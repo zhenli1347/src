@@ -1,4 +1,4 @@
-/*	$OpenBSD: usb.c,v 1.127 2021/01/29 16:59:41 sthen Exp $	*/
+/*	$OpenBSD: usb.c,v 1.130 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: usb.c,v 1.77 2003/01/01 00:10:26 thorpej Exp $	*/
 
 /*
@@ -49,8 +49,6 @@
 #include <sys/kthread.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 #include <sys/signalvar.h>
 #include <sys/time.h>
 #include <sys/rwlock.h>
@@ -807,7 +805,7 @@ usb_explore(void *v)
 	if (sc->sc_bus->flags & USB_BUS_CONFIG_PENDING) {
 		/*
 		 * If this is a low/full speed hub and there is a high
-		 * speed hub that hasn't explored yet, reshedule this
+		 * speed hub that hasn't explored yet, reschedule this
 		 * task, allowing the high speed explore task to run.
 		 */
 		if (sc->sc_bus->usbrev < USBREV_2_0 && explore_pending > 0) {
@@ -882,6 +880,10 @@ void
 usb_schedsoftintr(struct usbd_bus *bus)
 {
 	DPRINTFN(10,("%s: polling=%d\n", __func__, bus->use_polling));
+
+	/* In case usb(4) is disabled */
+	if (bus->soft == NULL)
+		return;
 
 	if (bus->use_polling) {
 		bus->methods->soft_intr(bus);

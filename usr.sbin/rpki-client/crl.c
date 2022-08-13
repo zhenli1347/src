@@ -1,4 +1,4 @@
-/*	$OpenBSD: crl.c,v 1.10 2021/01/29 10:13:16 claudio Exp $ */
+/*	$OpenBSD: crl.c,v 1.15 2022/04/21 09:53:07 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -28,38 +28,57 @@
 
 #include "extern.h"
 
-X509_CRL *
-crl_parse(const char *fn)
+struct crl *
+crl_parse(const char *fn, const unsigned char *der, size_t len)
 {
+	struct crl	*crl;
+	const ASN1_TIME	*at;
 	int		 rc = 0;
-	X509_CRL	*x = NULL;
-	BIO		*bio = NULL;
-	FILE		*f;
 
-	if ((f = fopen(fn, "rb")) == NULL) {
-		warn("%s", fn);
+	/* just fail for empty buffers, the warning was printed elsewhere */
+	if (der == NULL)
 		return NULL;
+
+	if ((crl = calloc(1, sizeof(*crl))) == NULL)
+		err(1, NULL);
+
+	if ((crl->x509_crl = d2i_X509_CRL(NULL, &der, len)) == NULL) {
+		cryptowarnx("%s: d2i_X509_CRL", fn);
+		goto out;
 	}
 
-	if ((bio = BIO_new_fp(f, BIO_CLOSE)) == NULL) {
-		if (verbose > 0)
-			cryptowarnx("%s: BIO_new_file", fn);
-		return NULL;
+	if ((crl->aki = x509_crl_get_aki(crl->x509_crl, fn)) == NULL) {
+		warnx("x509_crl_get_aki failed");
+		goto out;
 	}
 
-	if ((x = d2i_X509_CRL_bio(bio, NULL)) == NULL) {
-		cryptowarnx("%s: d2i_X509_CRL_bio", fn);
+	at = X509_CRL_get0_lastUpdate(crl->x509_crl);
+	if (at == NULL) {
+		warnx("%s: X509_CRL_get0_lastUpdate failed", fn);
+		goto out;
+	}
+	if (x509_get_time(at, &crl->issued) == -1) {
+		warnx("%s: ASN1_time_parse failed", fn);
+		goto out;
+	}
+
+	at = X509_CRL_get0_nextUpdate(crl->x509_crl);
+	if (at == NULL) {
+		warnx("%s: X509_CRL_get0_nextUpdate failed", fn);
+		goto out;
+	}
+	if (x509_get_time(at, &crl->expires) == -1) {
+		warnx("%s: ASN1_time_parse failed", fn);
 		goto out;
 	}
 
 	rc = 1;
-out:
-	BIO_free_all(bio);
+ out:
 	if (rc == 0) {
-		X509_CRL_free(x);
-		x = NULL;
+		crl_free(crl);
+		crl = NULL;
 	}
-	return x;
+	return crl;
 }
 
 static inline int
@@ -68,11 +87,33 @@ crlcmp(struct crl *a, struct crl *b)
 	return strcmp(a->aki, b->aki);
 }
 
-RB_GENERATE(crl_tree, crl, entry, crlcmp);
+RB_GENERATE_STATIC(crl_tree, crl, entry, crlcmp);
+
+/*
+ * Find a CRL based on the auth SKI value.
+ */
+struct crl *
+crl_get(struct crl_tree *crlt, const struct auth *a)
+{
+	struct crl	find;
+
+	if (a == NULL)
+		return NULL;
+	find.aki = a->cert->ski;
+	return RB_FIND(crl_tree, crlt, &find);
+}
+
+int
+crl_insert(struct crl_tree *crlt, struct crl *crl)
+{
+	return RB_INSERT(crl_tree, crlt, crl) == NULL;
+}
 
 void
-free_crl(struct crl *crl)
+crl_free(struct crl *crl)
 {
+	if (crl == NULL)
+		return;
 	free(crl->aki);
 	X509_CRL_free(crl->x509_crl);
 	free(crl);

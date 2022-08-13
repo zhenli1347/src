@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplpcie.c,v 1.5 2021/08/31 15:21:19 kettenis Exp $	*/
+/*	$OpenBSD: aplpcie.c,v 1.13 2022/04/06 18:59:26 naddy Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -30,31 +30,64 @@
 #include <dev/pci/pcivar.h>
 
 #include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_gpio.h>
 #include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/ofw_pinctrl.h>
+#include <dev/ofw/ofw_power.h>
 #include <dev/ofw/fdt.h>
 
-/*
- * This driver is based on preliminary device tree bindings and will
- * almost certainly need changes once the official bindings land in
- * mainline Linux.  Support for these preliminary bindings will be
- * dropped as soon as official bindings are available.
- *
- * The driver assumes that the hardware has been (almost) completely
- * initialized by U-Boot.  More code will be needed to support
- * alternate boot paths.
- */
+#define PCIE_CORE_LANE_CONF(port)	(0x84000 + (port) * 0x4000)
+#define  PCIE_CORE_LANE_CONF_REFCLK0REQ	(1 << 0)
+#define  PCIE_CORE_LANE_CONF_REFCLK1REQ	(1 << 1)
+#define  PCIE_CORE_LANE_CONF_REFCLK0ACK	(1 << 2)
+#define  PCIE_CORE_LANE_CONF_REFCLK1ACK	(1 << 3)
+#define  PCIE_CORE_LANE_CONF_REFCLK0EN	(1 << 9)
+#define  PCIE_CORE_LANE_CONF_REFCLK1EN	(1 << 10)
+#define PCIE_CORE_LANE_CTRL(port)	(0x84004 + (port) * 0x4000)
+#define  PCIE_CORE_LANE_CTRL_CFGACC	(1 << 15)
 
-#define PCIE_MSI_CTRL		0x0124
-#define  PCIE_MSI_CTRL_ENABLE	(1 << 0)
-#define  PCIE_MSI_CTRL_32	(5 << 4)
-#define PCIE_MSI_REMAP		0x0128
-#define PCIE_MSI_DOORBELL	0x0168
+#define PCIE_PORT_LTSSM_CTRL		0x0080
+#define  PCIE_PORT_LTSSM_CTRL_START	(1 << 0)
+#define PCIE_PORT_MSI_CTRL		0x0124
+#define  PCIE_PORT_MSI_CTRL_ENABLE	(1 << 0)
+#define  PCIE_PORT_MSI_CTRL_32		(5 << 4)
+#define PCIE_PORT_MSI_REMAP		0x0128
+#define PCIE_PORT_MSI_DOORBELL		0x0168
+#define PCIE_PORT_LINK_STAT		0x0208
+#define  PCIE_PORT_LINK_STAT_UP		(1 << 0)
+#define PCIE_PORT_APPCLK		0x0800
+#define  PCIE_PORT_APPCLK_EN		(1 << 0)
+#define  PCIE_PORT_APPCLK_CGDIS		(1 << 8)
+#define PCIE_PORT_STAT			0x0804
+#define  PCIE_PORT_STAT_READY		(1 << 0)
+#define PCIE_PORT_REFCLK		0x0810
+#define  PCIE_PORT_REFCLK_EN		(1 << 0)
+#define  PCIE_PORT_REFCLK_CGDIS		(1 << 8)
+#define PCIE_PORT_PERST			0x0814
+#define  PCIE_PORT_PERST_DIS		(1 << 0)
 
 #define HREAD4(sc, reg)							\
-	(bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg)))
+    (bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg)))
 #define HWRITE4(sc, reg, val)						\
-	bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
+    bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
+
+#define RREAD4(sc, reg)						\
+    (bus_space_read_4((sc)->sc_iot, (sc)->sc_rc_ioh, (reg)))
+#define RWRITE4(sc, reg, val)					\
+    bus_space_write_4((sc)->sc_iot, (sc)->sc_rc_ioh, (reg), (val))
+#define RSET4(sc, reg, bits)				\
+    RWRITE4((sc), (reg), RREAD4((sc), (reg)) | (bits))
+#define RCLR4(sc, reg, bits)				\
+    RWRITE4((sc), (reg), RREAD4((sc), (reg)) & ~(bits))
+
+#define PREAD4(sc, port, reg)						\
+    (bus_space_read_4((sc)->sc_iot, (sc)->sc_port_ioh[(port)], (reg)))
+#define PWRITE4(sc, port, reg, val)					\
+    bus_space_write_4((sc)->sc_iot, (sc)->sc_port_ioh[(port)], (reg), (val))
+#define PSET4(sc, port, reg, bits)				\
+    PWRITE4((sc), (port), (reg), PREAD4((sc), (port), (reg)) | (bits))
+#define PCLR4(sc, port, reg, bits)				\
+    PWRITE4((sc), (port), (reg), PREAD4((sc), (port), (reg)) & ~(bits))
 
 struct aplpcie_range {
 	uint32_t		flags;
@@ -63,11 +96,15 @@ struct aplpcie_range {
 	uint64_t		size;
 };
 
+#define APLPCIE_MAX_PORTS	4
+
 struct aplpcie_softc {
 	struct device		sc_dev;
 	bus_space_tag_t		sc_iot;
 	bus_space_handle_t	sc_ioh;
-	bus_space_handle_t	sc_port_ioh[3];
+	bus_space_handle_t	sc_rc_ioh;
+	bus_space_handle_t	sc_port_ioh[APLPCIE_MAX_PORTS];
+	bus_size_t		sc_port_ios[APLPCIE_MAX_PORTS];
 	bus_dma_tag_t		sc_dmat;
 
 	int			sc_node;
@@ -90,14 +127,15 @@ struct aplpcie_softc {
 
 	int			sc_msi;
 	bus_addr_t		sc_msi_doorbell;
-	uint32_t		sc_msi_range[2];
+	uint32_t		sc_msi_range[6];
+	int			sc_msi_rangelen;
 	struct interrupt_controller sc_msi_ic;
 };
 
 int	aplpcie_match(struct device *, void *, void *);
 void	aplpcie_attach(struct device *, struct device *, void *);
 
-struct cfattach	aplpcie_ca = {
+const struct cfattach	aplpcie_ca = {
 	sizeof (struct aplpcie_softc), aplpcie_match, aplpcie_attach
 };
 
@@ -112,6 +150,8 @@ aplpcie_match(struct device *parent, void *match, void *aux)
 
 	return OF_is_compatible(faa->fa_node, "apple,pcie");
 }
+
+void	aplpcie_init_port(struct aplpcie_softc *, int);
 
 void	aplpcie_attach_hook(struct device *, struct device *,
 	    struct pcibus_attach_args *);
@@ -147,57 +187,68 @@ aplpcie_attach(struct device *parent, struct device *self, void *aux)
 	uint32_t *ranges;
 	int i, j, nranges, rangeslen;
 	uint32_t bus_range[2];
-	uint32_t msi_range[2];
 	char name[32];
-	int idx;
+	int idx, node, port;
 
 	sc->sc_iot = faa->fa_iot;
 
 	idx = OF_getindex(faa->fa_node, "config", "reg-names");
 	if (idx < 0 || idx >= faa->fa_nreg ||
-	    bus_space_map(sc->sc_iot, faa->fa_reg[i].addr,
-	    faa->fa_reg[i].size, 0, &sc->sc_ioh)) {
+	    bus_space_map(sc->sc_iot, faa->fa_reg[idx].addr,
+	    faa->fa_reg[idx].size, 0, &sc->sc_ioh)) {
 		printf(": can't map registers\n");
 		return;
 	}
 
-	for (i = 0; i < 3; i++) {
-		snprintf(name, sizeof(name), "port%d", i);
+	idx = OF_getindex(faa->fa_node, "rc", "reg-names");
+	if (idx < 0 || idx >= faa->fa_nreg ||
+	    bus_space_map(sc->sc_iot, faa->fa_reg[idx].addr,
+	    faa->fa_reg[idx].size, 0, &sc->sc_rc_ioh)) {
+		printf(": can't map registers\n");
+		return;
+	}
+
+	for (port = 0; port < APLPCIE_MAX_PORTS; port++) {
+		snprintf(name, sizeof(name), "port%d", port);
 		idx = OF_getindex(faa->fa_node, name, "reg-names");
-		if (idx < 0 || idx > faa->fa_nreg ||
+		if (idx < 0)
+			continue;
+		if (idx > faa->fa_nreg ||
 		    bus_space_map(sc->sc_iot, faa->fa_reg[idx].addr,
-		    faa->fa_reg[idx].size, 0, &sc->sc_port_ioh[i])) {
+		    faa->fa_reg[idx].size, 0, &sc->sc_port_ioh[port])) {
 			printf(": can't map registers\n");
 			return;
 		}
+		sc->sc_port_ios[port] = faa->fa_reg[idx].size;
 	}
 
 	sc->sc_dmat = faa->fa_dmat;
 	sc->sc_node = faa->fa_node;
 
+	power_domain_enable(sc->sc_node);
 	pinctrl_byname(sc->sc_node, "default");
 
 	sc->sc_msi_doorbell =
 	    OF_getpropint64(sc->sc_node, "msi-doorbell", 0xffff000ULL);
-	if (OF_getpropintarray(sc->sc_node, "msi-ranges", sc->sc_msi_range,
-	    sizeof(sc->sc_msi_range)) != sizeof(msi_range)) {
+	sc->sc_msi_rangelen = OF_getpropintarray(sc->sc_node, "msi-ranges",
+	    sc->sc_msi_range, sizeof(sc->sc_msi_range));
+	if (sc->sc_msi_rangelen <= 0 ||
+	    (sc->sc_msi_rangelen % sizeof(uint32_t)) ||
+	    (sc->sc_msi_rangelen / sizeof(uint32_t)) < 5 ||
+	    (sc->sc_msi_rangelen / sizeof(uint32_t) > 6)) {
 		printf(": invalid msi-ranges property\n");
 		return;
 	}
 
+	for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
+		aplpcie_init_port(sc, node);
+
 	/*
-	 * Set things up such that we can share the 32 available MSIs
-	 * across all ports.
+	 * Must wait at least 100ms after link training completes
+	 * before sending a configuration request to a device
+	 * immediately below a port.
 	 */
-	for (i = 0; i < 3; i++) {
-		bus_space_write_4(sc->sc_iot, sc->sc_port_ioh[i],
-		    PCIE_MSI_CTRL, PCIE_MSI_CTRL_32 | PCIE_MSI_CTRL_ENABLE);
-		bus_space_write_4(sc->sc_iot, sc->sc_port_ioh[i],
-		    PCIE_MSI_REMAP, 0);
-		bus_space_write_4(sc->sc_iot, sc->sc_port_ioh[i],
-		    PCIE_MSI_DOORBELL, sc->sc_msi_doorbell);
-	}
-	sc->sc_msi = 0;
+	delay(100000);
 
 	sc->sc_acells = OF_getpropint(sc->sc_node, "#address-cells",
 	    faa->fa_acells);
@@ -329,6 +380,118 @@ aplpcie_attach(struct device *parent, struct device *self, void *aux)
 	fdt_intr_register(&sc->sc_msi_ic);
 
 	config_found(self, &pba, NULL);
+}
+
+void
+aplpcie_init_port(struct aplpcie_softc *sc, int node)
+{
+	uint32_t reg[5];
+	uint32_t *pwren_gpio;
+	uint32_t *reset_gpio;
+	int pwren_gpiolen, reset_gpiolen;
+	uint32_t stat;
+	int port, timo;
+
+	if (OF_getpropintarray(node, "reg", reg, sizeof(reg)) != sizeof(reg))
+		return;
+
+	port = reg[0] >> 11;
+	if (port >= APLPCIE_MAX_PORTS || sc->sc_port_ios[port] == 0)
+		return;
+
+	pwren_gpiolen = OF_getproplen(node, "pwren-gpios");
+	reset_gpiolen = OF_getproplen(node, "reset-gpios");
+	if (reset_gpiolen <= 0)
+		return;
+
+	/*
+	 * Set things up such that we can share the 32 available MSIs
+	 * across all ports.
+	 */
+	PWRITE4(sc, port, PCIE_PORT_MSI_CTRL,
+	    PCIE_PORT_MSI_CTRL_32 | PCIE_PORT_MSI_CTRL_ENABLE);
+	PWRITE4(sc, port, PCIE_PORT_MSI_REMAP, 0);
+	PWRITE4(sc, port, PCIE_PORT_MSI_DOORBELL, sc->sc_msi_doorbell);
+
+	/* Check if the link is already up. */
+	stat = PREAD4(sc, port, PCIE_PORT_LINK_STAT);
+	if (stat & PCIE_PORT_LINK_STAT_UP)
+		return;
+
+	PSET4(sc, port, PCIE_PORT_APPCLK, PCIE_PORT_APPCLK_EN);
+
+	/* Assert PERST#. */
+	reset_gpio = malloc(reset_gpiolen, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "reset-gpios", reset_gpio, reset_gpiolen);
+	gpio_controller_config_pin(reset_gpio, GPIO_CONFIG_OUTPUT);
+	gpio_controller_set_pin(reset_gpio, 1);
+
+	/* Power up the device if necessary. */
+	if (pwren_gpiolen > 0) {
+		pwren_gpio = malloc(pwren_gpiolen, M_TEMP, M_WAITOK);
+		OF_getpropintarray(node, "pwren-gpios",
+		    pwren_gpio, pwren_gpiolen);
+		gpio_controller_config_pin(pwren_gpio, GPIO_CONFIG_OUTPUT);
+		gpio_controller_set_pin(pwren_gpio, 1);
+		free(pwren_gpio, M_TEMP, pwren_gpiolen);
+	}
+
+	/* Setup Refclk. */
+	RSET4(sc, PCIE_CORE_LANE_CTRL(port), PCIE_CORE_LANE_CTRL_CFGACC);
+	RSET4(sc, PCIE_CORE_LANE_CONF(port), PCIE_CORE_LANE_CONF_REFCLK0REQ);
+	for (timo = 500; timo > 0; timo--) {
+		stat = RREAD4(sc, PCIE_CORE_LANE_CONF(port));
+		if (stat & PCIE_CORE_LANE_CONF_REFCLK0ACK)
+			break;
+		delay(100);
+	}
+	RSET4(sc, PCIE_CORE_LANE_CONF(port), PCIE_CORE_LANE_CONF_REFCLK1REQ);
+	for (timo = 500; timo > 0; timo--) {
+		stat = RREAD4(sc, PCIE_CORE_LANE_CONF(port));
+		if (stat & PCIE_CORE_LANE_CONF_REFCLK1ACK)
+			break;
+		delay(100);
+	}
+	RCLR4(sc, PCIE_CORE_LANE_CTRL(port), PCIE_CORE_LANE_CTRL_CFGACC);
+	RSET4(sc, PCIE_CORE_LANE_CONF(port),
+	    PCIE_CORE_LANE_CONF_REFCLK0EN | PCIE_CORE_LANE_CONF_REFCLK1EN);
+	PSET4(sc, port, PCIE_PORT_REFCLK, PCIE_PORT_REFCLK_EN);
+
+	/*
+	 * PERST# must remain asserted for at least 100us after the
+	 * reference clock becomes stable.  But also has to remain
+	 * active at least 100ms after power up.
+	 */
+	if (pwren_gpiolen > 0)
+		delay(100000);
+	else
+		delay(100);
+
+	/* Deassert PERST#. */
+	PSET4(sc, port, PCIE_PORT_PERST, PCIE_PORT_PERST_DIS);
+	gpio_controller_set_pin(reset_gpio, 0);
+	free(reset_gpio, M_TEMP, reset_gpiolen);
+
+	for (timo = 2500; timo > 0; timo--) {
+		stat = PREAD4(sc, port, PCIE_PORT_STAT);
+		if (stat & PCIE_PORT_STAT_READY)
+			break;
+		delay(100);
+	}
+	if ((stat & PCIE_PORT_STAT_READY) == 0)
+		return;
+
+	PCLR4(sc, port, PCIE_PORT_REFCLK, PCIE_PORT_REFCLK_CGDIS);
+	PCLR4(sc, port, PCIE_PORT_APPCLK, PCIE_PORT_APPCLK_CGDIS);
+
+	/* Bring up the link. */
+	PWRITE4(sc, port, PCIE_PORT_LTSSM_CTRL, PCIE_PORT_LTSSM_CTRL_START);
+	for (timo = 1000; timo > 0; timo--) {
+		stat = PREAD4(sc, port, PCIE_PORT_LINK_STAT);
+		if (stat & PCIE_PORT_LINK_STAT_UP)
+			break;
+		delay(100);
+	}
 }
 
 void
@@ -507,17 +670,18 @@ aplpcie_intr_establish_msi(void *cookie, uint64_t *addr, uint64_t *data,
     int level, struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
 {
 	struct aplpcie_softc *sc = cookie;
-	uint32_t cells[3];
+	uint32_t cells[4];
+	int ncells;
 
-	if (sc->sc_msi >= sc->sc_msi_range[1])
+	ncells = sc->sc_msi_rangelen / sizeof(uint32_t);
+	if (sc->sc_msi >= sc->sc_msi_range[ncells - 1])
 		return NULL;
 
 	*addr = sc->sc_msi_doorbell;
 	*data = sc->sc_msi++;
 
-	cells[0] = 0;
-	cells[1] = sc->sc_msi_range[0] + *data;
-	cells[2] = IST_LEVEL_HIGH;
+	memcpy(cells, &sc->sc_msi_range[1], sizeof(cells));
+	cells[ncells - 4] += *data;
 
 	return fdt_intr_parent_establish(&sc->sc_msi_ic, cells,
 	    level, ci, func, arg, name);

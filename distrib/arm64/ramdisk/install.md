@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.21 2021/07/20 15:25:48 kettenis Exp $
+#	$OpenBSD: install.md,v 1.32 2022/08/07 03:22:29 deraadt Exp $
 #
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
@@ -39,6 +39,7 @@ md_installboot() {
 	local _disk=/dev/$1 _mdec _plat
 
 	case $(sysctl -n machdep.compatible) in
+	apple,*)		_plat=apple;;
 	pine64,pine64*(+))	_plat=pine64;;
 	raspberrypi,*)		_plat=rpi;
 	esac
@@ -49,28 +50,35 @@ md_installboot() {
 		exit
 	fi
 
-	# Mount MSDOS partition to do some final tweaks
-	mount ${MOUNT_ARGS_msdos} ${_disk}i /mnt/mnt
-	echo bootaa64.efi > /mnt/mnt/efi/boot/startup.nsh
-
+	# Apply some final tweaks on selected platforms
 	_mdec=/usr/mdec/$_plat
 
 	case $_plat in
+	apple)
+		if [[ -d /etc/firmware/apple-bwfm ]]; then
+			(cd /etc/firmware
+				pax -rw apple-bwfm /mnt/etc/firmware)
+		fi
+		;;
 	pine64)
 		dd if=$_mdec/u-boot-sunxi-with-spl.bin of=${_disk}c \
 		    bs=1024 seek=8 >/dev/null 2>&1
 		;;
 	rpi)
+		mount ${MOUNT_ARGS_msdos} ${_disk}i /mnt/mnt
 		cp $_mdec/{bootcode.bin,start*.elf,fixup*.dat,*.dtb} /mnt/mnt/
 		cp $_mdec/u-boot.bin /mnt/mnt/
 		mkdir -p /mnt/mnt/overlays
 		cp $_mdec/disable-bt.dtbo /mnt/mnt/overlays
-		cat > /mnt/mnt/config.txt<<-__EOT
-			arm_64bit=1
-			enable_uart=1
-			dtoverlay=disable-bt
-			kernel=u-boot.bin
-		__EOT
+		if [[ ! -f /mnt/mnt/config.txt ]]; then
+			cat > /mnt/mnt/config.txt<<-__EOT
+				arm_64bit=1
+				enable_uart=1
+				dtoverlay=disable-bt
+				kernel=u-boot.bin
+			__EOT
+		fi
+		umount /mnt/mnt
 		;;
 	esac
 }
@@ -78,17 +86,18 @@ md_installboot() {
 md_prep_fdisk() {
 	local _disk=$1 _d _type=MBR
 
-	local bootpart=
 	local bootparttype="C"
 	local bootsectorstart="32768"
 	local bootsectorsize="32768"
-	local bootsectorend=$(($bootsectorstart + $bootsectorsize))
 	local bootfstype="msdos"
+
+	case $(sysctl -n machdep.compatible) in
+	openbsd,acpi)		bootsectorsize=532480;;
+	esac
 
 	while :; do
 		_d=whole
 		if disk_has $_disk gpt; then
-			[[ $_disk == $ROOTDISK ]] && bootpart="-b ${bootsectorsize}"
 			_type=GPT
 			fdisk $_disk
 		elif disk_has $_disk mbr; then
@@ -101,29 +110,23 @@ md_prep_fdisk() {
 		[wW]*)
 			echo -n "Creating a ${bootfstype} partition and an OpenBSD partition for rest of $_disk..."
 			if disk_has $_disk gpt apfsisc; then
-				fdisk -Ay ${bootpart} ${_disk} >/dev/null
+				if [[ $_disk == $ROOTDISK ]]; then
+					fdisk -Ay -b "${bootsectorsize}" ${_disk} >/dev/null
+				else
+					fdisk -Ay ${_disk} >/dev/null
+				fi
 			elif disk_has $_disk gpt; then
-				fdisk -iy -g ${bootpart} ${_disk} >/dev/null
+				if [[ $_disk == $ROOTDISK ]]; then
+					fdisk -gy -b "${bootsectorsize}" ${_disk} >/dev/null
+					installboot -p $_disk
+				else
+					fdisk -gy ${_disk} >/dev/null
+				fi
 			else
-				fdisk -e ${_disk} <<__EOT >/dev/null
-reinit
-e 0
-${bootparttype}
-n
-${bootsectorstart}
-${bootsectorsize}
-f 0
-e 3
-A6
-n
-${bootsectorend}
-
-write
-quit
-__EOT
+				fdisk -iy -b "${bootsectorsize}@${bootsectorstart}:${bootparttype}" ${_disk} >/dev/null
+				installboot -p $_disk
 			fi
 			echo "done."
-			installboot -p $_disk
 			return ;;
 		[eE]*)
 			if disk_has $_disk gpt; then
@@ -189,12 +192,34 @@ md_congrats() {
 }
 
 md_consoleinfo() {
-	CTTY=console
+	local _fw
+
 	DEFCONS=y
+	case $(scan_dmesg '/^\([^ ]*\).*: console.*std.*$/s//\1/p') in
+	wsdisplay0)
+		CTTY=ttyC0;;
+	*)
+		CTTY=console;;
+	esac
 	case $CSPEED in
 	9600|19200|38400|57600|115200|1500000)
 		;;
 	*)
 		CSPEED=115200;;
+	esac
+
+	_fw=$(dmesgtail | sed -n '\!^bwfm0: failed!{s!^.*/\(.*\),.*$!\1!p;q;}')
+	case $(sysctl -n machdep.compatible) in
+	apple,*)
+		make_dev sd0
+		if mount -o ro /dev/sd0l /mnt2 2>/dev/null; then
+			rm -rf /usr/mdec/rpi /etc/firmware/brcm /etc/firmware/apple-bwfm
+			if [[ -s /mnt2/vendorfw/firmware.tar ]]; then
+				tar -x -C /etc/firmware \
+				    -f /mnt2/vendorfw/firmware.tar "*$_fw*"
+				mv /etc/firmware/brcm /etc/firmware/apple-bwfm
+			fi
+			umount /mnt2
+		fi
 	esac
 }

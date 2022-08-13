@@ -1,4 +1,4 @@
-/*	$OpenBSD: refcnt.h,v 1.4 2016/06/07 07:53:33 mpi Exp $ */
+/*	$OpenBSD: refcnt.h,v 1.7 2022/06/28 09:32:28 bluhm Exp $ */
 
 /*
  * Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
@@ -19,19 +19,32 @@
 #ifndef _SYS_REFCNT_H_
 #define _SYS_REFCNT_H_
 
+/*
+ * Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	a	atomic operations
+ */
+
 struct refcnt {
-	unsigned int refs;
+	unsigned int	r_refs;		/* [a] reference counter */
+	int		r_traceidx;	/* [I] index for dt(4) tracing  */
 };
 
-#define REFCNT_INITIALIZER()	{ .refs = 1 }
+#define REFCNT_INITIALIZER()		{ .r_refs = 1, .r_traceidx = 0 }
 
 #ifdef _KERNEL
 
 void	refcnt_init(struct refcnt *);
+void	refcnt_init_trace(struct refcnt *, int id);
 void	refcnt_take(struct refcnt *);
 int	refcnt_rele(struct refcnt *);
 void	refcnt_rele_wake(struct refcnt *);
 void	refcnt_finalize(struct refcnt *, const char *);
+int	refcnt_shared(struct refcnt *);
+unsigned int	refcnt_read(struct refcnt *);
+
+#define DT_REFCNT_IDX_INPCB	1
+#define DT_REFCNT_IDX_TDB	2
 
 #endif /* _KERNEL */
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: misc.c,v 1.82 2021/08/28 11:55:17 krw Exp $	*/
+/*	$OpenBSD: misc.c,v 1.88 2022/07/10 20:34:31 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -30,33 +30,35 @@
 #include "disk.h"
 #include "misc.h"
 
-struct unit_type	unit_types[] = {
+const struct unit_type	unit_types[] = {
 	{ "b"	, 1LL				, "Bytes"	},
 	{ " "	, 0LL				, "Sectors"	},
 	{ "K"	, 1024LL			, "Kilobytes"	},
 	{ "M"	, 1024LL * 1024			, "Megabytes"	},
 	{ "G"	, 1024LL * 1024 *1024		, "Gigabytes"	},
 	{ "T"	, 1024LL * 1024 * 1024 * 1024	, "Terabytes"	},
-	{ NULL	, 0				, NULL		},
 };
+#define	SECTORS		1
 
-int
-unit_lookup(const char *units)
+double
+units_size(const char *units, const uint64_t sectors,
+    const struct unit_type **ut)
 {
-	int			i = 0;
+	double			size;
+	unsigned int		i;
 
-	if (units == NULL)
-		return SECTORS;
+	*ut = &unit_types[SECTORS];
+	size = sectors;
 
-	while (unit_types[i].ut_abbr != NULL) {
+	for (i = 0; i < nitems(unit_types); i++) {
 		if (strncasecmp(unit_types[i].ut_abbr, units, 1) == 0)
-			break;
-		i++;
+			*ut = &unit_types[i];
 	}
-	if (unit_types[i].ut_abbr == NULL)
-		return SECTORS;
 
-	return i;
+	if ((*ut)->ut_conversion == 0)
+		return size;
+	else
+		return (size * dl.d_secsize) / (*ut)->ut_conversion;
 }
 
 void
@@ -65,6 +67,7 @@ string_from_line(char *buf, const size_t buflen, const int trim)
 	static char		*line;
 	static size_t		 sz;
 	ssize_t			 len;
+	size_t			 n;
 	unsigned int		 i;
 
 	len = getline(&line, &sz, stdin);
@@ -74,7 +77,7 @@ string_from_line(char *buf, const size_t buflen, const int trim)
 	switch (trim) {
 	case UNTRIMMED:
 		line[strcspn(line, "\n")] = '\0';
-		strlcpy(buf, line, buflen);
+		n = strlcpy(buf, line, buflen);
 		break;
 	case TRIMMED:
 		for (i = strlen(line); i > 0; i--) {
@@ -82,8 +85,13 @@ string_from_line(char *buf, const size_t buflen, const int trim)
 				break;
 			line[i - 1] = '\0';
 		}
-		strlcpy(buf, line + strspn(line, WHITESPACE), buflen);
+		n = strlcpy(buf, line + strspn(line, WHITESPACE), buflen);
 		break;
+	}
+
+	if (n >= buflen) {
+		printf("input too long\n");
+		memset(buf, 0, buflen);
 	}
 }
 
@@ -117,7 +125,7 @@ getuint64(const char *prompt, uint64_t oval, const uint64_t minval,
     const uint64_t maxval)
 {
 	char			buf[BUFSIZ], *endptr, *p, operator = '\0';
-	const int		secsize = unit_types[SECTORS].ut_conversion;
+	const int		secsize = dl.d_secsize;
 	size_t			n;
 	int64_t			mult = 1;
 	double			d, d2;
@@ -230,40 +238,6 @@ getuint64(const char *prompt, uint64_t oval, const uint64_t minval,
 	} while (1);
 
 	return (uint64_t)d;
-}
-
-char *
-utf16le_to_string(const uint16_t *utf)
-{
-	static char		name[GPTPARTNAMESIZE];
-	int			i;
-
-	for (i = 0; i < GPTPARTNAMESIZE; i++) {
-		name[i] = letoh16(utf[i]) & 0x7F;
-		if (name[i] == '\0')
-			break;
-	}
-	if (i == GPTPARTNAMESIZE)
-		name[i - 1] = '\0';
-
-	return name;
-}
-
-uint16_t *
-string_to_utf16le(const char *ch)
-{
-	static uint16_t		utf[GPTPARTNAMESIZE];
-	int			i;
-
-	for (i = 0; i < GPTPARTNAMESIZE; i++) {
-		utf[i] = htole16((unsigned int)ch[i]);
-		if (utf[i] == 0)
-			break;
-	}
-	if (i == GPTPARTNAMESIZE)
-		utf[i - 1] = 0;
-
-	return utf;
 }
 
 int

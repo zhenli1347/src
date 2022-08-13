@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci.c,v 1.120 2021/07/23 00:29:14 jmatthew Exp $	*/
+/*	$OpenBSD: pci.c,v 1.125 2022/06/17 10:08:36 kettenis Exp $	*/
 /*	$NetBSD: pci.c,v 1.31 1997/06/06 23:48:04 thorpej Exp $	*/
 
 /*
@@ -85,7 +85,7 @@ struct pci_dev {
 extern int allowaperture;
 #endif
 
-struct cfattach pci_ca = {
+const struct cfattach pci_ca = {
 	sizeof(struct pci_softc), pcimatch, pciattach, pcidetach, pciactivate
 };
 
@@ -807,11 +807,31 @@ pci_enumerate_bus(struct pci_softc *sc,
 {
 	pci_chipset_tag_t pc = sc->sc_pc;
 	int device, function, nfunctions, ret;
+	int maxndevs = sc->sc_maxndevs;
 	const struct pci_quirkdata *qd;
-	pcireg_t id, bhlcr;
+	pcireg_t id, bhlcr, cap;
 	pcitag_t tag;
 
-	for (device = 0; device < sc->sc_maxndevs; device++) {
+	/*
+	 * PCIe downstream ports and root ports should only forward
+	 * configuration requests for device number 0.  However, not
+	 * all hardware implements this correctly, and some devices
+	 * will respond to other device numbers making the device show
+	 * up 32 times.  Prevent this by only scanning a single
+	 * device.
+	 */
+	if (sc->sc_bridgetag && pci_get_capability(pc, *sc->sc_bridgetag,
+	    PCI_CAP_PCIEXPRESS, NULL, &cap)) {
+		switch (PCI_PCIE_XCAP_TYPE(cap)) {
+		case PCI_PCIE_XCAP_TYPE_RP:
+		case PCI_PCIE_XCAP_TYPE_DOWN:
+		case PCI_PCIE_XCAP_TYPE_PCI2PCIE:
+			maxndevs = 1;
+			break;
+		}
+	}
+
+	for (device = 0; device < maxndevs; device++) {
 		tag = pci_make_tag(pc, sc->sc_bus, device, 0);
 
 		bhlcr = pci_conf_read(pc, tag, PCI_BHLC_REG);
@@ -1220,6 +1240,7 @@ pciioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 {
 	struct pcisel *sel = (struct pcisel *)data;
 	struct pci_io *io;
+	struct pci_dev *pd;
 	struct pci_rom *rom;
 	int i, error;
 	pcitag_t tag;
@@ -1263,6 +1284,18 @@ pciioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		return EINVAL;
 
 	pc = pci->sc_pc;
+	LIST_FOREACH(pd, &pci->sc_devs, pd_next) {
+		int bus, dev, func;
+
+		pci_decompose_tag(pc, pd->pd_tag, &bus, &dev, &func);
+
+		if (bus == sel->pc_bus && dev == sel->pc_dev &&
+		    func == sel->pc_func)
+			break;
+	}
+	if (pd == LIST_END(&pci->sc_devs))
+		return ENXIO;
+
 	tag = pci_make_tag(pc, sel->pc_bus, sel->pc_dev, sel->pc_func);
 
 	switch (cmd) {
@@ -1307,28 +1340,17 @@ pciioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		break;
 
 	case PCIOCREADMASK:
-	{
 		io = (struct pci_io *)data;
-		struct pci_dev *pd;
-		int dev, func, i;
 
 		if (io->pi_width != 4 || io->pi_reg & 0x3 ||
 		    io->pi_reg < PCI_MAPREG_START ||
 		    io->pi_reg >= PCI_MAPREG_END)
 			return (EINVAL);
 
-		error = ENODEV;
-		LIST_FOREACH(pd, &pci->sc_devs, pd_next) {
-			pci_decompose_tag(pc, pd->pd_tag, NULL, &dev, &func);
-			if (dev == sel->pc_dev && func == sel->pc_func) {
-				i = (io->pi_reg - PCI_MAPREG_START) / 4;
-				io->pi_data = pd->pd_mask[i];
-				error = 0;
-				break;
-			}
-		}
+		i = (io->pi_reg - PCI_MAPREG_START) / 4;
+		io->pi_data = pd->pd_mask[i];
+		error = 0;
 		break;
-	}
 
 	case PCIOCGETROMLEN:
 	case PCIOCGETROM:
@@ -1353,7 +1375,7 @@ pciioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		splx(s);
 
 		/*
-		 * Section 6.2.5.2 `Expansion ROM Base Addres Register',
+		 * Section 6.2.5.2 `Expansion ROM Base Address Register',
 		 *
 		 * tells us that only the upper 21 bits are writable.
 		 * This means that the size of a ROM must be a

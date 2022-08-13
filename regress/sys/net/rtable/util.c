@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.9 2021/04/13 08:21:12 claudio Exp $ */
+/*	$OpenBSD: util.c,v 1.11 2022/06/29 04:49:51 anton Exp $ */
 
 /*
  * Copyright (c) 2015 Martin Pieuchot
@@ -285,13 +285,13 @@ rt_maskedcopy(struct sockaddr *src, struct sockaddr *dst,
 void
 rtref(struct rtentry *rt)
 {
-	rt->rt_refcnt++;
+	rt->rt_refcnt.r_refs++;
 }
 
 void
 rtfree(struct rtentry *rt)
 {
-	assert(--(rt->rt_refcnt) >= 0);
+	assert(--(rt->rt_refcnt.r_refs) >= 0);
 }
 
 void
@@ -525,4 +525,9 @@ rt_hash(struct rtentry *rt, struct sockaddr *dst, uint32_t *src)
 	}
 
 	return (c & 0xffff);
+}
+
+void
+rt_timer_init(void)
+{
 }

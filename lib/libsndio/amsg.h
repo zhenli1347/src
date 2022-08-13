@@ -1,4 +1,4 @@
-/*	$OpenBSD: amsg.h,v 1.13 2020/02/26 13:53:58 ratchov Exp $	*/
+/*	$OpenBSD: amsg.h,v 1.15 2022/04/29 08:30:48 ratchov Exp $	*/
 /*
  * Copyright (c) 2008 Alexandre Ratchov <alex@caoua.org>
  *
@@ -96,6 +96,9 @@ struct amsg {
 #define AMSG_DATAMAX	0x1000
 			uint32_t size;
 		} data;
+		struct amsg_stop {
+			uint8_t drain;
+		} stop;
 		struct amsg_ts {
 			int32_t delta;
 		} ts;
@@ -106,6 +109,7 @@ struct amsg {
 			uint16_t mode;		/* bitmap of MODE_XXX */
 #define AMSG_VERSION	7
 			uint8_t version;	/* protocol version */
+#define AMSG_NODEV	255
 			uint8_t devnum;		/* device number */
 			uint32_t id;		/* client id */
 #define AMSG_OPTMAX	12

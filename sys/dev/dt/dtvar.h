@@ -1,4 +1,4 @@
-/*	$OpenBSD: dtvar.h,v 1.8 2021/09/03 16:45:45 jasper Exp $ */
+/*	$OpenBSD: dtvar.h,v 1.14 2022/06/28 09:32:27 bluhm Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -24,14 +24,14 @@
 #include <sys/time.h>
 
 /*
- * Length of provider/probe/function names, including terminating '\0'.
+ * Length of provider/probe/function names, including NUL.
  */
 #define DTNAMESIZE	16
 
 /*
- * Length of process name, keep in sync with MAXCOMLEN.
+ * Length of process name, including NUL.
  */
-#define DTMAXCOMLEN	16
+#define DTMAXCOMLEN	_MAXCOMLEN
 
 /*
  * Maximum number of arguments passed to a function.
@@ -51,8 +51,8 @@ struct dt_evt {
 	/*
 	 * Recorded if the corresponding flag is set.
 	 */
-	struct stacktrace 	dtev_kstack;	/* kernel stack frame */
-	char			dtev_comm[DTMAXCOMLEN+1]; /* current pr. name */
+	struct stacktrace	dtev_kstack;	/* kernel stack frame */
+	char			dtev_comm[DTMAXCOMLEN]; /* current pr. name */
 	union {
 		register_t		E_entry[DTMAXFUNCARGS];
 		struct {
@@ -110,7 +110,7 @@ struct dtioc_probe_info {
 };
 
 struct dtioc_probe {
-	size_t		 	 dtpr_size;	/* size of the buffer */
+	size_t			 dtpr_size;	/* size of the buffer */
 	struct dtioc_probe_info	*dtpr_probes;	/* array of probe info */
 };
 
@@ -159,7 +159,7 @@ int		dtioc_req_isvalid(struct dtioc_req *);
  *  Locks used to protect struct members in this file:
  *	I	immutable after creation
  *	K	kernel lock
- *	K,S	kernel lock for writting and SMR for reading
+ *	K,S	kernel lock for writing and SMR for reading
  *	m	per-pcb mutex
  *	c	owned (read & modified) by a single CPU
  */
@@ -204,7 +204,7 @@ void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
  *	I	immutable after creation
  *	K	kernel lock
  *	D	dt_lock
- *	D,S	dt_lock for writting and SMR for reading
+ *	D,S	dt_lock for writing and SMR for reading
  *	M	dtp mutex
  */
 struct dt_probe {
@@ -215,14 +215,13 @@ struct dt_probe {
 	const char		*dtp_name;	/* [I] probe name */
 	uint32_t		 dtp_pbn;	/* [I] unique ID */
 	volatile uint32_t	 dtp_recording;	/* [d] is it recording? */
-	struct mutex		 dtp_mtx;
 	unsigned		 dtp_ref;	/* [m] # of PCBs referencing the probe */
 
 	/* Provider specific fields. */
 	int			 dtp_sysnum;	/* [I] related # of syscall */
 	const char		*dtp_argtype[5];/* [I] type of arguments */
 	int			 dtp_nargs;	/* [I] # of arguments */
-	vaddr_t			 dtp_addr;	/* [I] address of breakpint */
+	vaddr_t			 dtp_addr;	/* [I] address of breakpoint */
 };
 
 
@@ -311,14 +310,33 @@ extern volatile uint32_t	dt_tracing;	/* currently tracing? */
 #define	DT_STATIC_PROBE5(func, name, arg0, arg1, arg2, arg3, arg4)	\
 	_DT_STATIC_PROBEN(func, name, arg0, arg1, arg2, arg3, arg4, 5)
 
-#define	DT_STATIC_ENTER(func, name, args...) do {			\
+#define DT_STATIC_ENTER(func, name, args...) do {			\
 	extern struct dt_probe _DT_STATIC_P(func, name);		\
 	struct dt_probe *dtp = &_DT_STATIC_P(func, name);		\
-	struct dt_provider *dtpv = dtp->dtp_prov;			\
 									\
 	if (__predict_false(dt_tracing) &&				\
 	    __predict_false(dtp->dtp_recording)) {			\
+		struct dt_provider *dtpv = dtp->dtp_prov;		\
+									\
 		dtpv->dtpv_enter(dtpv, dtp, args);			\
+	}								\
+} while (0)
+
+#define _DT_INDEX_P(func)		(dtps_index_##func)
+
+#define DT_INDEX_ENTER(func, index, args...) do {			\
+	extern struct dt_probe **_DT_INDEX_P(func);			\
+									\
+	if (__predict_false(dt_tracing) &&				\
+	    __predict_false(index > 0) &&				\
+	    __predict_true(_DT_INDEX_P(func) != NULL)) {		\
+		struct dt_probe *dtp = _DT_INDEX_P(func)[index];	\
+									\
+		if(__predict_false(dtp->dtp_recording)) {		\
+			struct dt_provider *dtpv = dtp->dtp_prov;	\
+									\
+			dtpv->dtpv_enter(dtpv, dtp, args);		\
+		}							\
 	}								\
 } while (0)
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uthum.c,v 1.35 2021/03/08 14:35:57 jcs Exp $   */
+/*	$OpenBSD: uthum.c,v 1.38 2022/01/09 05:43:02 jsg Exp $   */
 
 /*
  * Copyright (c) 2009, 2010 Yojiro UO <yuo@nui.org>
@@ -16,7 +16,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* Driver for HID base TEMPer seriese Temperature(/Humidity) sensors */
+/* Driver for HID based TEMPer series Temperature(/Humidity) sensors */
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -44,6 +44,7 @@
 #define UTHUM_TYPE_TEMPER1	0x5758 /* TEMPer1 and HID TEMPer */
 #define UTHUM_TYPE_TEMPER2	0x5759
 #define UTHUM_TYPE_TEMPERNTC	0x575b
+#define UTHUM_TYPE_TEMPERHUM_3	0x5f5a
 #define UTHUM_TYPE_UNKNOWN	0xffff
 
 /* Common */
@@ -167,7 +168,7 @@ uthum_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	if (uthum_lookup(uha->uaa->vendor, uha->uaa->product) == NULL)
@@ -385,8 +386,9 @@ uthum_check_device_info(struct uthum_softc *sc)
 		return EIO;
 
 	dev_type = betoh16(dinfo.dev_type);
-	/* TEMPerHUM has 2 different device identifiers, unify them */
-	if (dev_type == UTHUM_TYPE_TEMPERHUM_2)
+	/* TEMPerHUM has 3 different device identifiers, unify them */
+	if (dev_type == UTHUM_TYPE_TEMPERHUM_2 ||
+	    dev_type == UTHUM_TYPE_TEMPERHUM_3)
 		dev_type = UTHUM_TYPE_TEMPERHUM;
 
 	/* check device type and calibration offset*/

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_bio.c,v 1.206 2021/06/16 09:02:21 mpi Exp $	*/
+/*	$OpenBSD: vfs_bio.c,v 1.209 2022/08/12 14:30:52 visa Exp $	*/
 /*	$NetBSD: vfs_bio.c,v 1.44 1996/06/11 11:15:36 pk Exp $	*/
 
 /*
@@ -444,7 +444,7 @@ bio_doread(struct vnode *vp, daddr_t blkno, int size, int async)
 		SET(bp->b_flags, B_READ | async);
 		bcstats.pendingreads++;
 		bcstats.numreads++;
-		VOP_STRATEGY(bp);
+		VOP_STRATEGY(bp->b_vp, bp);
 		/* Pay for the read. */
 		curproc->p_ru.ru_inblock++;			/* XXX */
 	} else if (async) {
@@ -560,7 +560,7 @@ bread_cluster_callback(struct buf *bp)
 		struct uvm_object *oldobj = &bp->b_uobj;
 		int page;
 
-		uvm_obj_init(newobj, NULL, 1);
+		uvm_obj_init(newobj, &bufcache_pager, 1);
 		for (page = 0; page < atop(xbpp[i]->b_bufsize); page++) {
 			struct vm_page *pg = uvm_pagelookup(oldobj,
 			    xbpp[i]->b_poffs + ptoa(page));
@@ -675,7 +675,7 @@ bread_cluster(struct vnode *vp, daddr_t blkno, int size, struct buf **rbpp)
 
 	bcstats.pendingreads++;
 	bcstats.numreads++;
-	VOP_STRATEGY(bp);
+	VOP_STRATEGY(bp->b_vp, bp);
 	curproc->p_ru.ru_inblock++;
 
 out:
@@ -753,7 +753,7 @@ bwrite(struct buf *bp)
 	splx(s);
 	buf_flip_dma(bp);
 	SET(bp->b_flags, B_WRITEINPROG);
-	VOP_STRATEGY(bp);
+	VOP_STRATEGY(bp->b_vp, bp);
 
 	/*
 	 * If the queue is above the high water mark, wait till
@@ -1554,7 +1554,10 @@ bufcache_getcleanbuf(int cachenum, int discard)
 
 
 void
-discard_buffer(struct buf *bp) {
+discard_buffer(struct buf *bp)
+{
+	splassert(IPL_BIO);
+
 	bufcache_take(bp);
 	if (bp->b_vp) {
 		RBT_REMOVE(buf_rb_bufs,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipsp.h,v 1.206 2021/08/10 21:29:53 mvs Exp $	*/
+/*	$OpenBSD: ip_ipsp.h,v 1.240 2022/07/14 13:52:10 mvs Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr),
@@ -39,6 +39,18 @@
 
 #ifndef _NETINET_IPSP_H_
 #define _NETINET_IPSP_H_
+
+/*
+ * Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	a	atomic operations
+ *	N	net lock
+ *	A	ipsec_acquire_mtx
+ *	F	ipsec_flows_mtx
+ *	P	ipo_tdb_mtx		link policy to TDB global mutex
+ *	D	tdb_sadb_mtx		SA database global mutex
+ *	m	tdb_mtx			fields of struct tdb
+ */
 
 /* IPSP global definitions. */
 
@@ -131,19 +143,9 @@ struct ipsecstat {
 	uint64_t	ipsec_idrops;		/* Dropped on input */
 	uint64_t	ipsec_odrops;		/* Dropped on output */
 	uint64_t	ipsec_crypto;		/* Crypto processing failure */
-	uint64_t	ipsec_notdb;		/* Expired while in crypto */
+	uint64_t	ipsec_notdb;		/* No TDB was found */
 	uint64_t	ipsec_noxform;		/* Crypto error */
-};
-
-struct tdb_data {
-	uint64_t	tdd_ipackets;		/* Input IPsec packets */
-	uint64_t	tdd_opackets;		/* Output IPsec packets */
-	uint64_t	tdd_ibytes;		/* Input bytes */
-	uint64_t	tdd_obytes;		/* Output bytes */
-	uint64_t	tdd_idrops;		/* Dropped on input */
-	uint64_t	tdd_odrops;		/* Dropped on output */
-	uint64_t	tdd_idecompbytes;	/* Input bytes, decompressed */
-	uint64_t	tdd_ouncompbytes;	/* Output bytes, uncompressed */
+	uint64_t	ipsec_exctdb;		/* TDBs with hardlimit excess */
 };
 
 #ifdef _KERNEL
@@ -168,6 +170,7 @@ enum ipsec_counters {
 	ipsec_crypto,
 	ipsec_notdb,
 	ipsec_noxform,
+	ipsec_exctdb,
 	ipsec_ncounters
 };
 
@@ -189,6 +192,12 @@ static inline void
 ipsecstat_add(enum ipsec_counters c, uint64_t v)
 {
 	counters_add(ipseccounters, c, v);
+}
+
+static inline void
+ipsecstat_pkt(enum ipsec_counters p, enum ipsec_counters b, uint64_t v)
+{
+	counters_pkt(ipseccounters, p, b, v);
 }
 
 struct m_tag;
@@ -226,14 +235,14 @@ struct ipsec_id {
 };
 
 struct ipsec_ids {
-	LIST_ENTRY(ipsec_ids)	id_gc_list;
-	RBT_ENTRY(ipsec_ids)	id_node_id;
-	RBT_ENTRY(ipsec_ids)	id_node_flow;
-	struct ipsec_id		*id_local;
-	struct ipsec_id		*id_remote;
-	u_int32_t		id_flow;
-	int			id_refcount;
-	u_int			id_gc_ttl;
+	LIST_ENTRY(ipsec_ids)	id_gc_list;	/* [F] */
+	RBT_ENTRY(ipsec_ids)	id_node_id;	/* [F] */
+	RBT_ENTRY(ipsec_ids)	id_node_flow;	/* [F] */
+	struct ipsec_id		*id_local;	/* [I] */
+	struct ipsec_id		*id_remote;	/* [I] */
+	u_int32_t		id_flow;	/* [I] */
+	u_int			id_refcount;	/* [F] */
+	u_int			id_gc_ttl;	/* [F] */
 };
 RBT_HEAD(ipsec_ids_flows, ipsec_ids);
 RBT_HEAD(ipsec_ids_tree, ipsec_ids);
@@ -243,11 +252,14 @@ struct ipsec_acquire {
 	u_int32_t			ipa_seq;
 	struct sockaddr_encap		ipa_info;
 	struct sockaddr_encap		ipa_mask;
+	struct refcnt			ipa_refcnt;
 	struct timeout			ipa_timeout;
-	struct ipsec_policy		*ipa_policy;
-	TAILQ_ENTRY(ipsec_acquire)	ipa_ipo_next;
-	TAILQ_ENTRY(ipsec_acquire)	ipa_next;
+	struct ipsec_policy		*ipa_policy;	/* [A] back pointer */
+	TAILQ_ENTRY(ipsec_acquire)	ipa_ipo_next;	/* [A] per policy */
+	TAILQ_ENTRY(ipsec_acquire)	ipa_next;	/* [A] global list */
 };
+
+TAILQ_HEAD(ipsec_acquire_head, ipsec_acquire);
 
 struct ipsec_policy {
 	struct radix_node	ipo_nodes[2];	/* radix tree glue */
@@ -266,22 +278,22 @@ struct ipsec_policy {
 						 * mode was used.
 						 */
 
-	u_int64_t		ipo_last_searched;	/* Timestamp of last lookup */
+	u_int64_t	ipo_last_searched;	/* [P] Timestamp of lookup */
 
 	u_int8_t		ipo_flags;	/* See IPSP_POLICY_* definitions */
 	u_int8_t		ipo_type;	/* USE/ACQUIRE/... */
 	u_int8_t		ipo_sproto;	/* ESP/AH; if zero, use system dflts */
 	u_int			ipo_rdomain;
 
-	int                     ipo_ref_count;
+	struct refcnt		ipo_refcnt;
 
-	struct tdb		*ipo_tdb;		/* Cached entry */
+	struct tdb		*ipo_tdb;	/* [P] Cached TDB entry */
 
 	struct ipsec_ids	*ipo_ids;
 
-	TAILQ_HEAD(ipo_acquires_head, ipsec_acquire) ipo_acquires; /* List of acquires */
-	TAILQ_ENTRY(ipsec_policy)	ipo_tdb_next;	/* List TDB policies */
-	TAILQ_ENTRY(ipsec_policy)	ipo_list;	/* List of all policies */
+	struct ipsec_acquire_head ipo_acquires;	/* [A] List of acquires */
+	TAILQ_ENTRY(ipsec_policy) ipo_tdb_next;	/* [P] List TDB policies */
+	TAILQ_ENTRY(ipsec_policy) ipo_list;	/* List of all policies */
 };
 
 #define	IPSP_POLICY_NONE	0x0000	/* No flags set */
@@ -310,11 +322,15 @@ struct tdb {				/* tunnel descriptor block */
 	 * policy matching. The following three fields maintain the hash
 	 * queues in those three tables.
 	 */
-	struct tdb	*tdb_hnext;	/* dst/spi/sproto table */
-	struct tdb	*tdb_dnext;	/* dst/sproto table */
-	struct tdb	*tdb_snext;	/* src/sproto table */
+	struct tdb	*tdb_hnext;	/* [D] dst/spi/sproto table */
+	struct tdb	*tdb_dnext;	/* [D] dst/sproto table */
+	struct tdb	*tdb_snext;	/* [D] src/sproto table */
 	struct tdb	*tdb_inext;
 	struct tdb	*tdb_onext;
+	SIMPLEQ_ENTRY(tdb) tdb_walk;	/* [N] temp list for tdb walker */
+
+	struct refcnt	tdb_refcnt;
+	struct mutex	tdb_mtx;
 
 	const struct xformsw	*tdb_xform;		/* Transform to use */
 	const struct enc_xform	*tdb_encalgxform;	/* Enc algorithm */
@@ -327,6 +343,7 @@ struct tdb {				/* tunnel descriptor block */
 #define	TDBF_ALLOCATIONS	0x00008	/* Check the flows counters */
 #define	TDBF_INVALID		0x00010	/* This SPI is not valid yet/anymore */
 #define	TDBF_FIRSTUSE		0x00020	/* Expire after first use */
+#define	TDBF_DELETED		0x00040	/* This TDB has already been deleted */
 #define	TDBF_SOFT_TIMER		0x00080	/* Soft expiration */
 #define	TDBF_SOFT_BYTES		0x00100	/* Soft expiration */
 #define	TDBF_SOFT_ALLOCATIONS	0x00200	/* Soft expiration */
@@ -338,8 +355,17 @@ struct tdb {				/* tunnel descriptor block */
 #define	TDBF_PFSYNC		0x40000	/* TDB will be synced */
 #define	TDBF_PFSYNC_RPL		0x80000	/* Replay counter should be bumped */
 #define	TDBF_ESN		0x100000 /* 64-bit sequence numbers (ESN) */
+#define	TDBF_PFSYNC_SNAPPED	0x200000 /* entry is being dispatched to peer */
 
-	u_int32_t	tdb_flags;	/* Flags related to this TDB */
+#define TDBF_BITS ("\20" \
+	"\1UNIQUE\2TIMER\3BYTES\4ALLOCATIONS" \
+	"\5INVALID\6FIRSTUSE\7DELETED\10SOFT_TIMER" \
+	"\11SOFT_BYTES\12SOFT_ALLOCATIONS\13SOFT_FIRSTUSE\14PFS" \
+	"\15TUNNELING" \
+	"\21USEDTUNNEL\22UDPENCAP\23PFSYNC\24PFSYNC_RPL" \
+	"\25ESN")
+
+	u_int32_t	tdb_flags;	/* [m] Flags related to this TDB */
 
 	struct timeout	tdb_timer_tmo;
 	struct timeout	tdb_first_tmo;
@@ -368,20 +394,21 @@ struct tdb {				/* tunnel descriptor block */
 	u_int64_t	tdb_last_used;	/* When was this SA last used */
 	u_int64_t	tdb_last_marked;/* Last SKIPCRYPTO status change */
 
-	struct tdb_data	tdb_data;	/* stats about this TDB */
+	struct cpumem   *tdb_counters;  /* stats about this TDB */
+
 	u_int64_t	tdb_cryptoid;	/* Crypto session ID */
 
-	u_int32_t	tdb_spi;	/* SPI */
+	u_int32_t	tdb_spi;	/* [I] SPI */
 	u_int16_t	tdb_amxkeylen;	/* Raw authentication key length */
 	u_int16_t	tdb_emxkeylen;	/* Raw encryption key length */
 	u_int16_t	tdb_ivlen;	/* IV length */
-	u_int8_t	tdb_sproto;	/* IPsec protocol */
+	u_int8_t	tdb_sproto;	/* [I] IPsec protocol */
 	u_int8_t	tdb_wnd;	/* Replay window */
 	u_int8_t	tdb_satype;	/* SA type (RFC2367, PF_KEY) */
 	u_int8_t	tdb_updates;	/* pfsync update counter */
 
-	union sockaddr_union	tdb_dst;	/* Destination address */
-	union sockaddr_union	tdb_src;	/* Source address */
+	union sockaddr_union	tdb_dst;	/* [N] Destination address */
+	union sockaddr_union	tdb_src;	/* [N] Source address */
 
 	u_int8_t	*tdb_amxkey;	/* Raw authentication key */
 	u_int8_t	*tdb_emxkey;	/* Raw encryption key */
@@ -405,24 +432,47 @@ struct tdb {				/* tunnel descriptor block */
 	u_int16_t	tdb_tag;		/* Packet filter tag */
 	u_int32_t	tdb_tap;		/* Alternate enc(4) interface */
 
-	u_int		tdb_rdomain;		/* Routing domain */
-	u_int		tdb_rdomain_post;	/* Change domain */
+	u_int		tdb_rdomain;		/* [I] Routing domain */
+	u_int		tdb_rdomain_post;	/* [I] Change domain */
 
 	struct sockaddr_encap   tdb_filter; /* What traffic is acceptable */
 	struct sockaddr_encap   tdb_filtermask; /* And the mask */
 
-	TAILQ_HEAD(tdb_policy_head, ipsec_policy)	tdb_policy_head;
+	TAILQ_HEAD(tdb_policy_head, ipsec_policy) tdb_policy_head; /* [P] */
 	TAILQ_ENTRY(tdb)	tdb_sync_entry;
+	TAILQ_ENTRY(tdb)	tdb_sync_snap;
 };
-#define tdb_ipackets		tdb_data.tdd_ipackets
-#define tdb_opackets		tdb_data.tdd_opackets
-#define tdb_ibytes		tdb_data.tdd_ibytes
-#define tdb_obytes		tdb_data.tdd_obytes
-#define tdb_idrops		tdb_data.tdd_idrops
-#define tdb_odrops		tdb_data.tdd_odrops
-#define tdb_idecompbytes	tdb_data.tdd_idecompbytes
-#define tdb_ouncompbytes	tdb_data.tdd_ouncompbytes
 
+enum tdb_counters {
+	tdb_ipackets,           /* Input IPsec packets */
+	tdb_opackets,           /* Output IPsec packets */
+	tdb_ibytes,             /* Input bytes */
+	tdb_obytes,             /* Output bytes */
+	tdb_idrops,             /* Dropped on input */
+	tdb_odrops,             /* Dropped on output */
+	tdb_idecompbytes,       /* Input bytes, decompressed */
+	tdb_ouncompbytes,       /* Output bytes, uncompressed */
+	tdb_ncounters
+};
+
+static inline void
+tdbstat_inc(struct tdb *tdb, enum tdb_counters c)
+{
+	counters_inc(tdb->tdb_counters, c);
+}
+
+static inline void
+tdbstat_add(struct tdb *tdb, enum tdb_counters c, uint64_t v)
+{
+	counters_add(tdb->tdb_counters, c, v);
+}
+
+static inline void
+tdbstat_pkt(struct tdb *tdb, enum tdb_counters pc, enum tdb_counters bc,
+    uint64_t bytes)
+{
+	counters_pkt(tdb->tdb_counters, pc, bc, bytes);
+}
 
 struct tdb_ident {
 	u_int32_t spi;
@@ -473,14 +523,14 @@ struct xformsw {
 	int	(*xf_init)(struct tdb *, const struct xformsw *,
 		    struct ipsecinit *);
 	int	(*xf_zeroize)(struct tdb *); /* termination */
-	int	(*xf_input)(struct mbuf *, struct tdb *, int, int); /* input */
-	int	(*xf_output)(struct mbuf *, struct tdb *, struct mbuf **,
-	    int, int);        /* output */
+	int	(*xf_input)(struct mbuf **, struct tdb *, int, int);
+	int	(*xf_output)(struct mbuf *, struct tdb *, int, int);
 };
 
 extern int ipsec_in_use;
 extern u_int64_t ipsec_last_added;
 extern int encdebug;			/* enable message reporting */
+extern struct pool tdb_pool;
 
 extern int ipsec_keep_invalid;		/* lifetime of embryonic SAs (in sec) */
 extern int ipsec_require_pfs;		/* use Perfect Forward Secrecy */
@@ -518,12 +568,13 @@ extern char ipsec_def_comp[];
 
 extern TAILQ_HEAD(ipsec_policy_head, ipsec_policy) ipsec_policy_head;
 
+extern struct mutex tdb_sadb_mtx;
+extern struct mutex ipo_tdb_mtx;
+
 struct cryptop;
 
 /* Misc. */
-#ifdef ENCDEBUG
 const char *ipsp_address(union sockaddr_union *, char *, socklen_t);
-#endif /* ENCDEBUG */
 
 /* SPD tables */
 struct radix_node_head *spd_table_add(unsigned int);
@@ -548,79 +599,66 @@ struct	tdb *gettdbbysrcdst_dir(u_int, u_int32_t, union sockaddr_union *,
 #define gettdbbysrcdst(a,b,c,d,e) gettdbbysrcdst_dir((a),(b),(c),(d),(e),0)
 #define gettdbbysrcdst_rev(a,b,c,d,e) gettdbbysrcdst_dir((a),(b),(c),(d),(e),1)
 void	puttdb(struct tdb *);
+void	puttdb_locked(struct tdb *);
 void	tdb_delete(struct tdb *);
 struct	tdb *tdb_alloc(u_int);
+struct	tdb *tdb_ref(struct tdb *);
+void	tdb_unref(struct tdb *);
 void	tdb_free(struct tdb *);
 int	tdb_init(struct tdb *, u_int16_t, struct ipsecinit *);
 void	tdb_unlink(struct tdb *);
+void	tdb_unlink_locked(struct tdb *);
+void	tdb_cleanspd(struct tdb *);
+void	tdb_unbundle(struct tdb *);
+void	tdb_deltimeouts(struct tdb *);
 int	tdb_walk(u_int, int (*)(struct tdb *, void *, int), void *);
+void	tdb_printit(void *, int, int (*)(const char *, ...));
 
 /* XF_IP4 */
 int	ipe4_attach(void);
 int	ipe4_init(struct tdb *, const struct xformsw *, struct ipsecinit *);
 int	ipe4_zeroize(struct tdb *);
-int	ipe4_input(struct mbuf *, struct tdb *, int, int);
+int	ipe4_input(struct mbuf **, struct tdb *, int, int);
 
 /* XF_AH */
 int	ah_attach(void);
 int	ah_init(struct tdb *, const struct xformsw *, struct ipsecinit *);
 int	ah_zeroize(struct tdb *);
-int	ah_input(struct mbuf *, struct tdb *, int, int);
-int	ah_input_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int);
-int	ah_output(struct mbuf *, struct tdb *, struct mbuf **, int, int);
-int	ah_output_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int,
-	    int);
+int	ah_input(struct mbuf **, struct tdb *, int, int);
+int	ah_output(struct mbuf *, struct tdb *, int, int);
 int	ah_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 
-int	ah4_input(struct mbuf **, int *, int, int);
+int	ah46_input(struct mbuf **, int *, int, int);
 void	ah4_ctlinput(int, struct sockaddr *, u_int, void *);
 void	udpencap_ctlinput(int, struct sockaddr *, u_int, void *);
-
-#ifdef INET6
-int	ah6_input(struct mbuf **, int *, int, int);
-#endif /* INET6 */
 
 /* XF_ESP */
 int	esp_attach(void);
 int	esp_init(struct tdb *, const struct xformsw *, struct ipsecinit *);
 int	esp_zeroize(struct tdb *);
-int	esp_input(struct mbuf *, struct tdb *, int, int);
-int	esp_input_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int);
-int	esp_output(struct mbuf *, struct tdb *, struct mbuf **, int, int);
-int	esp_output_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int,
-	    int);
+int	esp_input(struct mbuf **, struct tdb *, int, int);
+int	esp_output(struct mbuf *, struct tdb *, int, int);
 int	esp_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 
-int	esp4_input(struct mbuf **, int *, int, int);
+int	esp46_input(struct mbuf **, int *, int, int);
 void	esp4_ctlinput(int, struct sockaddr *, u_int, void *);
-
-#ifdef INET6
-int	esp6_input(struct mbuf **, int *, int, int);
-#endif /* INET6 */
 
 /* XF_IPCOMP */
 int	ipcomp_attach(void);
 int	ipcomp_init(struct tdb *, const struct xformsw *, struct ipsecinit *);
 int	ipcomp_zeroize(struct tdb *);
-int	ipcomp_input(struct mbuf *, struct tdb *, int, int);
-int	ipcomp_input_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int);
-int	ipcomp_output(struct mbuf *, struct tdb *, struct mbuf **, int, int);
-int	ipcomp_output_cb(struct tdb *, struct tdb_crypto *, struct mbuf *, int,
-	    int);
+int	ipcomp_input(struct mbuf **, struct tdb *, int, int);
+int	ipcomp_output(struct mbuf *, struct tdb *, int, int);
 int	ipcomp_sysctl(int *, u_int, void *, size_t *, void *, size_t);
-int	ipcomp4_input(struct mbuf **, int *, int, int);
-#ifdef INET6
-int	ipcomp6_input(struct mbuf **, int *, int, int);
-#endif /* INET6 */
+int	ipcomp46_input(struct mbuf **, int *, int, int);
 
 /* XF_TCPSIGNATURE */
 int	tcp_signature_tdb_attach(void);
 int	tcp_signature_tdb_init(struct tdb *, const struct xformsw *,
 	    struct ipsecinit *);
 int	tcp_signature_tdb_zeroize(struct tdb *);
-int	tcp_signature_tdb_input(struct mbuf *, struct tdb *, int, int);
-int	tcp_signature_tdb_output(struct mbuf *, struct tdb *, struct mbuf **,
-	  int, int);
+int	tcp_signature_tdb_input(struct mbuf **, struct tdb *, int, int);
+int	tcp_signature_tdb_output(struct mbuf *, struct tdb *, int, int);
 
 /* Replay window */
 int	checkreplaywindow(struct tdb *, u_int64_t, u_int32_t, u_int32_t *, int);
@@ -628,10 +666,8 @@ int	checkreplaywindow(struct tdb *, u_int64_t, u_int32_t, u_int32_t *, int);
 /* Packet processing */
 int	ipsp_process_packet(struct mbuf *, struct tdb *, int, int);
 int	ipsp_process_done(struct mbuf *, struct tdb *);
-struct	tdb *ipsp_spd_lookup(struct mbuf *, int, int, int *, int,
-	    struct tdb *, struct inpcb *, u_int32_t);
-struct	tdb *ipsp_spd_inp(struct mbuf *, int, int, int *, int,
-	    struct tdb *, struct inpcb *, struct ipsec_policy *);
+int	ipsp_spd_lookup(struct mbuf *, int, int, int, struct tdb *,
+	    struct inpcb *, struct tdb **, struct ipsec_ids *);
 int	ipsp_is_unspecified(union sockaddr_union);
 int	ipsp_aux_match(struct tdb *, struct ipsec_ids *,
 	    struct sockaddr_encap *, struct sockaddr_encap *);
@@ -640,16 +676,19 @@ struct ipsec_ids *ipsp_ids_insert(struct ipsec_ids *);
 struct ipsec_ids *ipsp_ids_lookup(u_int32_t);
 void	ipsp_ids_free(struct ipsec_ids *);
 
+void	ipsp_init(void);
 void	ipsec_init(void);
 int	ipsec_sysctl(int *, u_int, void *, size_t *, void *, size_t);
-int	ipsec_common_input(struct mbuf *, int, int, int, int, int);
-void	ipsec_input_cb(struct cryptop *);
-void	ipsec_output_cb(struct cryptop *);
-int	ipsec_common_input_cb(struct mbuf *, struct tdb *, int, int);
+int	ipsec_common_input(struct mbuf **, int, int, int, int, int);
+int	ipsec_common_input_cb(struct mbuf **, struct tdb *, int, int);
+int	ipsec_input_disabled(struct mbuf **, int *, int, int);
+int	ipsec_protoff(struct mbuf *, int, int);
 int	ipsec_delete_policy(struct ipsec_policy *);
 ssize_t	ipsec_hdrsz(struct tdb *);
 void	ipsec_adjust_mtu(struct mbuf *, u_int32_t);
+void	ipsec_set_mtu(struct tdb *, u_int32_t);
 struct	ipsec_acquire *ipsec_get_acquire(u_int32_t);
+void	ipsec_unref_acquire(struct ipsec_acquire *);
 int	ipsec_forward_check(struct mbuf *, int, int);
 int	ipsec_local_check(struct mbuf *, int, int, int);
 

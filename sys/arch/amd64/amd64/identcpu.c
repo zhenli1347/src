@@ -1,4 +1,4 @@
-/*	$OpenBSD: identcpu.c,v 1.120 2021/08/31 15:52:59 patrick Exp $	*/
+/*	$OpenBSD: identcpu.c,v 1.126 2022/08/07 23:56:06 guenther Exp $	*/
 /*	$NetBSD: identcpu.c,v 1.1 2003/04/26 18:39:28 fvdl Exp $	*/
 
 /*
@@ -38,6 +38,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/atomic.h>
+#include <sys/proc.h>
 #include <sys/sysctl.h>
 
 #include "vmm.h"
@@ -246,7 +248,9 @@ cpu_amd64speed(int *freq)
 }
 
 #ifndef SMALL_KERNEL
-void	intelcore_update_sensor(void *args);
+void	intelcore_update_sensor(void *);
+void	cpu_hz_update_sensor(void *);
+
 /*
  * Temperature read on the CPU is relative to the maximum
  * temperature supported by the CPU, Tj(Max).
@@ -299,6 +303,44 @@ intelcore_update_sensor(void *args)
 	}
 }
 
+/*
+ * Effective CPU frequency measurement
+ *
+ * Refer to:
+ *   64-ia-32-architectures-software-developer-vol-3b-part-2-manual.pdf
+ *   Section 14.2 and
+ *   OSRR for AMD Family 17h processors Section 2.1.2
+ * Round to 50Mhz which is the accuracy of this measurement.
+ */
+#define FREQ_50MHZ	(50ULL * 1000000ULL * 1000000ULL)
+void
+cpu_hz_update_sensor(void *args)
+{
+	extern uint64_t	 tsc_frequency;
+	struct cpu_info	*ci = args;
+	uint64_t	 mperf, aperf, mdelta, adelta, val;
+	unsigned long	 s;
+
+	sched_peg_curproc(ci);
+
+	s = intr_disable();
+	mperf = rdmsr(MSR_MPERF);
+	aperf = rdmsr(MSR_APERF);
+	intr_restore(s);
+
+	mdelta = mperf - ci->ci_hz_mperf;
+	adelta = aperf - ci->ci_hz_aperf;
+	ci->ci_hz_mperf = mperf;
+	ci->ci_hz_aperf = aperf;
+
+	if (mdelta > 0) {
+		val = (adelta * 1000000) / mdelta * tsc_frequency;
+		val = ((val + FREQ_50MHZ / 2) / FREQ_50MHZ) * FREQ_50MHZ; 
+		ci->ci_hz_sensor.value = val;
+	}
+
+	atomic_clearbits_int(&curproc->p_flag, P_CPUPEG);
+}
 #endif
 
 void (*setperf_setup)(struct cpu_info *);
@@ -469,7 +511,7 @@ void
 identifycpu(struct cpu_info *ci)
 {
 	uint64_t freq = 0;
-	u_int32_t dummy, val;
+	u_int32_t dummy, val, cpu_tpm_ecxflags = 0;
 	char mycpu_model[48];
 	int i;
 	char *brandstr_from, *brandstr_to;
@@ -538,32 +580,28 @@ identifycpu(struct cpu_info *ci)
 		if (!strcmp(cpu_vendor, "GenuineIntel")) {
 			if ((ci->ci_family == 0x0f && ci->ci_model >= 0x03) ||
 			    (ci->ci_family == 0x06 && ci->ci_model >= 0x0e)) {
-				ci->ci_flags |= CPUF_CONST_TSC;
+				atomic_setbits_int(&ci->ci_flags, CPUF_CONST_TSC);
 			}
 		} else if (!strcmp(cpu_vendor, "CentaurHauls")) {
 			/* VIA */
 			if (ci->ci_model >= 0x0f) {
-				ci->ci_flags |= CPUF_CONST_TSC;
+				atomic_setbits_int(&ci->ci_flags, CPUF_CONST_TSC);
 			}
 		} else if (!strcmp(cpu_vendor, "AuthenticAMD")) {
 			if (cpu_apmi_edx & CPUIDEDX_ITSC) {
-				/* Invariant TSC indicates constant TSC on
-				 * AMD.
-				 */
-				ci->ci_flags |= CPUF_CONST_TSC;
+				/* Invariant TSC indicates constant TSC on AMD */
+				atomic_setbits_int(&ci->ci_flags, CPUF_CONST_TSC);
 			}
 		}
 
 		/* Check if it's an invariant TSC */
 		if (cpu_apmi_edx & CPUIDEDX_ITSC)
-			ci->ci_flags |= CPUF_INVAR_TSC;
+			atomic_setbits_int(&ci->ci_flags, CPUF_INVAR_TSC);
 
 		tsc_identify(ci);
 	}
 
 	freq = cpu_freq(ci);
-
-	amd_cpu_cacheinfo(ci);
 
 	printf("%s: %s", ci->ci_dev->dv_xname, mycpu_model);
 
@@ -619,12 +657,15 @@ identifycpu(struct cpu_info *ci)
 	}
 
 	if (!strcmp(cpu_vendor, "GenuineIntel") && cpuid_level >= 0x06) {
-		CPUID(0x06, ci->ci_feature_tpmflags, dummy, dummy, dummy);
+		CPUID(0x06, ci->ci_feature_tpmflags, dummy, cpu_tpm_ecxflags,
+		    dummy);
 		for (i = 0; i < nitems(cpu_tpm_eaxfeatures); i++)
 			if (ci->ci_feature_tpmflags &
 			    cpu_tpm_eaxfeatures[i].bit)
 				printf(",%s", cpu_tpm_eaxfeatures[i].str);
 	} else if (!strcmp(cpu_vendor, "AuthenticAMD")) {
+		CPUID(0x06, ci->ci_feature_tpmflags, dummy, cpu_tpm_ecxflags,
+		    dummy);
 		if (ci->ci_family >= 0x12)
 			ci->ci_feature_tpmflags |= TPM_ARAT;
 	}
@@ -737,12 +778,9 @@ identifycpu(struct cpu_info *ci)
 
 #ifndef SMALL_KERNEL
 	if (CPU_IS_PRIMARY(ci) && (ci->ci_feature_tpmflags & TPM_SENSOR)) {
-		strlcpy(ci->ci_sensordev.xname, ci->ci_dev->dv_xname,
-		    sizeof(ci->ci_sensordev.xname));
 		ci->ci_sensor.type = SENSOR_TEMP;
 		sensor_task_register(ci, intelcore_update_sensor, 5);
 		sensor_attach(&ci->ci_sensordev, &ci->ci_sensor);
-		sensordev_install(&ci->ci_sensordev);
 	}
 #endif
 
@@ -762,12 +800,9 @@ identifycpu(struct cpu_info *ci)
 	if (CPU_IS_PRIMARY(ci) && !strcmp(cpu_vendor, "CentaurHauls")) {
 		ci->cpu_setup = via_nano_setup;
 #ifndef SMALL_KERNEL
-		strlcpy(ci->ci_sensordev.xname, ci->ci_dev->dv_xname,
-		    sizeof(ci->ci_sensordev.xname));
 		ci->ci_sensor.type = SENSOR_TEMP;
 		sensor_task_register(ci, via_update_sensor, 5);
 		sensor_attach(&ci->ci_sensordev, &ci->ci_sensor);
-		sensordev_install(&ci->ci_sensordev);
 #endif
 	}
 
@@ -777,6 +812,15 @@ identifycpu(struct cpu_info *ci)
 #if NVMM > 0
 	cpu_check_vmm_cap(ci);
 #endif /* NVMM > 0 */
+
+	/* Check for effective frequency via MPERF, APERF */
+	if ((cpu_tpm_ecxflags & TPM_EFFFREQ) && ci->ci_smt_id == 0) {
+#ifndef SMALL_KERNEL
+		ci->ci_hz_sensor.type = SENSOR_FREQ;
+		sensor_task_register(ci, cpu_hz_update_sensor, 1);
+		sensor_attach(&ci->ci_sensordev, &ci->ci_hz_sensor);
+#endif
+	}
 }
 
 #ifndef SMALL_KERNEL
@@ -854,7 +898,7 @@ cpu_topology(struct cpu_info *ci)
 		ci->ci_pkg_id = apicid >> core_bits;
 
 		/* Get rid of the package bits */
-		core_mask = (1 << core_bits) - 1;
+		core_mask = (1U << core_bits) - 1;
 		thread_id = apicid & core_mask;
 
 		/* Cut logical thread_id into core id, and smt id in a core */
@@ -872,14 +916,14 @@ cpu_topology(struct cpu_info *ci)
 		max_coreid = ((eax >> 26) & 0x3f) + 1;
 		/* SMT */
 		smt_bits = mask_width(max_apicid / max_coreid);
-		smt_mask = (1 << smt_bits) - 1;
+		smt_mask = (1U << smt_bits) - 1;
 		/* Core */
 		core_bits = log2(max_coreid);
-		core_mask = (1 << (core_bits + smt_bits)) - 1;
+		core_mask = (1U << (core_bits + smt_bits)) - 1;
 		core_mask ^= smt_mask;
 		/* Pkg */
 		pkg_bits = core_bits + smt_bits;
-		pkg_mask = -1 << core_bits;
+		pkg_mask = ~0U << core_bits;
 
 		ci->ci_smt_id = apicid & smt_mask;
 		ci->ci_core_id = (apicid & core_mask) >> smt_bits;
@@ -955,7 +999,7 @@ cpu_check_vmm_cap(struct cpu_info *ci)
 			/* VM Functions available? */
 			if (msr & (IA32_VMX_ENABLE_VM_FUNCTIONS) << 32) {
 				ci->ci_vmm_cap.vcc_vmx.vmx_vm_func =
-				    rdmsr(IA32_VMX_VMFUNC);	
+				    rdmsr(IA32_VMX_VMFUNC);
 			}
 		}
 	}
@@ -1039,7 +1083,7 @@ cpu_check_vmm_cap(struct cpu_info *ci)
 		 * hardware (RDCL_NO), or we may be nested in an VMM that
 		 * is doing flushes (SKIP_L1DFL_VMENTRY) using the MSR.
 		 * In either case no mitigation at all is necessary.
-		 */	
+		 */
 		if (ci->ci_feature_sefflags_edx & SEFF0EDX_ARCH_CAP) {
 			msr = rdmsr(MSR_ARCH_CAPABILITIES);
 			if ((msr & ARCH_CAPABILITIES_RDCL_NO) ||

@@ -1,4 +1,4 @@
-.\"	$OpenBSD: iic.4,v 1.117 2021/06/23 15:32:40 kettenis Exp $
+.\"	$OpenBSD: iic.4,v 1.126 2022/08/06 12:09:59 jsg Exp $
 .\"
 .\" Copyright (c) 2004, 2006 Alexander Yurchenko <grange@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: June 23 2021 $
+.Dd $Mdocdate: August 6 2022 $
 .Dt IIC 4
 .Os
 .Sh NAME
@@ -30,6 +30,7 @@
 .Cd "iic* at glxpcib?               # i386"
 .Cd "iic* at gscsio?                # i386"
 .Cd "iic* at ichiic?                # amd64 i386"
+.Cd "iic* at iicmux?                # arm64"
 .Cd "iic* at nviic?                 # amd64 i386"
 .Cd "iic* at pcamux?                # arm64"
 .Cd "iic* at pcfiic?                # sparc64"
@@ -39,6 +40,7 @@
 .Cd "iic* at gdiumiic?              # loongson"
 .Cd "iic* at tsciic?                # alpha"
 .Cd "iic* at amliic?                # arm64"
+.Cd "iic* at apliic?                # arm64"
 .Cd "iic* at bcmbsc?                # arm64 armv7"
 .Cd "iic* at dwiic?                 # amd64 arm64"
 .Cd "iic* at octiic?                # octeon"
@@ -46,6 +48,7 @@
 .Cd "iic* at mviic?                 # arm64"
 .Cd "iic* at rkiic?                 # arm64 armv7"
 .Cd "iic* at sxitwi?                # arm64 armv7"
+.Cd "iic* at mpfiic?                # riscv64"
 .Cd "iic* at ociic?                 # riscv64"
 .Sh DESCRIPTION
 .Tn I2C
@@ -93,6 +96,8 @@ AMD-8111 SMBus controller
 AMD-756/766/768/8111 Power Management and SMBus controller
 .It Xr amliic 4
 Amlogic I2C controller
+.It Xr apliic 4
+Apple I2C controller
 .It Xr bcmbsc 4
 Broadcom Serial Control controller
 .It Xr dwiic 4
@@ -109,8 +114,10 @@ Intel ICH SMBus controller
 Freescale i.MX I2C controller
 .It Xr kiic 4
 Apple Kauai I2C controller
+.It Xr mpfiic 4
+Microchip PolarFire SoC MSS I2C controller
 .It Xr mviic 4
-Marvell Armada 3700 I2C Controller
+Marvell Armada 3700 onboard I2C controller
 .It Xr nviic 4
 NVIDIA nForce2/3/4 SMBus controller
 .It Xr ociic 4
@@ -232,6 +239,8 @@ Philips PCF8591 temperature sensor
 NXP PCF8523 real-time clock
 .It Xr pcxrtc 4
 NXP PCF8563 real-time clock
+.It Xr pcyrtc 4
+NXP PCF85063A/TP real-time clock
 .It Xr ricohrtc 4
 Ricoh RS5C372 real-time clock
 .It Xr rkpmic 4
@@ -244,6 +253,8 @@ Serial Presence Detect memory
 Solomon Systech SSD1306/SSD1309 OLED display module
 .It Xr stsec 4
 ST7 embedded controller
+.It Xr tascodec 4
+Texas Instruments TAS2770 digital amplifier
 .It Xr tcpci 4
 USB Type-C Port Controller Interface
 .It Xr tda 4
@@ -260,6 +271,7 @@ Winbond W83L784R/W83L785R/W83L785TS-L temperature, voltage, and fan sensor
 Winbond W83793G temperature, voltage, and fan sensor
 .El
 .Sh SEE ALSO
+.Xr iicmux 4 ,
 .Xr intro 4 ,
 .Xr iic 9
 .Sh HISTORY

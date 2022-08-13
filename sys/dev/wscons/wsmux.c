@@ -1,4 +1,4 @@
-/*	$OpenBSD: wsmux.c,v 1.54 2021/01/09 20:51:00 gnezdo Exp $	*/
+/*	$OpenBSD: wsmux.c,v 1.56 2022/07/02 08:50:42 visa Exp $	*/
 /*      $NetBSD: wsmux.c,v 1.37 2005/04/30 03:47:12 augustss Exp $      */
 
 /*
@@ -55,7 +55,6 @@
 #include <sys/tty.h>
 #include <sys/signalvar.h>
 #include <sys/device.h>
-#include <sys/poll.h>
 
 #include <dev/wscons/wsconsio.h>
 #include <dev/wscons/wsksymdef.h>
@@ -561,24 +560,6 @@ wsmux_do_ioctl(struct device *dv, u_long cmd, caddr_t data, int flag,
 	return (error);
 }
 
-/*
- * poll() of the pseudo device from device table.
- */
-int
-wsmuxpoll(dev_t dev, int events, struct proc *p)
-{
-	struct wsmux_softc *sc = wsmuxdevs[minor(dev)];
-
-	if (sc->sc_base.me_evp == NULL) {
-#ifdef DIAGNOSTIC
-		printf("wsmuxpoll: not open\n");
-#endif
-		return (POLLERR);
-	}
-
-	return (wsevent_poll(sc->sc_base.me_evp, events, p));
-}
-
 int
 wsmuxkqfilter(dev_t dev, struct knote *kn)
 {
@@ -913,7 +894,7 @@ wsmux_get_layout(struct wsmux_softc *sc)
 void
 wsmux_set_layout(struct wsmux_softc *sc, uint32_t layout)
 {
-	if ((layout & KB_DEFAULT) == 0)
+	if ((layout & (KB_DEFAULT | KB_NOENCODING)) == 0)
 		sc->sc_kbd_layout = layout;
 }
 

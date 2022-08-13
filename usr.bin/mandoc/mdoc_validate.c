@@ -1,6 +1,6 @@
-/* $OpenBSD: mdoc_validate.c,v 1.304 2021/07/18 11:40:58 schwarze Exp $ */
+/* $OpenBSD: mdoc_validate.c,v 1.306 2022/06/08 16:29:12 schwarze Exp $ */
 /*
- * Copyright (c) 2010-2020 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2010-2021 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008-2012 Kristaps Dzonsons <kristaps@bsd.lv>
  * Copyright (c) 2010 Joerg Sonnenberger <joerg@netbsd.org>
  *
@@ -1098,7 +1098,8 @@ post_tg(POST_ARGS)
 	/* Find the next node. */
 	n = mdoc->last;
 	for (nn = n; nn != NULL; nn = nn->parent) {
-		if (nn->next != NULL) {
+		if (nn->type != ROFFT_HEAD && nn->type != ROFFT_BODY &&
+		    nn->type != ROFFT_TAIL && nn->next != NULL) {
 			nn = nn->next;
 			break;
 		}
@@ -2857,7 +2858,6 @@ post_os(POST_ARGS)
 {
 #ifndef OSNAME
 	struct utsname	  utsname;
-	static char	 *defbuf;
 #endif
 	struct roff_node *n;
 
@@ -2894,15 +2894,15 @@ post_os(POST_ARGS)
 #ifdef OSNAME
 	mdoc->meta.os = mandoc_strdup(OSNAME);
 #else /*!OSNAME */
-	if (defbuf == NULL) {
+	if (mdoc->os_r == NULL) {
 		if (uname(&utsname) == -1) {
 			mandoc_msg(MANDOCERR_OS_UNAME, n->line, n->pos, "Os");
-			defbuf = mandoc_strdup("UNKNOWN");
+			mdoc->os_r = mandoc_strdup("UNKNOWN");
 		} else
-			mandoc_asprintf(&defbuf, "%s %s",
+			mandoc_asprintf(&mdoc->os_r, "%s %s",
 			    utsname.sysname, utsname.release);
 	}
-	mdoc->meta.os = mandoc_strdup(defbuf);
+	mdoc->meta.os = mandoc_strdup(mdoc->os_r);
 #endif /*!OSNAME*/
 
 out:

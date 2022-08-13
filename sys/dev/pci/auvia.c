@@ -1,4 +1,4 @@
-/*	$OpenBSD: auvia.c,v 1.60 2019/12/01 21:14:13 fcambus Exp $ */
+/*	$OpenBSD: auvia.c,v 1.63 2022/03/21 19:22:41 miod Exp $ */
 /*	$NetBSD: auvia.c,v 1.28 2002/11/04 16:38:49 kent Exp $	*/
 
 /*-
@@ -103,7 +103,7 @@ struct  cfdriver auvia_cd = {
 	NULL, "auvia", DV_DULL
 };
 
-struct cfattach auvia_ca = {
+const struct cfattach auvia_ca = {
 	sizeof (struct auvia_softc), auvia_match, auvia_attach,
 	    NULL, auvia_activate
 };
@@ -178,7 +178,7 @@ struct cfattach auvia_ca = {
 
 #define TIMEOUT	50
 
-struct audio_hw_if auvia_hw_if = {
+const struct audio_hw_if auvia_hw_if = {
 	auvia_open,
 	auvia_close,
 	auvia_set_params,
@@ -346,7 +346,7 @@ auvia_attach(struct device *parent, struct device *self, void *aux)
 	    AudioCoutputs, AudioNmaster, NULL);
 	auvia_set_port(sc, &ctl);
 
-	audio_attach_mi(&auvia_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&auvia_hw_if, sc, NULL, &sc->sc_dev);
 	sc->codec_if->vtbl->unlock(sc->codec_if);
 }
 

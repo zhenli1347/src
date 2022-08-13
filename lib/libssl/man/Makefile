@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.71 2021/05/12 14:17:27 tb Exp $
+# $OpenBSD: Makefile,v 1.77 2022/07/13 20:52:36 schwarze Exp $
 
 .include <bsd.own.mk>
 
@@ -14,15 +14,16 @@ MAN =	BIO_f_ssl.3 \
 	SSL_CTX_ctrl.3 \
 	SSL_CTX_flush_sessions.3 \
 	SSL_CTX_free.3 \
+	SSL_CTX_get0_certificate.3 \
 	SSL_CTX_get_ex_new_index.3 \
 	SSL_CTX_get_verify_mode.3 \
-	SSL_CTX_get0_certificate.3 \
 	SSL_CTX_load_verify_locations.3 \
 	SSL_CTX_new.3 \
 	SSL_CTX_sess_number.3 \
 	SSL_CTX_sess_set_cache_size.3 \
 	SSL_CTX_sess_set_get_cb.3 \
 	SSL_CTX_sessions.3 \
+	SSL_CTX_set1_groups.3 \
 	SSL_CTX_set_alpn_select_cb.3 \
 	SSL_CTX_set_cert_store.3 \
 	SSL_CTX_set_cert_verify_callback.3 \
@@ -32,6 +33,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_CTX_set_default_passwd_cb.3 \
 	SSL_CTX_set_generate_session_id.3 \
 	SSL_CTX_set_info_callback.3 \
+	SSL_CTX_set_keylog_callback.3 \
 	SSL_CTX_set_max_cert_list.3 \
 	SSL_CTX_set_min_proto_version.3 \
 	SSL_CTX_set_mode.3 \
@@ -39,6 +41,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_CTX_set_options.3 \
 	SSL_CTX_set_quiet_shutdown.3 \
 	SSL_CTX_set_read_ahead.3 \
+	SSL_CTX_set_security_level.3 \
 	SSL_CTX_set_session_cache_mode.3 \
 	SSL_CTX_set_session_id_context.3 \
 	SSL_CTX_set_ssl_version.3 \
@@ -50,17 +53,17 @@ MAN =	BIO_f_ssl.3 \
 	SSL_CTX_set_tmp_dh_callback.3 \
 	SSL_CTX_set_tmp_rsa_callback.3 \
 	SSL_CTX_set_verify.3 \
-	SSL_CTX_set1_groups.3 \
 	SSL_CTX_use_certificate.3 \
 	SSL_SESSION_free.3 \
+	SSL_SESSION_get0_cipher.3 \
+	SSL_SESSION_get0_peer.3 \
 	SSL_SESSION_get_compress_id.3 \
 	SSL_SESSION_get_ex_new_index.3 \
 	SSL_SESSION_get_id.3 \
 	SSL_SESSION_get_protocol_version.3 \
 	SSL_SESSION_get_time.3 \
-	SSL_SESSION_get0_cipher.3 \
-	SSL_SESSION_get0_peer.3 \
 	SSL_SESSION_has_ticket.3 \
+	SSL_SESSION_is_resumable.3 \
 	SSL_SESSION_new.3 \
 	SSL_SESSION_print.3 \
 	SSL_SESSION_set1_id_context.3 \
@@ -101,6 +104,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_num_renegotiations.3 \
 	SSL_pending.3 \
 	SSL_read.3 \
+	SSL_read_early_data.3 \
 	SSL_renegotiate.3 \
 	SSL_rstate_string.3 \
 	SSL_session_reused.3 \
@@ -111,6 +115,7 @@ MAN =	BIO_f_ssl.3 \
 	SSL_set_connect_state.3 \
 	SSL_set_fd.3 \
 	SSL_set_max_send_fragment.3 \
+	SSL_set_psk_use_session_callback.3 \
 	SSL_set_session.3 \
 	SSL_set_shutdown.3 \
 	SSL_set_tmp_ecdh.3 \
@@ -121,9 +126,6 @@ MAN =	BIO_f_ssl.3 \
 	SSL_write.3 \
 	d2i_SSL_SESSION.3 \
 	ssl.3
-
-# To be enabled after the release of OpenBSD 6.8:
-#	SSL_read_early_data.3 \
 
 all clean cleandir depend includes obj tags:
 

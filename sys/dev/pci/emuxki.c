@@ -1,4 +1,4 @@
-/*	$OpenBSD: emuxki.c,v 1.54 2020/06/17 00:03:13 mortimer Exp $	*/
+/*	$OpenBSD: emuxki.c,v 1.58 2022/03/21 19:22:41 miod Exp $	*/
 /*	$NetBSD: emuxki.c,v 1.1 2001/10/17 18:39:41 jdolecek Exp $	*/
 
 /*-
@@ -67,7 +67,7 @@
 #include <dev/pci/emuxkireg.h>
 #include <dev/pci/emuxkivar.h>
 
-/* autconf goo */
+/* autoconf goo */
 int  emuxki_match(struct device *, void *, void *);
 void emuxki_attach(struct device *, struct device *, void *);
 int  emuxki_detach(struct device *, int);
@@ -203,7 +203,7 @@ struct cfdriver emu_cd = {
 	NULL, "emu", DV_DULL
 };
 
-struct cfattach emu_ca = {
+const struct cfattach emu_ca = {
         sizeof(struct emuxki_softc),
         emuxki_match,
         emuxki_attach,
@@ -211,7 +211,7 @@ struct cfattach emu_ca = {
 	emuxki_activate
 };
 
-struct audio_hw_if emuxki_hw_if = {
+const struct audio_hw_if emuxki_hw_if = {
 	emuxki_open,
 	emuxki_close,
 	emuxki_set_params,
@@ -474,7 +474,7 @@ emuxki_attach(struct device *parent, struct device *self, void *aux)
 	if (emuxki_scinit(sc, 0) ||
 	    /* APS has no ac97 XXX */
 	    (sc->sc_flags & EMUXKI_APS || emuxki_ac97_init(sc)) ||
-	    (sc->sc_audev = audio_attach_mi(&emuxki_hw_if, sc, self)) == NULL) {
+	    (sc->sc_audev = audio_attach_mi(&emuxki_hw_if, sc, NULL, self)) == NULL) {
 		emuxki_pci_shutdown(sc);
 		return;
 	}

@@ -1,5 +1,6 @@
-#	$OpenBSD: Makefile,v 1.46 2021/08/30 17:34:32 tb Exp $
+#	$OpenBSD: Makefile,v 1.48 2022/01/05 09:59:39 jsing Exp $
 
+SUBDIR += api
 SUBDIR += asn1
 SUBDIR += buffer
 SUBDIR += bytestring
@@ -12,6 +13,7 @@ SUBDIR += record
 SUBDIR += record_layer
 SUBDIR += server
 SUBDIR += ssl
+SUBDIR += tls
 SUBDIR += tlsext
 SUBDIR += tlslegacy
 SUBDIR += key_schedule

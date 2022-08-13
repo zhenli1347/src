@@ -1,4 +1,4 @@
-/* $OpenBSD: wskbd.c,v 1.107 2020/11/02 19:45:18 tobhe Exp $ */
+/* $OpenBSD: wskbd.c,v 1.113 2022/07/02 08:50:42 visa Exp $ */
 /* $NetBSD: wskbd.c,v 1.80 2005/05/04 01:52:16 augustss Exp $ */
 
 /*
@@ -94,7 +94,6 @@
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <sys/vnode.h>
-#include <sys/poll.h>
 
 #include <ddb/db_var.h>
 
@@ -169,6 +168,10 @@ struct wskbd_softc {
 
 	int	sc_refcnt;
 	u_char	sc_dying;		/* device is being detached */
+
+#if NAUDIO > 0
+	void	*sc_audiocookie;
+#endif
 };
 
 #define MOD_SHIFT_L		(1 << 0)
@@ -205,6 +208,8 @@ int	wskbd_detach(struct device *, int);
 int	wskbd_activate(struct device *, int);
 
 int	wskbd_displayioctl(struct device *, u_long, caddr_t, int, struct proc *);
+int	wskbd_displayioctl_sc(struct wskbd_softc *, u_long, caddr_t, int,
+    struct proc *, int);
 
 void	update_leds(struct wskbd_internal *);
 void	update_modifier(struct wskbd_internal *, u_int, int, int);
@@ -217,7 +222,7 @@ void	change_displayparam(struct wskbd_softc *, int, int, int);
 #endif
 
 int	wskbd_do_ioctl_sc(struct wskbd_softc *, u_long, caddr_t, int,
-	    struct proc *);
+    struct proc *, int);
 void	wskbd_deliver_event(struct wskbd_softc *sc, u_int type, int value);
 
 #if NWSMUX > 0
@@ -231,6 +236,8 @@ int	wskbd_mux_close(struct wsevsrc *);
 int	wskbd_do_open(struct wskbd_softc *, struct wseventvar *);
 int	wskbd_do_ioctl(struct device *, u_long, caddr_t, int, struct proc *);
 
+void	wskbd_set_keymap(struct wskbd_softc *, struct wscons_keymap *, int);
+
 int	(*wskbd_get_backlight)(struct wskbd_backlight *);
 int	(*wskbd_set_backlight)(struct wskbd_backlight *);
 
@@ -238,7 +245,7 @@ struct cfdriver wskbd_cd = {
 	NULL, "wskbd", DV_TTY
 };
 
-struct cfattach wskbd_ca = {
+const struct cfattach wskbd_ca = {
 	sizeof (struct wskbd_softc), wskbd_match, wskbd_attach,
 	wskbd_detach, wskbd_activate
 };
@@ -303,7 +310,7 @@ static struct wskbd_internal wskbd_console_data;
 void	wskbd_update_layout(struct wskbd_internal *, kbd_t);
 
 #if NAUDIO > 0
-extern int wskbd_set_mixervolume(long, long);
+extern int wskbd_set_mixervolume_dev(void *, long, long);
 #endif
 
 void
@@ -391,6 +398,10 @@ wskbd_attach(struct device *parent, struct device *self, void *aux)
 	timeout_set(&sc->sc_repeat_ch, wskbd_repeat, sc);
 #endif
 
+#if NAUDIO > 0
+	sc->sc_audiocookie = ap->audiocookie;
+#endif
+
 	sc->id->t_sc = sc;
 
 	sc->sc_accessops = ap->accessops;
@@ -412,9 +423,14 @@ wskbd_attach(struct device *parent, struct device *self, void *aux)
 	}
 #endif
 	for (;;) {
-		if (wskbd_load_keymap(&sc->id->t_keymap, layout, &sc->sc_map,
-		    &sc->sc_maplen) == 0)
+		struct wscons_keymap *map;
+		int maplen;
+
+		if (wskbd_load_keymap(&sc->id->t_keymap, layout, &map,
+		    &maplen) == 0) {
+			wskbd_set_keymap(sc, map, maplen);
 			break;
+		}
 #if NWSMUX > 0
 		if (layout == sc->id->t_keymap.layout)
 			panic("cannot load keymap");
@@ -925,7 +941,14 @@ wskbdread(dev_t dev, struct uio *uio, int flags)
 int
 wskbdioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 {
-	return (wskbd_do_ioctl(wskbd_cd.cd_devs[minor(dev)], cmd, data, flag,p));
+	struct wskbd_softc *sc = wskbd_cd.cd_devs[minor(dev)];
+	int error;
+
+	sc->sc_refcnt++;
+	error = wskbd_do_ioctl_sc(sc, cmd, data, flag, p, 0);
+	if (--sc->sc_refcnt < 0)
+		wakeup(sc);
+	return (error);
 }
 
 /* A wrapper around the ioctl() workhorse to make reference counting easy. */
@@ -937,7 +960,7 @@ wskbd_do_ioctl(struct device *dv, u_long cmd, caddr_t data, int flag,
 	int error;
 
 	sc->sc_refcnt++;
-	error = wskbd_do_ioctl_sc(sc, cmd, data, flag, p);
+	error = wskbd_do_ioctl_sc(sc, cmd, data, flag, p, 1);
 	if (--sc->sc_refcnt < 0)
 		wakeup(sc);
 	return (error);
@@ -945,7 +968,7 @@ wskbd_do_ioctl(struct device *dv, u_long cmd, caddr_t data, int flag,
 
 int
 wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
-     struct proc *p)
+    struct proc *p, int evsrc)
 {
 	struct wseventvar *evar;
 	int error;
@@ -983,7 +1006,7 @@ wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
 	 * Try the keyboard driver for WSKBDIO ioctls.  It returns -1
 	 * if it didn't recognize the request.
 	 */
-	error = wskbd_displayioctl(&sc->sc_base.me_dv, cmd, data, flag, p);
+	error = wskbd_displayioctl_sc(sc, cmd, data, flag, p, evsrc);
 	return (error != -1 ? error : ENOTTY);
 }
 
@@ -992,10 +1015,18 @@ wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
  * Some of these have no real effect in raw mode, however.
  */
 int
-wskbd_displayioctl(struct device *dev, u_long cmd, caddr_t data, int flag,
+wskbd_displayioctl(struct device *dv, u_long cmd, caddr_t data, int flag,
     struct proc *p)
 {
-	struct wskbd_softc *sc = (struct wskbd_softc *)dev;
+	struct wskbd_softc *sc = (struct wskbd_softc *)dv;
+
+	return (wskbd_displayioctl_sc(sc, cmd, data, flag, p, 1));
+}
+
+int
+wskbd_displayioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data,
+    int flag, struct proc *p, int evsrc)
+{
 	struct wskbd_bell_data *ubdp, *kbdp;
 	struct wskbd_keyrepeat_data *ukdp, *kkdp;
 	struct wskbd_map_data *umdp;
@@ -1114,9 +1145,11 @@ getkeyrepeat:
 
 		error = copyin(umdp->map, buf, len);
 		if (error == 0) {
-			wskbd_init_keymap(umdp->maplen,
-					  &sc->sc_map, &sc->sc_maplen);
-			memcpy(sc->sc_map, buf, len);
+			struct wscons_keymap *map;
+
+			map = wskbd_init_keymap(umdp->maplen);
+			memcpy(map, buf, len);
+			wskbd_set_keymap(sc, map, umdp->maplen);
 			/* drop the variant bits handled by the map */
 			enc = KB_USER | (KB_VARIANT(sc->id->t_keymap.layout) &
 			    KB_HANDLEDBYWSKBD);
@@ -1134,6 +1167,9 @@ getkeyrepeat:
 		return(error);
 
 	case WSKBDIO_GETENCODING:
+		/* Do not advertise encoding to the parent mux. */
+		if (evsrc && (sc->id->t_keymap.layout & KB_NOENCODING))
+			return (ENOTTY);
 		*((kbd_t *)data) = sc->id->t_keymap.layout & ~KB_DEFAULT;
 		return(0);
 
@@ -1146,11 +1182,17 @@ getkeyrepeat:
 			/* map variants make no sense */
 			if (KB_VARIANT(enc) & ~KB_HANDLEDBYWSKBD)
 				return (EINVAL);
+		} else if (sc->id->t_keymap.layout & KB_NOENCODING) {
+			return (0);
 		} else {
+			struct wscons_keymap *map;
+			int maplen;
+
 			error = wskbd_load_keymap(&sc->id->t_keymap, enc,
-			    &sc->sc_map, &sc->sc_maplen);
+			    &map, &maplen);
 			if (error)
 				return (error);
+			wskbd_set_keymap(sc, map, maplen);
 		}
 		wskbd_update_layout(sc->id, enc);
 #if NWSMUX > 0
@@ -1211,16 +1253,6 @@ getkeyrepeat:
 	}
 #endif
 	return (error);
-}
-
-int
-wskbdpoll(dev_t dev, int events, struct proc *p)
-{
-	struct wskbd_softc *sc = wskbd_cd.cd_devs[minor(dev)];
-
-	if (sc->sc_base.me_evp == NULL)
-		return (POLLERR);
-	return (wsevent_poll(sc->sc_base.me_evp, events, p));
 }
 
 int
@@ -1731,13 +1763,13 @@ wskbd_translate(struct wskbd_internal *id, u_int type, int value)
 		switch (ksym) {
 #if NAUDIO > 0
 		case KS_AudioMute:
-			wskbd_set_mixervolume(0, 1);
+			wskbd_set_mixervolume_dev(sc->sc_audiocookie, 0, 1);
 			return (0);
 		case KS_AudioLower:
-			wskbd_set_mixervolume(-1, 1);
+			wskbd_set_mixervolume_dev(sc->sc_audiocookie, -1, 1);
 			return (0);
 		case KS_AudioRaise:
-			wskbd_set_mixervolume(1, 1);
+			wskbd_set_mixervolume_dev(sc->sc_audiocookie, 1, 1);
 			return (0);
 #endif
 		default:
@@ -1835,4 +1867,12 @@ wskbd_debugger(struct wskbd_softc *sc)
 			db_enter();
 	}
 #endif
+}
+
+void
+wskbd_set_keymap(struct wskbd_softc *sc, struct wscons_keymap *map, int maplen)
+{
+	free(sc->sc_map, M_DEVBUF, sc->sc_maplen * sizeof(*sc->sc_map));
+	sc->sc_map = map;
+	sc->sc_maplen = maplen;
 }

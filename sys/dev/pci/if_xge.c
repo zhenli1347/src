@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_xge.c,v 1.80 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_xge.c,v 1.82 2022/03/11 18:00:50 mpi Exp $	*/
 /*	$NetBSD: if_xge.c,v 1.1 2005/09/09 10:30:27 ragge Exp $	*/
 
 /*
@@ -137,7 +137,7 @@ static const uint64_t xge_fix_mac[] = {
 
 /*
  * Constants to be programmed into Hercules's registers, to configure
- * the XGXS transciever.
+ * the XGXS transceiver.
  */
 static const uint64_t xge_herc_dtx_cfg[] = {
 	0x8000051536750000ULL, 0x80000515367500E0ULL,
@@ -328,7 +328,7 @@ pif_wkey(struct xge_softc *sc, bus_size_t csr, uint64_t val)
 #endif
 }
 
-struct cfattach xge_ca = {
+const struct cfattach xge_ca = {
 	sizeof(struct xge_softc), xge_match, xge_attach
 };
 

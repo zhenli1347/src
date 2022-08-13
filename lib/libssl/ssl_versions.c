@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_versions.c,v 1.20 2021/07/01 17:53:39 jsing Exp $ */
+/* $OpenBSD: ssl_versions.c,v 1.23 2022/06/30 11:17:50 tb Exp $ */
 /*
  * Copyright (c) 2016, 2017 Joel Sing <jsing@openbsd.org>
  *
@@ -224,10 +224,10 @@ ssl_tls_version(uint16_t version)
 uint16_t
 ssl_effective_tls_version(SSL *s)
 {
-	if (S3I(s)->hs.negotiated_tls_version > 0)
-		return S3I(s)->hs.negotiated_tls_version;
+	if (s->s3->hs.negotiated_tls_version > 0)
+		return s->s3->hs.negotiated_tls_version;
 
-	return S3I(s)->hs.our_max_tls_version;
+	return s->s3->hs.our_max_tls_version;
 }
 
 int
@@ -239,6 +239,24 @@ ssl_max_supported_version(SSL *s, uint16_t *max_ver)
 
 	if (!ssl_supported_tls_version_range(s, NULL, &max_version))
 		return 0;
+
+	if (SSL_is_dtls(s)) {
+		if ((max_version = ssl_tls_to_dtls_version(max_version)) == 0)
+			return 0;
+	}
+
+	*max_ver = max_version;
+
+	return 1;
+}
+
+int
+ssl_max_legacy_version(SSL *s, uint16_t *max_ver)
+{
+	uint16_t max_version;
+
+	if ((max_version = s->s3->hs.our_max_tls_version) > TLS1_2_VERSION)
+		max_version = TLS1_2_VERSION;
 
 	if (SSL_is_dtls(s)) {
 		if ((max_version = ssl_tls_to_dtls_version(max_version)) == 0)
@@ -311,6 +329,9 @@ ssl_max_shared_version(SSL *s, uint16_t peer_ver, uint16_t *max_ver)
 			return 0;
 	}
 
+	if (!ssl_security_version(s, shared_version))
+		return 0;
+
 	*max_ver = shared_version;
 
 	return 1;
@@ -334,8 +355,11 @@ ssl_check_version_from_server(SSL *s, uint16_t server_version)
 	    &max_tls_version))
 		return 0;
 
-	return (server_tls_version >= min_tls_version &&
-	    server_tls_version <= max_tls_version);
+	if (server_tls_version < min_tls_version ||
+	    server_tls_version > max_tls_version)
+		return 0;
+
+	return ssl_security_version(s, server_tls_version);
 }
 
 int

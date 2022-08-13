@@ -1,4 +1,4 @@
-/*	$OpenBSD: agp_amd.c,v 1.21 2015/09/09 19:47:11 deraadt Exp $	*/
+/*	$OpenBSD: agp_amd.c,v 1.23 2022/03/11 18:00:45 mpi Exp $	*/
 /*	$NetBSD: agp_amd.c,v 1.6 2001/10/06 02:48:50 thorpej Exp $	*/
 
 /*-
@@ -87,7 +87,7 @@ void	agp_amd_bind_page(void *, bus_size_t, paddr_t, int);
 void	agp_amd_unbind_page(void *, bus_size_t);
 void	agp_amd_flush_tlb(void *);
 
-struct cfattach amdagp_ca = {
+const struct cfattach amdagp_ca = {
 	sizeof(struct agp_amd_softc), agp_amd_probe, agp_amd_attach, NULL,
 	agp_amd_activate
 };
@@ -202,7 +202,7 @@ agp_amd_attach(struct device *parent, struct device *self, void *aux)
 			break;
 
 		/*
-		 * almost certainly error allocating contigious dma memory
+		 * almost certainly error allocating contiguous dma memory
 		 * so reduce aperture so that the gatt size reduces.
 		 */
 		asc->asc_apsize /= 2;

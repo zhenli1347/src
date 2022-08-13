@@ -1,4 +1,4 @@
-/*	$OpenBSD: arcofi.c,v 1.17 2016/09/19 22:21:09 kettenis Exp $	*/
+/*	$OpenBSD: arcofi.c,v 1.20 2022/06/27 20:14:51 miod Exp $	*/
 
 /*
  * Copyright (c) 2011 Miodrag Vallat.
@@ -208,7 +208,7 @@ int	arcofi_set_port(void *, mixer_ctrl_t *);
 int	arcofi_start_input(void *, void *, int, void (*)(void *), void *);
 int	arcofi_start_output(void *, void *, int, void (*)(void *), void *);
 
-/* const */ struct audio_hw_if arcofi_hw_if = {
+const struct audio_hw_if arcofi_hw_if = {
 	.open = arcofi_open,
 	.close = arcofi_close,
 	.set_params = arcofi_set_params,
@@ -574,7 +574,7 @@ arcofi_mi_to_gain(int lvl)
 }
 
 /*
- * Input and output ports definition (used to be in <audioio.h>
+ * Input and output ports definition (used to be in <audioio.h>)
  */
 #define	AUDIO_SPEAKER		0x01	/* built-in speaker */
 #define	AUDIO_LINE_IN		0x02	/* line in	 */
@@ -1125,7 +1125,7 @@ arcofi_attach(struct arcofi_softc *sc, const char *version)
 	arcofi_write(sc, ARCOFI_FIFO_IR, 0);
 	arcofi_write(sc, ARCOFI_CSR, CSR_INTR_ENABLE);
 
-	audio_attach_mi(&arcofi_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&arcofi_hw_if, sc, NULL, &sc->sc_dev);
 	return;
 
 error:

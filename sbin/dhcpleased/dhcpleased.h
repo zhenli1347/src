@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpleased.h,v 1.11 2021/08/12 12:41:08 florian Exp $	*/
+/*	$OpenBSD: dhcpleased.h,v 1.14 2022/03/21 04:35:41 dlg Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -203,6 +203,7 @@ enum imsg_type {
 	IMSG_RECONF_IFACE,
 	IMSG_RECONF_VC_ID,
 	IMSG_RECONF_C_ID,
+	IMSG_RECONF_H_NAME,
 	IMSG_RECONF_END,
 #endif	/* SMALL */
 	IMSG_SEND_DISCOVER,
@@ -253,6 +254,7 @@ struct iface_conf {
 	int				 vc_id_len;
 	uint8_t				*c_id;
 	int				 c_id_len;
+	char				*h_name;
 	int				 ignore;
 	struct in_addr			 ignore_servers[MAX_SERVERS];
 	int				 ignore_servers_len;
@@ -287,15 +289,10 @@ struct imsg_dhcp {
 	uint8_t			packet[1500];
 };
 
-
-struct imsg_req_discover {
+struct imsg_req_dhcp {
 	uint32_t		if_index;
 	uint32_t		xid;
-};
-
-struct imsg_req_request {
-	uint32_t		if_index;
-	uint32_t		xid;
+	struct in_addr		ciaddr;
 	struct in_addr		requested_ip;
 	struct in_addr		server_identifier;
 	struct in_addr		dhcp_server;
@@ -321,7 +318,7 @@ int			*changed_ifaces(struct dhcpleased_conf *, struct
 void	print_config(struct dhcpleased_conf *);
 
 /* parse.y */
-struct dhcpleased_conf	*parse_config(char *);
+struct dhcpleased_conf	*parse_config(const char *);
 int			 cmdline_symset(char *);
 #else
 #define	sin_to_str(x...)	""

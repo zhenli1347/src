@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfvar.h,v 1.502 2021/06/23 06:53:52 dlg Exp $ */
+/*	$OpenBSD: pfvar.h,v 1.509 2022/07/20 09:33:11 mbuhl Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -136,7 +136,7 @@ enum	{ PFTM_TCP_FIRST_PACKET, PFTM_TCP_OPENING, PFTM_TCP_ESTABLISHED,
 enum	{ PF_NOPFROUTE, PF_ROUTETO, PF_DUPTO, PF_REPLYTO };
 enum	{ PF_LIMIT_STATES, PF_LIMIT_SRC_NODES, PF_LIMIT_FRAGS,
 	  PF_LIMIT_TABLES, PF_LIMIT_TABLE_ENTRIES, PF_LIMIT_PKTDELAY_PKTS,
-	  PF_LIMIT_MAX };
+	  PF_LIMIT_ANCHORS, PF_LIMIT_MAX };
 #define PF_POOL_IDMASK		0x0f
 enum	{ PF_POOL_NONE, PF_POOL_BITMASK, PF_POOL_RANDOM,
 	  PF_POOL_SRCHASH, PF_POOL_ROUNDROBIN, PF_POOL_LEASTSTATES };
@@ -476,6 +476,7 @@ union pf_rule_ptr {
 
 #define	PF_ANCHOR_NAME_SIZE	 64
 #define	PF_ANCHOR_MAXPATH	(PATH_MAX - PF_ANCHOR_NAME_SIZE - 1)
+#define	PF_ANCHOR_HIWAT		 512
 #define	PF_OPTIMIZER_TABLE_PFX	"__automatic_"
 
 struct pf_rule {
@@ -749,6 +750,7 @@ struct pf_state {
 	u_int8_t		 pad[3];
 
 	TAILQ_ENTRY(pf_state)	 sync_list;
+	TAILQ_ENTRY(pf_state)	 sync_snap;
 	TAILQ_ENTRY(pf_state)	 entry_list;
 	SLIST_ENTRY(pf_state)	 gc_list;
 	RB_ENTRY(pf_state)	 entry_id;
@@ -797,6 +799,7 @@ struct pf_state {
 	pf_refcnt_t		 refcnt;
 	u_int16_t		 delay;
 	u_int8_t		 rt;
+	u_int8_t		 snapped;
 };
 
 /*
@@ -1043,12 +1046,14 @@ struct _pfr_kentry {
 	struct radix_node	 _pfrke_node[2];
 	union pfsockaddr_union	 _pfrke_sa;
 	SLIST_ENTRY(pfr_kentry)	 _pfrke_workq;
+	SLIST_ENTRY(pfr_kentry)	 _pfrke_ioq;
 	struct pfr_kcounters	*_pfrke_counters;
 	time_t			 _pfrke_tzero;
 	u_int8_t		 _pfrke_af;
 	u_int8_t		 _pfrke_net;
 	u_int8_t		 _pfrke_flags;
 	u_int8_t		 _pfrke_type;
+	u_int8_t		 _pfrke_fb;
 };
 #define PFRKE_FLAG_NOT		0x01
 #define PFRKE_FLAG_MARK		0x02
@@ -1064,12 +1069,14 @@ struct pfr_kentry {
 #define pfrke_node	u._ke._pfrke_node
 #define pfrke_sa	u._ke._pfrke_sa
 #define pfrke_workq	u._ke._pfrke_workq
+#define pfrke_ioq	u._ke._pfrke_ioq
 #define pfrke_counters	u._ke._pfrke_counters
 #define pfrke_tzero	u._ke._pfrke_tzero
 #define pfrke_af	u._ke._pfrke_af
 #define pfrke_net	u._ke._pfrke_net
 #define pfrke_flags	u._ke._pfrke_flags
 #define pfrke_type	u._ke._pfrke_type
+#define pfrke_fb	u._ke._pfrke_fb
 
 struct pfr_kentry_route {
 	union {
@@ -1077,6 +1084,7 @@ struct pfr_kentry_route {
 	} u;
 
 	struct pfi_kif		*kif;
+	char			ifname[IFNAMSIZ];
 };
 
 struct pfr_kentry_cost {
@@ -1085,6 +1093,7 @@ struct pfr_kentry_cost {
 	} u;
 
 	struct pfi_kif		*kif;
+	char			ifname[IFNAMSIZ];
 	/* Above overlaps with pfr_kentry route */
 
 	u_int16_t		 weight;
@@ -1098,6 +1107,7 @@ struct pfr_kentry_all {
 	} u;
 };
 #define pfrke_rkif	u.kr.kif
+#define pfrke_rifname	u.kr.ifname
 
 SLIST_HEAD(pfr_ktableworkq, pfr_ktable);
 RB_HEAD(pfr_ktablehead, pfr_ktable);
@@ -1164,6 +1174,7 @@ struct pfi_kif {
 	int				 pfik_rules;
 	int				 pfik_routes;
 	int				 pfik_srcnodes;
+	int				 pfik_flagrefs;
 	TAILQ_HEAD(, pfi_dynaddr)	 pfik_dynaddrs;
 };
 
@@ -1172,7 +1183,8 @@ enum pfi_kif_refs {
 	PFI_KIF_REF_STATE,
 	PFI_KIF_REF_RULE,
 	PFI_KIF_REF_ROUTE,
-	PFI_KIF_REF_SRCNODE
+	PFI_KIF_REF_SRCNODE,
+	PFI_KIF_REF_FLAG
 };
 
 #define PFI_IFLAG_SKIP		0x0100	/* skip filtering on interface */
@@ -1692,13 +1704,13 @@ extern u_int32_t		 ticket_pabuf;
 extern struct pool		 pf_src_tree_pl, pf_sn_item_pl, pf_rule_pl;
 extern struct pool		 pf_state_pl, pf_state_key_pl, pf_state_item_pl,
 				    pf_rule_item_pl, pf_queue_pl,
-				    pf_pktdelay_pl;
+				    pf_pktdelay_pl, pf_anchor_pl;
 extern struct pool		 pf_state_scrub_pl;
 extern struct ifnet		*sync_ifp;
 extern struct pf_rule		 pf_default_rule;
 
 extern int			 pf_tbladdr_setup(struct pf_ruleset *,
-				    struct pf_addr_wrap *);
+				    struct pf_addr_wrap *, int);
 extern void			 pf_tbladdr_remove(struct pf_addr_wrap *);
 extern void			 pf_tbladdr_copyout(struct pf_addr_wrap *);
 extern void			 pf_calc_skip_steps(struct pf_rulequeue *);
@@ -1849,8 +1861,10 @@ struct pfr_ktable
 extern struct pfi_kif		*pfi_all;
 
 void		 pfi_initialize(void);
+struct pfi_kif	*pfi_kif_alloc(const char *, int);
+void		 pfi_kif_free(struct pfi_kif *);
 struct pfi_kif	*pfi_kif_find(const char *);
-struct pfi_kif	*pfi_kif_get(const char *);
+struct pfi_kif	*pfi_kif_get(const char *, struct pfi_kif **);
 void		 pfi_kif_ref(struct pfi_kif *, enum pfi_kif_refs);
 void		 pfi_kif_unref(struct pfi_kif *, enum pfi_kif_refs);
 int		 pfi_kif_match(struct pfi_kif *, struct pfi_kif *);
@@ -1858,15 +1872,15 @@ void		 pfi_attach_ifnet(struct ifnet *);
 void		 pfi_detach_ifnet(struct ifnet *);
 void		 pfi_attach_ifgroup(struct ifg_group *);
 void		 pfi_detach_ifgroup(struct ifg_group *);
-void		 pfi_group_change(const char *);
-void		 pfi_group_addmember(const char *, struct ifnet *);
+void		 pfi_group_addmember(const char *);
+void		 pfi_group_delmember(const char *);
 int		 pfi_match_addr(struct pfi_dynaddr *, struct pf_addr *,
 		    sa_family_t);
-int		 pfi_dynaddr_setup(struct pf_addr_wrap *, sa_family_t);
+int		 pfi_dynaddr_setup(struct pf_addr_wrap *, sa_family_t, int);
 void		 pfi_dynaddr_remove(struct pf_addr_wrap *);
 void		 pfi_dynaddr_copyout(struct pf_addr_wrap *);
 void		 pfi_update_status(const char *, struct pf_status *);
-int		 pfi_get_ifaces(const char *, struct pfi_kif *, int *);
+void		 pfi_get_ifaces(const char *, struct pfi_kif *, int *);
 int		 pfi_set_flags(const char *, int);
 int		 pfi_clear_flags(const char *, int);
 void		 pfi_xcommit(void);

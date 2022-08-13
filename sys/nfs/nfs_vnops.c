@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_vnops.c,v 1.186 2021/03/11 13:31:35 jsg Exp $	*/
+/*	$OpenBSD: nfs_vnops.c,v 1.190 2022/08/12 14:30:53 visa Exp $	*/
 /*	$NetBSD: nfs_vnops.c,v 1.62.4.1 1996/07/08 20:26:52 jtc Exp $	*/
 
 /*
@@ -44,7 +44,6 @@
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/resourcevar.h>
-#include <sys/poll.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/buf.h>
@@ -101,7 +100,6 @@ int nfs_mknodrpc(struct vnode *, struct vnode **, struct componentname *,
 int nfs_null(struct vnode *, struct ucred *, struct proc *);
 int nfs_open(void *);
 int nfs_pathconf(void *);
-int nfs_poll(void *);
 int nfs_print(void *);
 int nfs_read(void *);
 int nfs_readdir(void *);
@@ -149,7 +147,6 @@ const struct vops nfs_vops = {
 	.vop_read	= nfs_read,
 	.vop_write	= nfs_write,
 	.vop_ioctl	= nfs_ioctl,
-	.vop_poll	= nfs_poll,
 	.vop_kqfilter	= nfs_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= nfs_fsync,
@@ -193,22 +190,21 @@ const struct vops nfs_specvops = {
 
 	/* XXX: Keep in sync with spec_vops. */
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= spec_badop,
-	.vop_mknod	= spec_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= spec_open,
 	.vop_ioctl	= spec_ioctl,
-	.vop_poll	= spec_poll,
 	.vop_kqfilter	= spec_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
-	.vop_remove	= spec_badop,
-	.vop_link	= spec_badop,
-	.vop_rename	= spec_badop,
-	.vop_mkdir	= spec_badop,
-	.vop_rmdir	= spec_badop,
-	.vop_symlink	= spec_badop,
-	.vop_readdir	= spec_badop,
-	.vop_readlink	= spec_badop,
-	.vop_abortop	= spec_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
+	.vop_readdir	= vop_generic_badop,
+	.vop_readlink	= vop_generic_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_bmap	= vop_generic_bmap,
 	.vop_strategy	= spec_strategy,
 	.vop_pathconf	= spec_pathconf,
@@ -235,24 +231,23 @@ const struct vops nfs_fifovops = {
 
 	/* XXX: Keep in sync with fifo_vops. */
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= fifo_badop,
-	.vop_mknod	= fifo_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= fifo_open,
 	.vop_ioctl	= fifo_ioctl,
-	.vop_poll	= fifo_poll,
 	.vop_kqfilter	= fifo_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
-	.vop_remove	= fifo_badop,
-	.vop_link	= fifo_badop,
-	.vop_rename	= fifo_badop,
-	.vop_mkdir	= fifo_badop,
-	.vop_rmdir	= fifo_badop,
-	.vop_symlink	= fifo_badop,
-	.vop_readdir	= fifo_badop,
-	.vop_readlink	= fifo_badop,
-	.vop_abortop	= fifo_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
+	.vop_readdir	= vop_generic_badop,
+	.vop_readlink	= vop_generic_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_bmap	= vop_generic_bmap,
-	.vop_strategy	= fifo_badop,
+	.vop_strategy	= vop_generic_badop,
 	.vop_pathconf	= fifo_pathconf,
 	.vop_advlock	= fifo_advlock,
 };
@@ -2854,7 +2849,7 @@ nfs_flush(struct vnode *vp, struct ucred *cred, int waitfor, struct proc *p,
 	struct nfsmount *nmp = VFSTONFS(vp->v_mount);
 	uint64_t slptimeo = INFSLP;
 	int s, error = 0, slpflag = 0, retv, bvecpos;
-	int passone = 1;
+	int dirty, passone = 1;
 	u_quad_t off = (u_quad_t)-1, endoff = 0, toff;
 #ifndef NFS_COMMITBVECSIZ
 #define NFS_COMMITBVECSIZ	20
@@ -2987,8 +2982,8 @@ loop:
  loop2:
 		s = splbio();
 		error = vwaitforio(vp, slpflag, "nfs_fsync", slptimeo);
-		splx(s);
 		if (error) {
+			splx(s);
 			if (nfs_sigintr(nmp, NULL, p))
 				return (EINTR);
 			if (slpflag == PCATCH) {
@@ -2997,8 +2992,9 @@ loop:
 			}
 			goto loop2;
 		}
-
-		if (!LIST_EMPTY(&vp->v_dirtyblkhd) && commit) {
+		dirty = (!LIST_EMPTY(&vp->v_dirtyblkhd) && commit);
+		splx(s);
+		if (dirty) {
 #if 0
 			vprint("nfs_fsync: dirty", vp);
 #endif
@@ -3211,7 +3207,7 @@ nfs_writebp(struct buf *bp, int force)
 		buf_flip_dma(bp);
 		if (force)
 			bp->b_flags |= B_WRITEINPROG;
-		VOP_STRATEGY(bp);
+		VOP_STRATEGY(bp->b_vp, bp);
 	}
 
 	if( (oldflags & B_ASYNC) == 0) {
@@ -3264,17 +3260,6 @@ nfsspec_access(void *v)
 
 	return (vaccess(vp->v_type, va.va_mode, va.va_uid, va.va_gid,
 	    ap->a_mode, ap->a_cred));
-}
-
-int
-nfs_poll(void *v)
-{
-	struct vop_poll_args *ap = v;
-
-	/*
-	 * We should really check to see if I/O is possible.
-	 */
-	return (ap->a_events & (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM));
 }
 
 /*

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ucc.c,v 1.24 2021/09/02 15:15:12 anton Exp $	*/
+/*	$OpenBSD: ucc.c,v 1.35 2022/08/11 09:22:38 anton Exp $	*/
 
 /*
  * Copyright (c) 2021 Anton Lindqvist <anton@openbsd.org>
@@ -31,14 +31,17 @@
 #include <dev/wscons/wsksymdef.h>
 #include <dev/wscons/wsksymvar.h>
 
+#define DEVNAME(sc)	((sc)->sc_hdev.sc_dev.dv_xname)
+
 /* #define UCC_DEBUG */
 #ifdef UCC_DEBUG
 #define DPRINTF(x...)	do { if (ucc_debug) printf(x); } while (0)
-void	ucc_dump(const char *, uint8_t *, u_int);
+struct ucc_softc;
+void	ucc_dump(struct ucc_softc *, const char *, uint8_t *, u_int);
 int	ucc_debug = 1;
 #else
 #define DPRINTF(x...)
-#define ucc_dump(prefix, data, len)
+#define ucc_dump(sc, prefix, data, len)
 #endif
 
 struct ucc_softc {
@@ -104,7 +107,7 @@ void	ucc_attach(struct device *, struct device *, void *);
 int	ucc_detach(struct device *, int);
 void	ucc_intr(struct uhidev *, void *, u_int);
 
-void	ucc_attach_wskbd(struct ucc_softc *);
+void	ucc_attach_wskbd(struct ucc_softc *, void *);
 int	ucc_enable(void *, int);
 void	ucc_set_leds(void *, int);
 int	ucc_ioctl(void *, u_long, caddr_t, int, struct proc *);
@@ -386,7 +389,7 @@ static const struct ucc_keysym ucc_keysyms[] = {
 	N(0x019F,	"AL Control Panel",				0,		0)
 	N(0x01A0,	"AL Command Line Processor/Run",		0,		0)
 	N(0x01A1,	"AL Process/Task Manager",			0,		0)
-	N(0x01A2,	"AL Select Tast/Application",			0,		0)
+	N(0x01A2,	"AL Select Task/Application",			0,		0)
 	N(0x01A3,	"AL Next Task/Application",			0,		0)
 	N(0x01A4,	"AL Previous Task/Application",			0,		0)
 	N(0x01A5,	"AL Preemptive Halt Task/Application",		0,		0)
@@ -633,6 +636,9 @@ ucc_match(struct device *parent, void *match, void *aux)
 	void *desc;
 	int size;
 
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
+		return UMATCH_NONE;
+
 	uhidev_get_report_desc(uha->parent, &desc, &size);
 	if (hid_report_size(desc, size, hid_input, uha->reportid) == 0)
 		return UMATCH_NONE;
@@ -677,7 +683,7 @@ ucc_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Cannot load an empty map. */
 	if (sc->sc_maplen > 0)
-		ucc_attach_wskbd(sc);
+		ucc_attach_wskbd(sc, uha->uaa->cookie);
 }
 
 int
@@ -705,22 +711,22 @@ ucc_intr(struct uhidev *addr, void *data, u_int len)
 	int error;
 	u_int bit = 0;
 
-	ucc_dump(__func__, data, len);
+	ucc_dump(sc, __func__, data, len);
 
 	if (len > sc->sc_input.i_bufsiz) {
-		DPRINTF("%s: too much data: len %d, bufsiz %d\n", __func__,
+		DPRINTF("%s: too much data: len %d, bufsiz %d\n", DEVNAME(sc),
 		    len, sc->sc_input.i_bufsiz);
 		return;
 	}
 
 	error = ucc_intr_slice(sc, data, buf, &len);
 	if (error) {
-		DPRINTF("%s: slice failure: error %d\n", __func__, error);
+		DPRINTF("%s: slice failure: error %d\n", DEVNAME(sc), error);
 		return;
 	}
 
 	/* Dump the buffer again after slicing. */
-	ucc_dump(__func__, buf, len);
+	ucc_dump(sc, __func__, buf, len);
 
 	if (ucc_setbits(sc, buf, len, &bit)) {
 		/* All zeroes, assume key up event. */
@@ -765,11 +771,11 @@ ucc_intr(struct uhidev *addr, void *data, u_int len)
 	return;
 
 unknown:
-	DPRINTF("%s: unknown key: bit %d\n", __func__, bit);
+	DPRINTF("%s: unknown key: bit %d\n", DEVNAME(sc), bit);
 }
 
 void
-ucc_attach_wskbd(struct ucc_softc *sc)
+ucc_attach_wskbd(struct ucc_softc *sc, void *cookie)
 {
 	static const struct wskbd_accessops accessops = {
 		.enable		= ucc_enable,
@@ -781,6 +787,7 @@ ucc_attach_wskbd(struct ucc_softc *sc)
 		.keymap		= &sc->sc_keymap,
 		.accessops	= &accessops,
 		.accesscookie	= sc,
+		.audiocookie	= NULL,	/* XXX cookie */
 	};
 
 	sc->sc_keydesc[0].name = KB_US;
@@ -788,7 +795,7 @@ ucc_attach_wskbd(struct ucc_softc *sc)
 	sc->sc_keydesc[0].map_size = sc->sc_maplen;
 	sc->sc_keydesc[0].map = sc->sc_map;
 	sc->sc_keymap.keydesc = sc->sc_keydesc;
-	sc->sc_keymap.layout = KB_US;
+	sc->sc_keymap.layout = KB_US | KB_NOENCODING;
 	sc->sc_wskbddev = config_found(&sc->sc_hdev.sc_dev, &a, wskbddevprint);
 }
 
@@ -960,7 +967,7 @@ ucc_hid_parse(struct ucc_softc *sc, void *desc, int descsiz)
 	}
 	hid_end_parse(hd);
 
-	DPRINTF("%s: input: off %d, len %d\n", __func__,
+	DPRINTF("%s: input: off %d, len %d\n", DEVNAME(sc),
 	    sc->sc_input.i_off, sc->sc_input.i_len);
 
 	return error;
@@ -1017,7 +1024,7 @@ ucc_add_key(struct ucc_softc *sc, int32_t usage, u_int bit)
 		sc->sc_raw[bit] = us;
 	}
 
-	DPRINTF("%s: bit %d, usage \"%s\"\n", __func__,
+	DPRINTF("%s: bit %d, usage \"%s\"\n", DEVNAME(sc),
 	    bit, us->us_name);
 	return 0;
 }
@@ -1050,7 +1057,7 @@ ucc_add_key_volume(struct ucc_softc *sc, const struct hid_item *hi,
 	sc->sc_volume.v_len = len;
 
 	DPRINTF("%s: inc %d, dec %d, off %d, len %d, min %d, max %d\n",
-	    __func__, sc->sc_volume.v_inc, sc->sc_volume.v_dec,
+	    DEVNAME(sc), sc->sc_volume.v_inc, sc->sc_volume.v_dec,
 	    sc->sc_volume.v_off, sc->sc_volume.v_len,
 	    hi->logical_minimum, hi->logical_maximum);
 
@@ -1225,14 +1232,14 @@ ucc_setbits(struct ucc_softc *sc, uint8_t *data, int len, u_int *bit)
 #ifdef UCC_DEBUG
 
 void
-ucc_dump(const char *prefix, uint8_t *data, u_int len)
+ucc_dump(struct ucc_softc *sc, const char *prefix, uint8_t *data, u_int len)
 {
 	u_int i;
 
 	if (ucc_debug == 0)
 		return;
 
-	printf("%s:", prefix);
+	printf("%s: %s:", DEVNAME(sc), prefix);
 	for (i = 0; i < len; i++)
 		printf(" %02x", data[i]);
 	printf("\n");

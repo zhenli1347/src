@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.121 2021/05/20 12:34:35 bluhm Exp $	*/
+/*	$OpenBSD: trap.c,v 1.125 2022/01/21 14:07:06 tobhe Exp $	*/
 /*	$NetBSD: trap.c,v 1.3 1996/10/13 03:31:37 christos Exp $	*/
 
 /*
@@ -154,7 +154,7 @@ void
 enable_vec(struct proc *p)
 {
 	struct pcb *pcb = &p->p_addr->u_pcb;
-	struct vreg *pcb_vr = pcb->pcb_vr;
+	struct vreg *pcb_vr;
 	struct cpu_info *ci = curcpu();
 	u_int32_t oldmsr, msr;
 
@@ -163,6 +163,7 @@ enable_vec(struct proc *p)
 	 */
 	if (pcb->pcb_vr == NULL)
 		pcb->pcb_vr = pool_get(&ppc_vecpl, PR_WAITOK | PR_ZERO);
+	pcb_vr = pcb->pcb_vr;
 
 	if (curcpu()->ci_vecproc != NULL || pcb->pcb_veccpu != NULL)
 		printf("attempting to restore vector in use vecproc %p"
@@ -236,11 +237,11 @@ trap(struct trapframe *frame)
 	struct vm_map *map;
 	vaddr_t va;
 	int access_type;
-	struct sysent *callp;
+	const struct sysent *callp;
 	size_t argsize;
 	register_t code, error;
 	register_t *params, rval[2], args[10];
-	int nsys, n;
+	int n;
 
 	if (frame->srr1 & PSL_PR) {
 		type |= EXC_USER;
@@ -357,9 +358,6 @@ trap(struct trapframe *frame)
 	case EXC_SC|EXC_USER:
 		uvmexp.syscalls++;
 
-		nsys = p->p_p->ps_emul->e_nsysent;
-		callp = p->p_p->ps_emul->e_sysent;
-
 		code = frame->fixreg[0];
 		params = frame->fixreg + FIRSTARG;
 
@@ -377,16 +375,16 @@ trap(struct trapframe *frame)
 			 * so as to maintain quad alignment
 			 * for the rest of the args.
 			 */
-			if (callp != sysent)
-				break;
 			params++;
 			code = *params++;
 			break;
 		default:
 			break;
 		}
-		if (code < 0 || code >= nsys)
-			callp += p->p_p->ps_emul->e_nosys;
+
+		callp = sysent;
+		if (code < 0 || code >= SYS_MAXSYSCALL)
+			callp += SYS_syscall;
 		else
 			callp += code;
 		argsize = callp->sy_argsize;
@@ -422,10 +420,10 @@ trap(struct trapframe *frame)
 			/* nothing to do */
 			break;
 		default:
+			frame->fixreg[FIRSTARG + 1] = rval[1];
 		bad:
 			frame->fixreg[0] = error;
 			frame->fixreg[FIRSTARG] = error;
-			frame->fixreg[FIRSTARG + 1] = rval[1];
 			frame->cr |= 0x10000000;
 			break;
 		}
@@ -461,13 +459,14 @@ brain_damage:
 		/* set up registers */
 		db_save_regs(frame);
 		db_find_sym_and_offset(frame->srr0, &name, &offset);
-#else
-		name = NULL;
-#endif
 		if (!name) {
 			name = "0";
 			offset = frame->srr0;
 		}
+#else
+		name = "0";
+		offset = frame->srr0;
+#endif
 		panic("trap type %x srr1 %x at %x (%s+0x%lx) lr %lx",
 		    type, frame->srr1, frame->srr0, name, offset, frame->lr);
 

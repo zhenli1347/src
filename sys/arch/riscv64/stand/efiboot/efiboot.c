@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.2 2021/06/25 17:49:49 krw Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.5 2022/06/06 10:50:56 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -466,10 +466,10 @@ efi_dma_constraint(void)
 {
 	void *node;
 
-	/* Raspberry Pi 4 is "special". */
+	/* StarFive JH7100 has peripherals that only support 32-bit DMA. */
 	node = fdt_find_node("/");
-	if (fdt_node_is_compatible(node, "brcm,bcm2711"))
-		dma_constraint[1] = htobe64(0x3bffffff);
+	if (fdt_node_is_compatible(node, "starfive,jh7100"))
+		dma_constraint[1] = htobe64(0xffffffff);
 
 	/* Pass DMA constraint. */
 	node = fdt_find_node("/chosen");
@@ -491,6 +491,7 @@ efi_makebootargs(char *bootargs, int howto)
 	u_char zero[8] = { 0 };
 	uint64_t uefi_system_table = htobe64((uintptr_t)ST);
 	uint32_t boothowto = htobe32(howto);
+	EFI_PHYSICAL_ADDRESS addr;
 	void *node;
 	size_t len;
 	int i;
@@ -501,6 +502,17 @@ efi_makebootargs(char *bootargs, int howto)
 			    &ST->ConfigurationTable[i].VendorGuid) == 0)
 				fdt = ST->ConfigurationTable[i].VendorTable;
 		}
+	}
+
+	if (!fdt_get_size(fdt))
+		return NULL;
+
+	len = roundup(fdt_get_size(fdt) + PAGE_SIZE, PAGE_SIZE);
+	if (BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(len), &addr) == EFI_SUCCESS) {
+		memcpy((void *)addr, fdt, fdt_get_size(fdt));
+		((struct fdt_head *)addr)->fh_size = htobe32(len);
+		fdt = (void *)addr;
 	}
 
 	if (!fdt_init(fdt))
@@ -962,8 +974,6 @@ Xdtb_efi(void)
 	char path[MAXPATHLEN];
 	struct stat sb;
 	int fd;
-
-#define O_RDONLY	0
 
 	if (cmd.argc != 2) {
 		printf("dtb file\n");

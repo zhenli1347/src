@@ -1,4 +1,4 @@
-/*	$OpenBSD: umstc.c,v 1.4 2021/03/08 14:39:34 jcs Exp $ */
+/*	$OpenBSD: umstc.c,v 1.7 2021/11/22 11:29:18 anton Exp $ */
 
 /*
  * Copyright (c) 2020 joshua stein <jcs@jcs.org>
@@ -79,6 +79,9 @@ umstc_match(struct device *parent, void *match, void *aux)
 	struct uhidev_attach_arg *uha = (struct uhidev_attach_arg *)aux;
 	int size;
 	void *desc;
+
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
+		return (UMATCH_NONE);
 
 	if (!usb_lookup(umstc_devs, uha->uaa->vendor, uha->uaa->product))
 		return UMATCH_NONE;

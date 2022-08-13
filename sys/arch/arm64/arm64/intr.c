@@ -1,4 +1,4 @@
-/* $OpenBSD: intr.c,v 1.23 2021/05/17 17:25:13 kettenis Exp $ */
+/* $OpenBSD: intr.c,v 1.25 2022/07/27 20:26:17 kettenis Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -182,7 +182,7 @@ out:
  * register a dummy interrupt controller that simply stashes away all
  * relevant details of the interrupt handler being established.
  * Later, when the real interrupt controller registers itself, we
- * establush those interrupt handlers based on that information.
+ * establish those interrupt handlers based on that information.
  */
 
 #define MAX_INTERRUPT_CELLS	4
@@ -376,6 +376,13 @@ arm_intr_establish_fdt_idx_cpu(int node, int idx, int level, struct cpu_info *ci
 	for (i = 0; i <= idx && ncells > 0; i++) {
 		if (extended) {
 			phandle = cell[0];
+
+			/* Handle "empty" phandle reference. */
+			if (phandle == 0) {
+				cell++;
+				ncells--;
+				continue;
+			}
 
 			LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
 				if (ic->ic_phandle == phandle)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ixgbe_82598.c,v 1.18 2020/03/02 01:59:01 jmatthew Exp $	*/
+/*	$OpenBSD: ixgbe_82598.c,v 1.20 2022/01/27 18:28:45 bluhm Exp $	*/
 
 /******************************************************************************
   SPDX-License-Identifier: BSD-3-Clause
@@ -104,7 +104,7 @@ void ixgbe_set_pcie_completion_timeout(struct ixgbe_hw *hw)
 		goto out;
 
 	/*
-	 * if capababilities version is type 1 we can write the
+	 * if capabilities version is type 1 we can write the
 	 * timeout of 10ms to 250ms through the GCR register
 	 */
 	if (!(gcr & IXGBE_GCR_CAP_VER2)) {
@@ -544,7 +544,7 @@ int32_t ixgbe_fc_enable_82598(struct ixgbe_hw *hw)
 	}
 
 	/* Configure pause time (2 TCs per register) */
-	reg = hw->fc.pause_time * 0x00010001;
+	reg = (uint32_t)hw->fc.pause_time * 0x00010001;
 	for (i = 0; i < (IXGBE_DCB_MAX_TRAFFIC_CLASS / 2); i++)
 		IXGBE_WRITE_REG(hw, IXGBE_FCTTV(i), reg);
 
@@ -920,7 +920,7 @@ mac_reset_top:
 	/*
 	 * Store the original AUTOC value if it has not been
 	 * stored off yet.  Otherwise restore the stored original
-	 * AUTOC value since the reset operation sets back to deaults.
+	 * AUTOC value since the reset operation sets back to defaults.
 	 */
 	autoc = IXGBE_READ_REG(hw, IXGBE_AUTOC);
 	if (hw->mac.orig_link_settings_stored == FALSE) {

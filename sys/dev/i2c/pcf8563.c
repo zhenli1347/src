@@ -1,4 +1,4 @@
-/*	$OpenBSD: pcf8563.c,v 1.4 2021/04/24 10:15:15 mpi Exp $	*/
+/*	$OpenBSD: pcf8563.c,v 1.6 2022/04/06 18:59:28 naddy Exp $	*/
 
 /*
  * Copyright (c) 2005 Kimihiro Nonaka
@@ -30,11 +30,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/kernel.h>
-#include <sys/fcntl.h>
-#include <sys/uio.h>
-#include <sys/conf.h>
-#include <sys/event.h>
 
 #include <dev/clock_subr.h>
 
@@ -82,7 +77,7 @@ struct pcxrtc_softc {
 int pcxrtc_match(struct device *, void *, void *);
 void pcxrtc_attach(struct device *, struct device *, void *);
 
-struct cfattach pcxrtc_ca = {
+const struct cfattach pcxrtc_ca = {
 	sizeof(struct pcxrtc_softc), pcxrtc_match, pcxrtc_attach
 };
 

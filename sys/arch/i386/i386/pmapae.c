@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmapae.c,v 1.63 2021/05/16 15:10:19 deraadt Exp $	*/
+/*	$OpenBSD: pmapae.c,v 1.67 2022/06/29 14:24:29 dv Exp $	*/
 
 /*
  * Copyright (c) 2006-2008 Michael Shalayeff
@@ -469,6 +469,7 @@ extern caddr_t pmap_csrcp, pmap_cdstp, pmap_zerop, pmap_ptpp, pmap_flshp;
 extern int pmap_pg_g;
 extern int pmap_pg_wc;
 extern struct pmap_head pmaps;
+extern struct mutex pmaps_lock;
 
 extern uint32_t	cpu_meltdown;
 
@@ -1029,7 +1030,9 @@ pmap_pinit_pd_pae(struct pmap *pmap)
 		pmap->pm_pdirpa_intel = 0;
 	}
 
+	mtx_enter(&pmaps_lock);
 	LIST_INSERT_HEAD(&pmaps, pmap, pm_list);
+	mtx_leave(&pmaps_lock);
 }
 
 /*
@@ -1045,8 +1048,8 @@ pmap_extract_pae(struct pmap *pmap, vaddr_t va, paddr_t *pap)
 {
 	pt_entry_t *ptes, pte;
 
+	ptes = pmap_map_ptes_pae(pmap);
 	if (pmap_valid_entry(PDE(pmap, pdei(va)))) {
-		ptes = pmap_map_ptes_pae(pmap);
 		pte = ptes[atop(va)];
 		pmap_unmap_ptes_pae(pmap);
 		if (!pmap_valid_entry(pte))
@@ -1055,6 +1058,7 @@ pmap_extract_pae(struct pmap *pmap, vaddr_t va, paddr_t *pap)
 			*pap = (pte & PG_FRAME) | (va & ~PG_FRAME);
 		return 1;
 	}
+	pmap_unmap_ptes_pae(pmap);
 	return 0;
 }
 
@@ -1149,7 +1153,6 @@ pmap_copy_page_pae(struct vm_page *srcpg, struct vm_page *dstpg)
 /*
  * pmap_remove_ptes: remove PTEs from a PTP
  *
- * => must have proper locking on pmap_master_lock
  * => caller must hold pmap's lock
  * => PTP must be mapped into KVA
  * => PTP should be null if pmap == pmap_kernel()
@@ -1979,7 +1982,7 @@ pmap_enter_special_pae(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int32_t flags)
 	if ((pd = (pd_entry_t *)pmap->pm_pdir_intel) == 0)
 		panic("%s: PD not initialized for pmap @ %p", __func__, pmap);
 
-	/* npa = phsyaddr of PT page */
+	/* npa = physaddr of PT page */
 	npa = pd[l2idx] & PMAP_PA_MASK;
 
 	/* Valide PDE for the 2MB region containing va? */
@@ -2087,10 +2090,12 @@ pmap_growkernel_pae(vaddr_t maxkvaddr)
 			uvm_wait("pmap_growkernel");
 
 		/* distribute new kernel PTP to all active pmaps */
+		mtx_enter(&pmaps_lock);
 		LIST_FOREACH(pm, &pmaps, pm_list) {
 			PDE(pm, PDSLOT_KERN + nkpde) =
 				PDE(kpm, PDSLOT_KERN + nkpde);
 		}
+		mtx_leave(&pmaps_lock);
 	}
 
 	splx(s);

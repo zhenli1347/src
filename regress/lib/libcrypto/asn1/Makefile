@@ -1,23 +1,33 @@
-#	$OpenBSD: Makefile,v 1.5 2018/08/31 17:35:21 tb Exp $
+#	$OpenBSD: Makefile,v 1.21 2022/07/12 13:31:38 tb Exp $
 
-TESTS = \
+PROGS = \
+	asn1api \
+	asn1basic \
+	asn1complex \
 	asn1evp \
+	asn1object \
+	asn1string_copy \
+	asn1_string_to_utf8 \
 	asn1time \
-	rfc5280time
+	asn1x509 \
+	rfc5280time \
+	string_table
 
-PROGS = ${TESTS}
-
-REGRESS_TARGETS= all_tests
-
-LDADD=		-lcrypto
-DPADD=		${LIBCRYPTO} ${LIBSSL}
+DPADD+=		${LIBCRYPTO}
 WARNINGS=	Yes
 LDFLAGS+=	-lcrypto
-CFLAGS+=	-DLIBRESSL_INTERNAL -Wall -Wundef -Werror
+CFLAGS+=	-DLIBRESSL_INTERNAL
+CFLAGS+=	-Wall -Wundef -Werror
+CFLAGS+=	-I${.CURDIR}/../../../../lib/libcrypto/asn1
+CFLAGS+=	-I${.CURDIR}/../../../../lib/libcrypto/bytestring
 
-all_tests: ${TESTS}
-	@for test in $>; do \
-		./$$test; \
-	done
+LDADD_asn1basic = ${CRYPTO_INT}
+
+.for p in ${PROGS}
+REGRESS_TARGETS +=	run-$p
+
+run-$p: $p
+	@./$p
+.endfor
 
 .include <bsd.regress.mk>

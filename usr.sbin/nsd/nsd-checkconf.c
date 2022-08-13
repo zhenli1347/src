@@ -21,6 +21,13 @@
 extern char *optarg;
 extern int optind;
 static void usage(void) ATTR_NORETURN;
+int zonec_parse_string(region_type* ATTR_UNUSED(region),
+	domain_table_type* ATTR_UNUSED(domains), zone_type* ATTR_UNUSED(zone),
+	char* ATTR_UNUSED(str), domain_type** ATTR_UNUSED(parsed),
+	int* ATTR_UNUSED(num_rrs))
+{
+	return 0;
+}
 
 #define ZONE_GET_ACL(NAME, VAR, PATTERN) 		\
 	if (strcasecmp(#NAME, (VAR)) == 0) { 	\
@@ -348,6 +355,10 @@ config_print_zone(nsd_options_type* opt, const char* k, int s, const char *o,
 		ZONE_GET_RRL(rrl_whitelist, o, zone->pattern);
 #endif
 		ZONE_GET_BIN(multi_master_check, o, zone->pattern);
+		ZONE_GET_BIN(store_ixfr, o, zone->pattern);
+		ZONE_GET_INT(ixfr_size, o, zone->pattern);
+		ZONE_GET_INT(ixfr_number, o, zone->pattern);
+		ZONE_GET_BIN(create_ixfr, o, zone->pattern);
 		printf("Zone option not handled: %s %s\n", z, o);
 		exit(1);
 	} else if(pat) {
@@ -381,6 +392,10 @@ config_print_zone(nsd_options_type* opt, const char* k, int s, const char *o,
 		ZONE_GET_RRL(rrl_whitelist, o, p);
 #endif
 		ZONE_GET_BIN(multi_master_check, o, p);
+		ZONE_GET_BIN(store_ixfr, o, p);
+		ZONE_GET_INT(ixfr_size, o, p);
+		ZONE_GET_INT(ixfr_number, o, p);
+		ZONE_GET_BIN(create_ixfr, o, p);
 		printf("Pattern option not handled: %s %s\n", pat, o);
 		exit(1);
 	} else {
@@ -433,6 +448,8 @@ config_print_zone(nsd_options_type* opt, const char* k, int s, const char *o,
 		SERV_GET_INT(tcp_timeout, o);
 		SERV_GET_INT(tcp_mss, o);
 		SERV_GET_INT(outgoing_tcp_mss, o);
+		SERV_GET_INT(xfrd_tcp_max, o);
+		SERV_GET_INT(xfrd_tcp_pipeline, o);
 		SERV_GET_INT(ipv4_edns_size, o);
 		SERV_GET_INT(ipv6_edns_size, o);
 		SERV_GET_INT(statistics, o);
@@ -523,6 +540,41 @@ static void print_zone_content_elems(pattern_options_type* pat)
 	if(pat->size_limit_xfr != 0)
 		printf("\tsize-limit-xfr: %llu\n",
 			(long long unsigned)pat->size_limit_xfr);
+	if(!pat->store_ixfr_is_default)
+		printf("\tstore-ixfr: %s\n", pat->store_ixfr?"yes":"no");
+	if(!pat->ixfr_number_is_default)
+		printf("\tixfr-number: %u\n", (unsigned)pat->ixfr_number);
+	if(!pat->ixfr_size_is_default)
+		printf("\tixfr-size: %u\n", (unsigned)pat->ixfr_size);
+	if(!pat->create_ixfr_is_default)
+		printf("\tcreate-ixfr: %s\n", pat->create_ixfr?"yes":"no");
+	if(pat->verify_zone != VERIFY_ZONE_INHERIT) {
+		printf("\tverify-zone: ");
+		if(pat->verify_zone) {
+			printf("yes\n");
+		} else {
+			printf("no\n");
+		}
+	}
+	if(pat->verifier) {
+		char *const *s;
+		printf("\tverifier:");
+		for(s = pat->verifier; *s; s++) {
+			printf(" \"%s\"", *s);
+		}
+		printf("\n");
+	}
+	if(pat->verifier_feed_zone != VERIFIER_FEED_ZONE_INHERIT) {
+		printf("\tverifier-feed-zone: ");
+		if(pat->verifier_feed_zone) {
+			printf("yes\n");
+		} else {
+			printf("no\n");
+		}
+	}
+	if(pat->verifier_timeout != VERIFIER_TIMEOUT_INHERIT) {
+		printf("\tverifier-timeout: %d\n", pat->verifier_timeout);
+	}
 }
 
 void
@@ -581,6 +633,8 @@ config_test_print_server(nsd_options_type* opt)
 	printf("\ttcp-timeout: %d\n", opt->tcp_timeout);
 	printf("\ttcp-mss: %d\n", opt->tcp_mss);
 	printf("\toutgoing-tcp-mss: %d\n", opt->outgoing_tcp_mss);
+	printf("\txfrd-tcp-max: %d\n", opt->xfrd_tcp_max);
+	printf("\txfrd-tcp-pipeline: %d\n", opt->xfrd_tcp_pipeline);
 	printf("\tipv4-edns-size: %d\n", (int) opt->ipv4_edns_size);
 	printf("\tipv6-edns-size: %d\n", (int) opt->ipv6_edns_size);
 	print_string_var("pidfile:", opt->pidfile);
@@ -663,6 +717,25 @@ config_test_print_server(nsd_options_type* opt)
 	print_string_var("server-cert-file:", opt->server_cert_file);
 	print_string_var("control-key-file:", opt->control_key_file);
 	print_string_var("control-cert-file:", opt->control_cert_file);
+
+	printf("\nverify:\n");
+	printf("\tenable: %s\n", opt->verify_enable?"yes":"no");
+	for(ip = opt->verify_ip_addresses; ip; ip=ip->next) {
+		print_string_var("ip-address:", ip->address);
+	}
+	printf("\tport: %s\n", opt->verify_port);
+	printf("\tverify-zones: %s\n", opt->verify_zones?"yes":"no");
+	if(opt->verifier) {
+		char **s;
+		printf("\tverifier:");
+		for(s = opt->verifier; *s; s++) {
+			printf(" \"%s\"", *s);
+		}
+		printf("\n");
+	}
+	printf("\tverifier-count: %d\n", opt->verifier_count);
+	printf("\tverifier-feed-zone: %s\n", opt->verifier_feed_zone?"yes":"no");
+	printf("\tverifier-timeout: %d\n", opt->verifier_timeout);
 
 	RBTREE_FOR(key, key_options_type*, opt->keys)
 	{

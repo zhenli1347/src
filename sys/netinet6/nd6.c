@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.235 2021/03/08 16:49:07 florian Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.246 2022/08/09 21:10:03 kn Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -40,7 +40,6 @@
 #include <sys/time.h>
 #include <sys/kernel.h>
 #include <sys/pool.h>
-#include <sys/protosw.h>
 #include <sys/errno.h>
 #include <sys/ioctl.h>
 #include <sys/syslog.h>
@@ -87,9 +86,7 @@ int nd6_debug = 0;
 
 TAILQ_HEAD(llinfo_nd6_head, llinfo_nd6) nd6_list;
 struct	pool nd6_pool;		/* pool for llinfo_nd6 structures */
-int	nd6_inuse, nd6_allocated;
-
-int nd6_recalc_reachtm_interval = ND6_RECALC_REACHTM_INTERVAL;
+int	nd6_inuse;
 
 void nd6_timer(void *);
 void nd6_slowtimo(void *);
@@ -123,7 +120,7 @@ nd6_init(void)
 	nd6_init_done = 1;
 
 	/* start timer */
-	timeout_set_proc(&nd6_timer_to, nd6_timer, &nd6_timer_to);
+	timeout_set_proc(&nd6_timer_to, nd6_timer, NULL);
 	timeout_set_proc(&nd6_slowtimo_ch, nd6_slowtimo, NULL);
 	timeout_add_sec(&nd6_slowtimo_ch, ND6_SLOWTIMER_INTERVAL);
 	timeout_set(&nd6_expire_timeout, nd6_expire_timer, NULL);
@@ -271,6 +268,10 @@ nd6_options(union nd_opts *ndopts)
 			ndopts->nd_opts_pi_end =
 				(struct nd_opt_prefix_info *)nd_opt;
 			break;
+		case ND_OPT_DNSSL:
+		case ND_OPT_RDNSS:
+			/* Don't warn */
+			break;
 		default:
 			/*
 			 * Unknown options must be silently ignored,
@@ -300,7 +301,7 @@ skip1:
  * ND6 timer routine to handle ND6 entries
  */
 void
-nd6_llinfo_settimer(struct llinfo_nd6 *ln, unsigned int secs)
+nd6_llinfo_settimer(const struct llinfo_nd6 *ln, unsigned int secs)
 {
 	time_t expire = getuptime() + secs;
 
@@ -315,7 +316,7 @@ nd6_llinfo_settimer(struct llinfo_nd6 *ln, unsigned int secs)
 }
 
 void
-nd6_timer(void *arg)
+nd6_timer(void *unused)
 {
 	struct llinfo_nd6 *ln, *nln;
 	time_t expire = getuptime() + nd6_gctimer;
@@ -546,7 +547,7 @@ nd6_purge(struct ifnet *ifp)
 }
 
 struct rtentry *
-nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp,
+nd6_lookup(const struct in6_addr *addr6, int create, struct ifnet *ifp,
     u_int rtableid)
 {
 	struct rtentry *rt;
@@ -640,7 +641,7 @@ nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp,
  * XXX: should take care of the destination of a p2p link?
  */
 int
-nd6_is_addr_neighbor(struct sockaddr_in6 *addr, struct ifnet *ifp)
+nd6_is_addr_neighbor(const struct sockaddr_in6 *addr, struct ifnet *ifp)
 {
 	struct in6_ifaddr *ia6;
 	struct ifaddr *ifa;
@@ -700,9 +701,6 @@ nd6_invalidate(struct rtentry *rt)
 
 /*
  * Free an nd6 llinfo entry.
- * Since the function would cause significant changes in the kernel, DO NOT
- * make it global, unless you have a strong reason for the change, and are sure
- * that the change is safe.
  */
 void
 nd6_free(struct rtentry *rt)
@@ -788,6 +786,7 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 	struct sockaddr *gate = rt->rt_gateway;
 	struct llinfo_nd6 *ln = (struct llinfo_nd6 *)rt->rt_llinfo;
 	struct ifaddr *ifa;
+	struct in6_ifaddr *ifa6;
 
 	if (ISSET(rt->rt_flags, RTF_GATEWAY|RTF_MULTICAST|RTF_MPLS))
 		return;
@@ -881,7 +880,6 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 			break;
 		}
 		nd6_inuse++;
-		nd6_allocated++;
 		ln->ln_rt = rt;
 		/* this is required for "ndp" command. - shin */
 		if (req == RTM_ADD) {
@@ -940,8 +938,9 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		 * check if rt_key(rt) is one of my address assigned
 		 * to the interface.
 		 */
-		ifa = &in6ifa_ifpwithaddr(ifp,
-		    &satosin6(rt_key(rt))->sin6_addr)->ia_ifa;
+		ifa6 = in6ifa_ifpwithaddr(ifp,
+		    &satosin6(rt_key(rt))->sin6_addr);
+		ifa = ifa6 ? &ifa6->ia_ifa : NULL;
 		if (ifa) {
 			ln->ln_state = ND6_LLINFO_REACHABLE;
 			ln->ln_byhint = 0;
@@ -1023,9 +1022,9 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 
 	switch (cmd) {
 	case SIOCGIFINFO_IN6:
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		ndi->ndi = *ND_IFINFO(ifp);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (0);
 	case SIOCGNBRINFO_IN6:
 	{
@@ -1033,7 +1032,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		struct in6_addr nb_addr = nbi->addr; /* make local for safety */
 		time_t expire;
 
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		/*
 		 * XXX: KAME specific hack for scoped addresses
 		 *      XXXX: for other scopes than link-local?
@@ -1050,7 +1049,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		if (rt == NULL ||
 		    (ln = (struct llinfo_nd6 *)rt->rt_llinfo) == NULL) {
 			rtfree(rt);
-			NET_RUNLOCK_IN_IOCTL();
+			NET_UNLOCK_SHARED();
 			return (EINVAL);
 		}
 		expire = ln->ln_rt->rt_expire;
@@ -1065,7 +1064,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		nbi->expire = expire;
 
 		rtfree(rt);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (0);
 	}
 	}
@@ -1080,7 +1079,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
  * code - type dependent information
  */
 void
-nd6_cache_lladdr(struct ifnet *ifp, struct in6_addr *from, char *lladdr,
+nd6_cache_lladdr(struct ifnet *ifp, const struct in6_addr *from, char *lladdr,
     int lladdrlen, int type, int code)
 {
 	struct rtentry *rt = NULL;
@@ -1314,7 +1313,7 @@ nd6_slowtimo(void *ignored_arg)
 			 * value gets recomputed at least once every few hours.
 			 * (RFC 2461, 6.3.4)
 			 */
-			nd6if->recalctm = nd6_recalc_reachtm_interval;
+			nd6if->recalctm = ND6_RECALC_REACHTM_INTERVAL;
 			nd6if->reachable = ND_COMPUTE_RTIME(nd6if->basereachable);
 		}
 	}

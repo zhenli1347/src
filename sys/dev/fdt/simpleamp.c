@@ -1,4 +1,4 @@
-/*	$OpenBSD: simpleamp.c,v 1.1 2020/06/10 23:59:07 patrick Exp $	*/
+/*	$OpenBSD: simpleamp.c,v 1.4 2022/04/06 18:59:28 naddy Exp $	*/
 /*
  * Copyright (c) 2020 Patrick Wildt <patrick@blueri.se>
  *
@@ -42,16 +42,16 @@ struct simpleamp_softc {
 	struct dai_device	sc_dai;
 
 	uint32_t		*sc_gpio;
-	size_t			sc_gpiolen;
+	int			sc_gpiolen;
 	uint32_t		sc_vcc;
 };
 
-struct audio_hw_if simpleamp_hw_if = {
+const struct audio_hw_if simpleamp_hw_if = {
 	.open = simpleamp_open,
 	.close = simpleamp_close,
 };
 
-struct cfattach simpleamp_ca = {
+const struct cfattach simpleamp_ca = {
 	sizeof(struct simpleamp_softc), simpleamp_match, simpleamp_attach
 };
 

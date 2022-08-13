@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.h,v 1.100 2021/09/02 05:41:02 martijn Exp $	*/
+/*	$OpenBSD: snmpd.h,v 1.103 2022/06/30 11:28:36 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -35,6 +35,8 @@
 #include <stdio.h>
 #include <imsg.h>
 
+#include "log.h"
+#include "smi.h"
 #include "snmp.h"
 
 #ifndef nitems
@@ -589,8 +591,9 @@ struct snmpd {
 
 	int			 sc_ncpu;
 	int64_t			*sc_cpustates;
+	struct ber_oid		*sc_blocklist;
+	size_t			 sc_nblocklist;
 	int			 sc_rtfilter;
-	int			 sc_pfaddrfilter;
 
 	int			 sc_min_seclevel;
 	int			 sc_traphandler;
@@ -616,28 +619,6 @@ extern struct snmpd *snmpd_env;
 /* parse.y */
 struct snmpd	*parse_config(const char *, u_int);
 int		 cmdline_symset(char *);
-
-/* log.c */
-void	log_init(int, int);
-void	log_procinit(const char *);
-void	log_setverbose(int);
-int	log_getverbose(void);
-void	log_warn(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
-void	log_warnx(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
-void	log_info(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
-void	log_debug(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
-void	logit(int, const char *, ...)
-	    __attribute__((__format__ (printf, 2, 3)));
-void	vlog(int, const char *, va_list)
-	    __attribute__((__format__ (printf, 2, 0)));
-__dead void fatal(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
-__dead void fatalx(const char *, ...)
-	    __attribute__((__format__ (printf, 1, 2)));
 
 /* kroute.c */
 void		 kr_init(void);
@@ -719,7 +700,6 @@ int			 pfta_get_first(struct pfr_astats *);
 
 /* smi.c */
 int		 smi_init(void);
-u_long		 smi_getticks(void);
 void		 smi_mibtree(struct oid *);
 struct oid	*smi_find(struct oid *);
 struct oid	*smi_nfind(struct oid *);
@@ -728,7 +708,6 @@ struct oid	*smi_next(struct oid *);
 struct oid	*smi_foreach(struct oid *, u_int);
 void		 smi_oidlen(struct ber_oid *);
 void		 smi_scalar_oidlen(struct ber_oid *);
-char		*smi_oid2string(struct ber_oid *, char *, size_t, size_t);
 int		 smi_string2oid(const char *, struct ber_oid *);
 void		 smi_delete(struct oid *);
 int		 smi_insert(struct oid *);
@@ -736,7 +715,6 @@ int		 smi_oid_cmp(struct oid *, struct oid *);
 int		 smi_key_cmp(struct oid *, struct oid *);
 unsigned int	 smi_application(struct ber_element *);
 void		 smi_debug_elements(struct ber_element *);
-char		*smi_print_element(struct ber_element *);
 
 /* timer.c */
 void		 timer_init(void);

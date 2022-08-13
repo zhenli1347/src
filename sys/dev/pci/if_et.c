@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_et.c,v 1.39 2020/07/10 13:26:38 patrick Exp $	*/
+/*	$OpenBSD: if_et.c,v 1.42 2022/03/11 18:00:45 mpi Exp $	*/
 /*
  * Copyright (c) 2007 The DragonFly Project.  All rights reserved.
  * 
@@ -158,7 +158,7 @@ const struct pci_matchid et_devices[] = {
 	{ PCI_VENDOR_LUCENT, PCI_PRODUCT_LUCENT_ET1310_GBE }
 };
 
-struct cfattach et_ca = {
+const struct cfattach et_ca = {
 	sizeof (struct et_softc), et_match, et_attach, et_detach
 };
 
@@ -1188,7 +1188,6 @@ et_setmulti(struct et_softc *sc)
 	uint32_t rxmac_ctrl, pktfilt;
 	struct ether_multi *enm;
 	struct ether_multistep step;
-	uint8_t addr[ETHER_ADDR_LEN];
 	int i, count;
 
 	pktfilt = CSR_READ_4(sc, ET_PKTFILT);
@@ -1200,19 +1199,12 @@ et_setmulti(struct et_softc *sc)
 		goto back;
 	}
 
-	bcopy(etherbroadcastaddr, addr, ETHER_ADDR_LEN);
-
 	count = 0;
 	ETHER_FIRST_MULTI(step, ac, enm);
 	while (enm != NULL) {
 		uint32_t *hp, h;
 
-		for (i = 0; i < ETHER_ADDR_LEN; i++) {
-			addr[i] &=  enm->enm_addrlo[i];
-		}
-
-		h = ether_crc32_be(LLADDR((struct sockaddr_dl *)addr),
-		    ETHER_ADDR_LEN);
+		h = ether_crc32_be(enm->enm_addrlo, ETHER_ADDR_LEN);
 		h = (h & 0x3f800000) >> 23;
 
 		hp = &hash[0];
@@ -1598,7 +1590,7 @@ et_init_txmac(struct et_softc *sc)
 	/* No flow control yet */
 	CSR_WRITE_4(sc, ET_TXMAC_FLOWCTRL, 0);
 
-	/* Enable TX MAC but leave FC(?) diabled */
+	/* Enable TX MAC but leave FC(?) disabled */
 	CSR_WRITE_4(sc, ET_TXMAC_CTRL,
 		    ET_TXMAC_CTRL_ENABLE | ET_TXMAC_CTRL_FC_DISABLE);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: com_acpi.c,v 1.2 2020/05/08 11:18:01 kettenis Exp $	*/
+/*	$OpenBSD: com_acpi.c,v 1.10 2022/06/28 21:02:14 kettenis Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -43,16 +43,20 @@ struct com_acpi_softc {
 int	com_acpi_match(struct device *, void *, void *);
 void	com_acpi_attach(struct device *, struct device *, void *);
 
-struct cfattach com_acpi_ca = {
-	sizeof(struct com_acpi_softc), com_acpi_match, com_acpi_attach
+const struct cfattach com_acpi_ca = {
+	sizeof(struct com_acpi_softc), com_acpi_match, com_acpi_attach,
+	NULL, com_activate
 };
 
 const char *com_hids[] = {
+	"AMDI0020",
 	"HISI0031",
+	"PNP0501",
 	NULL
 };
 
 int	com_acpi_is_console(struct com_acpi_softc *);
+int	com_acpi_is_designware(const char *);
 int	com_acpi_intr_designware(void *);
 
 int
@@ -61,6 +65,11 @@ com_acpi_match(struct device *parent, void *match, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct cfdata *cf = match;
 
+	if (aaa->aaa_naddr < 1 || aaa->aaa_nirq < 1)
+		return 0;
+	if (cf->acpidevcf_addr != aaa->aaa_addr[0] &&
+	    cf->acpidevcf_addr != ACPIDEVCF_ADDR_UNK)
+		return 0;
 	return acpi_matchhids(aaa, com_hids, cf->cf_driver->cd_name);
 }
 
@@ -69,50 +78,52 @@ com_acpi_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct com_acpi_softc *sc = (struct com_acpi_softc *)self;
 	struct acpi_attach_args *aaa = aux;
-	uint32_t freq;
+	int (*intr)(void *) = comintr;
 
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
 	printf(" %s", sc->sc_node->name);
 
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
-
-	if (aaa->aaa_nirq < 1) {
-		printf(": no interrupt\n");
-		return;
-	}
-
 	printf(" addr 0x%llx/0x%llx", aaa->aaa_addr[0], aaa->aaa_size[0]);
 	printf(" irq %d", aaa->aaa_irq[0]);
 
-	freq = acpi_getpropint(sc->sc_node, "clock-frequency", 0);
+	sc->sc.sc_frequency = COM_FREQ;
+	if (strcmp(aaa->aaa_dev, "AMDI0020") == 0)
+		sc->sc.sc_frequency = 48000000;
 
 	sc->sc.sc_iot = aaa->aaa_bst[0];
 	sc->sc.sc_iobase = aaa->aaa_addr[0];
-	sc->sc.sc_uarttype = COM_UART_16550;
-	sc->sc.sc_frequency = freq ? freq : COM_FREQ;
+	sc->sc.sc_frequency = acpi_getpropint(sc->sc_node, "clock-frequency",
+	    sc->sc.sc_frequency);
 
-	sc->sc.sc_reg_width = acpi_getpropint(sc->sc_node, "reg-io-width", 4);
-	sc->sc.sc_reg_shift = acpi_getpropint(sc->sc_node, "reg-shift", 2);
+	if (com_acpi_is_designware(aaa->aaa_dev)) {
+		intr = com_acpi_intr_designware;
+		sc->sc.sc_uarttype = COM_UART_16550;
+		sc->sc.sc_reg_width = acpi_getpropint(sc->sc_node,
+		    "reg-io-width", 4);
+		sc->sc.sc_reg_shift = acpi_getpropint(sc->sc_node,
+		    "reg-shift", 2);
 
-	if (com_acpi_is_console(sc)) {
-		SET(sc->sc.sc_hwflags, COM_HW_CONSOLE);
-		SET(sc->sc.sc_swflags, COM_SW_SOFTCAR);
-		comconsfreq = sc->sc.sc_frequency;
-		comconsrate = B115200;
+		if (com_acpi_is_console(sc)) {
+			SET(sc->sc.sc_hwflags, COM_HW_CONSOLE);
+			SET(sc->sc.sc_swflags, COM_SW_SOFTCAR);
+			comconsfreq = sc->sc.sc_frequency;
+			comconsrate = B115200;
+		}
 	}
 
-	if (bus_space_map(sc->sc.sc_iot, aaa->aaa_addr[0], aaa->aaa_size[0],
-	    0, &sc->sc.sc_ioh)) {
-		printf(": can't map registers\n");
-		return;
+	if (sc->sc.sc_iobase == comconsaddr) {
+		sc->sc.sc_ioh = comconsioh;
+	} else {
+		if (bus_space_map(sc->sc.sc_iot,
+		    aaa->aaa_addr[0], aaa->aaa_size[0], 0, &sc->sc.sc_ioh)) {
+			printf(": can't map registers\n");
+			return;
+		}
 	}
 
 	sc->sc_ih = acpi_intr_establish(aaa->aaa_irq[0], aaa->aaa_irq_flags[0],
-	    IPL_TTY, com_acpi_intr_designware, sc, sc->sc.sc_dev.dv_xname);
+	    IPL_TTY, intr, sc, sc->sc.sc_dev.dv_xname);
 	if (sc->sc_ih == NULL) {
 		printf(": can't establish interrupt\n");
 		return;
@@ -145,11 +156,18 @@ com_acpi_is_console(struct com_acpi_softc *sc)
 }
 
 int
+com_acpi_is_designware(const char *hid)
+{
+	return strcmp(hid, "AMDI0020") == 0 ||
+	    strcmp(hid, "HISI0031") == 0;
+}
+
+int
 com_acpi_intr_designware(void *cookie)
 {
-	struct com_softc *sc = cookie;
+	struct com_acpi_softc *sc = cookie;
 
-	com_read_reg(sc, com_usr);
+	com_read_reg(&sc->sc, com_usr);
 
-	return comintr(sc);
+	return comintr(&sc->sc);
 }

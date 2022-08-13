@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ifconfig.8,v 1.375 2021/08/18 18:10:33 solene Exp $
+.\"	$OpenBSD: ifconfig.8,v 1.384 2022/06/27 16:27:03 jmc Exp $
 .\"	$NetBSD: ifconfig.8,v 1.11 1996/01/04 21:27:29 pk Exp $
 .\"     $FreeBSD: ifconfig.8,v 1.16 1998/02/01 07:03:29 steve Exp $
 .\"
@@ -31,7 +31,7 @@
 .\"
 .\"     @(#)ifconfig.8	8.4 (Berkeley) 6/1/94
 .\"
-.Dd $Mdocdate: August 18 2021 $
+.Dd $Mdocdate: June 27 2022 $
 .Dt IFCONFIG 8
 .Os
 .Sh NAME
@@ -163,6 +163,9 @@ automatically configures IPv4 addresses (using DHCP protocol)
 for interfaces with
 .Sy AUTOCONF4
 set.
+.Pp
+Automatically mark the interface as
+.Dq up .
 .It Cm -autoconf
 Unset the
 .Sy AUTOCONF4
@@ -177,40 +180,9 @@ network.
 The default broadcast address is the address with a host part of all 1's.
 .It Cm create
 Create the specified network pseudo-device.
-At least the following devices can be created on demand:
-.Pp
-.Xr aggr 4 ,
-.Xr bpe 4 ,
-.Xr bridge 4 ,
-.Xr carp 4 ,
-.Xr egre 4 ,
-.Xr enc 4 ,
-.Xr eoip 4 ,
-.Xr etherip 4 ,
-.Xr gif 4 ,
-.Xr gre 4 ,
-.Xr lo 4 ,
-.Xr mgre 4 ,
-.Xr mpe 4 ,
-.Xr mpw 4 ,
-.Xr nvgre 4 ,
-.Xr pair 4 ,
-.Xr pflog 4 ,
-.Xr pflow 4 ,
-.Xr pfsync 4 ,
-.Xr ppp 4 ,
-.Xr pppoe 4 ,
-.Xr svlan 4 ,
-.Xr switch 4 ,
-.Xr tap 4 ,
-.Xr tpmr 4 ,
-.Xr trunk 4 ,
-.Xr tun 4 ,
-.Xr veb 4 ,
-.Xr vether 4 ,
-.Xr vlan 4 ,
-.Xr vxlan 4 ,
-.Xr wg 4
+A list of devices which can be dynamically created may be shown with the
+.Fl C
+option.
 .It Cm debug
 Enable driver-dependent debugging code; usually, this turns on
 extra console error logging.
@@ -220,11 +192,12 @@ Disable driver-dependent debugging code.
 Remove the default inet address associated with the interface,
 including any netmask or destination address configured with it.
 An address and address family can be given to make the deletion more specific.
-.It Cm description Ar value
+.Tg description
+.It Cm descr Ns Oo Cm iption Oc Ar value
 Specify a description of the interface.
 This can be used to label interfaces in situations where they may
 otherwise be difficult to distinguish.
-.It Cm -description
+.It Cm -descr Ns Op Cm iption
 Clear the interface description.
 .It Cm destroy
 Destroy the specified network pseudo-device.
@@ -306,6 +279,8 @@ tag.
 As CSUM_TCPv4, but supports IPv6 datagrams.
 .It Sy CSUM_UDPv6
 As above, for UDP.
+.It Sy TSO
+The device supports TCP segment offloading (TSO).
 .It Sy WOL
 The device supports Wake on LAN (WoL).
 .It Sy hardmtu
@@ -513,6 +488,20 @@ Query and display information and diagnostics from GBIC and SFP
 modules installed in an interface.
 It is only supported by drivers implementing the necessary functionality
 on hardware which supports it.
+.It Cm tso
+Enable TCP segmentation offloading (TSO) if it's supported by the hardware; see
+.Cm hwfeatures .
+TSO enabled NICs modify received TCP/IP packets.
+This will also affect traffic of upper layer interfaces,
+such as
+.Xr vlan 4 ,
+.Xr aggr 4 ,
+and
+.Xr carp 4 .
+Changing this option will re-initialize the network interface.
+.It Cm -tso
+Disable TSO.
+TSO is disabled by default.
 .It Cm up
 Mark an interface
 .Dq up .
@@ -1738,66 +1727,6 @@ or
 .Ql none .
 In the latter case, authentication will be turned off.
 .El
-.Sh SWITCH
-The following options are available for a
-.Xr switch 4
-interface:
-.Bl -tag -width Ds
-.It Cm add Ar interface
-Add
-.Ar interface
-as a member of the switch.
-The interface is put into promiscuous mode so
-that it can receive every packet sent on the
-network.
-An interface can be a member of at most one switch.
-.It Cm addlocal Ar interface
-Add
-.Ar interface
-as a local port of the switch.
-Local port is a special port connected with the local system's network stack.
-Only
-.Xr vether 4
-can be used for the
-.Ar interface .
-Only one interface can be added as a local port.
-.It Cm datapath Ar id
-Configure the datapath ID for the switch.
-The default value is generated randomly.
-.It Cm del Ar interface
-Remove
-.Ar interface
-from the switch.
-Promiscuous mode is turned off for the interface when it is removed
-from the switch.
-.It Cm maxflow Ar number
-Set the maximum number of flows per table.
-The default value is 10000.
-.It Cm maxgroup Ar number
-Set the maximum number of groups.
-The default value is 1000.
-.It Cm portno Ar interface number
-Set the port number for the port named
-.Ar interface .
-The default value is the interface index of the
-.Ar interface .
-.It Cm protected Ar interface ids
-Put
-.Ar interface
-in protected domains.
-.Ar ids
-is a comma delimited list of domain IDs, between 1 and 31, to put the
-interface in.
-Interfaces that are part of a protected domain cannot forward traffic to any
-other interface in that domain.
-Interfaces do not belong to any protected domain by default.
-.It Cm -protected Ar interface
-Remove
-.Ar interface
-from all protected domains.
-.It Cm up
-Start the switch processing packets.
-.El
 .Sh TPMR
 .nr nS 1
 .Bk -words
@@ -1893,6 +1822,7 @@ for a complete list of the available protocols.
 .Op Oo Fl Oc Ns Cm keepalive Ar period count
 .Op Cm rxprio Ar prio
 .Op Oo Fl Oc Ns Cm tunnel Ar src_address dest_address
+.Op Cm tunneladdr Ar src_address
 .Op Oo Fl Oc Ns Cm tunneldf
 .Op Oo Fl Oc Ns Cm tunneldomain Ar rtable
 .Op Cm tunnelttl Ar ttl
@@ -1951,8 +1881,20 @@ Both addresses must be of the same family.
 The optional destination port can be specified for interfaces such as
 .Xr vxlan 4 ,
 which further encapsulate the packets in UDP datagrams.
+This directive is incompatible with
+.Cm tunneladdr .
 .It Cm -tunnel
 Remove the source and destination tunnel addresses.
+.It Cm tunneladdr Ar src_address
+Set the outer IP address of the tunnel.
+This is useful for point-to-multipoint tunnels where peers are in different
+subnets like
+.Xr vxlan 4
+endpoint mode or
+.Xr mgre 4 .
+It is incompatible with the
+.Cm tunnel
+directive.
 .It Cm tunneldf
 Do not allow fragmentation of encapsulated packets.
 .It Cm -tunneldf
@@ -2157,7 +2099,7 @@ Disable the filtering of IPv4 and IPv6 packets with
 This is the default.
 .It Cm protected Ar child-iface ids
 Put
-.Ar interface
+.Ar child-iface
 in protected domains.
 .Ar ids
 is a comma delimited list of domain IDs, between 1 and 31, to put the

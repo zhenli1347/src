@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.c,v 1.84 2021/08/11 16:14:00 sthen Exp $	*/
+/*	$OpenBSD: drm_linux.c,v 1.93 2022/06/20 01:39:44 visa Exp $	*/
 /*
  * Copyright (c) 2013 Jonathan Gray <jsg@openbsd.org>
  * Copyright (c) 2015, 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -49,6 +49,8 @@
 #include <linux/xarray.h>
 #include <linux/interval_tree.h>
 #include <linux/kthread.h>
+#include <linux/processor.h>
+#include <linux/sync_file.h>
 
 #include <drm/drm_device.h>
 #include <drm/drm_print.h>
@@ -57,6 +59,22 @@
 #include "bios.h"
 #endif
 
+/* allowed to sleep */
+void
+tasklet_unlock_wait(struct tasklet_struct *ts)
+{
+	while (test_bit(TASKLET_STATE_RUN, &ts->state))
+		cpu_relax();
+}
+
+/* must not sleep */
+void
+tasklet_unlock_spin_wait(struct tasklet_struct *ts)
+{
+	while (test_bit(TASKLET_STATE_RUN, &ts->state))
+		cpu_relax();
+}
+
 void
 tasklet_run(void *arg)
 {
@@ -64,8 +82,12 @@ tasklet_run(void *arg)
 
 	clear_bit(TASKLET_STATE_SCHED, &ts->state);
 	if (tasklet_trylock(ts)) {
-		if (!atomic_read(&ts->count))
-			ts->func(ts->data);
+		if (!atomic_read(&ts->count)) {
+			if (ts->use_callback)
+				ts->callback(ts);
+			else
+				ts->func(ts->data);
+		}
 		tasklet_unlock(ts);
 	}
 }
@@ -542,6 +564,11 @@ __pagevec_release(struct pagevec *pvec)
 	pagevec_reinit(pvec);
 }
 
+static struct kmem_va_mode kv_physwait = {
+	.kv_map = &phys_map,
+	.kv_wait = 1,
+};
+
 void *
 kmap(struct vm_page *pg)
 {
@@ -550,7 +577,7 @@ kmap(struct vm_page *pg)
 #if defined (__HAVE_PMAP_DIRECT)
 	va = pmap_map_direct(pg);
 #else
-	va = uvm_km_valloc_wait(phys_map, PAGE_SIZE);
+	va = (vaddr_t)km_alloc(PAGE_SIZE, &kv_physwait, &kp_none, &kd_waitok);
 	pmap_kenter_pa(va, VM_PAGE_TO_PHYS(pg), PROT_READ | PROT_WRITE);
 	pmap_update(pmap_kernel());
 #endif
@@ -567,7 +594,7 @@ kunmap_va(void *addr)
 #else
 	pmap_kremove(va, PAGE_SIZE);
 	pmap_update(pmap_kernel());
-	uvm_km_free_wakeup(phys_map, va, PAGE_SIZE);
+	km_free((void *)va, PAGE_SIZE, &kv_physwait, &kp_none);
 #endif
 }
 
@@ -602,7 +629,8 @@ vmap(struct vm_page **pages, unsigned int npages, unsigned long flags,
 	paddr_t pa;
 	int i;
 
-	va = uvm_km_valloc(kernel_map, PAGE_SIZE * npages);
+	va = (vaddr_t)km_alloc(PAGE_SIZE * npages, &kv_any, &kp_none,
+	    &kd_nowait);
 	if (va == 0)
 		return NULL;
 	for (i = 0; i < npages; i++) {
@@ -623,7 +651,7 @@ vunmap(void *addr, size_t size)
 
 	pmap_remove(pmap_kernel(), va, va + size);
 	pmap_update(pmap_kernel());
-	uvm_km_free(kernel_map, va, size);
+	km_free((void *)va, size, &kv_any, &kp_none);
 }
 
 bool
@@ -686,7 +714,7 @@ RB_GENERATE(linux_root, rb_node, __entry, panic_cmp);
 
 /*
  * This is a fairly minimal implementation of the Linux "idr" API.  It
- * probably isn't very efficient, and defenitely isn't RCU safe.  The
+ * probably isn't very efficient, and definitely isn't RCU safe.  The
  * pre-load buffer is global instead of per-cpu; we rely on the kernel
  * lock to make this work.  We do randomize our IDs in order to make
  * them harder to guess.
@@ -888,11 +916,15 @@ xa_init_flags(struct xarray *xa, gfp_t flags)
 	static int initialized;
 
 	if (!initialized) {
-		pool_init(&xa_pool, sizeof(struct xarray_entry), 0, IPL_TTY, 0,
+		pool_init(&xa_pool, sizeof(struct xarray_entry), 0, IPL_NONE, 0,
 		    "xapl", NULL);
 		initialized = 1;
 	}
 	SPLAY_INIT(&xa->xa_tree);
+	if (flags & XA_FLAGS_LOCK_IRQ)
+		mtx_init(&xa->xa_lock, IPL_TTY);
+	else
+		mtx_init(&xa->xa_lock, IPL_NONE);
 }
 
 void
@@ -907,14 +939,20 @@ xa_destroy(struct xarray *xa)
 }
 
 int
-xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
+__xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 {
 	struct xarray_entry *xid;
-	int flags = (gfp & GFP_NOWAIT) ? PR_NOWAIT : PR_WAITOK;
 	int start = (xa->xa_flags & XA_FLAGS_ALLOC1) ? 1 : 0;
 	int begin;
 
-	xid = pool_get(&xa_pool, flags);
+	if (gfp & GFP_NOWAIT) {
+		xid = pool_get(&xa_pool, PR_NOWAIT);
+	} else {
+		mtx_leave(&xa->xa_lock);
+		xid = pool_get(&xa_pool, PR_WAITOK);
+		mtx_enter(&xa->xa_lock);
+	}
+
 	if (xid == NULL)
 		return -ENOMEM;
 
@@ -939,7 +977,7 @@ xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 }
 
 void *
-xa_erase(struct xarray *xa, unsigned long index)
+__xa_erase(struct xarray *xa, unsigned long index)
 {
 	struct xarray_entry find, *res;
 	void *ptr = NULL;
@@ -955,7 +993,7 @@ xa_erase(struct xarray *xa, unsigned long index)
 }
 
 void *
-xa_load(struct xarray *xa, unsigned long index)
+__xa_load(struct xarray *xa, unsigned long index)
 {
 	struct xarray_entry find, *res;
 
@@ -964,6 +1002,42 @@ xa_load(struct xarray *xa, unsigned long index)
 	if (res == NULL)
 		return NULL;
 	return res->ptr;
+}
+
+void *
+__xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
+{
+	struct xarray_entry find, *res;
+	void *prev;
+
+	if (entry == NULL)
+		return __xa_erase(xa, index);
+
+	find.id = index;
+	res = SPLAY_FIND(xarray_tree, &xa->xa_tree, &find);
+	if (res != NULL) {
+		/* index exists */
+		/* XXX Multislot entries updates not implemented yet */
+		prev = res->ptr;
+		res->ptr = entry;
+		return prev;
+	}
+
+	/* index not found, add new */
+	if (gfp & GFP_NOWAIT) {
+		res = pool_get(&xa_pool, PR_NOWAIT);
+	} else {
+		mtx_leave(&xa->xa_lock);
+		res = pool_get(&xa_pool, PR_WAITOK);
+		mtx_enter(&xa->xa_lock);
+	}
+	if (res == NULL)
+		return XA_ERROR(-ENOMEM);
+	res->id = index;
+	res->ptr = entry;
+	if (SPLAY_INSERT(xarray_tree, &xa->xa_tree, res) != NULL)
+		return XA_ERROR(-EINVAL);
+	return NULL; /* no prev entry at index */
 }
 
 void *
@@ -1058,12 +1132,9 @@ fail:
 }
 
 int
-i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+__i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {
 	int ret, retries;
-
-	if (adap->lock_ops)
-		adap->lock_ops->lock_bus(adap, 0);
 
 	retries = adap->retries;
 retry:
@@ -1075,6 +1146,19 @@ retry:
 		retries--;
 		goto retry;
 	}
+
+	return ret;
+}
+
+int
+i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	int ret; 
+
+	if (adap->lock_ops)
+		adap->lock_ops->lock_bus(adap, 0);
+
+	ret = __i2c_transfer(adap, msgs, num);
 
 	if (adap->lock_ops)
 		adap->lock_ops->unlock_bus(adap, 0);
@@ -1118,7 +1202,7 @@ i2c_bit_add_bus(struct i2c_adapter *adap)
 
 /*
  * This is a minimal implementation of the Linux vga_get/vga_put
- * interface.  In all likelyhood, it will only work for inteldrm(4) as
+ * interface.  In all likelihood, it will only work for inteldrm(4) as
  * it assumes that if there is another active VGA device in the
  * system, it is sitting behind a PCI bridge.
  */
@@ -1378,6 +1462,15 @@ backlight_device_unregister(struct backlight_device *bd)
 	free(bd, M_DRM, sizeof(*bd));
 }
 
+struct backlight_device *
+devm_backlight_device_register(void *dev, const char *name, void *parent,
+    void *data, const struct backlight_ops *bo,
+    const struct backlight_properties *bp)
+{
+	STUB();
+	return NULL;
+}
+
 void
 backlight_schedule_update_status(struct backlight_device *bd)
 {
@@ -1458,7 +1551,7 @@ dma_fence_put(struct dma_fence *fence)
 }
 
 int
-dma_fence_signal_locked(struct dma_fence *fence)
+dma_fence_signal_timestamp_locked(struct dma_fence *fence, ktime_t timestamp)
 {
 	struct dma_fence_cb *cur, *tmp;
 	struct list_head cb_list;
@@ -1471,7 +1564,7 @@ dma_fence_signal_locked(struct dma_fence *fence)
 
 	list_replace(&fence->cb_list, &cb_list);
 
-	fence->timestamp = ktime_get();
+	fence->timestamp = timestamp;
 	set_bit(DMA_FENCE_FLAG_TIMESTAMP_BIT, &fence->flags);
 
 	list_for_each_entry_safe(cur, tmp, &cb_list, node) {
@@ -1491,7 +1584,31 @@ dma_fence_signal(struct dma_fence *fence)
 		return -EINVAL;
 
 	mtx_enter(fence->lock);
-	r = dma_fence_signal_locked(fence);
+	r = dma_fence_signal_timestamp_locked(fence, ktime_get());
+	mtx_leave(fence->lock);
+
+	return r;
+}
+
+int
+dma_fence_signal_locked(struct dma_fence *fence)
+{
+	if (fence == NULL)
+		return -EINVAL;
+
+	return dma_fence_signal_timestamp_locked(fence, ktime_get());
+}
+
+int
+dma_fence_signal_timestamp(struct dma_fence *fence, ktime_t timestamp)
+{
+	int r;
+
+	if (fence == NULL)
+		return -EINVAL;
+
+	mtx_enter(fence->lock);
+	r = dma_fence_signal_timestamp_locked(fence, timestamp);
 	mtx_leave(fence->lock);
 
 	return r;
@@ -1809,6 +1926,18 @@ dma_fence_get_stub(void)
 	return dma_fence_get(&dma_fence_stub);
 }
 
+struct dma_fence *
+dma_fence_allocate_private_stub(void)
+{
+	struct dma_fence *f = malloc(sizeof(*f), M_DRM,
+	    M_ZERO | M_WAITOK | M_CANFAIL);
+	if (f == NULL)
+		return ERR_PTR(-ENOMEM);
+	dma_fence_init(f, &dma_fence_stub_ops, &dma_fence_stub_mtx, 0, 0);
+	dma_fence_signal(f);
+	return f;
+}
+
 static const char *
 dma_fence_array_get_driver_name(struct dma_fence *fence)
 {
@@ -1822,10 +1951,9 @@ dma_fence_array_get_timeline_name(struct dma_fence *fence)
 }
 
 static void
-irq_dma_fence_array_work(struct irq_work *wrk)
+irq_dma_fence_array_work(void *arg)
 {
-	struct dma_fence_array *dfa = container_of(wrk, typeof(*dfa), work);
-
+	struct dma_fence_array *dfa = (struct dma_fence_array *)arg;
 	dma_fence_signal(&dfa->base);
 	dma_fence_put(&dfa->base);
 }
@@ -1838,7 +1966,7 @@ dma_fence_array_cb_func(struct dma_fence *f, struct dma_fence_cb *cb)
 	struct dma_fence_array *dfa = array_cb->array;
 	
 	if (atomic_dec_and_test(&dfa->num_pending))
-		irq_work_queue(&dfa->work);
+		timeout_add(&dfa->to, 1);
 	else
 		dma_fence_put(&dfa->base);
 }
@@ -1898,7 +2026,7 @@ dma_fence_array_create(int num_fences, struct dma_fence **fences, u64 context,
 	mtx_init(&dfa->lock, IPL_TTY);
 	dma_fence_init(&dfa->base, &dma_fence_array_ops, &dfa->lock,
 	    context, seqno);
-	init_irq_work(&dfa->work, irq_dma_fence_array_work);
+	timeout_set(&dfa->to, irq_dma_fence_array_work, dfa);
 
 	dfa->num_fences = num_fences;
 	atomic_set(&dfa->num_pending, signal_on_any ? 1 : num_fences);
@@ -1918,26 +2046,52 @@ const struct dma_fence_ops dma_fence_array_ops = {
 int
 dma_fence_chain_find_seqno(struct dma_fence **df, uint64_t seqno)
 {
+	struct dma_fence_chain *chain;
+	struct dma_fence *fence;
+
 	if (seqno == 0)
 		return 0;
-	STUB();
-	return -ENOSYS;
+
+	if ((chain = to_dma_fence_chain(*df)) == NULL)
+		return -EINVAL;
+
+	fence = &chain->base;
+	if (fence->seqno < seqno)
+		return -EINVAL;
+
+	dma_fence_chain_for_each(*df, fence) {
+		if ((*df)->context != fence->context)
+			break;
+
+		chain = to_dma_fence_chain(*df);
+		if (chain->prev_seqno < seqno)
+			break;
+	}
+	dma_fence_put(fence);
+
+	return 0;
 }
 
 void
 dma_fence_chain_init(struct dma_fence_chain *chain, struct dma_fence *prev,
     struct dma_fence *fence, uint64_t seqno)
 {
-	struct dma_fence_chain *prev_chain = to_dma_fence_chain(prev);
 	uint64_t context;
 
 	chain->fence = fence;
 	chain->prev = prev;
 	mtx_init(&chain->lock, IPL_TTY);
 
-	if (prev_chain && seqno > prev->seqno) {
-		chain->prev_seqno = prev->seqno;
-		context = prev->context;
+	/* if prev is a chain */
+	if (to_dma_fence_chain(prev) != NULL) {
+		if (seqno > prev->seqno) {
+			chain->prev_seqno = prev->seqno;
+			context = prev->context;
+		} else {
+			chain->prev_seqno = 0;
+			context = dma_fence_context_alloc(1);
+			seqno = prev->seqno;
+		}
 	} else {
 		chain->prev_seqno = 0;
 		context = dma_fence_context_alloc(1);
@@ -1959,39 +2113,125 @@ dma_fence_chain_get_timeline_name(struct dma_fence *fence)
 	return "unbound";
 }
 
+static bool dma_fence_chain_enable_signaling(struct dma_fence *);
+
+static void
+dma_fence_chain_timo(void *arg)
+{
+	struct dma_fence_chain *chain = (struct dma_fence_chain *)arg;
+
+	if (dma_fence_chain_enable_signaling(&chain->base) == false)
+		dma_fence_signal(&chain->base);
+	dma_fence_put(&chain->base);
+}
+
+static void
+dma_fence_chain_cb(struct dma_fence *f, struct dma_fence_cb *cb)
+{
+	struct dma_fence_chain *chain =
+	    container_of(cb, struct dma_fence_chain, cb);
+	timeout_set(&chain->to, dma_fence_chain_timo, chain);
+	timeout_add(&chain->to, 1);
+	dma_fence_put(f);
+}
+
 static bool
 dma_fence_chain_enable_signaling(struct dma_fence *fence)
 {
-	STUB();
+	struct dma_fence_chain *chain, *h;
+	struct dma_fence *f;
+
+	h = to_dma_fence_chain(fence);
+	dma_fence_get(&h->base);
+	dma_fence_chain_for_each(fence, &h->base) {
+		chain = to_dma_fence_chain(fence);
+		if (chain == NULL)
+			f = fence;
+		else
+			f = chain->fence;
+
+		dma_fence_get(f);
+		if (!dma_fence_add_callback(f, &h->cb, dma_fence_chain_cb)) {
+			dma_fence_put(fence);
+			return true;
+		}
+		dma_fence_put(f);
+	}
+	dma_fence_put(&h->base);
 	return false;
 }
 
 static bool
 dma_fence_chain_signaled(struct dma_fence *fence)
 {
-	STUB();
-	return false;
+	struct dma_fence_chain *chain;
+	struct dma_fence *f;
+
+	dma_fence_chain_for_each(fence, fence) {
+		chain = to_dma_fence_chain(fence);
+		if (chain == NULL)
+			f = fence;
+		else
+			f = chain->fence;
+
+		if (dma_fence_is_signaled(f) == false) {
+			dma_fence_put(fence);
+			return false;
+		}
+	}
+	return true;
 }
 
 static void
 dma_fence_chain_release(struct dma_fence *fence)
 {
-	STUB();
+	struct dma_fence_chain *chain = to_dma_fence_chain(fence);
+	struct dma_fence_chain *prev_chain;
+	struct dma_fence *prev;
+
+	for (prev = chain->prev; prev != NULL; prev = chain->prev) {
+		if (kref_read(&prev->refcount) > 1)
+			break;
+		if ((prev_chain = to_dma_fence_chain(prev)) == NULL)
+			break;
+		chain->prev = prev_chain->prev;
+		prev_chain->prev = NULL;
+		dma_fence_put(prev);
+	}
+	dma_fence_put(prev);
+	dma_fence_put(chain->fence);
+	dma_fence_free(fence);
 }
 
 struct dma_fence *
-dma_fence_chain_next(struct dma_fence *fence)
+dma_fence_chain_walk(struct dma_fence *fence)
 {
-	struct dma_fence_chain *chain = to_dma_fence_chain(fence);
+	struct dma_fence_chain *chain = to_dma_fence_chain(fence), *prev_chain;
+	struct dma_fence *prev, *new_prev, *tmp;
 
 	if (chain == NULL) {
 		dma_fence_put(fence);
 		return NULL;
 	}
 
-	STUB();
+	while ((prev = dma_fence_get(chain->prev)) != NULL) {
+		prev_chain = to_dma_fence_chain(prev);
+		if (prev_chain != NULL) {
+			if (!dma_fence_is_signaled(prev_chain->fence))
+				break;
+			new_prev = dma_fence_get(prev_chain->prev);
+		} else {
+			if (!dma_fence_is_signaled(prev))
+				break;
+			new_prev = NULL;
+		}
+		tmp = atomic_cas_ptr(&chain->prev, prev, new_prev);
+		dma_fence_put(tmp == prev ? prev : new_prev);
+		dma_fence_put(prev);
+	}
+
 	dma_fence_put(fence);
-	return NULL;
+	return prev;
 }
 
 const struct dma_fence_ops dma_fence_chain_ops = {
@@ -2018,12 +2258,6 @@ int
 dmabuf_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
 {
 	return (ENOTTY);
-}
-
-int
-dmabuf_poll(struct file *fp, int events, struct proc *p)
-{
-	return (0);
 }
 
 int
@@ -2086,7 +2320,6 @@ const struct fileops dmabufops = {
 	.fo_read	= dmabuf_read,
 	.fo_write	= dmabuf_write,
 	.fo_ioctl	= dmabuf_ioctl,
-	.fo_poll	= dmabuf_poll,
 	.fo_kqfilter	= dmabuf_kqfilter,
 	.fo_stat	= dmabuf_stat,
 	.fo_close	= dmabuf_close,
@@ -2221,6 +2454,10 @@ pcie_get_speed_cap(struct pci_dev *pdev)
 			cap = PCIE_SPEED_8_0GT;
 		if (lnkcap2 & 0x10)
 			cap = PCIE_SPEED_16_0GT;
+		if (lnkcap2 & 0x20)
+			cap = PCIE_SPEED_32_0GT;
+		if (lnkcap2 & 0x40)
+			cap = PCIE_SPEED_64_0GT;
 	} else {
 		if (lnkcap & 0x01)
 			cap = PCIE_SPEED_2_5GT;
@@ -2259,6 +2496,25 @@ pcie_get_width_cap(struct pci_dev *pdev)
 	if (lnkcap)
 		return (lnkcap & 0x3f0) >> 4;
 	return PCIE_LNK_WIDTH_UNKNOWN;
+}
+
+bool
+pcie_aspm_enabled(struct pci_dev *pdev)
+{
+	pci_chipset_tag_t	pc = pdev->pc;
+	pcitag_t		tag = pdev->tag;
+	int			pos ;
+	pcireg_t		lcsr;
+
+	if (!pci_get_capability(pc, tag, PCI_CAP_PCIEXPRESS,
+	    &pos, NULL)) 
+		return false;
+
+	lcsr = pci_conf_read(pc, tag, pos + PCI_PCIE_LCSR);
+	if ((lcsr & (PCI_PCIE_LCSR_ASPM_L0S | PCI_PCIE_LCSR_ASPM_L1)) != 0)
+		return true;
+	
+	return false;
 }
 
 int
@@ -2565,4 +2821,181 @@ interval_tree_insert(struct interval_tree_node *node,
 
 	rb_link_node(&node->rb, parent, iter);
 	rb_insert_color_cached(&node->rb, root, false);
+}
+
+int
+syncfile_read(struct file *fp, struct uio *uio, int fflags)
+{
+	return ENXIO;
+}
+
+int
+syncfile_write(struct file *fp, struct uio *uio, int fflags)
+{
+	return ENXIO;
+}
+
+int
+syncfile_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
+{
+	return ENOTTY;
+}
+
+int
+syncfile_kqfilter(struct file *fp, struct knote *kn)
+{
+	return EINVAL;
+}
+
+int
+syncfile_stat(struct file *fp, struct stat *st, struct proc *p)
+{
+	memset(st, 0, sizeof(*st));
+	st->st_mode = S_IFIFO;	/* XXX */
+	return 0;
+}
+
+int
+syncfile_close(struct file *fp, struct proc *p)
+{
+	struct sync_file *sf = fp->f_data;
+
+	dma_fence_put(sf->fence);
+	fp->f_data = NULL;
+	free(sf, M_DRM, sizeof(struct sync_file));
+	return 0;
+}
+
+int
+syncfile_seek(struct file *fp, off_t *offset, int whence, struct proc *p)
+{
+	off_t newoff;
+
+	if (*offset != 0)
+		return EINVAL;
+
+	switch (whence) {
+	case SEEK_SET:
+		newoff = 0;
+		break;
+	case SEEK_END:
+		newoff = 0;
+		break;
+	default:
+		return EINVAL;
+	}
+	mtx_enter(&fp->f_mtx);
+	fp->f_offset = newoff;
+	mtx_leave(&fp->f_mtx);
+	*offset = newoff;
+	return 0;
+}
+
+const struct fileops syncfileops = {
+	.fo_read	= syncfile_read,
+	.fo_write	= syncfile_write,
+	.fo_ioctl	= syncfile_ioctl,
+	.fo_kqfilter	= syncfile_kqfilter,
+	.fo_stat	= syncfile_stat,
+	.fo_close	= syncfile_close,
+	.fo_seek	= syncfile_seek,
+};
+
+void
+fd_install(int fd, struct file *fp)
+{
+	struct proc *p = curproc;
+	struct filedesc *fdp = p->p_fd;
+
+	if (fp->f_type != DTYPE_SYNC)
+		return;
+
+	fdplock(fdp);
+	/* all callers use get_unused_fd_flags(O_CLOEXEC) */
+	fdinsert(fdp, fd, UF_EXCLOSE, fp);
+	fdpunlock(fdp);
+}
+
+void
+fput(struct file *fp)
+{
+	if (fp->f_type != DTYPE_SYNC)
+		return;
+	
+	FRELE(fp, curproc);
+}
+
+int
+get_unused_fd_flags(unsigned int flags)
+{
+	struct proc *p = curproc;
+	struct filedesc *fdp = p->p_fd;
+	int error, fd;
+
+	KASSERT((flags & O_CLOEXEC) != 0);
+
+	fdplock(fdp);
+retryalloc:
+	if ((error = fdalloc(p, 0, &fd)) != 0) {
+		if (error == ENOSPC) {
+			fdexpand(p);
+			goto retryalloc;
+		}
+		fdpunlock(fdp);
+		return -1;
+	}
+	fdpunlock(fdp);
+
+	return fd;
+}
+
+void
+put_unused_fd(int fd)
+{
+	struct filedesc *fdp = curproc->p_fd;
+
+	fdplock(fdp);
+	fdremove(fdp, fd);
+	fdpunlock(fdp);
+}
+
+struct dma_fence *
+sync_file_get_fence(int fd)
+{
+	struct proc *p = curproc;
+	struct filedesc *fdp = p->p_fd;
+	struct file *fp;
+	struct sync_file *sf;
+	struct dma_fence *f;
+
+	if ((fp = fd_getfile(fdp, fd)) == NULL)
+		return NULL;
+
+	if (fp->f_type != DTYPE_SYNC) {
+		FRELE(fp, p);
+		return NULL;
+	}
+	sf = fp->f_data;
+	f = dma_fence_get(sf->fence);
+	FRELE(sf->file, p);
+	return f;
+}
+
+struct sync_file *
+sync_file_create(struct dma_fence *fence)
+{
+	struct proc *p = curproc;
+	struct sync_file *sf;
+	struct file *fp;
+
+	fp = fnew(p);
+	if (fp == NULL)
+		return NULL;
+	fp->f_type = DTYPE_SYNC;
+	fp->f_ops = &syncfileops;
+	sf = malloc(sizeof(struct sync_file), M_DRM, M_WAITOK | M_ZERO);
+	sf->file = fp;
+	sf->fence = dma_fence_get(fence);
+	fp->f_data = sf;
+	return sf;
 }

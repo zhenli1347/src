@@ -1,4 +1,4 @@
-/* $OpenBSD: crunchgen.c,v 1.23 2021/03/10 22:52:28 jsg Exp $	 */
+/* $OpenBSD: crunchgen.c,v 1.25 2021/11/15 15:14:24 millert Exp $	 */
 
 /*
  * Copyright (c) 1994 University of Maryland
@@ -117,8 +117,6 @@ main(int argc, char *argv[])
 {
 	char           *p;
 	int             optc;
-	extern int      optind;
-	extern char    *optarg;
 
 	if (pledge("stdio rpath wpath cpath proc exec", NULL) == -1) {
 		perror("pledge");
@@ -680,7 +678,7 @@ fillin_program_objs(prog_t * p, char *path)
 	fprintf(f, "crunchgen_objs:\n\t@echo 'OBJS= '${OBJS}\n");
 	fclose(f);
 
-	if ((dotfd = open(".", O_RDONLY, 0)) == -1 ||
+	if ((dotfd = open(".", O_RDONLY)) == -1 ||
 	    getcwd(cwd, sizeof(cwd)) == NULL) {
 		perror("get cwd");
 		goterror = 1;

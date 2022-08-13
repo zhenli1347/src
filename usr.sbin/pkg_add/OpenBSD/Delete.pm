@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: Delete.pm,v 1.160 2019/07/24 18:05:26 espie Exp $
+# $OpenBSD: Delete.pm,v 1.165 2022/06/09 09:27:11 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -83,7 +83,6 @@ sub delete_handle
 {
 	my ($handle, $state) = @_;
 	my $pkgname = $handle->pkgname;
-	$state->progress->message($state->f("reading list for #1", $pkgname));
 	my $plist = $handle->plist;
 	if ($plist->has('firmware') && !$state->defines('FW_UPDATE')) {
 		if ($state->is_interactive) {
@@ -116,7 +115,7 @@ sub unregister_dependencies
 	my $l = OpenBSD::Requiring->new($pkgname);
 
 	for my $name ($l->list) {
-		$state->say("remove dependency on #1", $name)
+		$state->say("remove dependency of #1 on #2", $pkgname, $name)
 		    if $state->verbose >= 3;
 		local $@;
 		try {
@@ -449,6 +448,7 @@ sub delete
 {
 	my ($self, $state) = @_;
 	my $realname = $self->realname($state);
+	return if defined $state->{current_set}{dont_delete}{$realname};
 
 	if (defined $self->{symlink}) {
 		if (-l $realname) {
@@ -460,8 +460,13 @@ sub delete
 				return;
 			}
 		} else  {
-			$state->say("Bogus symlink: #1", $realname);
-			$self->do_not_delete($state);
+			if (-e $realname) {
+				$state->say("Bogus symlink: #1", $realname);
+				$self->do_not_delete($state);
+			} else {
+				$state->say("Can't delete missing symlink: #1",
+				    $realname);
+			}
 			return;
 		}
 	} else {
@@ -640,16 +645,14 @@ use File::Basename;
 sub delete
 {
 	my ($self, $state) = @_;
+	return if defined $state->{current_set}{known_extra}{$self->fullname};
 	my $realname = $self->realname($state);
 	if ($state->verbose >= 2 && $state->{extra}) {
 		$state->say("deleting extra file: #1", $realname);
 	}
 	return if $state->{not};
 	return unless -e $realname or -l $realname;
-	if ($state->replacing) {
-		$state->log("Remember to update #1", $realname);
-		$self->mark_dir($state);
-	} elsif ($state->{extra}) {
+	if ($state->{extra}) {
 		unlink($realname) or
 		    $state->say("problem deleting extra file #1: #2", $realname, $!);
 	} else {
@@ -664,8 +667,8 @@ sub delete
 {
 	my ($self, $state) = @_;
 	return unless $state->{extra};
+	return if defined $state->{current_set}{known_extra}{$self->fullname};
 	my $realname = $self->realname($state);
-	return if $state->replacing;
 	if ($state->{extra}) {
 		$self->SUPER::delete($state);
 	} else {

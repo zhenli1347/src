@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_umb.c,v 1.46 2021/07/04 19:22:31 sthen Exp $ */
+/*	$OpenBSD: if_umb.c,v 1.49 2022/01/11 10:34:13 claudio Exp $ */
 
 /*
  * Copyright (c) 2016 genua mbH
@@ -255,6 +255,12 @@ const struct umb_quirk umb_quirks[] = {
 	  UMBFLG_FCC_AUTH_REQUIRED,
 	  0,
 	  0
+	},
+
+	{ { USB_VENDOR_SIMCOM, USB_PRODUCT_SIMCOM_SIM7600 },
+	  0,
+	  1,
+	  UMATCH_VENDOR_PRODUCT
 	},
 };
 
@@ -1007,8 +1013,6 @@ umb_start(struct ifnet *ifp)
 		offs += sizeof (struct ncm_pointer32);
 		maxoverhead = sizeof (struct ncm_pointer32_dgram);
 		break;
-	default:
-		KASSERT(0);
 	}
 
 	/*
@@ -2012,7 +2016,7 @@ umb_decode_ip_configuration(struct umb_softc *sc, void *data, int len)
 	if (len < sizeof (*ic))
 		return 0;
 	if (letoh32(ic->sessionid) != umb_session_id) {
-		DPRINTF("%s: ignore IP configration for session id %d\n",
+		DPRINTF("%s: ignore IP configuration for session id %d\n",
 		    DEVNAM(sc), letoh32(ic->sessionid));
 		return 0;
 	}
@@ -2022,7 +2026,7 @@ umb_decode_ip_configuration(struct umb_softc *sc, void *data, int len)
 	memset(sc->sc_info.ipv6dns, 0, sizeof (sc->sc_info.ipv6dns));
 
 	/*
-	 * IPv4 configuation
+	 * IPv4 configuration
 	 */
 	avail_v4 = letoh32(ic->ipv4_available);
 	if ((avail_v4 & (MBIM_IPCONF_HAS_ADDRINFO | MBIM_IPCONF_HAS_GWINFO)) ==
@@ -2086,7 +2090,7 @@ umb_decode_ip_configuration(struct umb_softc *sc, void *data, int len)
 tryv6:;
 #ifdef INET6
 	/*
-	 * IPv6 configuation
+	 * IPv6 configuration
 	 */
 	avail_v6 = letoh32(ic->ipv6_available);
 	if (avail_v6 == 0) {
@@ -3147,7 +3151,7 @@ umb_intr(struct usbd_xfer *xfer, void *priv, usbd_status status)
 		    DEVNAM(sc));
 		break;
 	default:
-		DPRINTF("%s: unexpected notifiation (0x%02x)\n",
+		DPRINTF("%s: unexpected notification (0x%02x)\n",
 		    DEVNAM(sc), sc->sc_intr_msg.bNotification);
 		break;
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_input.c,v 1.363 2021/06/21 22:09:14 jca Exp $	*/
+/*	$OpenBSD: ip_input.c,v 1.378 2022/08/12 14:49:15 bluhm Exp $	*/
 /*	$NetBSD: ip_input.c,v 1.30 1996/03/16 23:53:58 christos Exp $	*/
 
 /*
@@ -64,7 +64,6 @@
 #include <net/if_types.h>
 
 #ifdef INET6
-#include <netinet6/ip6protosw.h>
 #include <netinet6/ip6_var.h>
 #endif
 
@@ -92,10 +91,8 @@ int	ipsendredirects = 1;
 int	ip_dosourceroute = 0;
 int	ip_defttl = IPDEFTTL;
 int	ip_mtudisc = 1;
-u_int	ip_mtudisc_timeout = IPMTUDISCTIMEOUT;
+int	ip_mtudisc_timeout = IPMTUDISCTIMEOUT;
 int	ip_directedbcast = 0;
-
-struct rttimer_queue *ip_mtudisc_timeout_q = NULL;
 
 /* Protects `ipq' and `ip_frags'. */
 struct mutex	ipq_mutex = MUTEX_INITIALIZER(IPL_SOFTNET);
@@ -106,10 +103,6 @@ LIST_HEAD(, ipq) ipq;
 /* Keep track of memory used for reassembly */
 int	ip_maxqueue = 300;
 int	ip_frags = 0;
-
-#ifdef MROUTING
-extern int ip_mrtproto;
-#endif
 
 const struct sysctl_bounded_args ipctl_vars[] = {
 #ifdef MROUTING
@@ -130,6 +123,8 @@ const struct sysctl_bounded_args ipctl_vars[] = {
 	{ IPCTL_ARPDOWN, &arpt_down, 0, INT_MAX },
 };
 
+struct niqueue ipintrq = NIQUEUE_INITIALIZER(IPQ_MAXLEN, NETISR_IP);
+
 struct pool ipqent_pool;
 struct pool ipq_pool;
 
@@ -143,8 +138,14 @@ static struct mbuf_queue	ipsendraw_mq;
 extern struct niqueue		arpinq;
 
 int	ip_ours(struct mbuf **, int *, int, int);
+int	ip_local(struct mbuf **, int *, int, int);
 int	ip_dooptions(struct mbuf *, struct ifnet *);
 int	in_ouraddr(struct mbuf *, struct ifnet *, struct rtentry **);
+
+int		ip_fragcheck(struct mbuf **, int *);
+struct mbuf *	ip_reass(struct ipqent *, struct ipq *);
+void		ip_freef(struct ipq *);
+void		ip_flush(void);
 
 static void ip_send_dispatch(void *);
 static void ip_sendraw_dispatch(void *);
@@ -202,9 +203,6 @@ ip_init(void)
 		    pr->pr_protocol < IPPROTO_MAX)
 			ip_protox[pr->pr_protocol] = pr - inetsw;
 	LIST_INIT(&ipq);
-	if (ip_mtudisc != 0)
-		ip_mtudisc_timeout_q =
-		    rt_timer_queue_create(ip_mtudisc_timeout);
 
 	/* Fill in list of ports not to allocate dynamically. */
 	memset(&baddynamicports, 0, sizeof(baddynamicports));
@@ -227,6 +225,52 @@ ip_init(void)
 #ifdef IPSEC
 	ipsec_init();
 #endif
+#ifdef MROUTING
+	rt_timer_queue_init(&ip_mrouterq, MCAST_EXPIRE_FREQUENCY,
+	    &mfc_expire_route);
+#endif
+}
+
+/*
+ * Enqueue packet for local delivery.  Queuing is used as a boundary
+ * between the network layer (input/forward path) running with
+ * NET_LOCK_SHARED() and the transport layer needing it exclusively.
+ */
+int
+ip_ours(struct mbuf **mp, int *offp, int nxt, int af)
+{
+	nxt = ip_fragcheck(mp, offp);
+	if (nxt == IPPROTO_DONE)
+		return IPPROTO_DONE;
+
+	/* We are already in a IPv4/IPv6 local deliver loop. */
+	if (af != AF_UNSPEC)
+		return ip_local(mp, offp, nxt, af);
+
+	niq_enqueue(&ipintrq, *mp);
+	*mp = NULL;
+	return IPPROTO_DONE;
+}
+
+/*
+ * Dequeue and process locally delivered packets.
+ * This is called with exclusive NET_LOCK().
+ */
+void
+ipintr(void)
+{
+	struct mbuf *m;
+	int off, nxt;
+
+	while ((m = niq_dequeue(&ipintrq)) != NULL) {
+#ifdef DIAGNOSTIC
+		if ((m->m_flags & M_PKTHDR) == 0)
+			panic("ipintr no HDR");
+#endif
+		off = 0;
+		nxt = ip_local(&m, &off, IPPROTO_IPV4, AF_UNSPEC);
+		KASSERT(nxt == IPPROTO_DONE);
+	}
 }
 
 /*
@@ -514,31 +558,68 @@ ip_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
  * If fragmented try to reassemble.  Pass to next level.
  */
 int
-ip_ours(struct mbuf **mp, int *offp, int nxt, int af)
+ip_local(struct mbuf **mp, int *offp, int nxt, int af)
 {
-	struct mbuf *m = *mp;
-	struct ip *ip = mtod(m, struct ip *);
+	struct ip *ip;
+
+	ip = mtod(*mp, struct ip *);
+	*offp = ip->ip_hl << 2;
+	nxt = ip->ip_p;
+
+	/* Check whether we are already in a IPv4/IPv6 local deliver loop. */
+	if (af == AF_UNSPEC)
+		nxt = ip_deliver(mp, offp, nxt, AF_INET);
+	return nxt;
+}
+
+int
+ip_fragcheck(struct mbuf **mp, int *offp)
+{
+	struct ip *ip;
 	struct ipq *fp;
 	struct ipqent *ipqe;
-	int mff, hlen;
+	int hlen;
+	uint16_t mff;
 
+	ip = mtod(*mp, struct ip *);
 	hlen = ip->ip_hl << 2;
 
 	/*
-	 * If offset or IP_MF are set, must reassemble.
+	 * If offset or more fragments are set, must reassemble.
 	 * Otherwise, nothing need be done.
 	 * (We could look in the reassembly queue to see
 	 * if the packet was previously fragmented,
 	 * but it's not worth the time; just let them time out.)
 	 */
-	if (ip->ip_off &~ htons(IP_DF | IP_RF)) {
-		if (m->m_flags & M_EXT) {		/* XXX */
-			if ((m = *mp = m_pullup(m, hlen)) == NULL) {
+	if (ISSET(ip->ip_off, htons(IP_OFFMASK | IP_MF))) {
+		if ((*mp)->m_flags & M_EXT) {		/* XXX */
+			if ((*mp = m_pullup(*mp, hlen)) == NULL) {
 				ipstat_inc(ips_toosmall);
 				return IPPROTO_DONE;
 			}
-			ip = mtod(m, struct ip *);
+			ip = mtod(*mp, struct ip *);
 		}
+
+		/*
+		 * Adjust ip_len to not reflect header,
+		 * set ipqe_mff if more fragments are expected,
+		 * convert offset of this to bytes.
+		 */
+		ip->ip_len = htons(ntohs(ip->ip_len) - hlen);
+		mff = ISSET(ip->ip_off, htons(IP_MF));
+		if (mff) {
+			/*
+			 * Make sure that fragments have a data length
+			 * that's a non-zero multiple of 8 bytes.
+			 */
+			if (ntohs(ip->ip_len) == 0 ||
+			    (ntohs(ip->ip_len) & 0x7) != 0) {
+				ipstat_inc(ips_badfrags);
+				m_freemp(mp);
+				return IPPROTO_DONE;
+			}
+		}
+		ip->ip_off = htons(ntohs(ip->ip_off) << 3);
 
 		mtx_enter(&ipq_mutex);
 
@@ -553,26 +634,6 @@ ip_ours(struct mbuf **mp, int *offp, int nxt, int af)
 			    ip->ip_p == fp->ipq_p)
 				break;
 		}
-
-		/*
-		 * Adjust ip_len to not reflect header,
-		 * set ipqe_mff if more fragments are expected,
-		 * convert offset of this to bytes.
-		 */
-		ip->ip_len = htons(ntohs(ip->ip_len) - hlen);
-		mff = (ip->ip_off & htons(IP_MF)) != 0;
-		if (mff) {
-			/*
-			 * Make sure that fragments have a data length
-			 * that's a non-zero multiple of 8 bytes.
-			 */
-			if (ntohs(ip->ip_len) == 0 ||
-			    (ntohs(ip->ip_len) & 0x7) != 0) {
-				ipstat_inc(ips_badfrags);
-				goto bad;
-			}
-		}
-		ip->ip_off = htons(ntohs(ip->ip_off) << 3);
 
 		/*
 		 * If datagram marked as having more fragments
@@ -594,28 +655,26 @@ ip_ours(struct mbuf **mp, int *offp, int nxt, int af)
 			}
 			ip_frags++;
 			ipqe->ipqe_mff = mff;
-			ipqe->ipqe_m = m;
+			ipqe->ipqe_m = *mp;
 			ipqe->ipqe_ip = ip;
-			m = *mp = ip_reass(ipqe, fp);
-			if (m == NULL)
+			*mp = ip_reass(ipqe, fp);
+			if (*mp == NULL)
 				goto bad;
 			ipstat_inc(ips_reassembled);
-			ip = mtod(m, struct ip *);
+			ip = mtod(*mp, struct ip *);
 			hlen = ip->ip_hl << 2;
 			ip->ip_len = htons(ntohs(ip->ip_len) + hlen);
-		} else
-			if (fp)
+		} else {
+			if (fp != NULL)
 				ip_freef(fp);
+		}
 
 		mtx_leave(&ipq_mutex);
 	}
 
 	*offp = hlen;
-	nxt = ip->ip_p;
-	/* Check whether we are already in a IPv4/IPv6 local deliver loop. */
-	if (af == AF_UNSPEC)
-		nxt = ip_deliver(mp, offp, nxt, AF_INET);
-	return nxt;
+	return ip->ip_p;
+
  bad:
 	mtx_leave(&ipq_mutex);
 	m_freemp(mp);
@@ -637,6 +696,8 @@ ip_deliver(struct mbuf **mp, int *offp, int nxt, int af)
 #ifdef INET6
 	int nest = 0;
 #endif /* INET6 */
+
+	NET_ASSERT_LOCKED_EXCLUSIVE();
 
 	/* pf might have modified stuff, might have to chksum */
 	switch (af) {
@@ -1311,8 +1372,10 @@ save_rte(struct mbuf *m, u_char *option, struct in_addr dst)
 		return;
 
 	mtag = m_tag_get(PACKET_TAG_SRCROUTE, sizeof(*isr), M_NOWAIT);
-	if (mtag == NULL)
+	if (mtag == NULL) {
+		ipstat_inc(ips_idropped);
 		return;
+	}
 	isr = (struct ip_srcrt *)(mtag + 1);
 
 	memcpy(isr->isr_hdr, option, olen);
@@ -1345,8 +1408,10 @@ ip_srcroute(struct mbuf *m0)
 	if (isr->isr_nhops == 0)
 		return (NULL);
 	m = m_get(M_DONTWAIT, MT_SOOPTS);
-	if (m == NULL)
+	if (m == NULL) {
+		ipstat_inc(ips_idropped);
 		return (NULL);
+	}
 
 #define OPTSIZ	(sizeof(isr->isr_nop) + sizeof(isr->isr_hdr))
 
@@ -1436,7 +1501,7 @@ ip_forward(struct mbuf *m, struct ifnet *ifp, struct rtentry *rt, int srcrt)
 	struct ip *ip = mtod(m, struct ip *);
 	struct sockaddr_in *sin;
 	struct route ro;
-	int error, type = 0, code = 0, destmtu = 0, fake = 0, len;
+	int error = 0, type = 0, code = 0, destmtu = 0, fake = 0, len;
 	u_int32_t dest;
 
 	dest = 0;
@@ -1535,10 +1600,45 @@ ip_forward(struct mbuf *m, struct ifnet *ifp, struct rtentry *rt, int srcrt)
 		goto freecopy;
 
 	switch (error) {
-
 	case 0:				/* forwarded, but need redirect */
 		/* type, code set above */
 		break;
+
+	case EMSGSIZE:
+		type = ICMP_UNREACH;
+		code = ICMP_UNREACH_NEEDFRAG;
+		if (rt != NULL) {
+			if (rt->rt_mtu) {
+				destmtu = rt->rt_mtu;
+			} else {
+				struct ifnet *destifp;
+
+				destifp = if_get(rt->rt_ifidx);
+				if (destifp != NULL)
+					destmtu = destifp->if_mtu;
+				if_put(destifp);
+			}
+		}
+		ipstat_inc(ips_cantfrag);
+		if (destmtu == 0)
+			goto freecopy;
+		break;
+
+	case EACCES:
+		/*
+		 * pf(4) blocked the packet. There is no need to send an ICMP
+		 * packet back since pf(4) takes care of it.
+		 */
+		goto freecopy;
+
+	case ENOBUFS:
+		/*
+		 * a router should not generate ICMP_SOURCEQUENCH as
+		 * required in RFC1812 Requirements for IP Version 4 Routers.
+		 * source quench could be a big problem under DoS attacks,
+		 * or the underlying interface is rate-limited.
+		 */
+		goto freecopy;
 
 	case ENETUNREACH:		/* shouldn't happen, checked above */
 	case EHOSTUNREACH:
@@ -1548,44 +1648,7 @@ ip_forward(struct mbuf *m, struct ifnet *ifp, struct rtentry *rt, int srcrt)
 		type = ICMP_UNREACH;
 		code = ICMP_UNREACH_HOST;
 		break;
-
-	case EMSGSIZE:
-		type = ICMP_UNREACH;
-		code = ICMP_UNREACH_NEEDFRAG;
-
-#ifdef IPSEC
-		if (rt != NULL) {
-			if (rt->rt_mtu)
-				destmtu = rt->rt_mtu;
-			else {
-				struct ifnet *destifp;
-
-				destifp = if_get(rt->rt_ifidx);
-				if (destifp != NULL)
-					destmtu = destifp->if_mtu;
-				if_put(destifp);
-			}
-		}
-#endif /*IPSEC*/
-		ipstat_inc(ips_cantfrag);
-		break;
-
-	case EACCES:
-		/*
-		 * pf(4) blocked the packet. There is no need to send an ICMP
-		 * packet back since pf(4) takes care of it.
-		 */
-		goto freecopy;
-	case ENOBUFS:
-		/*
-		 * a router should not generate ICMP_SOURCEQUENCH as
-		 * required in RFC1812 Requirements for IP Version 4 Routers.
-		 * source quench could be a big problem under DoS attacks,
-		 * or the underlying interface is rate-limited.
-		 */
-		goto freecopy;
 	}
-
 	mcopy = m_copym(&mfake, 0, len, M_DONTWAIT);
 	if (mcopy)
 		icmp_error(mcopy, type, code, dest, destmtu);
@@ -1612,36 +1675,24 @@ ip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 
 	switch (name[0]) {
 	case IPCTL_SOURCEROUTE:
-		/*
-		 * Don't allow this to change in a secure environment.
-		 */
-		if (newp && securelevel > 0)
-			return (EPERM);
 		NET_LOCK();
-		error = sysctl_int(oldp, oldlenp, newp, newlen,
+		error = sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
 		    &ip_dosourceroute);
 		NET_UNLOCK();
 		return (error);
 	case IPCTL_MTUDISC:
 		NET_LOCK();
-		error = sysctl_int(oldp, oldlenp, newp, newlen,
-		    &ip_mtudisc);
-		if (ip_mtudisc != 0 && ip_mtudisc_timeout_q == NULL) {
-			ip_mtudisc_timeout_q =
-			    rt_timer_queue_create(ip_mtudisc_timeout);
-		} else if (ip_mtudisc == 0 && ip_mtudisc_timeout_q != NULL) {
-			rt_timer_queue_destroy(ip_mtudisc_timeout_q);
-			ip_mtudisc_timeout_q = NULL;
-		}
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &ip_mtudisc);
+		if (ip_mtudisc == 0)
+			rt_timer_queue_flush(&ip_mtudisc_timeout_q);
 		NET_UNLOCK();
 		return error;
 	case IPCTL_MTUDISCTIMEOUT:
 		NET_LOCK();
-		error = sysctl_int(oldp, oldlenp, newp, newlen,
-		   &ip_mtudisc_timeout);
-		if (ip_mtudisc_timeout_q != NULL)
-			rt_timer_queue_change(ip_mtudisc_timeout_q,
-					      ip_mtudisc_timeout);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &ip_mtudisc_timeout, 0, INT_MAX);
+		rt_timer_queue_change(&ip_mtudisc_timeout_q,
+		    ip_mtudisc_timeout);
 		NET_UNLOCK();
 		return (error);
 #ifdef IPSEC
@@ -1665,7 +1716,8 @@ ip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		    newlen));
 #endif
 	case IPCTL_IFQUEUE:
-		return (EOPNOTSUPP);
+		return (sysctl_niq(name + 1, namelen - 1,
+		    oldp, oldlenp, newp, newlen, &ipintrq));
 	case IPCTL_ARPQUEUE:
 		return (sysctl_niq(name + 1, namelen - 1,
 		    oldp, oldlenp, newp, newlen, &arpinq));
@@ -1817,7 +1869,6 @@ ip_send_do_dispatch(void *xmq, int flags)
 	struct mbuf *m;
 	struct mbuf_list ml;
 	struct m_tag *mtag;
-	u_int32_t ipsecflowinfo = 0;
 
 	mq_delist(mq, &ml);
 	if (ml_empty(&ml))
@@ -1825,6 +1876,8 @@ ip_send_do_dispatch(void *xmq, int flags)
 
 	NET_LOCK();
 	while ((m = ml_dequeue(&ml)) != NULL) {
+		u_int32_t ipsecflowinfo = 0;
+
 		if ((mtag = m_tag_find(m, PACKET_TAG_IPSEC_FLOWINFO, NULL))
 		    != NULL) {
 			ipsecflowinfo = *(u_int32_t *)(mtag + 1);

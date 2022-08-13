@@ -1,4 +1,4 @@
-/*	$OpenBSD: repo.c,v 1.9 2021/08/12 15:27:15 claudio Exp $ */
+/*	$OpenBSD: repo.c,v 1.35 2022/07/17 10:32:45 jsg Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <fts.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,7 @@
 extern struct stats	stats;
 extern int		noop;
 extern int		rrdpon;
+extern int		repo_timeout;
 
 enum repo_state {
 	REPO_LOADING = 0,
@@ -56,22 +58,20 @@ struct rrdprepo {
 	SLIST_ENTRY(rrdprepo)	 entry;
 	char			*notifyuri;
 	char			*basedir;
-	char			*temp;
-	struct filepath_tree	 added;
 	struct filepath_tree	 deleted;
-	size_t			 id;
+	unsigned int		 id;
 	enum repo_state		 state;
 };
-SLIST_HEAD(, rrdprepo)	rrdprepos = SLIST_HEAD_INITIALIZER(rrdprepos);
+static SLIST_HEAD(, rrdprepo)	rrdprepos = SLIST_HEAD_INITIALIZER(rrdprepos);
 
 struct rsyncrepo {
 	SLIST_ENTRY(rsyncrepo)	 entry;
 	char			*repouri;
 	char			*basedir;
-	size_t			 id;
+	unsigned int		 id;
 	enum repo_state		 state;
 };
-SLIST_HEAD(, rsyncrepo)	rsyncrepos = SLIST_HEAD_INITIALIZER(rsyncrepos);
+static SLIST_HEAD(, rsyncrepo)	rsyncrepos = SLIST_HEAD_INITIALIZER(rsyncrepos);
 
 struct tarepo {
 	SLIST_ENTRY(tarepo)	 entry;
@@ -81,24 +81,31 @@ struct tarepo {
 	char			**uri;
 	size_t			 urisz;
 	size_t			 uriidx;
-	size_t			 id;
+	unsigned int		 id;
 	enum repo_state		 state;
 };
-SLIST_HEAD(, tarepo)	tarepos = SLIST_HEAD_INITIALIZER(tarepos);
+static SLIST_HEAD(, tarepo)	tarepos = SLIST_HEAD_INITIALIZER(tarepos);
 
-struct	repo {
+struct repo {
 	SLIST_ENTRY(repo)	 entry;
-	char			*repouri;	/* CA repository base URI */
+	char			*repouri;
+	char			*notifyuri;
+	char			*basedir;
 	const struct rrdprepo	*rrdp;
 	const struct rsyncrepo	*rsync;
 	const struct tarepo	*ta;
 	struct entityq		 queue;		/* files waiting for repo */
-	size_t			 id;		/* identifier */
+	time_t			 alarm;		/* sync timeout */
+	int			 talid;
+	unsigned int		 id;		/* identifier */
 };
-SLIST_HEAD(, repo)	repos = SLIST_HEAD_INITIALIZER(repos);
+static SLIST_HEAD(, repo)	repos = SLIST_HEAD_INITIALIZER(repos);
 
 /* counter for unique repo id */
-size_t			repoid;
+unsigned int		repoid;
+
+static struct rsyncrepo	*rsync_get(const char *, const char *);
+static void		 remove_contents(char *);
 
 /*
  * Database of all file path accessed during a run.
@@ -145,9 +152,8 @@ filepath_add(struct filepath_tree *tree, char *file)
 static struct filepath *
 filepath_find(struct filepath_tree *tree, char *file)
 {
-	struct filepath needle;
+	struct filepath needle = { .file = file };
 
-	needle.file = file;
 	return RB_FIND(filepath_tree, tree, &needle);
 }
 
@@ -158,26 +164,6 @@ static int
 filepath_exists(struct filepath_tree *tree, char *file)
 {
 	return filepath_find(tree, file) != NULL;
-}
-
-/*
- * Return true if a filepath entry exists that starts with path.
- */
-static int
-filepath_dir_exists(struct filepath_tree *tree, char *path)
-{
-	struct filepath needle;
-	struct filepath *res;
-
-	needle.file = path;
-	res = RB_NFIND(filepath_tree, tree, &needle);
-	while (res != NULL && strstr(res->file, path) == res->file) {
-		/* make sure that filepath actually is in that path */
-		if (res->file[strlen(path)] == '/')
-			return 1;
-		res = RB_NEXT(filepath_tree, tree, res);
-	}
-	return 0;
 }
 
 /*
@@ -207,26 +193,15 @@ RB_GENERATE(filepath_tree, filepath, entry, filepathcmp);
 
 /*
  * Function to hash a string into a unique directory name.
- * prefixed with dir.
+ * Returned hash needs to be freed.
  */
 static char *
-hash_dir(const char *uri, const char *dir)
+hash_dir(const char *uri)
 {
-	const char hex[] = "0123456789abcdef";
 	unsigned char m[SHA256_DIGEST_LENGTH];
-	char hash[SHA256_DIGEST_LENGTH * 2 + 1];
-	char *out;
-	size_t i;
 
 	SHA256(uri, strlen(uri), m);
-	for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-		hash[i * 2] = hex[m[i] >> 4];
-		hash[i * 2 + 1] = hex[m[i] & 0xf];
-	}
-	hash[SHA256_DIGEST_LENGTH * 2] = '\0';
-
-	asprintf(&out, "%s/%s", dir, hash);
-	return out;
+	return hex_encode(m, sizeof(m));
 }
 
 /*
@@ -234,13 +209,30 @@ hash_dir(const char *uri, const char *dir)
  * as prefix. Skip the proto:// in URI but keep everything else.
  */
 static char *
-rsync_dir(const char *uri, const char *dir)
+repo_dir(const char *uri, const char *dir, int hash)
 {
-	char *local, *out;
+	const char *local;
+	char *out, *hdir = NULL;
 
-	local = strchr(uri, ':') + strlen("://");
+	if (hash) {
+		local = hdir = hash_dir(uri);
+	} else {
+		local = strchr(uri, ':');
+		if (local != NULL)
+			local += strlen("://");
+		else
+			local = uri;
+	}
 
-	asprintf(&out, "%s/%s", dir, local);
+	if (dir == NULL) {
+		if ((out = strdup(local)) == NULL)
+			err(1, NULL);
+	} else {
+		if (asprintf(&out, "%s/%s", dir, local) == -1)
+			err(1, NULL);
+	}
+
+	free(hdir);
 	return out;
 }
 
@@ -249,7 +241,7 @@ rsync_dir(const char *uri, const char *dir)
  * This functions alters the path temporarily.
  */
 static int
-repo_mkpath(char *file)
+repo_mkpath(int fd, char *file)
 {
 	char *slash;
 
@@ -257,12 +249,57 @@ repo_mkpath(char *file)
 	slash = strrchr(file, '/');
 	assert(slash != NULL);
 	*slash = '\0';
-	if (mkpath(file) == -1) {
+	if (mkpathat(fd, file) == -1) {
 		warn("mkpath %s", file);
 		return -1;
 	}
 	*slash = '/';
 	return 0;
+}
+
+/*
+ * Return the state of a repository.
+ */
+static enum repo_state
+repo_state(struct repo *rp)
+{
+	if (rp->ta)
+		return rp->ta->state;
+	if (rp->rsync)
+		return rp->rsync->state;
+	if (rp->rrdp)
+		return rp->rrdp->state;
+	/* No backend so sync is by definition done. */
+	return REPO_DONE;
+}
+
+/*
+ * Function called once a repository is done with the sync. Either
+ * successfully or after failure.
+ */
+static void
+repo_done(const void *vp, int ok)
+{
+	struct repo *rp;
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (vp == rp->ta)
+			entityq_flush(&rp->queue, rp);
+		if (vp == rp->rsync)
+			entityq_flush(&rp->queue, rp);
+		if (vp == rp->rrdp) {
+			if (!ok) {
+				/* try to fall back to rsync */
+				rp->rrdp = NULL;
+				rp->rsync = rsync_get(rp->repouri,
+				    rp->basedir);
+				/* need to check if it was already loaded */
+				if (repo_state(rp) != REPO_LOADING)
+					entityq_flush(&rp->queue, rp);
+			} else
+				entityq_flush(&rp->queue, rp);
+		}
+	}
 }
 
 /*
@@ -280,52 +317,11 @@ ta_filename(const struct tarepo *tr, int temp)
 	assert(file);
 
 	if (asprintf(&nfile, "%s%s%s", tr->basedir, file,
-	    temp ? ".XXXXXXXX": "") == -1)
+	    temp ? ".XXXXXXXX" : "") == -1)
 		err(1, NULL);
 
 	return nfile;
 }
-
-/*
- * Build local file name base on the URI and the rrdprepo info.
- */
-static char *
-rrdp_filename(const struct rrdprepo *rr, const char *uri, int temp)
-{
-	char *nfile;
-	char *dir = rr->basedir;
-
-	if (temp)
-		dir = rr->temp;
-
-	if (!valid_uri(uri, strlen(uri), "rsync://")) {
-		warnx("%s: bad URI %s", rr->basedir, uri);
-		return NULL;
-	}
-
-	uri += strlen("rsync://");	/* skip proto */
-	if (asprintf(&nfile, "%s/%s", dir, uri) == -1)
-		err(1, NULL);
-	return nfile;
-}
-
-/*
- * Build RRDP state file name based on the repo info.
- * If temp is set add Xs for mkostemp.
- */
-static char *
-rrdp_state_filename(const struct rrdprepo *rr, int temp)
-{
-	char *nfile;
-
-	if (asprintf(&nfile, "%s/.state%s", rr->basedir,
-	    temp ? ".XXXXXXXX": "") == -1)
-		err(1, NULL);
-
-	return nfile;
-}
-
-
 
 static void
 ta_fetch(struct tarepo *tr)
@@ -339,14 +335,10 @@ ta_fetch(struct tarepo *tr)
 	}
 
 	if (tr->uriidx >= tr->urisz) {
-		struct repo *rp;
-
 		tr->state = REPO_FAILED;
 		logx("ta/%s: fallback to cache", tr->descr);
 
-		SLIST_FOREACH(rp, &repos, entry)
-			if (rp->ta == tr)
-				entityq_flush(&rp->queue, rp);
+		repo_done(tr, 0);
 		return;
 	}
 
@@ -357,7 +349,7 @@ ta_fetch(struct tarepo *tr)
 		 * Create destination location.
 		 * Build up the tree to this point.
 		 */
-		rsync_fetch(tr->id, tr->uri[tr->uriidx], tr->basedir);
+		rsync_fetch(tr->id, tr->uri[tr->uriidx], tr->basedir, NULL);
 	} else {
 		int fd;
 
@@ -382,9 +374,6 @@ ta_get(struct tal *tal)
 
 	/* no need to look for possible other repo */
 
-	if (tal->urisz == 0)
-		errx(1, "TAL %s has no URI", tal->descr);
-
 	if ((tr = calloc(1, sizeof(*tr))) == NULL)
 		err(1, NULL);
 	tr->id = ++repoid;
@@ -392,32 +381,21 @@ ta_get(struct tal *tal)
 
 	if ((tr->descr = strdup(tal->descr)) == NULL)
 		err(1, NULL);
-	if (asprintf(&tr->basedir, "ta/%s", tal->descr) == -1)
-		err(1, NULL);
+	tr->basedir = repo_dir(tal->descr, "ta", 0);
 
-	/* steal URI infromation from TAL */
+	/* steal URI information from TAL */
 	tr->urisz = tal->urisz;
 	tr->uri = tal->uri;
 	tal->urisz = 0;
 	tal->uri = NULL;
 
-	if (noop) {
-		tr->state = REPO_DONE;
-		logx("ta/%s: using cache", tr->descr);
-		/* there is nothing in the queue so no need to flush */
-	} else {
-		/* try to create base directory */
-		if (mkpath(tr->basedir) == -1)
-			warn("mkpath %s", tr->basedir);
-
-		ta_fetch(tr);
-	}
+	ta_fetch(tr);
 
 	return tr;
 }
 
 static struct tarepo *
-ta_find(size_t id)
+ta_find(unsigned int id)
 {
 	struct tarepo *tr;
 
@@ -443,7 +421,7 @@ ta_free(void)
 }
 
 static struct rsyncrepo *
-rsync_get(const char *uri)
+rsync_get(const char *uri, const char *validdir)
 {
 	struct rsyncrepo *rr;
 	char *repo;
@@ -464,29 +442,23 @@ rsync_get(const char *uri)
 	SLIST_INSERT_HEAD(&rsyncrepos, rr, entry);
 
 	rr->repouri = repo;
-	rr->basedir = rsync_dir(repo, "rsync");
+	rr->basedir = repo_dir(repo, ".rsync", 0);
 
-	if (noop) {
-		rr->state = REPO_DONE;
-		logx("%s: using cache", rr->basedir);
-		/* there is nothing in the queue so no need to flush */
-	} else {
-		/* create base directory */
-		if (mkpath(rr->basedir) == -1) {
-			warn("mkpath %s", rr->basedir);
-			rsync_finish(rr->id, 0);
-			return rr;
-		}
-
-		logx("%s: pulling from %s", rr->basedir, rr->repouri);
-		rsync_fetch(rr->id, rr->repouri, rr->basedir);
+	/* create base directory */
+	if (mkpath(rr->basedir) == -1) {
+		warn("mkpath %s", rr->basedir);
+		rsync_finish(rr->id, 0);
+		return rr;
 	}
+
+	logx("%s: pulling from %s", rr->basedir, rr->repouri);
+	rsync_fetch(rr->id, rr->repouri, rr->basedir, validdir);
 
 	return rr;
 }
 
 static struct rsyncrepo *
-rsync_find(size_t id)
+rsync_find(unsigned int id)
 {
 	struct rsyncrepo *rr;
 
@@ -509,57 +481,46 @@ rsync_free(void)
 	}
 }
 
-static int rrdprepo_fetch(struct rrdprepo *);
-
-static struct rrdprepo *
-rrdp_get(const char *uri)
+/*
+ * Build local file name base on the URI and the rrdprepo info.
+ */
+static char *
+rrdp_filename(const struct rrdprepo *rr, const char *uri, int valid)
 {
-	struct rrdprepo *rr;
+	char *nfile;
+	const char *dir = rr->basedir;
 
-	SLIST_FOREACH(rr, &rrdprepos, entry)
-		if (strcmp(rr->notifyuri, uri) == 0) {
-			if (rr->state == REPO_FAILED)
-				return NULL;
-			return rr;
-		}
-
-	if ((rr = calloc(1, sizeof(*rr))) == NULL)
-		err(1, NULL);
-
-	rr->id = ++repoid;
-	SLIST_INSERT_HEAD(&rrdprepos, rr, entry);
-
-	if ((rr->notifyuri = strdup(uri)) == NULL)
-		err(1, NULL);
-	rr->basedir = hash_dir(uri, "rrdp");
-
-	RB_INIT(&rr->added);
-	RB_INIT(&rr->deleted);
-
-	if (noop) {
-		rr->state = REPO_DONE;
-		logx("%s: using cache", rr->notifyuri);
-		/* there is nothing in the queue so no need to flush */
+	if (!valid_uri(uri, strlen(uri), "rsync://"))
+		errx(1, "%s: bad URI %s", rr->basedir, uri);
+	uri += strlen("rsync://");	/* skip proto */
+	if (valid) {
+		if ((nfile = strdup(uri)) == NULL)
+			err(1, NULL);
 	} else {
-		/* create base directory */
-		if (mkpath(rr->basedir) == -1) {
-			warn("mkpath %s", rr->basedir);
-			rrdp_finish(rr->id, 0);
-			return rr;
-		}
-		if (rrdprepo_fetch(rr) == -1) {
-			rrdp_finish(rr->id, 0);
-			return rr;
-		}
-
-		logx("%s: pulling from %s", rr->notifyuri, "network");
+		if (asprintf(&nfile, "%s/%s", dir, uri) == -1)
+			err(1, NULL);
 	}
+	return nfile;
+}
 
-	return rr;
+/*
+ * Build RRDP state file name based on the repo info.
+ * If temp is set add Xs for mkostemp.
+ */
+static char *
+rrdp_state_filename(const struct rrdprepo *rr, int temp)
+{
+	char *nfile;
+
+	if (asprintf(&nfile, "%s/.state%s", rr->basedir,
+	    temp ? ".XXXXXXXX" : "") == -1)
+		err(1, NULL);
+
+	return nfile;
 }
 
 static struct rrdprepo *
-rrdp_find(size_t id)
+rrdp_find(unsigned int id)
 {
 	struct rrdprepo *rr;
 
@@ -579,35 +540,53 @@ rrdp_free(void)
 
 		free(rr->notifyuri);
 		free(rr->basedir);
-		free(rr->temp);
 
-		filepath_free(&rr->added);
 		filepath_free(&rr->deleted);
 
 		free(rr);
 	}
 }
 
-static struct rrdprepo *
-rrdp_basedir(const char *dir)
+/*
+ * Check if a directory is an active rrdp repository.
+ * Returns 1 if found else 0.
+ */
+static int
+rrdp_is_active(const char *dir)
 {
 	struct rrdprepo *rr;
 
 	SLIST_FOREACH(rr, &rrdprepos, entry)
-		if (strcmp(dir, rr->basedir) == 0) {
-			if (rr->state == REPO_FAILED)
-				return NULL;
-			return rr;
-		}
+		if (strcmp(dir, rr->basedir) == 0)
+			return rr->state != REPO_FAILED;
 
-	return NULL;
+	return 0;
+}
+
+/*
+ * Check if the URI is actually covered by one of the repositories
+ * that depend on this RRDP repository.
+ * Returns 1 if the URI is valid, 0 if no repouri matches the URI.
+ */
+static int
+rrdp_uri_valid(struct rrdprepo *rr, const char *uri)
+{
+	struct repo *rp;
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (rp->rrdp != rr)
+			continue;
+		if (strncmp(uri, rp->repouri, strlen(rp->repouri)) == 0)
+			return 1;
+	}
+	return 0;
 }
 
 /*
  * Allocate and insert a new repository.
  */
 static struct repo *
-repo_alloc(void)
+repo_alloc(int talid)
 {
 	struct repo *rp;
 
@@ -615,26 +594,13 @@ repo_alloc(void)
 		err(1, NULL);
 
 	rp->id = ++repoid;
+	rp->talid = talid;
+	rp->alarm = getmonotime() + repo_timeout;
 	TAILQ_INIT(&rp->queue);
 	SLIST_INSERT_HEAD(&repos, rp, entry);
 
 	stats.repos++;
 	return rp;
-}
-
-/*
- * Return the state of a repository.
- */
-static enum repo_state
-repo_state(struct repo *rp)
-{
-	if (rp->ta)
-		return rp->ta->state;
-	if (rp->rrdp)
-		return rp->rrdp->state;
-	if (rp->rsync)
-		return rp->rsync->state;
-	errx(1, "%s: bad repo", rp->repouri);
 }
 
 /*
@@ -704,7 +670,7 @@ fail:
  * Carefully write the RRDP session state file back.
  */
 void
-rrdp_save_state(size_t id, struct rrdp_session *state)
+rrdp_save_state(unsigned int id, struct rrdp_session *state)
 {
 	struct rrdprepo *rr;
 	char *temp, *file;
@@ -713,7 +679,7 @@ rrdp_save_state(size_t id, struct rrdp_session *state)
 
 	rr = rrdp_find(id);
 	if (rr == NULL)
-		errx(1, "non-existant rrdp repo %zu", id);
+		errx(1, "non-existant rrdp repo %u", id);
 
 	file = rrdp_state_filename(rr, 0);
 	temp = rrdp_state_filename(rr, 1);
@@ -722,7 +688,7 @@ rrdp_save_state(size_t id, struct rrdp_session *state)
 		warn("mkostemp %s", temp);
 		goto fail;
 	}
-	(void) fchmod(fd, 0644);
+	(void)fchmod(fd, 0644);
 	f = fdopen(fd, "w");
 	if (f == NULL)
 		err(1, "fdopen");
@@ -756,6 +722,65 @@ fail:
 	free(file);
 }
 
+static struct rrdprepo *
+rrdp_get(const char *uri)
+{
+	struct rrdp_session state = { 0 };
+	struct rrdprepo *rr;
+
+	SLIST_FOREACH(rr, &rrdprepos, entry)
+		if (strcmp(rr->notifyuri, uri) == 0) {
+			if (rr->state == REPO_FAILED)
+				return NULL;
+			return rr;
+		}
+
+	if ((rr = calloc(1, sizeof(*rr))) == NULL)
+		err(1, NULL);
+
+	rr->id = ++repoid;
+	SLIST_INSERT_HEAD(&rrdprepos, rr, entry);
+
+	if ((rr->notifyuri = strdup(uri)) == NULL)
+		err(1, NULL);
+	rr->basedir = repo_dir(uri, ".rrdp", 1);
+
+	RB_INIT(&rr->deleted);
+
+	/* create base directory */
+	if (mkpath(rr->basedir) == -1) {
+		warn("mkpath %s", rr->basedir);
+		rrdp_finish(rr->id, 0);
+		return rr;
+	}
+
+	/* parse state and start the sync */
+	rrdp_parse_state(rr, &state);
+	rrdp_fetch(rr->id, rr->notifyuri, rr->notifyuri, &state);
+	free(state.session_id);
+	free(state.last_mod);
+
+	logx("%s: pulling from %s", rr->notifyuri, "network");
+
+	return rr;
+}
+
+/*
+ * Remove RRDP repo and start over.
+ */
+void
+rrdp_clear(unsigned int id)
+{
+	struct rrdprepo *rr;
+
+	rr = rrdp_find(id);
+	if (rr == NULL)
+		errx(1, "non-existant rrdp repo %u", id);
+
+	/* remove rrdp repository contents */
+	remove_contents(rr->basedir);
+}
+
 /*
  * Write a file into the temporary RRDP dir but only after checking
  * its hash (if required). The function also makes sure that the file
@@ -763,43 +788,44 @@ fail:
  * Returns 1 on success, 0 if the repo is corrupt, -1 on IO error
  */
 int
-rrdp_handle_file(size_t id, enum publish_type pt, char *uri,
+rrdp_handle_file(unsigned int id, enum publish_type pt, char *uri,
     char *hash, size_t hlen, char *data, size_t dlen)
 {
 	struct rrdprepo *rr;
 	struct filepath *fp;
 	ssize_t s;
-	char *fn;
-	int fd = -1;
+	char *fn = NULL;
+	int fd = -1, try = 0;
 
 	rr = rrdp_find(id);
 	if (rr == NULL)
-		errx(1, "non-existant rrdp repo %zu", id);
+		errx(1, "non-existant rrdp repo %u", id);
 	if (rr->state == REPO_FAILED)
 		return -1;
 
+	/* check hash of original file for updates and deletes */
 	if (pt == PUB_UPD || pt == PUB_DEL) {
 		if (filepath_exists(&rr->deleted, uri)) {
 			warnx("%s: already deleted", uri);
 			return 0;
 		}
-		fp = filepath_find(&rr->added, uri);
-		if (fp == NULL) {
-			if ((fn = rrdp_filename(rr, uri, 0)) == NULL)
+		/* try to open file first in rrdp then in valid repo */
+		do {
+			free(fn);
+			if ((fn = rrdp_filename(rr, uri, try++)) == NULL)
 				return 0;
-		} else {
-			filepath_put(&rr->added, fp);
-			if ((fn = rrdp_filename(rr, uri, 1)) == NULL)
-				return 0;
-		}
-		if (!valid_filehash(fn, hash, hlen)) {
-			warnx("%s: bad message digest", fn);
+			fd = open(fn, O_RDONLY);
+		} while (fd == -1 && try < 2);
+
+		if (!valid_filehash(fd, hash, hlen)) {
+			warnx("%s: bad file digest for %s", rr->notifyuri, fn);
 			free(fn);
 			return 0;
 		}
 		free(fn);
 	}
 
+	/* write new content or mark uri as deleted. */
 	if (pt == PUB_DEL) {
 		filepath_add(&rr->deleted, uri);
 	} else {
@@ -807,11 +833,11 @@ rrdp_handle_file(size_t id, enum publish_type pt, char *uri,
 		if (fp != NULL)
 			filepath_put(&rr->deleted, fp);
 
-		/* add new file to temp dir */
-		if ((fn = rrdp_filename(rr, uri, 1)) == NULL)
+		/* add new file to rrdp dir */
+		if ((fn = rrdp_filename(rr, uri, 0)) == NULL)
 			return 0;
 
-		if (repo_mkpath(fn) == -1)
+		if (repo_mkpath(AT_FDCWD, fn) == -1)
 			goto fail;
 
 		fd = open(fn, O_WRONLY|O_CREAT|O_TRUNC, 0644);
@@ -828,7 +854,6 @@ rrdp_handle_file(size_t id, enum publish_type pt, char *uri,
 		if ((size_t)s != dlen)	/* impossible */
 			errx(1, "short write %s", fn);
 		free(fn);
-		filepath_add(&rr->added, uri);
 	}
 
 	return 1;
@@ -842,176 +867,87 @@ fail:
 }
 
 /*
- * Initiate a RRDP sync, create the required temporary directory and
- * parse a possible state file before sending the request to the RRDP process.
- */
-static int
-rrdprepo_fetch(struct rrdprepo *rr)
-{
-	struct rrdp_session state = { 0 };
-
-	if (asprintf(&rr->temp, "%s.XXXXXXXX", rr->basedir) == -1)
-		err(1, NULL);
-	if (mkdtemp(rr->temp) == NULL) {
-		warn("mkdtemp %s", rr->temp);
-		return -1;
-	}
-
-	rrdp_parse_state(rr, &state);
-	rrdp_fetch(rr->id, rr->notifyuri, rr->notifyuri, &state);
-
-	free(state.session_id);
-	free(state.last_mod);
-
-	return 0;
-}
-
-static int
-rrdp_merge_repo(struct rrdprepo *rr)
-{
-	struct filepath *fp, *nfp;
-	char *fn, *rfn;
-
-	RB_FOREACH_SAFE(fp, filepath_tree, &rr->added, nfp) {
-		fn = rrdp_filename(rr, fp->file, 1);
-		rfn = rrdp_filename(rr, fp->file, 0);
-
-		if (fn == NULL || rfn == NULL)
-			errx(1, "bad filepath");	/* should not happen */
-
-		if (repo_mkpath(rfn) == -1) {
-			goto fail;
-		}
-
-		if (rename(fn, rfn) == -1) {
-			warn("rename %s", rfn);
-			goto fail;
-		}
-
-		free(rfn);
-		free(fn);
-		filepath_put(&rr->added, fp);
-	}
-
-	return 1;
-
-fail:
-	free(rfn);
-	free(fn);
-	return 0;
-}
-
-static void
-rrdp_clean_temp(struct rrdprepo *rr)
-{
-	struct filepath *fp, *nfp;
-	char *fn;
-
-	filepath_free(&rr->deleted);
-
-	RB_FOREACH_SAFE(fp, filepath_tree, &rr->added, nfp) {
-		if ((fn = rrdp_filename(rr, fp->file, 1)) != NULL) {
-			if (unlink(fn) == -1)
-				warn("unlink %s", fn);
-			free(fn);
-		}
-		filepath_put(&rr->added, fp);
-	}
-}
-
-/*
  * RSYNC sync finished, either with or without success.
  */
 void
-rsync_finish(size_t id, int ok)
+rsync_finish(unsigned int id, int ok)
 {
 	struct rsyncrepo *rr;
 	struct tarepo *tr;
-	struct repo *rp;
 
 	tr = ta_find(id);
 	if (tr != NULL) {
+		/* repository changed state already, ignore request */
+		if (tr->state != REPO_LOADING)
+			return;
 		if (ok) {
 			logx("ta/%s: loaded from network", tr->descr);
 			stats.rsync_repos++;
 			tr->state = REPO_DONE;
+			repo_done(tr, 1);
 		} else {
-			logx("ta/%s: load from network failed", tr->descr);
+			warnx("ta/%s: load from network failed", tr->descr);
 			stats.rsync_fails++;
 			tr->uriidx++;
 			ta_fetch(tr);
-			return;
 		}
-		SLIST_FOREACH(rp, &repos, entry)
-			if (rp->ta == tr)
-				entityq_flush(&rp->queue, rp);
-
 		return;
 	}
 
 	rr = rsync_find(id);
 	if (rr == NULL)
-		errx(1, "unknown rsync repo %zu", id);
+		errx(1, "unknown rsync repo %u", id);
+	/* repository changed state already, ignore request */
+	if (rr->state != REPO_LOADING)
+		return;
 
 	if (ok) {
 		logx("%s: loaded from network", rr->basedir);
 		stats.rsync_repos++;
 		rr->state = REPO_DONE;
 	} else {
-		logx("%s: load from network failed, fallback to cache",
+		warnx("%s: load from network failed, fallback to cache",
 		    rr->basedir);
 		stats.rsync_fails++;
 		rr->state = REPO_FAILED;
+		/* clear rsync repo since it failed */
+		remove_contents(rr->basedir);
 	}
 
-	SLIST_FOREACH(rp, &repos, entry)
-		if (rp->rsync == rr)
-			entityq_flush(&rp->queue, rp);
+	repo_done(rr, ok);
 }
 
 /*
  * RRDP sync finshed, either with or without success.
  */
 void
-rrdp_finish(size_t id, int ok)
+rrdp_finish(unsigned int id, int ok)
 {
 	struct rrdprepo *rr;
-	struct repo *rp;
 
 	rr = rrdp_find(id);
 	if (rr == NULL)
-		errx(1, "unknown RRDP repo %zu", id);
+		errx(1, "unknown RRDP repo %u", id);
+	/* repository changed state already, ignore request */
+	if (rr->state != REPO_LOADING)
+		return;
 
-	if (ok && rrdp_merge_repo(rr)) {
+	if (ok) {
 		logx("%s: loaded from network", rr->notifyuri);
-		rr->state = REPO_DONE;
 		stats.rrdp_repos++;
-		SLIST_FOREACH(rp, &repos, entry)
-			if (rp->rrdp == rr)
-				entityq_flush(&rp->queue, rp);
-	} else if (!ok) {
-		rrdp_clean_temp(rr);
-		stats.rrdp_fails++;
-		rr->state = REPO_FAILED;
-		logx("%s: load from network failed, fallback to rsync",
-		    rr->notifyuri);
-		SLIST_FOREACH(rp, &repos, entry)
-			if (rp->rrdp == rr) {
-				rp->rrdp = NULL;
-				rp->rsync = rsync_get(rp->repouri);
-				/* need to check if it was already loaded */
-				if (repo_state(rp) != REPO_LOADING)
-					entityq_flush(&rp->queue, rp);
-			}
+		rr->state = REPO_DONE;
 	} else {
-		rrdp_clean_temp(rr);
+		warnx("%s: load from network failed, fallback to rsync",
+		    rr->notifyuri);
 		stats.rrdp_fails++;
 		rr->state = REPO_FAILED;
-		logx("%s: load from network failed", rr->notifyuri);
-		SLIST_FOREACH(rp, &repos, entry)
-			if (rp->rrdp == rr)
-				entityq_flush(&rp->queue, rp);
+		/* clear the RRDP repo since it failed */
+		remove_contents(rr->basedir);
+		/* also clear the list of deleted files */
+		filepath_free(&rr->deleted);
 	}
+
+	repo_done(rr, ok);
 }
 
 /*
@@ -1020,10 +956,9 @@ rrdp_finish(size_t id, int ok)
  * over to the rrdp process.
  */
 void
-http_finish(size_t id, enum http_result res, const char *last_mod)
+http_finish(unsigned int id, enum http_result res, const char *last_mod)
 {
 	struct tarepo *tr;
-	struct repo *rp;
 
 	tr = ta_find(id);
 	if (tr == NULL) {
@@ -1031,6 +966,10 @@ http_finish(size_t id, enum http_result res, const char *last_mod)
 		rrdp_http_done(id, res, last_mod);
 		return;
 	}
+
+	/* repository changed state already, ignore request */
+	if (tr->state != REPO_LOADING)
+		return;
 
 	/* Move downloaded TA file into place, or unlink on failure. */
 	if (res == HTTP_OK) {
@@ -1044,30 +983,27 @@ http_finish(size_t id, enum http_result res, const char *last_mod)
 		logx("ta/%s: loaded from network", tr->descr);
 		tr->state = REPO_DONE;
 		stats.http_repos++;
+		repo_done(tr, 1);
 	} else {
 		if (unlink(tr->temp) == -1 && errno != ENOENT)
 			warn("unlink %s", tr->temp);
 
 		tr->uriidx++;
-		logx("ta/%s: load from network failed", tr->descr);
+		warnx("ta/%s: load from network failed", tr->descr);
 		ta_fetch(tr);
-		return;
 	}
-
-	SLIST_FOREACH(rp, &repos, entry)
-		if (rp->ta == tr)
-			entityq_flush(&rp->queue, rp);
 }
-
-
 
 /*
  * Look up a trust anchor, queueing it for download if not found.
  */
 struct repo *
-ta_lookup(struct tal *tal)
+ta_lookup(int id, struct tal *tal)
 {
 	struct repo	*rp;
+
+	if (tal->urisz == 0)
+		errx(1, "TAL %s has no URI", tal->descr);
 
 	/* Look up in repository table. (Lookup should actually fail here) */
 	SLIST_FOREACH(rp, &repos, entry) {
@@ -1075,10 +1011,27 @@ ta_lookup(struct tal *tal)
 			return rp;
 	}
 
-	rp = repo_alloc();
+	rp = repo_alloc(id);
+	rp->basedir = repo_dir(tal->descr, "ta", 0);
 	if ((rp->repouri = strdup(tal->descr)) == NULL)
 		err(1, NULL);
+
+	/* try to create base directory */
+	if (mkpath(rp->basedir) == -1)
+		warn("mkpath %s", rp->basedir);
+
+	/* check if sync disabled ... */
+	if (noop) {
+		logx("ta/%s: using cache", rp->repouri);
+		entityq_flush(&rp->queue, rp);
+		return rp;
+	}
+
 	rp->ta = ta_get(tal);
+
+	/* need to check if it was already loaded */
+	if (repo_state(rp) != REPO_LOADING)
+		entityq_flush(&rp->queue, rp);
 
 	return rp;
 }
@@ -1087,60 +1040,142 @@ ta_lookup(struct tal *tal)
  * Look up a repository, queueing it for discovery if not found.
  */
 struct repo *
-repo_lookup(const char *uri, const char *notify)
+repo_lookup(int talid, const char *uri, const char *notify)
 {
-	struct repo *rp;
+	struct repo	*rp;
+	char		*repouri;
+	int		 nofetch = 0;
+
+	if ((repouri = rsync_base_uri(uri)) == NULL)
+		errx(1, "bad caRepository URI: %s", uri);
 
 	/* Look up in repository table. */
 	SLIST_FOREACH(rp, &repos, entry) {
-		if (strcmp(rp->repouri, uri) != 0)
+		if (strcmp(rp->repouri, repouri) != 0)
 			continue;
+		if (rp->notifyuri != NULL) {
+			if (notify == NULL)
+				continue;
+			if (strcmp(rp->notifyuri, notify) != 0)
+				continue;
+		} else if (notify != NULL)
+			continue;
+		/* found matching repo */
+		free(repouri);
 		return rp;
 	}
 
-	rp = repo_alloc();
-	if ((rp->repouri = strdup(uri)) == NULL)
-		err(1, NULL);
+	rp = repo_alloc(talid);
+	rp->basedir = repo_dir(repouri, NULL, 0);
+	rp->repouri = repouri;
+	if (notify != NULL)
+		if ((rp->notifyuri = strdup(notify)) == NULL)
+			err(1, NULL);
 
-	/* try RRDP first if available */
+	if (++talrepocnt[talid] >= MAX_REPO_PER_TAL) {
+		if (talrepocnt[talid] == MAX_REPO_PER_TAL)
+			warnx("too many repositories under %s", tals[talid]);
+		nofetch = 1;
+	}
+
+	/* try to create base directory */
+	if (mkpath(rp->basedir) == -1)
+		warn("mkpath %s", rp->basedir);
+
+	/* check if sync disabled ... */
+	if (noop || nofetch) {
+		logx("%s: using cache", rp->basedir);
+		entityq_flush(&rp->queue, rp);
+		return rp;
+	}
+
+	/* ... else try RRDP first if available then rsync */
 	if (notify != NULL)
 		rp->rrdp = rrdp_get(notify);
 	if (rp->rrdp == NULL)
-		rp->rsync = rsync_get(uri);
+		rp->rsync = rsync_get(uri, rp->basedir);
+
+	/* need to check if it was already loaded */
+	if (repo_state(rp) != REPO_LOADING)
+		entityq_flush(&rp->queue, rp);
 
 	return rp;
 }
 
 /*
- * Build local file name base on the URI and the repo info.
+ * Find repository by identifier.
+ */
+struct repo *
+repo_byid(unsigned int id)
+{
+	struct repo	*rp;
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (rp->id == id)
+			return rp;
+	}
+	return NULL;
+}
+
+/*
+ * Find repository by base path.
+ */
+static struct repo *
+repo_bypath(const char *path)
+{
+	struct repo	*rp;
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (strcmp(rp->basedir, path) == 0)
+			return rp;
+	}
+	return NULL;
+}
+
+/*
+ * Return the repository base or alternate directory.
+ * Returned string must be freed by caller.
  */
 char *
-repo_filename(const struct repo *rp, const char *uri)
+repo_basedir(const struct repo *rp, int wantvalid)
 {
-	char *nfile;
-	char *dir, *repouri;
+	char *path = NULL;
 
-	if (uri == NULL && rp->ta)
-		return ta_filename(rp->ta, 0);
-
-	assert(uri != NULL);
-	if (rp->rrdp)
-		return rrdp_filename(rp->rrdp, uri, 0);
-
-	/* must be rsync */
-	dir = rp->rsync->basedir;
-	repouri = rp->rsync->repouri;
-
-	if (strstr(uri, repouri) != uri) {
-		warnx("%s: URI %s outside of repository", repouri, uri);
-		return NULL;
+	if (!wantvalid) {
+		if (rp->ta) {
+			if ((path = strdup(rp->ta->basedir)) == NULL)
+				err(1, NULL);
+		} else if (rp->rsync) {
+			if ((path = strdup(rp->rsync->basedir)) == NULL)
+				err(1, NULL);
+		} else if (rp->rrdp) {
+			path = rrdp_filename(rp->rrdp, rp->repouri, 0);
+		} else
+			path = NULL;	/* only valid repo available */
+	} else if (rp->basedir != NULL) {
+		if ((path = strdup(rp->basedir)) == NULL)
+			err(1, NULL);
 	}
 
-	uri += strlen(repouri) + 1;	/* skip base and '/' */
+	return path;
+}
 
-	if (asprintf(&nfile, "%s/%s", dir, uri) == -1)
-		err(1, NULL);
-	return nfile;
+/*
+ * Return the repository identifier.
+ */
+unsigned int
+repo_id(const struct repo *rp)
+{
+	return rp->id;
+}
+
+/*
+ * Return the repository URI.
+ */
+const char *
+repo_uri(const struct repo *rp)
+{
+	return rp->repouri;
 }
 
 int
@@ -1153,96 +1188,301 @@ repo_queued(struct repo *rp, struct entity *p)
 	return 0;
 }
 
-static char **
-add_to_del(char **del, size_t *dsz, char *file)
+static void
+repo_fail(struct repo *rp)
 {
-	size_t i = *dsz;
+	/* reset the alarm since code may fallback to rsync */
+	rp->alarm = getmonotime() + repo_timeout;
 
-	del = reallocarray(del, i + 1, sizeof(*del));
-	if (del == NULL)
-		err(1, NULL);
-	if ((del[i] = strdup(file)) == NULL)
-		err(1, NULL);
-	*dsz = i + 1;
-	return del;
+	if (rp->ta)
+		http_finish(rp->ta->id, HTTP_FAILED, NULL);
+	else if (rp->rsync)
+		rsync_finish(rp->rsync->id, 0);
+	else if (rp->rrdp)
+		rrdp_finish(rp->rrdp->id, 0);
+	else
+		errx(1, "%s: bad repo", rp->repouri);
 }
 
-static char **
-repo_rrdp_cleanup(struct filepath_tree *tree, struct rrdprepo *rr,
-    char **del, size_t *delsz)
+int
+repo_check_timeout(int timeout)
 {
+	struct repo	*rp;
+	time_t		 now;
+
+	now = getmonotime();
+	/* Look up in repository table. (Lookup should actually fail here) */
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (repo_state(rp) == REPO_LOADING) {
+			if (rp->alarm <= now) {
+				warnx("%s: synchronisation timeout",
+				    rp->repouri);
+				repo_fail(rp);
+			} else {
+				int diff = rp->alarm - now;
+				diff *= 1000;
+				if (timeout == INFTIM || diff < timeout)
+					timeout = diff;
+			}
+		}
+	}
+	return timeout;
+}
+
+/*
+ * Delayed delete of files from RRDP. Since RRDP has no security built-in
+ * this code needs to check if this RRDP repository is actually allowed to
+ * remove the file referenced by the URI.
+ */
+static void
+repo_cleanup_rrdp(struct filepath_tree *tree)
+{
+	struct rrdprepo *rr;
 	struct filepath *fp, *nfp;
 	char *fn;
 
-	RB_FOREACH_SAFE(fp, filepath_tree, &rr->deleted, nfp) {
-		fn = rrdp_filename(rr, fp->file, 0);
-		/* temp dir will be cleaned up by repo_cleanup() */
+	SLIST_FOREACH(rr, &rrdprepos, entry) {
+		RB_FOREACH_SAFE(fp, filepath_tree, &rr->deleted, nfp) {
+			if (!rrdp_uri_valid(rr, fp->file)) {
+				warnx("%s: external URI %s", rr->notifyuri,
+				    fp->file);
+				filepath_put(&rr->deleted, fp);
+				continue;
+			}
+			/* try to remove file from rrdp repo ... */
+			fn = rrdp_filename(rr, fp->file, 0);
 
-		if (fn == NULL)
-			errx(1, "bad filepath");	/* should not happen */
+			if (unlink(fn) == -1) {
+				if (errno != ENOENT)
+					warn("unlink %s", fn);
+			} else {
+				if (verbose > 1)
+					logx("deleted %s", fn);
+				stats.del_files++;
+			}
+			free(fn);
 
-		if (!filepath_exists(tree, fn))
-			del = add_to_del(del, delsz, fn);
-		else
-			warnx("%s: referenced file supposed to be deleted", fn);
+			/* ... and from the valid repository if unused. */
+			fn = rrdp_filename(rr, fp->file, 1);
+			if (!filepath_exists(tree, fn)) {
+				if (unlink(fn) == -1) {
+					if (errno != ENOENT)
+						warn("unlink %s", fn);
+				} else {
+					if (verbose > 1)
+						logx("deleted %s", fn);
+					stats.del_files++;
+				}
+			} else
+				warnx("%s: referenced file supposed to be "
+				    "deleted", fn);
 
-		free(fn);
-		filepath_put(&rr->deleted, fp);
+			free(fn);
+			filepath_put(&rr->deleted, fp);
+		}
 	}
+}
 
-	return del;
+/*
+ * All files in tree are valid and should be moved to the valid repository
+ * if not already there. Rename the files to the new path and readd the
+ * filepath entry with the new path if successful.
+ */
+static void
+repo_move_valid(struct filepath_tree *tree)
+{
+	struct filepath *fp, *nfp;
+	size_t rsyncsz = strlen(".rsync/");
+	size_t rrdpsz = strlen(".rrdp/");
+	char *fn, *base;
+
+	RB_FOREACH_SAFE(fp, filepath_tree, tree, nfp) {
+		if (strncmp(fp->file, ".rsync/", rsyncsz) != 0 &&
+		    strncmp(fp->file, ".rrdp/", rrdpsz) != 0)
+			continue; /* not a temporary file path */
+
+		if (strncmp(fp->file, ".rsync/", rsyncsz) == 0) {
+			fn = fp->file + rsyncsz;
+		} else {
+			base = strchr(fp->file + rrdpsz, '/');
+			assert(base != NULL);
+			fn = base + 1;
+		}
+
+		if (repo_mkpath(AT_FDCWD, fn) == -1)
+			continue;
+
+		if (rename(fp->file, fn) == -1) {
+			warn("rename %s", fp->file);
+			continue;
+		}
+
+		/* switch filepath node to new path */
+		RB_REMOVE(filepath_tree, tree, fp);
+		base = fp->file;
+		if ((fp->file = strdup(fn)) == NULL)
+			err(1, NULL);
+		free(base);
+		if (RB_INSERT(filepath_tree, tree, fp) != NULL)
+			errx(1, "%s: both possibilities of file present",
+			    fp->file);
+	}
+}
+
+#define	BASE_DIR	(void *)0x01
+#define	RSYNC_DIR	(void *)0x02
+#define	RRDP_DIR	(void *)0x03
+
+static const struct rrdprepo *
+repo_is_rrdp(struct repo *rp)
+{
+	/* check for special pointers first these are not a repository */
+	if (rp == NULL || rp == BASE_DIR || rp == RSYNC_DIR || rp == RRDP_DIR)
+		return NULL;
+
+	if (rp->rrdp)
+		return rp->rrdp->state == REPO_DONE ? rp->rrdp : NULL;
+	return NULL;
+}
+
+static inline char *
+skip_dotslash(char *in)
+{
+	if (memcmp(in, "./", 2) == 0)
+		return in + 2;
+	return in;
 }
 
 void
-repo_cleanup(struct filepath_tree *tree)
+repo_cleanup(struct filepath_tree *tree, int cachefd)
 {
-	size_t i, cnt, delsz = 0, dirsz = 0;
-	char **del = NULL, **dir = NULL;
-	char *argv[4] = { "ta", "rsync", "rrdp", NULL };
-	struct rrdprepo *rr;
+	char *argv[2] = { ".", NULL };
 	FTS *fts;
 	FTSENT *e;
+	const struct rrdprepo *rr;
+
+	/* first move temp files which have been used to valid dir */
+	repo_move_valid(tree);
+	/* then delete files requested by rrdp */
+	repo_cleanup_rrdp(tree);
 
 	if ((fts = fts_open(argv, FTS_PHYSICAL | FTS_NOSTAT, NULL)) == NULL)
 		err(1, "fts_open");
 	errno = 0;
 	while ((e = fts_read(fts)) != NULL) {
+		char *path = skip_dotslash(e->fts_path);
 		switch (e->fts_info) {
 		case FTS_NSOK:
-			if (!filepath_exists(tree, e->fts_path))
-				del = add_to_del(del, &delsz,
-				    e->fts_path);
+			if (filepath_exists(tree, path)) {
+				e->fts_parent->fts_number++;
+				break;
+			}
+			if (e->fts_parent->fts_pointer == RRDP_DIR) {
+				e->fts_parent->fts_number++;
+				/* handle rrdp .state files explicitly */
+				if (e->fts_level == 3 &&
+				    strcmp(e->fts_name, ".state") == 0)
+					break;
+				/* can't delete these extra files */
+				stats.extra_files++;
+				if (verbose > 1)
+					logx("superfluous %s", path);
+				break;
+			}
+			if (e->fts_parent->fts_pointer == RSYNC_DIR) {
+				/* no need to keep rsync files */
+				if (verbose > 1)
+					logx("superfluous %s", path);
+			}
+			rr = repo_is_rrdp(e->fts_parent->fts_pointer);
+			if (rr != NULL) {
+				char *fn;
+
+				if (asprintf(&fn, "%s/%s", rr->basedir,
+				    path) == -1)
+					err(1, NULL);
+
+				if (repo_mkpath(cachefd, fn) == 0) {
+					if (renameat(AT_FDCWD, e->fts_accpath,
+					    cachefd, fn) == -1)
+						warn("rename %s to %s", path,
+						    fn);
+					else if (verbose > 1)
+						logx("moved %s", path);
+					stats.extra_files++;
+				}
+				free(fn);
+			} else {
+				if (unlink(e->fts_accpath) == -1) {
+					warn("unlink %s", path);
+				} else {
+					if (verbose > 1)
+						logx("deleted %s", path);
+					stats.del_files++;
+				}
+			}
 			break;
 		case FTS_D:
-			/* special cleanup for rrdp directories */
-			if ((rr = rrdp_basedir(e->fts_path)) != NULL) {
-				del = repo_rrdp_cleanup(tree, rr, del, &delsz);
-				if (fts_set(fts, e, FTS_SKIP) == -1)
-					err(1, "fts_set");
+			if (e->fts_level == 1) {
+				if (strcmp(".rsync", e->fts_name) == 0)
+					e->fts_pointer = RSYNC_DIR;
+				else if (strcmp(".rrdp", e->fts_name) == 0)
+					e->fts_pointer = RRDP_DIR;
+				else
+					e->fts_pointer = BASE_DIR;
+			} else
+				e->fts_pointer = e->fts_parent->fts_pointer;
+
+			/*
+			 * special handling for rrdp directories,
+			 * clear them if they are not used anymore but
+			 * only if rrdp is active.
+			 */
+			if (e->fts_pointer == RRDP_DIR && e->fts_level == 2) {
+				if (!rrdp_is_active(path))
+					e->fts_pointer = NULL;
+			}
+			if (e->fts_pointer == BASE_DIR && e->fts_level > 1) {
+				e->fts_pointer = repo_bypath(path);
+				if (e->fts_pointer == NULL)
+					e->fts_pointer = BASE_DIR;
 			}
 			break;
 		case FTS_DP:
-			if (!filepath_dir_exists(tree, e->fts_path))
-				dir = add_to_del(dir, &dirsz,
-				    e->fts_path);
+			if (e->fts_level == FTS_ROOTLEVEL)
+				break;
+			if (e->fts_level == 1)
+				/* do not remove .rsync and .rrdp */
+				if (e->fts_pointer == RRDP_DIR ||
+				    e->fts_pointer == RSYNC_DIR)
+					break;
+
+			e->fts_parent->fts_number += e->fts_number;
+
+			if (e->fts_number == 0) {
+				if (rmdir(e->fts_accpath) == -1)
+					warn("rmdir %s", path);
+				else
+					stats.del_dirs++;
+			}
 			break;
 		case FTS_SL:
 		case FTS_SLNONE:
-			warnx("symlink %s", e->fts_path);
-			del = add_to_del(del, &delsz, e->fts_path);
+			warnx("symlink %s", path);
+			if (unlink(e->fts_accpath) == -1)
+				warn("unlink %s", path);
 			break;
 		case FTS_NS:
 		case FTS_ERR:
 			if (e->fts_errno == ENOENT &&
-			    (strcmp(e->fts_path, "rsync") == 0 ||
-			    strcmp(e->fts_path, "rrdp") == 0))
+			    e->fts_level == FTS_ROOTLEVEL)
 				continue;
-			warnx("fts_read %s: %s", e->fts_path,
+			warnx("fts_read %s: %s", path,
 			    strerror(e->fts_errno));
 			break;
 		default:
-			warnx("unhandled[%x] %s", e->fts_info,
-			    e->fts_path);
+			warnx("fts_read %s: unhandled[%x]", path,
+			    e->fts_info);
 			break;
 		}
 
@@ -1252,32 +1492,6 @@ repo_cleanup(struct filepath_tree *tree)
 		err(1, "fts_read");
 	if (fts_close(fts) == -1)
 		err(1, "fts_close");
-
-	cnt = 0;
-	for (i = 0; i < delsz; i++) {
-		if (unlink(del[i]) == -1) {
-			if (errno != ENOENT)
-				warn("unlink %s", del[i]);
-		} else {
-			if (verbose > 1)
-				logx("deleted %s", del[i]);
-			cnt++;
-		}
-		free(del[i]);
-	}
-	free(del);
-	stats.del_files = cnt;
-
-	cnt = 0;
-	for (i = 0; i < dirsz; i++) {
-		if (rmdir(dir[i]) == -1)
-			warn("rmdir %s", dir[i]);
-		else
-			cnt++;
-		free(dir[i]);
-	}
-	free(dir);
-	stats.del_dirs = cnt;
 }
 
 void
@@ -1288,10 +1502,60 @@ repo_free(void)
 	while ((rp = SLIST_FIRST(&repos)) != NULL) {
 		SLIST_REMOVE_HEAD(&repos, entry);
 		free(rp->repouri);
+		free(rp->notifyuri);
+		free(rp->basedir);
 		free(rp);
 	}
 
 	ta_free();
 	rrdp_free();
 	rsync_free();
+}
+
+/*
+ * Remove all files and directories under base but do not remove base itself.
+ */
+static void
+remove_contents(char *base)
+{
+	char *argv[2] = { base, NULL };
+	FTS *fts;
+	FTSENT *e;
+
+	if ((fts = fts_open(argv, FTS_PHYSICAL | FTS_NOSTAT, NULL)) == NULL)
+		err(1, "fts_open");
+	errno = 0;
+	while ((e = fts_read(fts)) != NULL) {
+		switch (e->fts_info) {
+		case FTS_NSOK:
+		case FTS_SL:
+		case FTS_SLNONE:
+			if (unlink(e->fts_accpath) == -1)
+				warn("unlink %s", e->fts_path);
+			break;
+		case FTS_D:
+			break;
+		case FTS_DP:
+			/* keep root directory */
+			if (e->fts_level == FTS_ROOTLEVEL)
+				break;
+			if (rmdir(e->fts_accpath) == -1)
+				warn("rmdir %s", e->fts_path);
+			break;
+		case FTS_NS:
+		case FTS_ERR:
+			warnx("fts_read %s: %s", e->fts_path,
+			    strerror(e->fts_errno));
+			break;
+		default:
+			warnx("unhandled[%x] %s", e->fts_info,
+			    e->fts_path);
+			break;
+		}
+		errno = 0;
+	}
+	if (errno)
+		err(1, "fts_read");
+	if (fts_close(fts) == -1)
+		err(1, "fts_close");
 }

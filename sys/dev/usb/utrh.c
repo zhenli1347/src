@@ -1,4 +1,4 @@
-/*	$OpenBSD: utrh.c,v 1.24 2021/03/08 14:35:57 jcs Exp $   */
+/*	$OpenBSD: utrh.c,v 1.26 2022/01/09 05:43:02 jsg Exp $   */
 
 /*
  * Copyright (c) 2009 Yojiro UO <yuo@nui.org>
@@ -16,7 +16,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* Driver for Strawberry linux USBRH Temerature/Humidity sensor */
+/* Driver for Strawberry linux USBRH Temperature/Humidity sensor */
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -93,7 +93,7 @@ utrh_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	return (usb_lookup(utrh_devs, uha->uaa->vendor, uha->uaa->product) != NULL ?

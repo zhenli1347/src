@@ -1,4 +1,4 @@
-/*	$OpenBSD: tvtwo.c,v 1.15 2013/10/20 20:07:31 miod Exp $	*/
+/*	$OpenBSD: tvtwo.c,v 1.18 2022/07/15 17:57:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2003, 2006, 2008, Miodrag Vallat.
@@ -144,7 +144,7 @@ void	tvtwo_setcolor(void *, u_int, u_int8_t, u_int8_t, u_int8_t);
 int	tvtwomatch(struct device *, void *, void *);
 void	tvtwoattach(struct device *, struct device *, void *);
 
-struct cfattach tvtwo_ca = {
+const struct cfattach tvtwo_ca = {
 	sizeof(struct tvtwo_softc), tvtwomatch, tvtwoattach
 };
 
@@ -302,7 +302,7 @@ tvtwo_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 
 	/*
 	 * Note that, although the emulation (text) mode is running in a
-	 * 8-bit plane, we advertize the frame buffer as 32-bit.
+	 * 8-bit plane, we advertise the frame buffer as 32-bit.
 	 */
 	switch (cmd) {
 	case WSDISPLAYIO_GTYPE:
@@ -313,6 +313,8 @@ tvtwo_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width = sc->sc_sunfb.sf_width;
 		wdf->depth = 32;
+		wdf->stride = sc->sc_sunfb.sf_linebytes * 4;
+		wdf->offset = 0;
 		wdf->cmsize = 0;
 		break;
 	case WSDISPLAYIO_GETSUPPORTEDDEPTH:

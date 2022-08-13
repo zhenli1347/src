@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.399 2021/05/25 22:45:09 bluhm Exp $	*/
+/*	$OpenBSD: route.c,v 1.413 2022/07/28 22:19:09 bluhm Exp $	*/
 /*	$NetBSD: route.c,v 1.14 1996/02/13 22:00:46 christos Exp $	*/
 
 /*
@@ -108,7 +108,6 @@
 #include <sys/socketvar.h>
 #include <sys/timeout.h>
 #include <sys/domain.h>
-#include <sys/protosw.h>
 #include <sys/ioctl.h>
 #include <sys/kernel.h>
 #include <sys/queue.h>
@@ -149,10 +148,9 @@ struct cpumem *		rtcounters;
 int			rttrash;	/* routes not in table but not freed */
 int			ifatrash;	/* ifas not in ifp list but not free */
 
-struct pool		rtentry_pool;	/* pool for rtentry structures */
-struct pool		rttimer_pool;	/* pool for rttimer structures */
+struct pool	rtentry_pool;		/* pool for rtentry structures */
+struct pool	rttimer_pool;		/* pool for rttimer structures */
 
-void	rt_timer_init(void);
 int	rt_setgwroute(struct rtentry *, u_int);
 void	rt_putgwroute(struct rtentry *);
 int	rtflushclone1(struct rtentry *, void *, u_int);
@@ -162,12 +160,6 @@ struct rtentry *rt_match(struct sockaddr *, uint32_t *, int, unsigned int);
 int	rt_clone(struct rtentry **, struct sockaddr *, unsigned int);
 struct sockaddr *rt_plentosa(sa_family_t, int, struct sockaddr_in6 *);
 static int rt_copysa(struct sockaddr *, struct sockaddr *, struct sockaddr **);
-
-#ifdef DDB
-void	db_print_sa(struct sockaddr *);
-void	db_print_ifa(struct ifaddr *);
-int	db_show_rtentry(struct rtentry *, void *, unsigned int);
-#endif
 
 #define	LABELID_MAX	50000
 
@@ -185,7 +177,7 @@ route_init(void)
 {
 	rtcounters = counters_alloc(rts_ncounters);
 
-	pool_init(&rtentry_pool, sizeof(struct rtentry), 0, IPL_SOFTNET, 0,
+	pool_init(&rtentry_pool, sizeof(struct rtentry), 0, IPL_MPFLOOR, 0,
 	    "rtentry", NULL);
 
 	while (rt_hashjitter == 0)
@@ -224,8 +216,8 @@ rtisvalid(struct rtentry *rt)
  * Return the best matching entry for the destination ``dst''.
  *
  * "RT_RESOLVE" means that a corresponding L2 entry should
- *   be added to the routing table and resolved (via ARP or
- *   NDP), if it does not exist.
+ * be added to the routing table and resolved (via ARP or
+ * NDP), if it does not exist.
  */
 struct rtentry *
 rt_match(struct sockaddr *dst, uint32_t *src, int flags, unsigned int tableid)
@@ -490,40 +482,34 @@ rt_putgwroute(struct rtentry *rt)
 void
 rtref(struct rtentry *rt)
 {
-	atomic_inc_int(&rt->rt_refcnt);
+	refcnt_take(&rt->rt_refcnt);
 }
 
 void
 rtfree(struct rtentry *rt)
 {
-	int		 refcnt;
-
 	if (rt == NULL)
 		return;
 
-	refcnt = (int)atomic_dec_int_nv(&rt->rt_refcnt);
-	if (refcnt <= 0) {
-		KASSERT(!ISSET(rt->rt_flags, RTF_UP));
-		KASSERT(!RT_ROOT(rt));
-		atomic_dec_int(&rttrash);
-		if (refcnt < 0) {
-			printf("rtfree: %p not freed (neg refs)\n", rt);
-			return;
-		}
+	if (refcnt_rele(&rt->rt_refcnt) == 0)
+		return;
 
-		KERNEL_LOCK();
-		rt_timer_remove_all(rt);
-		ifafree(rt->rt_ifa);
-		rtlabel_unref(rt->rt_labelid);
+	KASSERT(!ISSET(rt->rt_flags, RTF_UP));
+	KASSERT(!RT_ROOT(rt));
+	atomic_dec_int(&rttrash);
+
+	KERNEL_LOCK();
+	rt_timer_remove_all(rt);
+	ifafree(rt->rt_ifa);
+	rtlabel_unref(rt->rt_labelid);
 #ifdef MPLS
-		rt_mpls_clear(rt);
+	rt_mpls_clear(rt);
 #endif
-		free(rt->rt_gateway, M_RTABLE, ROUNDUP(rt->rt_gateway->sa_len));
-		free(rt_key(rt), M_RTABLE, rt_key(rt)->sa_len);
-		KERNEL_UNLOCK();
+	free(rt->rt_gateway, M_RTABLE, ROUNDUP(rt->rt_gateway->sa_len));
+	free(rt_key(rt), M_RTABLE, rt_key(rt)->sa_len);
+	KERNEL_UNLOCK();
 
-		pool_put(&rtentry_pool, rt);
-	}
+	pool_put(&rtentry_pool, rt);
 }
 
 void
@@ -584,7 +570,7 @@ rtredirect(struct sockaddr *dst, struct sockaddr *gateway,
 	if (rt != NULL && (!equal(src, rt->rt_gateway) || rt->rt_ifa != ifa))
 		error = EINVAL;
 	else if (ifa_ifwithaddr(gateway, rdomain) != NULL ||
-	    (gateway->sa_family = AF_INET &&
+	    (gateway->sa_family == AF_INET &&
 	    in_broadcast(satosin(gateway)->sin_addr, rdomain)))
 		error = EHOSTUNREACH;
 	if (error)
@@ -725,7 +711,7 @@ rtflushclone1(struct rtentry *rt, void *arg, u_int id)
 	 */
 	ifp = if_get(rt->rt_ifidx);
 	if (ifp == NULL)
-	        return 0;
+		return 0;
 
 	if_put(ifp);
 	return EEXIST;
@@ -879,7 +865,7 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 			return (ENOBUFS);
 		}
 
-		rt->rt_refcnt = 1;
+		refcnt_init(&rt->rt_refcnt);
 		rt->rt_flags = info->rti_flags | RTF_UP;
 		rt->rt_priority = prio;	/* init routing priority */
 		LIST_INIT(&rt->rt_timer);
@@ -1362,17 +1348,28 @@ rt_ifa_purge_walker(struct rtentry *rt, void *vifa, unsigned int rtableid)
  * for multiple queues for efficiency's sake...
  */
 
-LIST_HEAD(, rttimer_queue)	rttimer_queue_head;
-static int			rt_init_done = 0;
+struct mutex			rttimer_mtx;
+
+struct rttimer {
+	TAILQ_ENTRY(rttimer)	rtt_next;	/* [T] entry on timer queue */
+	LIST_ENTRY(rttimer)	rtt_link;	/* [T] timers per rtentry */
+	struct timeout		rtt_timeout;	/* [I] timeout for this entry */
+	struct rttimer_queue	*rtt_queue;	/* [I] back pointer to queue */
+	struct rtentry		*rtt_rt;	/* [T] back pointer to route */
+	time_t			rtt_expire;	/* [I] rt expire time */
+	u_int			rtt_tableid;	/* [I] rtable id of rtt_rt */
+};
 
 #define RTTIMER_CALLOUT(r)	{					\
-	if (r->rtt_func != NULL) {					\
-		(*r->rtt_func)(r->rtt_rt, r);				\
+	if (r->rtt_queue->rtq_func != NULL) {				\
+		(*r->rtt_queue->rtq_func)(r->rtt_rt, r->rtt_tableid);	\
 	} else {							\
 		struct ifnet *ifp;					\
 									\
 		ifp = if_get(r->rtt_rt->rt_ifidx);			\
-		if (ifp != NULL) 					\
+		if (ifp != NULL &&					\
+		    (r->rtt_rt->rt_flags & (RTF_DYNAMIC|RTF_HOST)) ==	\
+		    (RTF_DYNAMIC|RTF_HOST))				\
 			rtdeletemsg(r->rtt_rt, ifp, r->rtt_tableid);	\
 		if_put(ifp);						\
 	}								\
@@ -1388,65 +1385,53 @@ static int			rt_init_done = 0;
 void
 rt_timer_init(void)
 {
-	static struct timeout	rt_timer_timeout;
-
-	if (rt_init_done)
-		panic("rt_timer_init: already initialized");
-
-	pool_init(&rttimer_pool, sizeof(struct rttimer), 0, IPL_SOFTNET, 0,
-	    "rttmr", NULL);
-
-	LIST_INIT(&rttimer_queue_head);
-	timeout_set_proc(&rt_timer_timeout, rt_timer_timer, &rt_timer_timeout);
-	timeout_add_sec(&rt_timer_timeout, 1);
-	rt_init_done = 1;
+	pool_init(&rttimer_pool, sizeof(struct rttimer), 0,
+	    IPL_MPFLOOR, 0, "rttmr", NULL);
+	mtx_init(&rttimer_mtx, IPL_MPFLOOR);
 }
 
-struct rttimer_queue *
-rt_timer_queue_create(u_int timeout)
+void
+rt_timer_queue_init(struct rttimer_queue *rtq, int timeout,
+    void (*func)(struct rtentry *, u_int))
 {
-	struct rttimer_queue	*rtq;
-
-	if (rt_init_done == 0)
-		rt_timer_init();
-
-	if ((rtq = malloc(sizeof(*rtq), M_RTABLE, M_NOWAIT|M_ZERO)) == NULL)
-		return (NULL);
-
 	rtq->rtq_timeout = timeout;
 	rtq->rtq_count = 0;
+	rtq->rtq_func = func;
 	TAILQ_INIT(&rtq->rtq_head);
-	LIST_INSERT_HEAD(&rttimer_queue_head, rtq, rtq_link);
-
-	return (rtq);
 }
 
 void
-rt_timer_queue_change(struct rttimer_queue *rtq, long timeout)
+rt_timer_queue_change(struct rttimer_queue *rtq, int timeout)
 {
+	mtx_enter(&rttimer_mtx);
 	rtq->rtq_timeout = timeout;
+	mtx_leave(&rttimer_mtx);
 }
 
 void
-rt_timer_queue_destroy(struct rttimer_queue *rtq)
+rt_timer_queue_flush(struct rttimer_queue *rtq)
 {
-	struct rttimer	*r;
+	struct rttimer		*r;
+	TAILQ_HEAD(, rttimer)	 rttlist;
 
 	NET_ASSERT_LOCKED();
 
+	TAILQ_INIT(&rttlist);
+	mtx_enter(&rttimer_mtx);
 	while ((r = TAILQ_FIRST(&rtq->rtq_head)) != NULL) {
 		LIST_REMOVE(r, rtt_link);
 		TAILQ_REMOVE(&rtq->rtq_head, r, rtt_next);
+		TAILQ_INSERT_TAIL(&rttlist, r, rtt_next);
+		KASSERT(rtq->rtq_count > 0);
+		rtq->rtq_count--;
+	}
+	mtx_leave(&rttimer_mtx);
+
+	while ((r = TAILQ_FIRST(&rttlist)) != NULL) {
+		TAILQ_REMOVE(&rttlist, r, rtt_next);
 		RTTIMER_CALLOUT(r);
 		pool_put(&rttimer_pool, r);
-		if (rtq->rtq_count > 0)
-			rtq->rtq_count--;
-		else
-			printf("rt_timer_queue_destroy: rtq_count reached 0\n");
 	}
-
-	LIST_REMOVE(rtq, rtq_link);
-	free(rtq, M_RTABLE, sizeof(*rtq));
 }
 
 unsigned long
@@ -1455,61 +1440,97 @@ rt_timer_queue_count(struct rttimer_queue *rtq)
 	return (rtq->rtq_count);
 }
 
+static inline struct rttimer *
+rt_timer_unlink(struct rttimer *r)
+{
+	MUTEX_ASSERT_LOCKED(&rttimer_mtx);
+
+	LIST_REMOVE(r, rtt_link);
+	r->rtt_rt = NULL;
+
+	if (timeout_del(&r->rtt_timeout) == 0) {
+		/* timeout fired, so rt_timer_timer will do the cleanup */
+		return NULL;
+	}
+
+	TAILQ_REMOVE(&r->rtt_queue->rtq_head, r, rtt_next);
+	KASSERT(r->rtt_queue->rtq_count > 0);
+	r->rtt_queue->rtq_count--;
+	return r;
+}
+
 void
 rt_timer_remove_all(struct rtentry *rt)
 {
-	struct rttimer	*r;
+	struct rttimer		*r;
+	TAILQ_HEAD(, rttimer)	 rttlist;
 
+	TAILQ_INIT(&rttlist);
+	mtx_enter(&rttimer_mtx);
 	while ((r = LIST_FIRST(&rt->rt_timer)) != NULL) {
-		LIST_REMOVE(r, rtt_link);
-		TAILQ_REMOVE(&r->rtt_queue->rtq_head, r, rtt_next);
-		if (r->rtt_queue->rtq_count > 0)
-			r->rtt_queue->rtq_count--;
-		else
-			printf("rt_timer_remove_all: rtq_count reached 0\n");
+		r = rt_timer_unlink(r);
+		if (r != NULL)
+			TAILQ_INSERT_TAIL(&rttlist, r, rtt_next);
+	}
+	mtx_leave(&rttimer_mtx);
+
+	while ((r = TAILQ_FIRST(&rttlist)) != NULL) {
+		TAILQ_REMOVE(&rttlist, r, rtt_next);
 		pool_put(&rttimer_pool, r);
 	}
 }
 
-int
-rt_timer_add(struct rtentry *rt, void (*func)(struct rtentry *,
-    struct rttimer *), struct rttimer_queue *queue, u_int rtableid)
+time_t
+rt_timer_get_expire(const struct rtentry *rt)
 {
-	struct rttimer	*r;
-	long		 current_time;
+	const struct rttimer	*r;
+	time_t			 expire = 0;
+	
+	mtx_enter(&rttimer_mtx);
+	LIST_FOREACH(r, &rt->rt_timer, rtt_link) {
+		if (expire == 0 || expire > r->rtt_expire)
+			expire = r->rtt_expire;
+	}
+	mtx_leave(&rttimer_mtx);
 
-	current_time = getuptime();
-	rt->rt_expire = getuptime() + queue->rtq_timeout;
+	return expire;
+}
 
+int
+rt_timer_add(struct rtentry *rt, struct rttimer_queue *queue, u_int rtableid)
+{
+	struct rttimer	*r, *rnew;
+
+	rnew = pool_get(&rttimer_pool, PR_NOWAIT | PR_ZERO);
+	if (rnew == NULL)
+		return (ENOBUFS);
+
+	rnew->rtt_rt = rt;
+	rnew->rtt_queue = queue;
+	rnew->rtt_tableid = rtableid;
+	rnew->rtt_expire = getuptime() + queue->rtq_timeout;
+	timeout_set_proc(&rnew->rtt_timeout, rt_timer_timer, rnew);
+
+	mtx_enter(&rttimer_mtx);
 	/*
 	 * If there's already a timer with this action, destroy it before
 	 * we add a new one.
 	 */
 	LIST_FOREACH(r, &rt->rt_timer, rtt_link) {
-		if (r->rtt_func == func) {
-			LIST_REMOVE(r, rtt_link);
-			TAILQ_REMOVE(&r->rtt_queue->rtq_head, r, rtt_next);
-			if (r->rtt_queue->rtq_count > 0)
-				r->rtt_queue->rtq_count--;
-			else
-				printf("rt_timer_add: rtq_count reached 0\n");
-			pool_put(&rttimer_pool, r);
+		if (r->rtt_queue == queue) {
+			r = rt_timer_unlink(r);
 			break;  /* only one per list, so we can quit... */
 		}
 	}
 
-	r = pool_get(&rttimer_pool, PR_NOWAIT | PR_ZERO);
-	if (r == NULL)
-		return (ENOBUFS);
+	LIST_INSERT_HEAD(&rt->rt_timer, rnew, rtt_link);
+	TAILQ_INSERT_TAIL(&queue->rtq_head, rnew, rtt_next);
+	timeout_add_sec(&rnew->rtt_timeout, queue->rtq_timeout);
+	rnew->rtt_queue->rtq_count++;
+	mtx_leave(&rttimer_mtx);
 
-	r->rtt_rt = rt;
-	r->rtt_time = current_time;
-	r->rtt_func = func;
-	r->rtt_queue = queue;
-	r->rtt_tableid = rtableid;
-	LIST_INSERT_HEAD(&rt->rt_timer, r, rtt_link);
-	TAILQ_INSERT_TAIL(&queue->rtq_head, r, rtt_next);
-	r->rtt_queue->rtq_count++;
+	if (r != NULL)
+		pool_put(&rttimer_pool, r);
 
 	return (0);
 }
@@ -1517,30 +1538,25 @@ rt_timer_add(struct rtentry *rt, void (*func)(struct rtentry *,
 void
 rt_timer_timer(void *arg)
 {
-	struct timeout		*to = (struct timeout *)arg;
-	struct rttimer_queue	*rtq;
-	struct rttimer		*r;
-	long			 current_time;
-
-	current_time = getuptime();
+	struct rttimer		*r = arg;
+	struct rttimer_queue	*rtq = r->rtt_queue;
 
 	NET_LOCK();
-	LIST_FOREACH(rtq, &rttimer_queue_head, rtq_link) {
-		while ((r = TAILQ_FIRST(&rtq->rtq_head)) != NULL &&
-		    (r->rtt_time + rtq->rtq_timeout) < current_time) {
-			LIST_REMOVE(r, rtt_link);
-			TAILQ_REMOVE(&rtq->rtq_head, r, rtt_next);
-			RTTIMER_CALLOUT(r);
-			pool_put(&rttimer_pool, r);
-			if (rtq->rtq_count > 0)
-				rtq->rtq_count--;
-			else
-				printf("rt_timer_timer: rtq_count reached 0\n");
-		}
-	}
+	mtx_enter(&rttimer_mtx);
+
+	if (r->rtt_rt != NULL)
+		LIST_REMOVE(r, rtt_link);
+	TAILQ_REMOVE(&rtq->rtq_head, r, rtt_next);
+	KASSERT(rtq->rtq_count > 0);
+	rtq->rtq_count--;
+
+	mtx_leave(&rttimer_mtx);
+
+	if (r->rtt_rt != NULL)
+		RTTIMER_CALLOUT(r);
 	NET_UNLOCK();
 
-	timeout_add_sec(to, 1);
+	pool_put(&rttimer_pool, r);
 }
 
 #ifdef MPLS
@@ -1803,6 +1819,9 @@ rt_plen2mask(struct rtentry *rt, struct sockaddr_in6 *sa_mask)
 #include <machine/db_machdep.h>
 #include <ddb/db_output.h>
 
+void	db_print_sa(struct sockaddr *);
+void	db_print_ifa(struct ifaddr *);
+
 void
 db_print_sa(struct sockaddr *sa)
 {
@@ -1843,7 +1862,7 @@ db_print_ifa(struct ifaddr *ifa)
 }
 
 /*
- * Function to pass to rtalble_walk().
+ * Function to pass to rtable_walk().
  * Return non-zero error to abort walk.
  */
 int
@@ -1851,8 +1870,8 @@ db_show_rtentry(struct rtentry *rt, void *w, unsigned int id)
 {
 	db_printf("rtentry=%p", rt);
 
-	db_printf(" flags=0x%x refcnt=%d use=%llu expire=%lld rtableid=%u\n",
-	    rt->rt_flags, rt->rt_refcnt, rt->rt_use, rt->rt_expire, id);
+	db_printf(" flags=0x%x refcnt=%u use=%llu expire=%lld\n",
+	    rt->rt_flags, rt->rt_refcnt.r_refs, rt->rt_use, rt->rt_expire);
 
 	db_printf(" key="); db_print_sa(rt_key(rt));
 	db_printf(" plen=%d", rt_plen(rt));
@@ -1861,19 +1880,19 @@ db_show_rtentry(struct rtentry *rt, void *w, unsigned int id)
 	db_printf(" ifa=%p\n", rt->rt_ifa);
 	db_print_ifa(rt->rt_ifa);
 
-	db_printf(" gwroute=%p llinfo=%p\n", rt->rt_gwroute, rt->rt_llinfo);
+	db_printf(" gwroute=%p llinfo=%p priority=%d\n",
+	    rt->rt_gwroute, rt->rt_llinfo, rt->rt_priority);
 	return (0);
 }
 
 /*
  * Function to print all the route trees.
- * Use this from ddb:  "call db_show_arptab"
  */
 int
-db_show_arptab(void)
+db_show_rtable(int af, unsigned int rtableid)
 {
-	db_printf("Route tree for AF_INET\n");
-	rtable_walk(0, AF_INET, NULL, db_show_rtentry, NULL);
+	db_printf("Route tree for af %d, rtableid %u\n", af, rtableid);
+	rtable_walk(rtableid, af, NULL, db_show_rtentry, NULL);
 	return (0);
 }
 #endif /* DDB */

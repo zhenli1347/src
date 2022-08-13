@@ -1,4 +1,4 @@
-/*	$OpenBSD: sxiccmu.c,v 1.28 2020/08/30 05:23:49 uaa Exp $	*/
+/*	$OpenBSD: sxiccmu.c,v 1.31 2022/06/28 23:43:12 naddy Exp $	*/
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2013 Artturi Alm
@@ -58,11 +58,11 @@ struct sxiccmu_softc {
 	bus_space_handle_t	sc_ioh;
 	int			sc_node;
 
-	struct sxiccmu_ccu_bit	*sc_gates;
+	const struct sxiccmu_ccu_bit *sc_gates;
 	int			sc_ngates;
 	struct clock_device	sc_cd;
 
-	struct sxiccmu_ccu_bit	*sc_resets;
+	const struct sxiccmu_ccu_bit *sc_resets;
 	int			sc_nresets;
 	struct reset_device	sc_rd;
 
@@ -75,7 +75,7 @@ struct sxiccmu_softc {
 int	sxiccmu_match(struct device *, void *, void *);
 void	sxiccmu_attach(struct device *, struct device *, void *);
 
-struct cfattach	sxiccmu_ca = {
+const struct cfattach	sxiccmu_ca = {
 	sizeof (struct sxiccmu_softc), sxiccmu_match, sxiccmu_attach
 };
 
@@ -335,7 +335,7 @@ void	sxiccmu_mmc_enable(void *, uint32_t *, int);
 void	sxiccmu_gate_enable(void *, uint32_t *, int);
 void	sxiccmu_reset(void *, uint32_t *, int);
 
-struct sxiccmu_device sxiccmu_devices[] = {
+const struct sxiccmu_device sxiccmu_devices[] = {
 	{
 		.compat = "allwinner,sun4i-a10-osc-clk",
 		.get_frequency = sxiccmu_osc_get_frequency,
@@ -1311,15 +1311,30 @@ sxiccmu_h3_r_get_frequency(struct sxiccmu_softc *sc, uint32_t idx)
 	return 0;
 }
 
+/* Allwinner H6 */
+#define H6_AHB3_CFG_REG		0x051c
+#define H6_AHB3_CLK_FACTOR_N(x)	(((x) >> 8) & 0x3)
+#define H6_AHB3_CLK_FACTOR_M(x)	(((x) >> 0) & 0x3)
+
 uint32_t
 sxiccmu_h6_get_frequency(struct sxiccmu_softc *sc, uint32_t idx)
 {
+	uint32_t reg, m, n;
+	uint32_t freq;
+
 	switch (idx) {
 	case H6_CLK_PLL_PERIPH0:
 		/* Not hardcoded, but recommended. */
 		return 600000000;
 	case H6_CLK_PLL_PERIPH0_2X:
 		return sxiccmu_h6_get_frequency(sc, H6_CLK_PLL_PERIPH0) * 2;
+	case H6_CLK_AHB3:
+		reg = SXIREAD4(sc, H6_AHB3_CFG_REG);
+		/* assume PLL_PERIPH0 source */
+		freq = sxiccmu_h6_get_frequency(sc, H6_CLK_PLL_PERIPH0);
+		m = H6_AHB3_CLK_FACTOR_M(reg) + 1;
+		n = 1 << H6_AHB3_CLK_FACTOR_N(reg);
+		return freq / (m * n);
 	case H6_CLK_APB2:
 		/* XXX Controlled by a MUX. */
 		return 24000000;

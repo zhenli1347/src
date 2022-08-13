@@ -1,4 +1,4 @@
-/*	$OpenBSD: xl.c,v 1.136 2020/12/12 11:48:52 jan Exp $	*/
+/*	$OpenBSD: xl.c,v 1.138 2022/02/22 01:15:01 guenther Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999
@@ -105,7 +105,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
@@ -2439,7 +2438,7 @@ xl_attach(struct xl_softc *sc)
 	 * of 0x1578 for its capabilities word, which is somewhat
 	 * nonsensical. Another way to distinguish a 3c90x chip
 	 * from a 3c90xB/C chip is to check for the 'supportsLargePackets'
-	 * bit. This will only be set for 3c90x boomerage chips.
+	 * bit. This will only be set for 3c90x boomerang chips.
 	 */
 	xl_read_eeprom(sc, (caddr_t)&sc->xl_caps, XL_EE_CAPS, 1, 0);
 	if (sc->xl_caps & XL_CAPS_NO_TXLENGTH ||

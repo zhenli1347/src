@@ -1,4 +1,4 @@
-/*	$OpenBSD: qec.c,v 1.14 2017/09/08 05:36:52 deraadt Exp $	*/
+/*	$OpenBSD: qec.c,v 1.16 2022/03/13 13:34:54 mpi Exp $	*/
 /*	$NetBSD: qec.c,v 1.12 2000/12/04 20:12:55 fvdl Exp $ */
 
 /*-
@@ -67,7 +67,7 @@ void *	qec_intr_establish(
 		void *,			/*arg*/
 		const char *);		/*what*/
 
-struct cfattach qec_ca = {
+const struct cfattach qec_ca = {
 	sizeof(struct qec_softc), qecmatch, qecattach
 };
 
@@ -302,7 +302,7 @@ qec_intr_establish(t, t0, pri, level, flags, handler, arg, what)
 			    (t, t0, pri, level, flags, handler, arg, what));
 	}
 
-	panic("qec_intr_extablish): no handler found");
+	panic("qec_intr_establish): no handler found");
 
 	return (NULL);
 }

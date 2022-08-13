@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.70 2021/07/06 09:34:06 kettenis Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.72 2022/07/24 00:28:09 cheloha Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 1996/09/30 16:34:21 ws Exp $	*/
 
 /*
@@ -55,6 +55,7 @@ struct cpu_info {
 	volatile int ci_want_resched;
 	volatile int ci_cpl;
 	volatile int ci_ipending;
+	volatile int ci_dec_deferred;
 
 	volatile int	ci_flags;
 #define	CI_FLAGS_SLEEPING		2
@@ -421,6 +422,12 @@ ppc_intr_disable(void)
 	dmsr = emsr & ~PSL_EE;
 	ppc_mtmsr(dmsr);
 	return (emsr & PSL_EE);
+}
+
+static inline void
+intr_enable(void)
+{
+	ppc_mtmsr(ppc_mfmsr() | PSL_EE);
 }
 
 static __inline u_long

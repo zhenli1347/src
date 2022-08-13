@@ -1,9 +1,9 @@
-#	$OpenBSD: test-exec.sh,v 1.87 2021/09/01 00:50:27 dtucker Exp $
+#	$OpenBSD: test-exec.sh,v 1.92 2022/07/25 07:12:45 dtucker Exp $
 #	Placed in the Public Domain.
 
 #SUDO=sudo
 
-if [ ! -x "$TEST_SSH_ELAPSED_TIMES" ]; then
+if [ ! -z "$TEST_SSH_ELAPSED_TIMES" ]; then
 	STARTTIME=`date '+%s'`
 fi
 
@@ -134,6 +134,30 @@ if [ "x$TEST_REGRESS_LOGFILE" = "x" ]; then
 	TEST_REGRESS_LOGFILE=$OBJ/regress.log
 fi
 
+# If set, keep track of successful tests and skip them them if we've
+# previously completed that test.
+if [ "x$TEST_REGRESS_CACHE_DIR" != "x" ]; then
+	if [ ! -d "$TEST_REGRESS_CACHE_DIR" ]; then
+		mkdir -p "$TEST_REGRESS_CACHE_DIR"
+	fi
+	TEST="`basename $SCRIPT .sh`"
+	CACHE="${TEST_REGRESS_CACHE_DIR}/${TEST}.cache"
+	for i in ${SSH} ${SSHD} ${SSHAGENT} ${SSHADD} ${SSHKEYGEN} ${SCP} \
+	    ${SFTP} ${SFTPSERVER} ${SSHKEYSCAN}; do
+		case $i in
+		/*)	bin="$i" ;;
+		*)	bin="`which $i`" ;;
+		esac
+		if [ "$bin" -nt "$CACHE" ]; then
+			rm -f "$CACHE"
+		fi
+	done
+	if [ -f "$CACHE" ]; then
+		echo ok cached $CACHE
+		exit 0
+	fi
+fi
+
 # truncate logfiles
 >$TEST_SSH_LOGFILE
 >$TEST_SSHD_LOGFILE
@@ -146,6 +170,7 @@ fi
 SSHLOGWRAP=$OBJ/ssh-log-wrapper.sh
 cat >$SSHLOGWRAP <<EOD
 #!/bin/sh
+echo "Executing: ${SSH} \$@" >>${TEST_SSH_LOGFILE}
 for i in "\$@";do shift;case "\$i" in -q):;; *) set -- "\$@" "\$i";;esac;done
 exec ${SSH} -E${TEST_SSH_LOGFILE} "\$@"
 EOD
@@ -366,7 +391,6 @@ Host *
 	UserKnownHostsFile	$OBJ/known_hosts
 	PubkeyAuthentication	yes
 	ChallengeResponseAuthentication	no
-	HostbasedAuthentication	no
 	PasswordAuthentication	no
 	BatchMode		yes
 	StrictHostKeyChecking	yes
@@ -524,6 +548,9 @@ start_sshd ()
 cleanup
 if [ $RESULT -eq 0 ]; then
 	verbose ok $tid
+	if [ "x$CACHE" != "x" ]; then
+		touch "$CACHE"
+	fi
 else
 	echo failed $tid
 fi

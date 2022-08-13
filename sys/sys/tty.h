@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.h,v 1.39 2020/07/14 14:33:06 deraadt Exp $	*/
+/*	$OpenBSD: tty.h,v 1.41 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: tty.h,v 1.30.4.1 1996/06/02 09:08:13 mrg Exp $	*/
 
 /*-
@@ -260,7 +260,8 @@ void	 clist_init(void);
 int	 getc(struct clist *q);
 void	 ndflush(struct clist *q, int cc);
 int	 ndqb(struct clist *q, int flag);
-u_char	*nextc(struct clist *q, u_char *cp, int *c);
+u_char	*firstc(struct clist *clp, int *c, int *cc);
+u_char	*nextc(struct clist *q, u_char *cp, int *c, int *cc);
 int	 putc(int c, struct clist *q);
 int	 q_to_b(struct clist *q, u_char *cp, int cc);
 int	 unputc(struct clist *q);
@@ -271,7 +272,6 @@ int	 ttioctl(struct tty *tp, u_long com, caddr_t data, int flag,
 	    struct proc *p);
 int	 ttread(struct tty *tp, struct uio *uio, int flag);
 void	 ttrstrt(void *tp);
-int	 ttpoll(dev_t device, int events, struct proc *p);
 int	 ttkqfilter(dev_t dev, struct knote *kn);
 void	 ttsetwater(struct tty *tp);
 int	 ttspeedtab(int speed, const struct speedtab *table);
@@ -300,13 +300,11 @@ void	 ttytstamp(struct tty *tp, int octs, int ncts, int odcd, int ndcd);
 void	tty_init(void);
 struct tty *ttymalloc(int);
 void	 ttyfree(struct tty *);
-u_char	*firstc(struct clist *clp, int *c);
 
 int	cttyopen(dev_t, int, int, struct proc *);
 int	cttyread(dev_t, struct uio *, int);
 int	cttywrite(dev_t, struct uio *, int);
 int	cttyioctl(dev_t, u_long, caddr_t, int, struct proc *);
-int	cttypoll(dev_t, int, struct proc *);
 
 void	clalloc(struct clist *, int, int);
 void	clfree(struct clist *);

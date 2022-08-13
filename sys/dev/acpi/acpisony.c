@@ -1,4 +1,4 @@
-/* $OpenBSD: acpisony.c,v 1.8 2020/04/06 00:01:08 pirofti Exp $ */
+/* $OpenBSD: acpisony.c,v 1.10 2022/04/06 18:59:27 naddy Exp $ */
 /*
  * Copyright (c) 2010 Paul Irofti <paul@irofti.net>
  *
@@ -67,7 +67,7 @@ struct acpisony_softc {
 	struct aml_node		*sc_devnode;
 };
 
-struct cfattach acpisony_ca = {
+const struct cfattach acpisony_ca = {
 	sizeof(struct acpisony_softc), acpisony_match, acpisony_attach,
 	NULL, acpisony_activate
 };
@@ -198,7 +198,7 @@ acpisony_notify(struct aml_node *node, int notify, void *arg)
 #ifndef SMALL_KERNEL
 		if (acpi_record_event(sc->sc_acpi, APM_USER_SUSPEND_REQ))
 			acpi_addtask(sc->sc_acpi, acpi_sleep_task,
-			    sc->sc_acpi, ACPI_SLEEP_SUSPEND);
+			    sc->sc_acpi, SLEEP_SUSPEND);
 #endif
 		break;
 	case SONY_NOTIFY_SUSPEND_RELEASED:

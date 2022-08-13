@@ -1,4 +1,4 @@
-/*	$OpenBSD: login_cap.h,v 1.17 2021/06/03 13:19:45 deraadt Exp $	*/
+/*	$OpenBSD: login_cap.h,v 1.19 2022/03/01 01:22:11 tedu Exp $	*/
 
 /*-
  * Copyright (c) 1995,1997 Berkeley Software Design, Inc. All rights reserved.
@@ -42,6 +42,7 @@
 #define	LOGIN_DEFSERVICE	"login"
 #define	LOGIN_DEFUMASK		022
 #define	_PATH_LOGIN_CONF	"/etc/login.conf"
+#define	_PATH_LOGIN_CONF_D	"/etc/login.conf.d"
 #define	_PATH_AUTHPROGDIR	"/usr/libexec/auth"
 #define	_PATH_AUTHPROG		"/usr/libexec/auth/login_"
 
@@ -53,7 +54,8 @@
 #define	LOGIN_SETUMASK		0x0020	/* Set umask */
 #define	LOGIN_SETUSER		0x0040	/* Set user */
 #define	LOGIN_SETENV		0x0080	/* Set environment */
-#define	LOGIN_SETALL 		0x00ff	/* Set all. */
+#define	LOGIN_SETRTABLE		0x0100	/* Set rtable */
+#define	LOGIN_SETALL 		0x01ff	/* Set all. */
 
 #define	BI_AUTH		"authorize"		/* Accepted authentication */
 #define	BI_REJECT	"reject"		/* Rejected authentication */

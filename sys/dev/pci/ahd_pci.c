@@ -1,4 +1,4 @@
-/*	$OpenBSD: ahd_pci.c,v 1.26 2020/07/24 12:43:31 krw Exp $	*/
+/*	$OpenBSD: ahd_pci.c,v 1.28 2022/03/11 18:00:45 mpi Exp $	*/
 
 /*
  * Copyright (c) 2004 Milos Urbanek, Kenneth R. Westerback & Marco Peereboom
@@ -284,7 +284,7 @@ int	ahd_pci_probe(struct device *, void *, void *);
 void	ahd_pci_attach(struct device *, struct device *, void *);
 int	ahd_activate(struct device *, int);
 
-struct cfattach ahd_pci_ca = {
+const struct cfattach ahd_pci_ca = {
         sizeof(struct ahd_softc), ahd_pci_probe, ahd_pci_attach,
 	NULL, ahd_activate
 };
@@ -598,7 +598,7 @@ ahd_pci_test_register_access(struct ahd_softc *ahd)
 	 * Next create a situation where write combining
 	 * or read prefetching could be initiated by the
 	 * CPU or host bridge.  Our device does not support
-	 * either, so look for data corruption and/or flaged
+	 * either, so look for data corruption and/or flagged
 	 * PCI errors.  First pause without causing another
 	 * chip reset.
 	 */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: specialreg.h,v 1.77 2021/03/11 11:16:57 jsg Exp $	*/
+/*	$OpenBSD: specialreg.h,v 1.79 2022/02/21 10:06:35 jsg Exp $	*/
 /*	$NetBSD: specialreg.h,v 1.7 1994/10/27 04:16:26 cgd Exp $	*/
 
 /*-
@@ -317,11 +317,11 @@
 #define	CPUID(code, eax, ebx, ecx, edx)                         \
 	__asm volatile("cpuid"                                  \
 	    : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)    \
-	    : "a" (code));
+	    : "a" (code))
 #define	CPUID_LEAF(code, leaf, eax, ebx, ecx, edx)		\
 	__asm volatile("cpuid"                                  \
 	    : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)    \
-	    : "a" (code), "c" (leaf));
+	    : "a" (code), "c" (leaf))
 
 
 /*
@@ -609,7 +609,7 @@
  *	686-class: `rdpmc' instruction
  *	586-class: `rdmsr' instruction, CESR MSR
  *
- * The descriptions of these events are too lenghy to include here.
+ * The descriptions of these events are too lengthy to include here.
  * See Appendix A of "Intel Architecture Software Developer's
  * Manual, Volume 3: System Programming" for more information.
  */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ipw.c,v 1.129 2021/03/28 18:02:32 stsp Exp $	*/
+/*	$OpenBSD: if_ipw.c,v 1.132 2022/04/21 21:03:03 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2004-2008
@@ -129,7 +129,7 @@ int ipw_debug = 0;
 #define DPRINTFN(n, x)
 #endif
 
-struct cfattach ipw_ca = {
+const struct cfattach ipw_ca = {
 	sizeof (struct ipw_softc), ipw_match, ipw_attach, NULL,
 	ipw_activate
 };
@@ -907,9 +907,8 @@ ipw_data_intr(struct ipw_softc *sc, struct ipw_status *status,
 	ni = ieee80211_find_rxnode(ic, wh);
 
 	/* send the frame to the upper layer */
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = status->rssi;
-	rxi.rxi_tstamp = 0;	/* unused */
 	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	ieee80211_release_node(ic, ni);
@@ -1773,7 +1772,7 @@ ipw_auth_and_assoc(void *arg1)
 			frm = ieee80211_add_wpa(frm, ic, ni);
 		assoc.optie_len = htole32(frm - assoc.optie);
 	}
-	DPRINTF(("Preparing assocation request (optional IE length=%d)\n",
+	DPRINTF(("Preparing association request (optional IE length=%d)\n",
 	    letoh32(assoc.optie_len)));
 	error = ipw_cmd(sc, IPW_CMD_SET_ASSOC_REQ, &assoc, sizeof assoc);
 	if (error != 0)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwxreg.h,v 1.30 2021/08/16 14:54:50 kevlo Exp $	*/
+/*	$OpenBSD: if_iwxreg.h,v 1.39 2022/05/10 09:11:44 stsp Exp $	*/
 
 /*-
  * Based on BSD-licensed source modules in the Linux iwlwifi driver,
@@ -59,7 +59,7 @@
  */
 
 
-/* maximmum number of DRAM map entries supported by FW */
+/* maximum number of DRAM map entries supported by FW */
 #define IWX_MAX_DRAM_ENTRY	64
 #define IWX_CSR_CTXT_INFO_BA	0x40
 
@@ -224,6 +224,262 @@ struct iwx_context_info {
 	uint32_t reserved3[16];
 } __packed;
 
+
+/*
+ * Context info definitions for AX210 devices.
+ */
+
+#define IWX_CSR_CTXT_INFO_BOOT_CTRL         0x0
+#define IWX_CSR_CTXT_INFO_ADDR              0x118
+#define IWX_CSR_IML_DATA_ADDR               0x120
+#define IWX_CSR_IML_SIZE_ADDR               0x128
+#define IWX_CSR_IML_RESP_ADDR               0x12c
+
+/* Set bit for enabling automatic function boot */
+#define IWX_CSR_AUTO_FUNC_BOOT_ENA          (1 << 1)
+/* Set bit for initiating function boot */
+#define IWX_CSR_AUTO_FUNC_INIT              (1 << 7)
+
+/**
+ * iwx_prph_scratch_mtr_format - tfd size configuration
+ * @IWX_PRPH_MTR_FORMAT_16B: 16 bit tfd
+ * @IWX_PRPH_MTR_FORMAT_32B: 32 bit tfd
+ * @IWX_PRPH_MTR_FORMAT_64B: 64 bit tfd
+ * @IWX_PRPH_MTR_FORMAT_256B: 256 bit tfd
+ */
+#define IWX_PRPH_MTR_FORMAT_16B		0x0
+#define IWX_PRPH_MTR_FORMAT_32B		0x40000
+#define IWX_PRPH_MTR_FORMAT_64B		0x80000
+#define IWX_PRPH_MTR_FORMAT_256B	0xC0000
+
+/**
+ * iwx_prph_scratch_flags - PRPH scratch control flags
+ * @IWX_PRPH_SCRATCH_IMR_DEBUG_EN: IMR support for debug
+ * @IWX_PRPH_SCRATCH_EARLY_DEBUG_EN: enable early debug conf
+ * @IWX_PRPH_SCRATCH_EDBG_DEST_DRAM: use DRAM, with size allocated
+ *	in hwm config.
+ * @IWX_PRPH_SCRATCH_EDBG_DEST_INTERNAL: use buffer on SRAM
+ * @IWX_PRPH_SCRATCH_EDBG_DEST_ST_ARBITER: use st arbiter, mainly for
+ *	multicomm.
+ * @IWX_PRPH_SCRATCH_EDBG_DEST_TB22DTF: route debug data to SoC HW
+ * @IWX_PRPH_SCTATCH_RB_SIZE_4K: Use 4K RB size (the default is 2K)
+ * @IWX_PRPH_SCRATCH_MTR_MODE: format used for completion - 0: for
+ *	completion descriptor, 1 for responses (legacy)
+ * @IWX_PRPH_SCRATCH_MTR_FORMAT: a mask for the size of the tfd.
+ *	There are 4 optional values: 0: 16 bit, 1: 32 bit, 2: 64 bit,
+ *	3: 256 bit.
+ * @IWX_PRPH_SCRATCH_RB_SIZE_EXT_MASK: RB size full information, ignored
+ *	by older firmware versions, so set IWX_PRPH_SCRATCH_RB_SIZE_4K
+ *	appropriately; use the below values for this.
+ * @IWX_PRPH_SCRATCH_RB_SIZE_EXT_8K: 8kB RB size
+ * @IWX_PRPH_SCRATCH_RB_SIZE_EXT_12K: 12kB RB size
+ * @IWX_PRPH_SCRATCH_RB_SIZE_EXT_16K: 16kB RB size
+ */
+#define IWX_PRPH_SCRATCH_IMR_DEBUG_EN		(1 << 1)
+#define IWX_PRPH_SCRATCH_EARLY_DEBUG_EN		(1 << 4)
+#define IWX_PRPH_SCRATCH_EDBG_DEST_DRAM		(1 << 8)
+#define IWX_PRPH_SCRATCH_EDBG_DEST_INTERNAL	(1 << 9)
+#define IWX_PRPH_SCRATCH_EDBG_DEST_ST_ARBITER	(1 << 10)
+#define IWX_PRPH_SCRATCH_EDBG_DEST_TB22DTF	(1 << 11)
+#define IWX_PRPH_SCRATCH_RB_SIZE_4K		(1 << 16)
+#define IWX_PRPH_SCRATCH_MTR_MODE		(1 << 17)
+#define IWX_PRPH_SCRATCH_MTR_FORMAT		((1 << 18) | (1 << 19))
+#define IWX_PRPH_SCRATCH_RB_SIZE_EXT_MASK	(0xf << 20)
+#define IWX_PRPH_SCRATCH_RB_SIZE_EXT_8K		(8 << 20)
+#define IWX_PRPH_SCRATCH_RB_SIZE_EXT_12K	(9 << 20)
+#define IWX_PRPH_SCRATCH_RB_SIZE_EXT_16K	(10 << 20)
+
+/*
+ * struct iwx_prph_scratch_version - version structure
+ * @mac_id: SKU and revision id
+ * @version: prph scratch information version id
+ * @size: the size of the context information in DWs
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch_version {
+	uint16_t mac_id;
+	uint16_t version;
+	uint16_t size;
+	uint16_t reserved;
+} __packed; /* PERIPH_SCRATCH_VERSION_S */
+
+/*
+ * struct iwx_prph_scratch_control - control structure
+ * @control_flags: context information flags see &iwx_prph_scratch_flags
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch_control {
+	uint32_t control_flags;
+	uint32_t reserved;
+} __packed; /* PERIPH_SCRATCH_CONTROL_S */
+
+/*
+ * struct iwx_prph_scratch_pnvm_cfg - ror config
+ * @pnvm_base_addr: PNVM start address
+ * @pnvm_size: PNVM size in DWs
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch_pnvm_cfg {
+	uint64_t pnvm_base_addr;
+	uint32_t pnvm_size;
+	uint32_t reserved;
+} __packed; /* PERIPH_SCRATCH_PNVM_CFG_S */
+
+struct iwx_pnvm_section {
+	uint32_t offset;
+	const uint8_t data[];
+} __packed;
+
+/*
+ * struct iwx_prph_scratch_hwm_cfg - hwm config
+ * @hwm_base_addr: hwm start address
+ * @hwm_size: hwm size in DWs
+ * @debug_token_config: debug preset
+ */
+struct iwx_prph_scratch_hwm_cfg {
+	uint64_t hwm_base_addr;
+	uint32_t hwm_size;
+	uint32_t debug_token_config;
+} __packed; /* PERIPH_SCRATCH_HWM_CFG_S */
+
+/*
+ * struct iwx_prph_scratch_rbd_cfg - RBDs configuration
+ * @free_rbd_addr: default queue free RB CB base address
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch_rbd_cfg {
+	uint64_t free_rbd_addr;
+	uint32_t reserved;
+} __packed; /* PERIPH_SCRATCH_RBD_CFG_S */
+
+/*
+ * struct iwx_prph_scratch_uefi_cfg - prph scratch reduce power table
+ * @base_addr: reduce power table address
+ * @size: table size in dwords
+ */
+struct iwx_prph_scratch_uefi_cfg {
+	uint64_t base_addr;
+	uint32_t size;
+	uint32_t reserved;
+} __packed; /* PERIPH_SCRATCH_UEFI_CFG_S */
+
+/*
+ * struct iwx_prph_scratch_ctrl_cfg - prph scratch ctrl and config
+ * @version: version information of context info and HW
+ * @control: control flags of FH configurations
+ * @pnvm_cfg: ror configuration
+ * @hwm_cfg: hwm configuration
+ * @rbd_cfg: default RX queue configuration
+ */
+struct iwx_prph_scratch_ctrl_cfg {
+	struct iwx_prph_scratch_version version;
+	struct iwx_prph_scratch_control control;
+	struct iwx_prph_scratch_pnvm_cfg pnvm_cfg;
+	struct iwx_prph_scratch_hwm_cfg hwm_cfg;
+	struct iwx_prph_scratch_rbd_cfg rbd_cfg;
+	struct iwx_prph_scratch_uefi_cfg reduce_power_cfg;
+} __packed; /* PERIPH_SCRATCH_CTRL_CFG_S */
+
+/*
+ * struct iwx_prph_scratch - peripheral scratch mapping
+ * @ctrl_cfg: control and configuration of prph scratch
+ * @dram: firmware images addresses in DRAM
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch {
+	struct iwx_prph_scratch_ctrl_cfg ctrl_cfg;
+	uint32_t reserved[12];
+	struct iwx_context_info_dram dram;
+} __packed; /* PERIPH_SCRATCH_S */
+
+/*
+ * struct iwx_prph_info - peripheral information
+ * @boot_stage_mirror: reflects the value in the Boot Stage CSR register
+ * @ipc_status_mirror: reflects the value in the IPC Status CSR register
+ * @sleep_notif: indicates the peripheral sleep status
+ * @reserved: reserved
+ */
+struct iwx_prph_info {
+	uint32_t boot_stage_mirror;
+	uint32_t ipc_status_mirror;
+	uint32_t sleep_notif;
+	uint32_t reserved;
+} __packed; /* PERIPH_INFO_S */
+
+/*
+ * struct iwx_context_info_gen3 - device INIT configuration
+ * @version: version of the context information
+ * @size: size of context information in DWs
+ * @config: context in which the peripheral would execute - a subset of
+ *	capability csr register published by the peripheral
+ * @prph_info_base_addr: the peripheral information structure start address
+ * @cr_head_idx_arr_base_addr: the completion ring head index array
+ *	start address
+ * @tr_tail_idx_arr_base_addr: the transfer ring tail index array
+ *	start address
+ * @cr_tail_idx_arr_base_addr: the completion ring tail index array
+ *	start address
+ * @tr_head_idx_arr_base_addr: the transfer ring head index array
+ *	start address
+ * @cr_idx_arr_size: number of entries in the completion ring index array
+ * @tr_idx_arr_size: number of entries in the transfer ring index array
+ * @mtr_base_addr: the message transfer ring start address
+ * @mcr_base_addr: the message completion ring start address
+ * @mtr_size: number of entries which the message transfer ring can hold
+ * @mcr_size: number of entries which the message completion ring can hold
+ * @mtr_doorbell_vec: the doorbell vector associated with the message
+ *	transfer ring
+ * @mcr_doorbell_vec: the doorbell vector associated with the message
+ *	completion ring
+ * @mtr_msi_vec: the MSI which shall be generated by the peripheral after
+ *	completing a transfer descriptor in the message transfer ring
+ * @mcr_msi_vec: the MSI which shall be generated by the peripheral after
+ *	completing a completion descriptor in the message completion ring
+ * @mtr_opt_header_size: the size of the optional header in the transfer
+ *	descriptor associated with the message transfer ring in DWs
+ * @mtr_opt_footer_size: the size of the optional footer in the transfer
+ *	descriptor associated with the message transfer ring in DWs
+ * @mcr_opt_header_size: the size of the optional header in the completion
+ *	descriptor associated with the message completion ring in DWs
+ * @mcr_opt_footer_size: the size of the optional footer in the completion
+ *	descriptor associated with the message completion ring in DWs
+ * @msg_rings_ctrl_flags: message rings control flags
+ * @prph_info_msi_vec: the MSI which shall be generated by the peripheral
+ *	after updating the Peripheral Information structure
+ * @prph_scratch_base_addr: the peripheral scratch structure start address
+ * @prph_scratch_size: the size of the peripheral scratch structure in DWs
+ * @reserved: reserved
+ */
+struct iwx_context_info_gen3 {
+	uint16_t version;
+	uint16_t size;
+	uint32_t config;
+	uint64_t prph_info_base_addr;
+	uint64_t cr_head_idx_arr_base_addr;
+	uint64_t tr_tail_idx_arr_base_addr;
+	uint64_t cr_tail_idx_arr_base_addr;
+	uint64_t tr_head_idx_arr_base_addr;
+	uint16_t cr_idx_arr_size;
+	uint16_t tr_idx_arr_size;
+	uint64_t mtr_base_addr;
+	uint64_t mcr_base_addr;
+	uint16_t mtr_size;
+	uint16_t mcr_size;
+	uint16_t mtr_doorbell_vec;
+	uint16_t mcr_doorbell_vec;
+	uint16_t mtr_msi_vec;
+	uint16_t mcr_msi_vec;
+	uint8_t mtr_opt_header_size;
+	uint8_t mtr_opt_footer_size;
+	uint8_t mcr_opt_header_size;
+	uint8_t mcr_opt_footer_size;
+	uint16_t msg_rings_ctrl_flags;
+	uint16_t prph_info_msi_vec;
+	uint64_t prph_scratch_base_addr;
+	uint32_t prph_scratch_size;
+	uint32_t reserved;
+} __packed; /* IPC_CONTEXT_INFO_S */
+
 #define IWX_MGMT_TID		15
 
 #define IWX_MQ_RX_TABLE_SIZE	512
@@ -271,6 +527,18 @@ struct iwx_context_info {
  */
 #define IWX_CSR_HW_REV              (0x028)
 
+/*
+ * RF ID revision info
+ * Bit fields:
+ * 31:24: Reserved (set to 0x0)
+ * 23:12: Type
+ * 11:8:  Step (A - 0x0, B - 0x1, etc)
+ * 7:4:   Dash
+ * 3:0:   Flavor
+ */
+#define IWX_CSR_HW_RF_ID		(0x09c)
+
+
 #define IWX_CSR_GIO_REG		(0x03C)
 
 /*
@@ -288,6 +556,18 @@ struct iwx_context_info {
 #define IWX_CSR_DRAM_INT_TBL_REG	(0x0A0)
 #define IWX_CSR_MAC_SHADOW_REG_CTRL	(0x0A8) /* 6000 and up */
 
+/* LTR control */
+#define IWX_CSR_LTR_LONG_VAL_AD				(0x0d4)
+#define IWX_CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ		0x80000000
+#define IWX_CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE_MASK	0x1c000000
+#define IWX_CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE_SHIFT	24
+#define IWX_CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL_MASK	0x03ff0000
+#define IWX_CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL_SHIFT	16
+#define IWX_CSR_LTR_LONG_VAL_AD_SNOOP_REQ		0x00008000
+#define IWX_CSR_LTR_LONG_VAL_AD_SNOOP_SCALE_MASK	0x00001c00
+#define IWX_CSR_LTR_LONG_VAL_AD_SNOOP_SCALE_SHIFT	8
+#define IWX_CSR_LTR_LONG_VAL_AD_SNOOP_VAL		0x000003ff
+#define IWX_CSR_LTR_LONG_VAL_AD_SCALE_USEC		2
 
 /* GIO Chicken Bits (PCI Express bus link power management) */
 #define IWX_CSR_GIO_CHICKEN_BITS    (0x100)
@@ -362,6 +642,34 @@ struct iwx_context_info {
 #define IWX_CSR_FH_INT_TX_MASK	(IWX_CSR_FH_INT_BIT_TX_CHNL1 | \
 				IWX_CSR_FH_INT_BIT_TX_CHNL0)
 
+/**
+ * struct iwx_rx_transfer_desc - transfer descriptor AX210
+ * @addr: ptr to free buffer start address
+ * @rbid: unique tag of the buffer
+ * @reserved: reserved
+ */
+struct iwx_rx_transfer_desc {
+	uint16_t rbid;
+	uint16_t reserved[3];
+	uint64_t addr;
+};
+
+#define IWX_RX_CD_FLAGS_FRAGMENTED	(1 << 0)
+
+/**
+ * struct iwx_rx_completion_desc - completion descriptor AX210
+ * @reserved1: reserved
+ * @rbid: unique tag of the received buffer
+ * @flags: flags (0: fragmented, all others: reserved)
+ * @reserved2: reserved
+ */
+struct iwx_rx_completion_desc {
+	uint32_t reserved1;
+	uint16_t rbid;
+	uint8_t flags;
+	uint8_t reserved2[25];
+};
+
 /* RESET */
 #define IWX_CSR_RESET_REG_FLAG_NEVO_RESET                (0x00000001)
 #define IWX_CSR_RESET_REG_FLAG_FORCE_NMI                 (0x00000002)
@@ -423,9 +731,22 @@ struct iwx_context_info {
 /* HW REV */
 #define IWX_CSR_HW_REV_DASH(_val)          (((_val) & 0x0000003) >> 0)
 #define IWX_CSR_HW_REV_STEP(_val)          (((_val) & 0x000000C) >> 2)
+#define IWX_CSR_HW_REV_TYPE(_val)          (((_val) & 0x000FFF0) >> 4)
 
 #define IWX_CSR_HW_REV_TYPE_MSK		(0x000FFF0)
+#define IWX_CSR_HW_REV_TYPE_QU_B0	(0x0000334)
+#define IWX_CSR_HW_REV_TYPE_QU_C0	(0x0000338)
 #define IWX_CSR_HW_REV_TYPE_QUZ		(0x0000354)
+#define IWX_CSR_HW_REV_TYPE_SO		(0x0000370)
+#define IWX_CSR_HW_REV_TYPE_TY		(0x0000420)
+
+/* HW RFID */
+#define IWX_CSR_HW_RFID_FLAVOR(_val)       (((_val) & 0x000000F) >> 0)
+#define IWX_CSR_HW_RFID_DASH(_val)         (((_val) & 0x00000F0) >> 4)
+#define IWX_CSR_HW_RFID_STEP(_val)         (((_val) & 0x0000F00) >> 8)
+#define IWX_CSR_HW_RFID_TYPE(_val)         (((_val) & 0x0FFF000) >> 12)
+#define IWX_CSR_HW_RFID_IS_CDB(_val)       (((_val) & 0x10000000) >> 28)
+#define IWX_CSR_HW_RFID_IS_JACKET(_val)    (((_val) & 0x20000000) >> 29)
 
 /* CSR GIO */
 #define IWX_CSR_GIO_REG_VAL_L0S_DISABLED	(0x00000002)
@@ -485,7 +806,7 @@ struct iwx_context_info {
  *
  * Bits 3:0:
  * Define the maximum number of pending read requests.
- * Maximum configration value allowed is 0xC
+ * Maximum configuration value allowed is 0xC
  * Bits 9:8:
  * Define the maximum transfer size. (64 / 128 / 256)
  * Bit 10:
@@ -644,7 +965,7 @@ struct iwx_context_info {
 /* end of 9000 rx series registers */
 
 /*
- * This register is writen by driver and is read by uCode during boot flow.
+ * This register is written by driver and is read by uCode during boot flow.
  * Note this address is cleared after MAC reset.
  */
 #define IWX_UREG_UCODE_LOAD_STATUS	(0xa05c40)
@@ -732,6 +1053,19 @@ struct iwx_context_info {
 #define IWX_HPM_HIPM_GEN_CFG_CR_SLP_EN		(1 << 1)
 #define IWX_HPM_HIPM_GEN_CFG_CR_FORCE_ACTIVE	(1 << 10)
 
+#define IWX_UREG_DOORBELL_TO_ISR6		0xa05c04
+#define IWX_UREG_DOORBELL_TO_ISR6_NMI_BIT	(1 << 0)
+#define IWX_UREG_DOORBELL_TO_ISR6_RESET_HANDSHAKE ((1 << 0) | (1 << 1))
+#define IWX_UREG_DOORBELL_TO_ISR6_SUSPEND	(1 << 18)
+#define IWX_UREG_DOORBELL_TO_ISR6_RESUME	(1 << 19)
+#define IWX_UREG_DOORBELL_TO_ISR6_PNVM		(1 << 20)
+
+/* LTR control (Qu only) */
+#define IWX_HPM_MAC_LTR_CSR			0xa0348c
+#define IWX_HPM_MAC_LRT_ENABLE_ALL		0xf
+/* also uses CSR_LTR_* for values */
+#define IWX_HPM_UMAC_LTR			0xa03480
+
 /*
  * Per-Tx-queue write pointer (index, really!)
  * Indicates index to next TFD that driver will fill (1 past latest filled).
@@ -787,11 +1121,10 @@ enum msix_fh_int_causes {
 /*
  * Causes for the HW register interrupts
  */
-enum msix_hw_int_causes {
+enum mix_hw_int_causes {
 	IWX_MSIX_HW_INT_CAUSES_REG_ALIVE	= (1 << 0),
 	IWX_MSIX_HW_INT_CAUSES_REG_WAKEUP	= (1 << 1),
-	IWX_MSIX_HW_INT_CAUSES_REG_IPC		= (1 << 1),
-	IWX_MSIX_HW_INT_CAUSES_REG_IML		= (1 << 2),
+	IWX_MSIX_HW_INT_CAUSES_REG_RESET_DONE	= (1 << 2),
 	IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2	= (1 << 5),
 	IWX_MSIX_HW_INT_CAUSES_REG_CT_KILL	= (1 << 6),
 	IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL	= (1 << 7),
@@ -813,7 +1146,7 @@ enum msix_ivar_for_cause {
 	IWX_MSIX_IVAR_CAUSE_FH_ERR		= 0x5,
 	IWX_MSIX_IVAR_CAUSE_REG_ALIVE		= 0x10,
 	IWX_MSIX_IVAR_CAUSE_REG_WAKEUP		= 0x11,
-	IWX_MSIX_IVAR_CAUSE_REG_IML		= 0x12,
+	IWX_MSIX_IVAR_CAUSE_REG_RESET_DONE	= 0x12,
 	IWX_MSIX_IVAR_CAUSE_REG_CT_KILL		= 0x16,
 	IWX_MSIX_IVAR_CAUSE_REG_RF_KILL		= 0x17,
 	IWX_MSIX_IVAR_CAUSE_REG_PERIODIC	= 0x18,
@@ -826,6 +1159,12 @@ enum msix_ivar_for_cause {
 
 #define IWX_MSIX_AUTO_CLEAR_CAUSE		(0 << 7)
 #define IWX_MSIX_NON_AUTO_CLEAR_CAUSE		(1 << 7)
+
+#define IWX_CSR_ADDR_BASE(sc)			((sc)->mac_addr_from_csr)
+#define IWX_CSR_MAC_ADDR0_OTP(sc)		(IWX_CSR_ADDR_BASE(sc) + 0x00)
+#define IWX_CSR_MAC_ADDR1_OTP(sc)		(IWX_CSR_ADDR_BASE(sc) + 0x04)
+#define IWX_CSR_MAC_ADDR0_STRAP(sc)		(IWX_CSR_ADDR_BASE(sc) + 0x08)
+#define IWX_CSR_MAC_ADDR1_STRAP(sc)		(IWX_CSR_ADDR_BASE(sc) + 0x0c)
 
 /**
  * uCode API flags
@@ -893,7 +1232,7 @@ enum msix_ivar_for_cause {
  *	scan request.
  * @IWX_UCODE_TLV_API_TKIP_MIC_KEYS: This ucode supports version 2 of
  *	ADD_MODIFY_STA_KEY_API_S_VER_2.
- * @IWX_UCODE_TLV_API_STA_TYPE: This ucode supports station type assignement.
+ * @IWX_UCODE_TLV_API_STA_TYPE: This ucode supports station type assignment.
  * @IWX_UCODE_TLV_API_EXT_SCAN_PRIORITY: scan APIs use 8-level priority
  *	instead of 3.
  * @IWX_UCODE_TLV_API_NEW_RX_STATS: should new RX STATISTICS API be used
@@ -1228,6 +1567,7 @@ struct iwx_ucode_header {
 #define IWX_UCODE_TLV_UMAC_DEBUG_ADDRS	54
 #define IWX_UCODE_TLV_LMAC_DEBUG_ADDRS	55
 #define IWX_UCODE_TLV_FW_RECOVERY_INFO	57
+#define IWX_UCODE_TLV_HW_TYPE		58
 #define IWX_UCODE_TLV_FW_FMAC_RECOVERY_INFO 59
 #define IWX_UCODE_TLV_FW_FSEQ_VERSION	60
 #define IWX_UCODE_TLV_PHY_INTEGRATION_VERSION	61
@@ -1243,7 +1583,8 @@ struct iwx_ucode_header {
 #define IWX_UCODE_TLV_TYPE_HCMD			(IWX_UCODE_TLV_DEBUG_BASE + 2)
 #define IWX_UCODE_TLV_TYPE_REGIONS		(IWX_UCODE_TLV_DEBUG_BASE + 3)
 #define IWX_UCODE_TLV_TYPE_TRIGGERS		(IWX_UCODE_TLV_DEBUG_BASE + 4)
-#define IWX_UCODE_TLV_DEBUG_MAX IWX_UCODE_TLV_TYPE_TRIGGERS
+#define IWX_UCODE_TLV_TYPE_CONF_SET		(IWX_UCODE_TLV_DEBUG_BASE + 5)
+#define IWX_UCODE_TLV_DEBUG_MAX IWX_UCODE_TLV_TYPE_CONF_SET
 
 
 struct iwx_ucode_tlv {
@@ -1323,8 +1664,8 @@ struct iwx_rb_status {
 #define IWX_TFD_QUEUE_SIZE_BC_DUP	(64)
 #define IWX_TFD_QUEUE_BC_SIZE		(IWX_TFD_QUEUE_SIZE_MAX + \
 					IWX_TFD_QUEUE_SIZE_BC_DUP)
-#define IWX_TFD_QUEUE_BC_SIZE_GEN3	(IWX_TFD_QUEUE_SIZE_MAX_GEN3 + \
-					IWX_TFD_QUEUE_SIZE_BC_DUP)
+#define IWX_TFD_QUEUE_BC_SIZE_GEN3_AX210	1024
+#define IWX_TFD_QUEUE_BC_SIZE_GEN3_BZ		(1024 * 4)
 #define IWX_TFH_NUM_TBS		25
 
 /**
@@ -1375,26 +1716,23 @@ struct iwx_tfh_tfd {
 /**
  * struct iwx_agn_schedq_bc_tbl scheduler byte count table
  *	base physical address provided by IWX_SCD_DRAM_BASE_ADDR
- * @tfd_offset  0-12 - tx command byte count
- *	       12-16 - station index
+ * @tfd_offset  0-11 - tx command byte count
+ *		12-13 - number of 64 byte chunks
+ *		14-15 - reserved
  */
 struct iwx_agn_scd_bc_tbl {
 	uint16_t tfd_offset[IWX_TFD_QUEUE_BC_SIZE];
 } __packed;
 
 /**
- * struct iwx_gen3_bc_tbl scheduler byte count table gen3
- * For 22560 and on:
- * @tfd_offset: 0-12 - tx command byte count
- *		12-13 - number of 64 byte chunks
- *		14-16 - reserved
+ * struct iwx_gen3_bc_tbl_entry scheduler byte count table entry gen3
+ * For AX210 and up, the table no longer needs to be contiguous in memory.
+ * @tfd_offset: 0-13 - tx command byte count
+ *		14-15 - number of 64 byte chunks
  */
-struct iwx_gen3_bc_tbl {
-	uint16_t tfd_offset[IWX_TFD_QUEUE_BC_SIZE_GEN3];
+struct iwx_gen3_bc_tbl_entry {
+	uint16_t tfd_offset;
 } __packed;
-
-/* Maximum number of Tx queues. */
-#define IWX_MAX_QUEUES	31
 
 /**
  * DQA - Dynamic Queue Allocation -introduction
@@ -1410,26 +1748,27 @@ struct iwx_gen3_bc_tbl {
  * some queues that are statically allocated:
  *	TXQ #0 - command queue
  *	TXQ #1 - aux frames
- *	TXQ #2 - P2P device frames
- *	TXQ #3 - P2P GO/SoftAP GCAST/BCAST frames
- *	TXQ #4 - BSS DATA frames queue
- *	TXQ #5-8 - non-QoS data, QoS no-data, and MGMT frames queue pool
- *	TXQ #9 - P2P GO/SoftAP probe responses
- *	TXQ #10-31 - QoS DATA frames queue pool (for Tx aggregation)
  */
 
 /* static DQA Tx queue numbers */
 #define IWX_DQA_CMD_QUEUE		0
 #define IWX_DQA_AUX_QUEUE		1
-#define IWX_DQA_P2P_DEVICE_QUEUE	2
-#define IWX_DQA_INJECT_MONITOR_QUEUE	2
-#define IWX_DQA_GCAST_QUEUE		3
-#define IWX_DQA_BSS_CLIENT_QUEUE	4
-#define IWX_DQA_MIN_MGMT_QUEUE		5
-#define IWX_DQA_MAX_MGMT_QUEUE		8
-#define IWX_DQA_AP_PROBE_RESP_QUEUE	9
-#define IWX_DQA_MIN_DATA_QUEUE		10
-#define IWX_DQA_MAX_DATA_QUEUE		31
+
+#define IWX_DQA_INJECT_MONITOR_QUEUE	2 /* used in monitor mode only */
+#define IWX_DQA_MGMT_QUEUE		1 /* default queue other modes */
+
+/* Reserve 8 DQA Tx queues for QoS data frames. */
+#define IWX_MAX_TID_COUNT	8
+#define IWX_FIRST_AGG_TX_QUEUE	(IWX_DQA_MGMT_QUEUE + 1)
+#define IWX_LAST_AGG_TX_QUEUE	(IWX_FIRST_AGG_TX_QUEUE + IWX_MAX_TID_COUNT - 1)
+#define IWX_NUM_TX_QUEUES	(IWX_LAST_AGG_TX_QUEUE + 1)
+
+/**
+ * Max Tx window size is the max number of contiguous TFDs that the scheduler
+ * can keep track of at one time when creating block-ack chains of frames.
+ * Note that "64" matches the number of ack bits in a block-ack packet.
+ */
+#define IWX_FRAME_LIMIT	64
 
 #define IWX_TX_FIFO_BK	0
 #define IWX_TX_FIFO_BE	1
@@ -1667,6 +2006,8 @@ struct iwx_tx_queue_cfg_rsp {
 /* REGULATORY_AND_NVM group subcommand IDs */
 #define IWX_NVM_ACCESS_COMPLETE	0x00
 #define IWX_NVM_GET_INFO	0x02
+#define IWX_NVM_GET_INFO	0x02
+#define IWX_PNVM_INIT_COMPLETE	0xfe
 
 /*
  * struct iwx_dqa_enable_cmd
@@ -2047,7 +2388,7 @@ struct iwx_init_extended_cfg_cmd {
  * struct iwx_error_resp - FW error indication
  * ( IWX_REPLY_ERROR = 0x2 )
  * @error_type: one of IWX_FW_ERR_*
- * @cmd_id: the command ID for which the error occured
+ * @cmd_id: the command ID for which the error occurred
  * @bad_cmd_seq_num: sequence number of the erroneous command
  * @error_service: which service created the error, applicable only if
  *	error_type = 2, otherwise 0
@@ -2462,7 +2803,7 @@ struct iwx_fw_dbg_trigger_time_event {
  * tx_bar: tid bitmap to configure on what tid the trigger should occur
  *	when a BAR is send (for an Rx BlocAck session).
  * frame_timeout: tid bitmap to configure on what tid the trigger should occur
- *	when a frame times out in the reodering buffer.
+ *	when a frame times out in the reordering buffer.
  */
 struct iwx_fw_dbg_trigger_ba {
 	uint16_t rx_ba_start;
@@ -2688,7 +3029,7 @@ struct iwx_fw_cmd_version {
  * @IWX_TE_V2_NOTIF_INTERNAL_FRAG_END: internal FW use.
  * @IWX_TE_V2_DEP_OTHER: depends on another time event
  * @IWX_TE_V2_DEP_TSF: depends on a specific time
- * @IWX_TE_V2_EVENT_SOCIOPATHIC: can't co-exist with other events of tha same MAC
+ * @IWX_TE_V2_EVENT_SOCIOPATHIC: can't co-exist with other events of the same MAC
  * @IWX_TE_V2_ABSENCE: are we present or absent during the Time Event.
  */
 #define IWX_TE_V2_DEFAULT_POLICY		0x0
@@ -2799,7 +3140,7 @@ struct iwx_time_event_notif {
  *	that event, no other activity will happen in the firmware,
  *	which is why it can't be too long.
  *	The length of this event is hard-coded in the firmware: 300TUs.
- *	* Another event which can be much longer (it's duration is
+ *	* Another event which can be much longer (its duration is
  *	configurable by the driver) which has a slightly lower
  *	priority and that can be fragmented allowing other activities
  *	to run while this event is running.
@@ -2900,7 +3241,7 @@ struct iwx_binding_cmd {
  * struct iwx_time_quota_data - configuration of time quota per binding
  * @id_and_color: ID and color of the relevant Binding
  * @quota: absolute time quota in TU. The scheduler will try to divide the
- *	remainig quota (after Time Events) according to this quota.
+ *	remaining quota (after Time Events) according to this quota.
  * @max_duration: max uninterrupted context duration in TU
  */
 struct iwx_time_quota_data {
@@ -3060,7 +3401,7 @@ struct iwx_phy_context_cmd {
  * XXX Intel forgot to bump the PHY_CONTEXT command API when they increased
  * the size of fw_channel_info from v1 to v2.
  * To keep things simple we define two versions of this struct, and both
- * are labled as CMD_API_VER_1. (The Linux iwlwifi driver performs dark
+ * are labeled as CMD_API_VER_1. (The Linux iwlwifi driver performs dark
  * magic with pointers to struct members instead.)
  */
 /* This version must be used if IWX_UCODE_TLV_CAPA_ULTRA_HB_CHANNELS is set: */
@@ -3264,6 +3605,42 @@ struct iwx_rx_mpdu_res_start {
 #define IWX_RX_MPDU_PHY_NCCK_ADDTL_NTFY		(1 << 7)
 #define IWX_RX_MPDU_PHY_TSF_OVERLOAD		(1 << 8)
 
+struct iwx_rx_mpdu_desc_v3 {
+	union {
+		uint32_t filter_match;
+		uint32_t phy_data3;
+	};
+	union {
+		uint32_t rss_hash;
+		uint32_t phy_data2;
+	};
+	uint32_t partial_hash; /* ip/tcp header hash w/o some fields */
+	uint16_t raw_xsum;
+	uint16_t reserved_xsum;
+	uint32_t rate_n_flags;
+	uint8_t energy_a;
+	uint8_t energy_b;
+	uint8_t channel;
+	uint8_t mac_context;
+	uint32_t gp2_on_air_rise;
+	union {
+		/*
+		 * TSF value on air rise (INA), only valid if
+		 * IWX_RX_MPDU_PHY_TSF_OVERLOAD isn't set
+		 */
+		uint64_t tsf_on_air_rise;
+
+		struct {
+			uint32_t phy_data0;
+
+			/* Only valid if IWX_RX_MPDU_PHY_TSF_OVERLOAD is set. */
+			uint32_t phy_data1;
+		};
+	};
+	uint32_t reserved[2];
+} __packed; /* RX_MPDU_RES_START_API_S_VER_3,
+	       RX_MPDU_RES_START_API_S_VER_5 */
+
 struct iwx_rx_mpdu_desc_v1 {
 	union {
 		uint32_t rss_hash;
@@ -3313,8 +3690,16 @@ struct iwx_rx_mpdu_desc {
 	uint8_t hash_filter;
 	uint8_t sta_id_flags;
 	uint32_t reorder_data;
-	struct iwx_rx_mpdu_desc_v1 v1;
-} __packed;
+	union {
+		struct iwx_rx_mpdu_desc_v1 v1;
+		struct iwx_rx_mpdu_desc_v3 v3;
+	};
+} __packed; /* RX_MPDU_RES_START_API_S_VER_3,
+	       RX_MPDU_RES_START_API_S_VER_4,
+	       RX_MPDU_RES_START_API_S_VER_5 */
+
+#define IWX_RX_DESC_SIZE_V1 ((sizeof(struct iwx_rx_mpdu_desc) - \
+    sizeof(struct iwx_rx_mpdu_desc_v3)) + sizeof(struct iwx_rx_mpdu_desc_v1))
 
 struct iwx_frame_release {
 	uint8_t baid;
@@ -3776,7 +4161,7 @@ struct iwx_statistics_cmd {
 /**
  * Smart Fifo configuration command.
  * @state: smart fifo state, types listed in enum %iwx_sf_state.
- * @watermark: Minimum allowed availabe free space in RXF for transient state.
+ * @watermark: Minimum allowed available free space in RXF for transient state.
  * @long_delay_timeouts: aging and idle timer values for each scenario
  * in long delay state.
  * @full_on_timeouts: timer values for each scenario in full on state.
@@ -3966,7 +4351,7 @@ struct iwx_mac_data_p2p_dev {
 /**
  * MAC context filter flags
  * @IWX_MAC_FILTER_IN_PROMISC: accept all data frames
- * @IWX_MAC_FILTER_IN_CONTROL_AND_MGMT: pass all mangement and
+ * @IWX_MAC_FILTER_IN_CONTROL_AND_MGMT: pass all management and
  *	control frames to the host
  * @IWX_MAC_FILTER_ACCEPT_GRP: accept multicast frames
  * @IWX_MAC_FILTER_DIS_DECRYPT: don't decrypt unicast frames
@@ -4184,7 +4569,7 @@ struct iwx_device_power_cmd {
 /**
  * struct iwx_mac_power_cmd - New power command containing uAPSD support
  * IWX_MAC_PM_POWER_TABLE = 0xA9 (command, has simple generic response)
- * @id_and_color:	MAC contex identifier
+ * @id_and_color:	MAC context identifier
  * @flags:		Power table command flags from POWER_FLAGS_*
  * @keep_alive_seconds:	Keep alive period in seconds. Default - 25 sec.
  *			Minimum allowed:- 3 * DTIM. Keep alive period must be
@@ -4270,7 +4655,7 @@ struct iwx_uapsd_misbehaving_ap_notif {
 /**
  * struct iwx_beacon_filter_cmd
  * IWX_REPLY_BEACON_FILTERING_CMD = 0xd2 (command)
- * @id_and_color: MAC contex identifier
+ * @id_and_color: MAC context identifier
  * @bf_energy_delta: Used for RSSI filtering, if in 'normal' state. Send beacon
  *      to driver if delta in Energy values calculated for this and last
  *      passed beacon is greater than this threshold. Zero value means that
@@ -4287,7 +4672,7 @@ struct iwx_uapsd_misbehaving_ap_notif {
  *      Roaming Energy Delta Threshold, otherwise use normal Energy Delta
  *      Threshold. Typical energy threshold is -72dBm.
  * @bf_temp_threshold: This threshold determines the type of temperature
- *	filtering (Slow or Fast) that is selected (Units are in Celsuis):
+ *	filtering (Slow or Fast) that is selected (Units are in Celsius):
  *      If the current temperature is above this threshold - Fast filter
  *	will be used, If the current temperature is below this threshold -
  *	Slow filter will be used.
@@ -4295,12 +4680,12 @@ struct iwx_uapsd_misbehaving_ap_notif {
  *      calculated for this and the last passed beacon is greater than this
  *      threshold. Zero value means that the temperature change is ignored for
  *      beacon filtering; beacons will not be  forced to be sent to driver
- *      regardless of whether its temerature has been changed.
+ *      regardless of whether its temperature has been changed.
  * @bf_temp_slow_filter: Send Beacon to driver if delta in temperature values
  *      calculated for this and the last passed beacon is greater than this
  *      threshold. Zero value means that the temperature change is ignored for
  *      beacon filtering; beacons will not be forced to be sent to driver
- *      regardless of whether its temerature has been changed.
+ *      regardless of whether its temperature has been changed.
  * @bf_enable_beacon_filter: 1, beacon filtering is enabled; 0, disabled.
  * @bf_escape_timer: Send beacons to driver if no beacons were passed
  *      for a specific period of time. Units: Beacons.
@@ -4667,7 +5052,7 @@ enum {
 #define IWX_LQ_FLAG_RTS_BW_SIG_DYNAMIC      (2 << IWX_LQ_FLAG_RTS_BW_SIG_POS)
 
 /* Bit 6: (0) No dynamic BW selection (1) Allow dynamic BW selection
- * Dyanmic BW selection allows Tx with narrower BW then requested in rates
+ * Dynamic BW selection allows Tx with narrower BW then requested in rates
  */
 #define IWX_LQ_FLAG_DYNAMIC_BW_POS          6
 #define IWX_LQ_FLAG_DYNAMIC_BW_MSK          (1 << IWX_LQ_FLAG_DYNAMIC_BW_POS)
@@ -4844,68 +5229,6 @@ struct iwx_tlc_update_notif {
 #define IWX_ANT_BC	(IWX_ANT_B | IWX_ANT_C)
 #define IWX_ANT_ABC	(IWX_ANT_A | IWX_ANT_B | IWX_ANT_C)
 
-/**
- * bitmasks for tx_flags in TX command
- * @IWX_TX_CMD_FLG_PROT_REQUIRE: use RTS or CTS-to-self to protect the frame
- * @IWX_TX_CMD_FLG_ACK: expect ACK from receiving station
- * @IWX_TX_CMD_FLG_STA_RATE: use RS table with initial index from the TX command.
- *	Otherwise, use rate_n_flags from the TX command
- * @IWX_TX_CMD_FLG_BA: this frame is a block ack
- * @IWX_TX_CMD_FLG_BAR: this frame is a BA request, immediate BAR is expected
- *	Must set IWX_TX_CMD_FLG_ACK with this flag.
- * @IWX_TX_CMD_FLG_TXOP_PROT: protect frame with full TXOP protection
- * @IWX_TX_CMD_FLG_VHT_NDPA: mark frame is NDPA for VHT beamformer sequence
- * @IWX_TX_CMD_FLG_HT_NDPA: mark frame is NDPA for HT beamformer sequence
- * @IWX_TX_CMD_FLG_CSI_FDBK2HOST: mark to send feedback to host (only if good CRC)
- * @IWX_TX_CMD_FLG_BT_DIS: disable BT priority for this frame
- * @IWX_TX_CMD_FLG_SEQ_CTL: set if FW should override the sequence control.
- *	Should be set for mgmt, non-QOS data, mcast, bcast and in scan command
- * @IWX_TX_CMD_FLG_MORE_FRAG: this frame is non-last MPDU
- * @IWX_TX_CMD_FLG_NEXT_FRAME: this frame includes information of the next frame
- * @IWX_TX_CMD_FLG_TSF: FW should calculate and insert TSF in the frame
- *	Should be set for beacons and probe responses
- * @IWX_TX_CMD_FLG_CALIB: activate PA TX power calibrations
- * @IWX_TX_CMD_FLG_KEEP_SEQ_CTL: if seq_ctl is set, don't increase inner seq count
- * @IWX_TX_CMD_FLG_AGG_START: allow this frame to start aggregation
- * @IWX_TX_CMD_FLG_MH_PAD: driver inserted 2 byte padding after MAC header.
- *	Should be set for 26/30 length MAC headers
- * @IWX_TX_CMD_FLG_RESP_TO_DRV: zero this if the response should go only to FW
- * @IWX_TX_CMD_FLG_CCMP_AGG: this frame uses CCMP for aggregation acceleration
- * @IWX_TX_CMD_FLG_TKIP_MIC_DONE: FW already performed TKIP MIC calculation
- * @IWX_TX_CMD_FLG_DUR: disable duration overwriting used in PS-Poll Assoc-id
- * @IWX_TX_CMD_FLG_FW_DROP: FW should mark frame to be dropped
- * @IWX_TX_CMD_FLG_EXEC_PAPD: execute PAPD
- * @IWX_TX_CMD_FLG_PAPD_TYPE: 0 for reference power, 1 for nominal power
- * @IWX_TX_CMD_FLG_HCCA_CHUNK: mark start of TSPEC chunk
- */
-#define IWX_TX_CMD_FLG_PROT_REQUIRE	(1 << 0)
-#define IWX_TX_CMD_FLG_ACK		(1 << 3)
-#define IWX_TX_CMD_FLG_STA_RATE		(1 << 4)
-#define IWX_TX_CMD_FLG_BA		(1 << 5)
-#define IWX_TX_CMD_FLG_BAR		(1 << 6)
-#define IWX_TX_CMD_FLG_TXOP_PROT	(1 << 7)
-#define IWX_TX_CMD_FLG_VHT_NDPA		(1 << 8)
-#define IWX_TX_CMD_FLG_HT_NDPA		(1 << 9)
-#define IWX_TX_CMD_FLG_CSI_FDBK2HOST	(1 << 10)
-#define IWX_TX_CMD_FLG_BT_DIS		(1 << 12)
-#define IWX_TX_CMD_FLG_SEQ_CTL		(1 << 13)
-#define IWX_TX_CMD_FLG_MORE_FRAG	(1 << 14)
-#define IWX_TX_CMD_FLG_NEXT_FRAME	(1 << 15)
-#define IWX_TX_CMD_FLG_TSF		(1 << 16)
-#define IWX_TX_CMD_FLG_CALIB		(1 << 17)
-#define IWX_TX_CMD_FLG_KEEP_SEQ_CTL	(1 << 18)
-#define IWX_TX_CMD_FLG_AGG_START	(1 << 19)
-#define IWX_TX_CMD_FLG_MH_PAD		(1 << 20)
-#define IWX_TX_CMD_FLG_RESP_TO_DRV	(1 << 21)
-#define IWX_TX_CMD_FLG_CCMP_AGG		(1 << 22)
-#define IWX_TX_CMD_FLG_TKIP_MIC_DONE	(1 << 23)
-#define IWX_TX_CMD_FLG_DUR		(1 << 25)
-#define IWX_TX_CMD_FLG_FW_DROP		(1 << 26)
-#define IWX_TX_CMD_FLG_EXEC_PAPD	(1 << 27)
-#define IWX_TX_CMD_FLG_PAPD_TYPE	(1 << 28)
-#define IWX_TX_CMD_FLG_HCCA_CHUNK	(1U << 31)
-/* IWX_TX_FLAGS_BITS_API_S_VER_1 */
-
 /*
  * TX command security control
  */
@@ -4952,7 +5275,6 @@ struct iwx_tlc_update_notif {
 /*
  * TID for non QoS frames - to be written in tid_tspec
  */
-#define IWX_MAX_TID_COUNT	8
 #define IWX_TID_NON_QOS	0
 
 /*
@@ -4977,7 +5299,7 @@ struct iwx_tlc_update_notif {
 #define IWX_FIRST_TB_SIZE_ALIGN ((IWX_FIRST_TB_SIZE + (64 - 1)) & ~(64 - 1))
 
 /**
- * %iwl_tx_cmd offload_assist values
+ * %iwx_tx_cmd offload_assist values
  * @TX_CMD_OFFLD_IP_HDR: offset to start of IP header (in words)
  *	from mac header end. For normal case it is 4 words for SNAP.
  *	note: tx_cmd, mac header and pad are not counted in the offset.
@@ -5026,7 +5348,7 @@ struct iwx_dram_sec_info {
  * ( TX_CMD = 0x1c )
  * @len: in bytes of the payload, see below for details
  * @offload_assist: TX offload configuration
- * @flags: combination of TX_CMD_FLG_*
+ * @flags: combination of TX_FLAGS_*
  * @dram_info: FW internal DRAM storage
  * @rate_n_flags: rate for *all* Tx attempts, if TX_CMD_FLG_STA_RATE_MSK is
  *	cleared. Combination of RATE_MCS_*
@@ -5039,7 +5361,31 @@ struct iwx_tx_cmd_gen2 {
 	struct iwx_dram_sec_info dram_info;
 	uint32_t rate_n_flags;
 	struct ieee80211_frame hdr[0];
-} __packed; /* TX_CMD_API_S_VER_7 */
+} __packed; /* TX_CMD_API_S_VER_7,
+	       TX_CMD_API_S_VER_9 */
+
+/**
+ * struct iwx_tx_cmd_gen3 - TX command struct to FW for AX210+ devices
+ * ( TX_CMD = 0x1c )
+ * @len: in bytes of the payload, see below for details
+ * @flags: combination of TX_FLAGS_*
+ * @offload_assist: TX offload configuration
+ * @dram_info: FW internal DRAM storage
+ * @rate_n_flags: rate for *all* Tx attempts, if TX_CMD_FLG_STA_RATE_MSK is
+ *	cleared. Combination of RATE_MCS_*
+ * @reserved: reserved
+ * @hdr: 802.11 header
+ */
+struct iwx_tx_cmd_gen3 {
+	uint16_t len;
+	uint16_t flags;
+	uint32_t offload_assist;
+	struct iwx_dram_sec_info dram_info;
+	uint32_t rate_n_flags;
+	uint8_t reserved[8];
+	struct ieee80211_frame hdr[];
+} __packed; /* TX_CMD_API_S_VER_8,
+	       TX_CMD_API_S_VER_10 */
 
 /*
  * TX response related data
@@ -5290,34 +5636,95 @@ struct iwx_tx_resp {
 } __packed; /* TX_RSP_API_S_VER_6 */
 
 /**
- * struct iwx_ba_notif - notifies about reception of BA
- * ( IWX_BA_NOTIF = 0xc5 )
- * @sta_addr_lo32: lower 32 bits of the MAC address
- * @sta_addr_hi16: upper 16 bits of the MAC address
- * @sta_id: Index of recipient (BA-sending) station in fw's station table
- * @tid: tid of the session
- * @seq_ctl:
- * @bitmap: the bitmap of the BA notification as seen in the air
- * @scd_flow: the tx queue this BA relates to
- * @scd_ssn: the index of the last contiguously sent packet
- * @txed: number of Txed frames in this batch
- * @txed_2_done: number of Acked frames in this batch
+ * struct iwx_compressed_ba_tfd - progress of a TFD queue
+ * @q_num: TFD queue number
+ * @tfd_index: Index of first un-acked frame in the  TFD queue
+ * @scd_queue: For debug only - the physical queue the TFD queue is bound to
+ * @tid: TID of the queue (0-7)
+ * @reserved: reserved for alignment
  */
-struct iwx_ba_notif {
-	uint32_t sta_addr_lo32;
-	uint16_t sta_addr_hi16;
-	uint16_t reserved;
-
-	uint8_t sta_id;
+struct iwx_compressed_ba_tfd {
+	uint16_t q_num;
+	uint16_t tfd_index;
+	uint8_t scd_queue;
 	uint8_t tid;
-	uint16_t seq_ctl;
-	uint64_t bitmap;
-	uint16_t scd_flow;
-	uint16_t scd_ssn;
-	uint8_t txed;
-	uint8_t txed_2_done;
-	uint16_t reserved1;
-} __packed;
+	uint8_t reserved[2];
+} __packed; /* COMPRESSED_BA_TFD_API_S_VER_1 */
+
+/**
+ * struct iwx_compressed_ba_ratid - progress of a RA TID queue
+ * @q_num: RA TID queue number
+ * @tid: TID of the queue
+ * @ssn: BA window current SSN
+ */
+struct iwx_compressed_ba_ratid {
+	uint8_t q_num;
+	uint8_t tid;
+	uint16_t ssn;
+} __packed; /* COMPRESSED_BA_RATID_API_S_VER_1 */
+
+/*
+ * enum iwx_ba_resp_flags - TX aggregation status
+ * @IWX_MVM_BA_RESP_TX_AGG: generated due to BA
+ * @IWX_MVM_BA_RESP_TX_BAR: generated due to BA after BAR
+ * @IWX_MVM_BA_RESP_TX_AGG_FAIL: aggregation didn't receive BA
+ * @IWX_MVM_BA_RESP_TX_UNDERRUN: aggregation got underrun
+ * @IWX_MVM_BA_RESP_TX_BT_KILL: aggregation got BT-kill
+ * @IWX_MVM_BA_RESP_TX_DSP_TIMEOUT: aggregation didn't finish within the
+ *	expected time
+ */
+enum iwx_ba_resp_flags {
+	IWX_MVM_BA_RESP_TX_AGG,
+	IWX_MVM_BA_RESP_TX_BAR,
+	IWX_MVM_BA_RESP_TX_AGG_FAIL,
+	IWX_MVM_BA_RESP_TX_UNDERRUN,
+	IWX_MVM_BA_RESP_TX_BT_KILL,
+	IWX_MVM_BA_RESP_TX_DSP_TIMEOUT
+};
+
+/**
+ * struct iwx_compressed_ba_notif - notifies about reception of BA
+ * ( BA_NOTIF = 0xc5 )
+ * @flags: status flag, see the &iwx_ba_resp_flags
+ * @sta_id: Index of recipient (BA-sending) station in fw's station table
+ * @reduced_txp: power reduced according to TPC. This is the actual value and
+ *	not a copy from the LQ command. Thus, if not the first rate was used
+ *	for Tx-ing then this value will be set to 0 by FW.
+ * @tlc_rate_info: TLC rate info, initial rate index, TLC table color
+ * @retry_cnt: retry count
+ * @query_byte_cnt: SCD query byte count
+ * @query_frame_cnt: SCD query frame count
+ * @txed: number of frames sent in the aggregation (all-TIDs)
+ * @done: number of frames that were Acked by the BA (all-TIDs)
+ * @reserved: reserved (for alignment)
+ * @wireless_time: Wireless-media time
+ * @tx_rate: the rate the aggregation was sent at
+ * @tfd_cnt: number of TFD-Q elements
+ * @ra_tid_cnt: number of RATID-Q elements
+ * @tfd: array of TFD queue status updates. See &iwx_compressed_ba_tfd
+ *	for details. Length in @tfd_cnt.
+ * @ra_tid: array of RA-TID queue status updates. For debug purposes only. See
+ *	&iwx_compressed_ba_ratid for more details. Length in @ra_tid_cnt.
+ */
+struct iwx_compressed_ba_notif {
+	uint32_t flags;
+	uint8_t sta_id;
+	uint8_t reduced_txp;
+	uint8_t tlc_rate_info;
+	uint8_t retry_cnt;
+	uint32_t query_byte_cnt;
+	uint16_t query_frame_cnt;
+	uint16_t txed;
+	uint16_t done;
+	uint16_t reserved;
+	uint32_t wireless_time;
+	uint32_t tx_rate;
+	uint16_t tfd_cnt;
+	uint16_t ra_tid_cnt;
+	struct iwx_compressed_ba_ratid ra_tid[0];
+	struct iwx_compressed_ba_tfd tfd[];
+} __packed; /* COMPRESSED_BA_RES_API_S_VER_4 */
+
 
 struct iwx_beacon_notif {
 	struct iwx_tx_resp_v3 beacon_notify_hdr;
@@ -5356,6 +5763,33 @@ struct iwx_tx_path_flush_cmd {
 	uint16_t reserved;
 } __packed; /* TX_PATH_FLUSH_CMD_API_S_VER_2 */
 
+#define IWX_TX_FLUSH_QUEUE_RSP 16
+
+/**
+ * struct iwx_flush_queue_info - virtual flush queue info
+ * @queue_num: virtual queue id
+ * @read_before_flush: read pointer before flush
+ * @read_after_flush: read pointer after flush
+ */
+struct iwx_flush_queue_info {
+	uint16_t tid;
+	uint16_t queue_num;
+	uint16_t read_before_flush;
+	uint16_t read_after_flush;
+} __packed; /* TFDQ_FLUSH_INFO_API_S_VER_1 */
+
+/**
+ * struct iwx_tx_path_flush_cmd_rsp -- queue/FIFO flush command response
+ * @num_flushed_queues: number of queues in queues array
+ * @queues: all flushed queues
+ */
+struct iwx_tx_path_flush_cmd_rsp {
+	uint16_t sta_id;
+	uint16_t num_flushed_queues;
+	struct iwx_flush_queue_info queues[IWX_TX_FLUSH_QUEUE_RSP];
+} __packed; /* TX_PATH_FLUSH_CMD_RSP_API_S_VER_1 */
+
+
 /**
  * iwx_get_scd_ssn - returns the SSN of the SCD
  * @tx_resp: the Tx response from the fw (agg or non-agg)
@@ -5380,7 +5814,7 @@ static inline uint32_t iwx_get_scd_ssn(struct iwx_tx_resp *tx_resp)
  * @token:
  * @sta_id: station id
  * @tid:
- * @scd_queue: scheduler queue to confiug
+ * @scd_queue: scheduler queue to config
  * @enable: 1 queue enable, 0 queue disable
  * @aggregate: 1 aggregated queue, 0 otherwise
  * @tx_fifo: %enum iwx_tx_fifo
@@ -5628,8 +6062,8 @@ struct iwx_scan_offload_blacklist {
 /**
  * iwx_scan_offload_profile - IWX_SCAN_OFFLOAD_PROFILE_S
  * @ssid_index:		index to ssid list in fixed part
- * @unicast_cipher:	encryption olgorithm to match - bitmap
- * @aut_alg:		authentication olgorithm to match - bitmap
+ * @unicast_cipher:	encryption algorithm to match - bitmap
+ * @aut_alg:		authentication algorithm to match - bitmap
  * @network_type:	enum iwx_scan_offload_network_type
  * @band_selection:	enum iwx_scan_offload_band_selection
  * @client_bitmap:	clients waiting for match - enum scan_framework_client
@@ -5646,7 +6080,7 @@ struct iwx_scan_offload_profile {
 
 /**
  * iwx_scan_offload_profile_cfg - IWX_SCAN_OFFLOAD_PROFILES_CFG_API_S_VER_1
- * @blaclist:		AP list to filter off from scan results
+ * @blacklist:		AP list to filter off from scan results
  * @profiles:		profiles to search for match
  * @blacklist_len:	length of blacklist
  * @num_profiles:	num of profiles in the list
@@ -5738,7 +6172,7 @@ struct iwx_scan_dwell {
 /**
  * struct iwl_scan_config
  * @enable_cam_mode: whether to enable CAM mode.
- * @enable_promiscouos_mode: whether to enable promiscouos mode
+ * @enable_promiscuous_mode: whether to enable promiscuous mode
  * @bcast_sta_id: the index of the station in the fw. Deprecated starting with
  *     API version 5.
  * @reserved: reserved
@@ -5747,7 +6181,7 @@ struct iwx_scan_dwell {
  */
 struct iwx_scan_config {
 	uint8_t enable_cam_mode;
-	uint8_t enable_promiscouos_mode;
+	uint8_t enable_promiscuous_mode;
 	uint8_t bcast_sta_id;
 	uint8_t reserved;
 	uint32_t tx_chains;
@@ -5790,7 +6224,7 @@ struct iwx_scan_config_v2 {
  * iwx_umac_scan_flags
  *@IWX_UMAC_SCAN_FLAG_PREEMPTIVE: scan process triggered by this scan request
  *	can be preempted by other scan requests with higher priority.
- *	The low priority scan will be resumed when the higher proirity scan is
+ *	The low priority scan will be resumed when the higher priority scan is
  *	completed.
  *@IWX_UMAC_SCAN_FLAG_START_NOTIF: notification will be sent to the driver
  *	when scan starts.
@@ -5812,7 +6246,7 @@ struct iwx_scan_config_v2 {
 #define IWX_UMAC_SCAN_GEN_FLAGS_RRM_ENABLED	(1 << 8)
 #define IWX_UMAC_SCAN_GEN_FLAGS_MATCH		(1 << 9)
 #define IWX_UMAC_SCAN_GEN_FLAGS_EXTENDED_DWELL	(1 << 10)
-/* Extended dwell is obselete when adaptive dwell is used, making this
+/* Extended dwell is obsolete when adaptive dwell is used, making this
  * bit reusable. Hence, probe request defer is used only when adaptive
  * dwell is supported. */
 #define IWX_UMAC_SCAN_GEN_FLAGS_PROB_REQ_DEFER_SUPP	(1 << 10)
@@ -6345,7 +6779,9 @@ struct iwx_umac_scan_iter_complete_notif {
 #define IWX_STA_FLG_MAX_AGG_SIZE_256K	(5 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 #define IWX_STA_FLG_MAX_AGG_SIZE_512K	(6 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 #define IWX_STA_FLG_MAX_AGG_SIZE_1024K	(7 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
-#define IWX_STA_FLG_MAX_AGG_SIZE_MSK	(7 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
+#define IWX_STA_FLG_MAX_AGG_SIZE_2M	(8 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
+#define IWX_STA_FLG_MAX_AGG_SIZE_4M	(9 << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
+#define IWX_STA_FLG_MAX_AGG_SIZE_MSK	(0xf << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT)
 
 #define IWX_STA_FLG_AGG_MPDU_DENS_SHIFT	23
 #define IWX_STA_FLG_AGG_MPDU_DENS_2US	(4 << IWX_STA_FLG_AGG_MPDU_DENS_SHIFT)
@@ -6374,7 +6810,7 @@ struct iwx_umac_scan_iter_complete_notif {
  * @IWX_STA_KEY_FLG_EXT: extended cipher algorithm (depends on the FW support)
  * @IWX_STA_KEY_FLG_CMAC: CMAC encryption algorithm
  * @IWX_STA_KEY_FLG_ENC_UNKNOWN: unknown encryption algorithm
- * @IWX_STA_KEY_FLG_EN_MSK: mask for encryption algorithmi value
+ * @IWX_STA_KEY_FLG_EN_MSK: mask for encryption algorithm value
  * @IWX_STA_KEY_FLG_WEP_KEY_MAP: wep is either a group key (0 - legacy WEP) or from
  *	station info array (1 - n 1X mode)
  * @IWX_STA_KEY_FLG_KEYID_MSK: the index of the key
@@ -6518,7 +6954,7 @@ struct iwx_keyinfo {
  *	mac-addr.
  * @beamform_flags: beam forming controls
  * @tfd_queue_msk: tfd queues used by this station.
- *	Obselete for new TX API (9 and above).
+ *	Obsolete for new TX API (9 and above).
  * @rx_ba_window: aggregation window size
  * @sp_length: the size of the SP in actual number of frames
  * @uapsd_acs:  4 LS bits are trigger enabled ACs, 4 MS bits are the deliver
@@ -6565,7 +7001,7 @@ struct iwx_add_sta_cmd {
  *	and probe responses.
  * @IWX_STA_MULTICAST: multicast traffic,
  * @IWX_STA_TDLS_LINK: TDLS link station
- * @IWX_STA_AUX_ACTIVITY: auxilary station (scan, ROC and so on).
+ * @IWX_STA_AUX_ACTIVITY: auxiliary station (scan, ROC and so on).
  */
 #define IWX_STA_LINK		0
 #define IWX_STA_GENERAL_PURPOSE	1

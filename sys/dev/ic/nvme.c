@@ -1,4 +1,4 @@
-/*	$OpenBSD: nvme.c,v 1.103 2021/08/31 04:21:04 dlg Exp $ */
+/*	$OpenBSD: nvme.c,v 1.105 2022/07/10 20:14:16 mlarkin Exp $ */
 
 /*
  * Copyright (c) 2014 David Gwynne <dlg@openbsd.org>
@@ -93,7 +93,7 @@ void	nvme_scsi_free(struct scsi_link *);
 int	nvme_hibernate_io(dev_t, daddr_t, vaddr_t, size_t, int, void *);
 #endif
 
-struct scsi_adapter nvme_switch = {
+const struct scsi_adapter nvme_switch = {
 	nvme_scsi_cmd, nvme_minphys, nvme_scsi_probe, nvme_scsi_free, NULL
 };
 
@@ -142,7 +142,7 @@ nvme_read8(struct nvme_softc *sc, bus_size_t r)
 {
 	u_int64_t v;
 
-	v = (u_int64_t)nvme_read4(sc, r) | 
+	v = (u_int64_t)nvme_read4(sc, r) |
 	    (u_int64_t)nvme_read4(sc, r + 4) << 32;
 
 	return (v);

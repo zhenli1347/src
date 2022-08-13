@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsync.c,v 1.25 2021/09/01 12:26:26 claudio Exp $ */
+/*	$OpenBSD: rsync.c,v 1.41 2022/08/09 09:02:26 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -33,15 +33,18 @@
 
 #include "extern.h"
 
+#define	__STRINGIFY(x)	#x
+#define	STRINGIFY(x)	__STRINGIFY(x)
+
 /*
  * A running rsync process.
  * We can have multiple of these simultaneously and need to keep track
  * of which process maps to which request.
  */
 struct	rsyncproc {
-	char	*uri; /* uri of this rsync proc */
-	size_t	 id; /* identity of request */
-	pid_t	 pid; /* pid of process or 0 if unassociated */
+	char		*uri; /* uri of this rsync proc */
+	unsigned int	 id; /* identity of request */
+	pid_t		 pid; /* pid of process or 0 if unassociated */
 };
 
 /*
@@ -96,6 +99,31 @@ rsync_base_uri(const char *uri)
 	return base_uri;
 }
 
+/*
+ * The directory passed as --compare-dest needs to be relative to
+ * the destination directory. This function takes care of that.
+ */
+static char *
+rsync_fixup_dest(char *destdir, char *compdir)
+{
+	const char *dotdot = "../../../../../../";	/* should be enough */
+	int dirs = 1;
+	char *fn;
+	char c;
+
+	while ((c = *destdir++) != '\0')
+		if (c == '/')
+			dirs++;
+
+	if (dirs > 6)
+		/* too deep for us */
+		return NULL;
+
+	if ((asprintf(&fn, "%.*s%s", dirs * 3, dotdot, compdir)) == -1)
+		err(1, NULL);
+	return fn;
+}
+
 static void
 proc_child(int signal)
 {
@@ -109,22 +137,22 @@ proc_child(int signal)
  * does so.
  * It then responds with the identifier of the repo that it updated.
  * It only exits cleanly when fd is closed.
- * FIXME: limit the number of simultaneous process.
- * Currently, an attacker can trivially specify thousands of different
- * repositories and saturate our system.
  */
 void
 proc_rsync(char *prog, char *bind_addr, int fd)
 {
-	size_t			 i, idsz = 0;
+	size_t			 i, nprocs = 0;
 	int			 rc = 0;
 	struct pollfd		 pfd;
 	struct msgbuf		 msgq;
+	struct ibuf		*b, *inbuf = NULL;
 	sigset_t		 mask, oldmask;
-	struct rsyncproc	*ids = NULL;
+	struct rsyncproc	 ids[MAX_RSYNC_REQUESTS] = { 0 };
+
+	if (pledge("stdio rpath proc exec unveil", NULL) == -1)
+		err(1, "pledge");
 
 	pfd.fd = fd;
-
 	msgbuf_init(&msgq);
 	msgq.fd = fd;
 
@@ -177,13 +205,14 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 		err(1, NULL);
 
 	for (;;) {
-		char *uri = NULL, *dst = NULL;
-		ssize_t ssz;
-		size_t id;
+		char *uri, *dst, *compdst;
+		unsigned int id;
 		pid_t pid;
 		int st;
 
-		pfd.events = POLLIN;
+		pfd.events = 0;
+		if (nprocs < MAX_RSYNC_REQUESTS)
+			pfd.events |= POLLIN;
 		if (msgq.queued)
 			pfd.events |= POLLOUT;
 
@@ -199,13 +228,13 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			 */
 
 			while ((pid = waitpid(WAIT_ANY, &st, WNOHANG)) > 0) {
-				struct ibuf *b;
 				int ok = 1;
 
-				for (i = 0; i < idsz; i++)
+				for (i = 0; i < MAX_RSYNC_REQUESTS; i++)
 					if (ids[i].pid == pid)
 						break;
-				assert(i < idsz);
+				if (i >= MAX_RSYNC_REQUESTS)
+					errx(1, "waitpid: %d unexpected", pid);
 
 				if (!WIFEXITED(st)) {
 					warnx("rsync %s terminated abnormally",
@@ -217,17 +246,17 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 					ok = 0;
 				}
 
-				b = ibuf_open(sizeof(size_t) + sizeof(ok));
-				if (b == NULL)
-					err(1, NULL);
-				io_simple_buffer(b, &ids[i].id, sizeof(size_t));
+				b = io_new_buffer();
+				io_simple_buffer(b, &ids[i].id,
+				    sizeof(ids[i].id));
 				io_simple_buffer(b, &ok, sizeof(ok));
-				ibuf_close(&msgq, b);
+				io_close_buffer(&msgq, b);
 
 				free(ids[i].uri);
 				ids[i].uri = NULL;
 				ids[i].pid = 0;
 				ids[i].id = 0;
+				nprocs--;
 			}
 			if (pid == -1 && errno != ECHILD)
 				err(1, "waitpid");
@@ -243,23 +272,27 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			}
 		}
 
-		if (!(pfd.revents & POLLIN))
-			continue;
-
-		/*
-		 * Read til the parent exits.
-		 * That will mean that we can safely exit.
-		 */
-
-		if ((ssz = read(fd, &id, sizeof(size_t))) == -1)
-			err(1, "read");
-		if (ssz == 0)
+		/* connection closed */
+		if (pfd.revents & POLLHUP)
 			break;
 
-		/* Read host and module. */
+		if (!(pfd.revents & POLLIN))
+			continue;
+		if (nprocs >= MAX_RSYNC_REQUESTS)
+			continue;
 
-		io_str_read(fd, &dst);
-		io_str_read(fd, &uri);
+		b = io_buf_read(fd, &inbuf);
+		if (b == NULL)
+			continue;
+
+		/* Read host and module. */
+		io_read_buf(b, &id, sizeof(id));
+		io_read_str(b, &dst);
+		io_read_str(b, &compdst);
+		io_read_str(b, &uri);
+
+		ibuf_free(b);
+
 		assert(dst);
 		assert(uri);
 
@@ -270,6 +303,7 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 
 		if (pid == 0) {
 			char *args[32];
+			char *reldst;
 
 			if (pledge("stdio exec", NULL) == -1)
 				err(1, "pledge");
@@ -277,17 +311,25 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 			args[i++] = (char *)prog;
 			args[i++] = "-rt";
 			args[i++] = "--no-motd";
-			args[i++] = "--timeout=180";
+			args[i++] = "--max-size=" STRINGIFY(MAX_FILE_SIZE);
+			args[i++] = "--contimeout=" STRINGIFY(MAX_CONN_TIMEOUT);
+			args[i++] = "--timeout=" STRINGIFY(MAX_IO_TIMEOUT);
 			args[i++] = "--include=*/";
 			args[i++] = "--include=*.cer";
 			args[i++] = "--include=*.crl";
 			args[i++] = "--include=*.gbr";
 			args[i++] = "--include=*.mft";
 			args[i++] = "--include=*.roa";
+			args[i++] = "--include=*.asa";
 			args[i++] = "--exclude=*";
 			if (bind_addr != NULL) {
 				args[i++] = "--address";
 				args[i++] = (char *)bind_addr;
+			}
+			if (compdst != NULL &&
+			    (reldst = rsync_fixup_dest(dst, compdst)) != NULL) {
+				args[i++] = "--compare-dest";
+				args[i++] = reldst;
 			}
 			args[i++] = uri;
 			args[i++] = dst;
@@ -299,33 +341,28 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 
 		/* Augment the list of running processes. */
 
-		for (i = 0; i < idsz; i++)
+		for (i = 0; i < MAX_RSYNC_REQUESTS; i++)
 			if (ids[i].pid == 0)
 				break;
-		if (i == idsz) {
-			ids = reallocarray(ids, idsz + 1, sizeof(*ids));
-			if (ids == NULL)
-				err(1, NULL);
-			idsz++;
-		}
-
+		assert(i < MAX_RSYNC_REQUESTS);
 		ids[i].id = id;
 		ids[i].pid = pid;
 		ids[i].uri = uri;
+		nprocs++;
 
 		/* Clean up temporary values. */
 
 		free(dst);
+		free(compdst);
 	}
 
 	/* No need for these to be hanging around. */
-	for (i = 0; i < idsz; i++)
-		if (ids[i].pid > 0) {
+	for (i = 0; i < MAX_RSYNC_REQUESTS; i++)
+		if (ids[i].pid != 0) {
 			kill(ids[i].pid, SIGTERM);
 			free(ids[i].uri);
 		}
 
 	msgbuf_clear(&msgq);
-	free(ids);
 	exit(rc);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath_emc.c,v 1.23 2020/06/30 18:43:37 krw Exp $ */
+/*	$OpenBSD: mpath_emc.c,v 1.25 2022/07/02 08:50:42 visa Exp $ */
 
 /*
  * Copyright (c) 2011 David Gwynne <dlg@openbsd.org>
@@ -28,8 +28,6 @@
 #include <sys/rwlock.h>
 #include <sys/pool.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 
 #include <scsi/scsi_all.h>
 #include <scsi/scsiconf.h>
@@ -70,7 +68,7 @@ void		emc_attach(struct device *, struct device *, void *);
 int		emc_detach(struct device *, int);
 int		emc_activate(struct device *, int);
 
-struct cfattach emc_ca = {
+const struct cfattach emc_ca = {
 	sizeof(struct emc_softc),
 	emc_match,
 	emc_attach,

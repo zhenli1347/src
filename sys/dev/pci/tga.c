@@ -1,4 +1,4 @@
-/* $OpenBSD: tga.c,v 1.40 2020/05/25 09:55:48 jsg Exp $ */
+/* $OpenBSD: tga.c,v 1.43 2022/07/15 17:57:26 kettenis Exp $ */
 /* $NetBSD: tga.c,v 1.40 2002/03/13 15:05:18 ad Exp $ */
 
 /*
@@ -74,7 +74,7 @@ struct cfdriver tga_cd = {
 	NULL, "tga", DV_DULL
 };
 
-struct cfattach tga_ca = {
+const struct cfattach tga_ca = {
 	sizeof(struct tga_softc), (cfmatch_t)tgamatch, tgaattach,
 };
 
@@ -594,6 +594,8 @@ tga_ioctl(v, cmd, data, flag, p)
 		wsd_fbip->height = sc->sc_dc->dc_ht;
 		wsd_fbip->width = sc->sc_dc->dc_wid;
 		wsd_fbip->depth = sc->sc_dc->dc_tgaconf->tgac_phys_depth;
+		wsd_fbip->stride = sc->sc_dc->dc_rowbytes;
+		wsd_fbip->offset = 0;
 		wsd_fbip->cmsize = 1024;		/* XXX ??? */
 #undef wsd_fbip
 		break;
@@ -1368,7 +1370,7 @@ tga_putchar(c, row, col, uc, attr)
 		*rp = 0xffffffff;
 	}
 
-	/* Set grapics mode back to normal. */
+	/* Set graphics mode back to normal. */
 	TGAWREG(dc, TGA_REG_GMOR, 0);
 	TGAWREG(dc, TGA_REG_GPXR_P, 0xffffffff);
 
@@ -1426,7 +1428,7 @@ tga_eraserows(c, row, num, attr)
 		rp = (int32_t *)((caddr_t)rp + ri->ri_stride);
 	}
 
-	/* Set grapics mode back to normal. */
+	/* Set graphics mode back to normal. */
 	TGAWREG(dc, TGA_REG_GMOR, 0);
 	
 	return 0;
@@ -1483,7 +1485,7 @@ tga_erasecols (c, row, col, num, attr)
 		rp = (int32_t *)((caddr_t)rp + ri->ri_stride);
 	}
 
-	/* Set grapics mode back to normal. */
+	/* Set graphics mode back to normal. */
 	TGAWREG(dc, TGA_REG_GMOR, 0);
 
 	return 0;
@@ -1533,7 +1535,7 @@ tga_bt463_rd(v, btreg)
 
 	/* 
 	 * Strobe CE# (high->low->high) since status and data are latched on 
-	 * the falling and rising edges (repsectively) of this active-low signal.
+	 * the falling and rising edges (respectively) of this active-low signal.
 	 */
 	
 	TGAREGWB(dc, TGA_REG_EPSR, 1);

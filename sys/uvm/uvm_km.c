@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_km.c,v 1.145 2021/06/15 16:38:09 mpi Exp $	*/
+/*	$OpenBSD: uvm_km.c,v 1.151 2022/08/01 14:15:46 mpi Exp $	*/
 /*	$NetBSD: uvm_km.c,v 1.42 2001/01/14 02:10:01 thorpej Exp $	*/
 
 /* 
@@ -239,20 +239,24 @@ uvm_km_suballoc(struct vm_map *map, vaddr_t *min, vaddr_t *max, vsize_t size,
  *    the pages right away.    (this gets called from uvm_unmap_...).
  */
 void
-uvm_km_pgremove(struct uvm_object *uobj, vaddr_t start, vaddr_t end)
+uvm_km_pgremove(struct uvm_object *uobj, vaddr_t startva, vaddr_t endva)
 {
+	const voff_t start = startva - vm_map_min(kernel_map);
+	const voff_t end = endva - vm_map_min(kernel_map);
 	struct vm_page *pp;
 	voff_t curoff;
 	int slot;
 	int swpgonlydelta = 0;
 
 	KASSERT(UVM_OBJ_IS_AOBJ(uobj));
+	KASSERT(rw_write_held(uobj->vmobjlock));
 
+	pmap_remove(pmap_kernel(), startva, endva);
 	for (curoff = start ; curoff < end ; curoff += PAGE_SIZE) {
 		pp = uvm_pagelookup(uobj, curoff);
 		if (pp && pp->pg_flags & PG_BUSY) {
-			atomic_setbits_int(&pp->pg_flags, PG_WANTED);
-			tsleep_nsec(pp, PVM, "km_pgrm", INFSLP);
+			uvm_pagewait(pp, uobj->vmobjlock, "km_pgrm");
+			rw_enter(uobj->vmobjlock, RW_WRITE);
 			curoff -= PAGE_SIZE; /* loop back to us */
 			continue;
 		}
@@ -301,6 +305,7 @@ uvm_km_pgremove_intrsafe(vaddr_t start, vaddr_t end)
 			panic("uvm_km_pgremove_intrsafe: no page");
 		uvm_pagefree(pg);
 	}
+	pmap_kremove(start, end - start);
 }
 
 /*
@@ -379,6 +384,9 @@ uvm_km_kmemalloc_pla(struct vm_map *map, struct uvm_object *obj, vsize_t size,
 		return (0);
 	}
 
+	if (obj != NULL)
+		rw_enter(obj->vmobjlock, RW_WRITE);
+
 	loopva = kva;
 	while (loopva != kva + size) {
 		pg = TAILQ_FIRST(&pgl);
@@ -405,6 +413,9 @@ uvm_km_kmemalloc_pla(struct vm_map *map, struct uvm_object *obj, vsize_t size,
 	KASSERT(TAILQ_EMPTY(&pgl));
 	pmap_update(pmap_kernel());
 
+	if (obj != NULL)
+		rw_exit(obj->vmobjlock);
+
 	return kva;
 }
 
@@ -415,27 +426,6 @@ void
 uvm_km_free(struct vm_map *map, vaddr_t addr, vsize_t size)
 {
 	uvm_unmap(map, trunc_page(addr), round_page(addr+size));
-}
-
-/*
- * uvm_km_free_wakeup: free an area of kernel memory and wake up
- * anyone waiting for vm space.
- *
- * => XXX: "wanted" bit + unlock&wait on other end?
- */
-void
-uvm_km_free_wakeup(struct vm_map *map, vaddr_t addr, vsize_t size)
-{
-	struct uvm_map_deadq dead_entries;
-
-	vm_map_lock(map);
-	TAILQ_INIT(&dead_entries);
-	uvm_unmap_remove(map, trunc_page(addr), round_page(addr+size), 
-	     &dead_entries, FALSE, TRUE);
-	wakeup(map);
-	vm_map_unlock(map);
-
-	uvm_unmap_detach(&dead_entries, 0);
 }
 
 /*
@@ -470,12 +460,14 @@ uvm_km_alloc1(struct vm_map *map, vsize_t size, vsize_t align, boolean_t zeroit)
 	/* now allocate the memory.  we must be careful about released pages. */
 	loopva = kva;
 	while (size) {
+		rw_enter(uvm.kernel_object->vmobjlock, RW_WRITE);
 		/* allocate ram */
 		pg = uvm_pagealloc(uvm.kernel_object, offset, NULL, 0);
 		if (pg) {
 			atomic_clearbits_int(&pg->pg_flags, PG_BUSY);
 			UVM_PAGE_OWN(pg, NULL);
 		}
+		rw_exit(uvm.kernel_object->vmobjlock);
 		if (__predict_false(pg == NULL)) {
 			if (curproc == uvm.pagedaemon_proc) {
 				/*
@@ -513,91 +505,6 @@ uvm_km_alloc1(struct vm_map *map, vsize_t size, vsize_t align, boolean_t zeroit)
 		memset((caddr_t)kva, 0, loopva - kva);
 
 	return kva;
-}
-
-/*
- * uvm_km_valloc: allocate zero-fill memory in the kernel's address space
- *
- * => memory is not allocated until fault time
- */
-
-vaddr_t
-uvm_km_valloc(struct vm_map *map, vsize_t size)
-{
-	return uvm_km_valloc_align(map, size, 0, 0);
-}
-
-vaddr_t
-uvm_km_valloc_try(struct vm_map *map, vsize_t size)
-{
-	return uvm_km_valloc_align(map, size, 0, UVM_FLAG_TRYLOCK);
-}
-
-vaddr_t
-uvm_km_valloc_align(struct vm_map *map, vsize_t size, vsize_t align, int flags)
-{
-	vaddr_t kva;
-
-	KASSERT(vm_map_pmap(map) == pmap_kernel());
-
-	size = round_page(size);
-	kva = vm_map_min(map);		/* hint */
-
-	/*
-	 * allocate some virtual space.  will be demand filled by kernel_object.
-	 */
-	if (__predict_false(uvm_map(map, &kva, size, uvm.kernel_object,
-	    UVM_UNKNOWN_OFFSET, align,
-	    UVM_MAPFLAG(PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE,
-	    MAP_INHERIT_NONE, MADV_RANDOM, flags)) != 0)) {
-		return 0;
-	}
-
-	return kva;
-}
-
-/*
- * uvm_km_valloc_wait: allocate zero-fill memory in the kernel's address space
- *
- * => memory is not allocated until fault time
- * => if no room in map, wait for space to free, unless requested size
- *    is larger than map (in which case we return 0)
- */
-vaddr_t
-uvm_km_valloc_prefer_wait(struct vm_map *map, vsize_t size, voff_t prefer)
-{
-	vaddr_t kva;
-
-	KASSERT(vm_map_pmap(map) == pmap_kernel());
-
-	size = round_page(size);
-	if (size > vm_map_max(map) - vm_map_min(map))
-		return 0;
-
-	while (1) {
-		kva = vm_map_min(map);		/* hint */
-
-		/*
-		 * allocate some virtual space.   will be demand filled
-		 * by kernel_object.
-		 */
-		if (__predict_true(uvm_map(map, &kva, size, uvm.kernel_object,
-		    prefer, 0,
-		    UVM_MAPFLAG(PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE,
-		    MAP_INHERIT_NONE, MADV_RANDOM, 0)) == 0)) {
-			return kva;
-		}
-
-		/* failed.  sleep for a while (on map) */
-		tsleep_nsec(map, PVM, "vallocwait", INFSLP);
-	}
-	/*NOTREACHED*/
-}
-
-vaddr_t
-uvm_km_valloc_wait(struct vm_map *map, vsize_t size)
-{
-	return uvm_km_valloc_prefer_wait(map, size, UVM_UNKNOWN_OFFSET);
 }
 
 #if defined(__HAVE_PMAP_DIRECT)

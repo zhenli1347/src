@@ -1,4 +1,4 @@
-/*	$OpenBSD: siop.c,v 1.87 2021/03/07 06:21:38 jsg Exp $ */
+/*	$OpenBSD: siop.c,v 1.89 2022/04/16 19:19:59 naddy Exp $ */
 /*	$NetBSD: siop.c,v 1.79 2005/11/18 23:10:32 bouyer Exp $	*/
 
 /*
@@ -102,7 +102,7 @@ struct cfdriver siop_cd = {
 	NULL, "siop", DV_DULL
 };
 
-struct scsi_adapter siop_switch = {
+const struct scsi_adapter siop_switch = {
 	siop_scsicmd, NULL, siop_scsiprobe, siop_scsifree, NULL
 };
 
@@ -600,7 +600,7 @@ siop_intr(void *v)
 				goto scintr;
 			}
 			/*
-			 * else we have to restart it ourselve, at the
+			 * else we have to restart it ourselves, at the
 			 * interrupted instruction.
 			 */
 			bus_space_write_4(sc->sc_c.sc_rt, sc->sc_c.sc_rh,

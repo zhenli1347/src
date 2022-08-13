@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.645 2021/05/01 16:18:28 gnezdo Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.651 2022/07/27 01:44:25 daniel Exp $	*/
 /*	$NetBSD: machdep.c,v 1.214 1996/11/10 03:16:17 thorpej Exp $	*/
 
 /*-
@@ -510,8 +510,6 @@ const struct cpu_nocpuid_nameclass i386_nocpuid_cpus[] = {
 		NULL},				/* CPU_486DLC */
 	{ CPUVENDOR_CYRIX, "Cyrix", "6x86",	CPUCLASS_486,
 		cyrix6x86_cpu_setup},		/* CPU_6x86 */
-	{ CPUVENDOR_NEXGEN,"NexGen","586",	CPUCLASS_386,
-		NULL},				/* CPU_NX586 */
 };
 
 const char *classnames[] = {
@@ -781,41 +779,6 @@ const struct cpu_cpuid_nameclass i386_cpuid_cpus[] = {
 				"C3"		/* Default */
 			},
 			cyrix3_cpu_setup
-		} }
-	},
-	{
-		"RiseRiseRise",
-		CPUVENDOR_RISE,
-		"Rise",
-		/* Family 4, not available from Rise */
-		{ {
-			CPUCLASS_486,
-			{
-				0, 0, 0, 0, 0, 0, 0, 0,
-				0, 0, 0, 0, 0, 0, 0, 0,
-				"486 class"		/* Default */
-			},
-			NULL
-		},
-		/* Family 5 */
-		{
-			CPUCLASS_586,
-			{
-				"mP6", 0, "mP6", 0, 0, 0, 0, 0,
-				0, 0, 0, 0, 0, 0, 0, 0,
-				"mP6"			/* Default */
-			},
-			NULL
-		},
-		/* Family 6, not yet available from Rise */
-		{
-			CPUCLASS_686,
-			{
-				0, 0, 0, 0, 0, 0, 0, 0,
-				0, 0, 0, 0, 0, 0, 0, 0,
-				"686 class"		/* Default */
-			},
-			NULL
 		} }
 	},
 	{
@@ -1840,12 +1803,9 @@ identifycpu(struct cpu_info *ci)
 		u_int regs[4];
 		cpuid(0x80000000, regs);
 
-		if (regs[0] >= 0x80000005)
-			cpuid(0x80000005, ci->ci_amdcacheinfo);
-
 		if (regs[0] >= 0x80000006) {
-			cpuid(0x80000006, ci->ci_extcacheinfo);
-			cachesize = (ci->ci_extcacheinfo[2] >> 16);
+			cpuid(0x80000006, regs);
+			cachesize = (regs[2] >> 16);
 		}
 	}
 
@@ -1861,7 +1821,6 @@ identifycpu(struct cpu_info *ci)
 	}
 
 	if (vendor == CPUVENDOR_INTEL) {
-		u_int regs[4];
 		/*
 		 * PIII, Core Solo and Core Duo CPUs have known
 		 * errata stating:
@@ -1872,12 +1831,6 @@ identifycpu(struct cpu_info *ci)
 		 */
 		if (ci->ci_family == 6 && ci->ci_model < 15)
 		    ci->ci_feature_flags &= ~CPUID_PAT;
-
-		if (cpuid_level >= 0x1) {
-			cpuid(0x80000000, regs);
-			if (regs[0] >= 0x80000006)
-				cpuid(0x80000006, ci->ci_extcacheinfo);
-		}
 	}
 
 	/* Remove leading, trailing and duplicated spaces from cpu_brandstr */
@@ -2444,12 +2397,12 @@ pentium_cpuspeed(int *freq)
  * specified pc, psl.
  */
 int
-sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
+sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
+    int info, int onstack)
 {
 	struct proc *p = curproc;
 	struct trapframe *tf = p->p_md.md_regs;
 	struct sigframe *fp, frame;
-	struct sigacts *psp = p->p_p->ps_sigacts;
 	register_t sp;
 
 	/*
@@ -2462,7 +2415,7 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	 * Allocate space for the signal handler context.
 	 */
 	if ((p->p_sigstk.ss_flags & SS_DISABLE) == 0 &&
-	    !sigonstack(tf->tf_esp) && (psp->ps_sigonstack & sigmask(sig)))
+	    !sigonstack(tf->tf_esp) && onstack)
 		sp = trunc_page((vaddr_t)p->p_sigstk.ss_sp + p->p_sigstk.ss_size);
 	else
 		sp = tf->tf_esp;
@@ -2509,7 +2462,7 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	frame.sf_sc.sc_esp = tf->tf_esp;
 	frame.sf_sc.sc_ss = tf->tf_ss;
 
-	if (psp->ps_siginfo & sigmask(sig)) {
+	if (info) {
 		frame.sf_sip = &fp->sf_si;
 		frame.sf_si = *ksip;
 	}
@@ -3348,14 +3301,15 @@ init386(paddr_t first_avail)
 
 			/*
 			 * XXX Some buggy ACPI BIOSes use memory that
-			 * they declare as free.  Typically the
+			 * they declare as free. Current worst offender
+			 * is Supermicro 5019D-FTN4.  Typically the
 			 * affected memory areas are small blocks
 			 * between areas reserved for ACPI and other
-			 * BIOS goo.  So skip areas smaller than 1 MB
+			 * BIOS goo.  So skip areas smaller than 32 MB
 			 * above the 16 MB boundary (to avoid
 			 * affecting legacy stuff).
 			 */
-			if (a > 16*1024*1024 && (e - a) < 1*1024*1024) {
+			if (a > 16*1024*1024 && (e - a) < 32*1024*1024) {
 #ifdef DEBUG
 				printf("-X");
 #endif
@@ -3617,12 +3571,8 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case CPU_CPUFEATURE:
 		return (sysctl_rdint(oldp, oldlenp, newp, curcpu()->ci_feature_flags));
 	case CPU_KBDRESET:
-		if (securelevel > 0)
-			return (sysctl_rdint(oldp, oldlenp, newp,
-			    kbd_reset));
-		else
-			return (sysctl_int(oldp, oldlenp, newp, newlen,
-			    &kbd_reset));
+		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
+		    &kbd_reset));
 #if NPCKBC > 0 && NUKBD > 0
 	case CPU_FORCEUKBD:
 		{

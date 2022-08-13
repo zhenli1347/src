@@ -1,4 +1,4 @@
-# $OpenBSD: files.arm64,v 1.44 2021/08/31 15:20:06 kettenis Exp $
+# $OpenBSD: files.arm64,v 1.58 2022/08/03 13:42:16 kettenis Exp $
 
 maxpartitions	16
 maxusers	2 8 128
@@ -25,9 +25,9 @@ file	arch/arm64/arm64/syscall.c
 file	arch/arm64/arm64/sys_machdep.c
 
 file	arch/arm64/arm64/cpu.c
+file	arch/arm64/arm64/fpu.c
 file	arch/arm64/arm64/intr.c
 file	arch/arm64/arm64/softintr.c
-file	arch/arm64/arm64/vfp.c
 file	arch/arm64/arm64/exception.S
 file	arch/arm64/arm64/trampoline.S
 file	arch/arm64/arm64/trap.c
@@ -120,6 +120,9 @@ include "dev/sdmmc/files.sdmmc"
 # Machine-independent FDT drivers
 include "dev/fdt/files.fdt"
 
+define	rtkit
+file	arch/arm64/dev/rtkit.c			rtkit
+
 device	ampintc: fdt
 attach	ampintc at fdt
 device	ampintcmsi
@@ -136,21 +139,53 @@ device	agtimer
 attach	agtimer at fdt
 file	arch/arm64/dev/agtimer.c		agtimer
 
+device	aplaudio: audio
+attach	aplaudio at fdt
+file	arch/arm64/dev/aplaudio.c		aplaudio
+
+device	aplcpu
+attach	aplcpu at fdt
+file	arch/arm64/dev/aplcpu.c			aplcpu
+
 device	apldart
 attach	apldart at fdt
 file	arch/arm64/dev/apldart.c		apldart
+
+device	apldma
+attach	apldma at fdt
+file	arch/arm64/dev/apldma.c			apldma
 
 device	apldog
 attach	apldog at fdt
 file	arch/arm64/dev/apldog.c			apldog
 
-device	apldwusb: fdt
-attach	apldwusb at fdt
-file	arch/arm64/dev/apldwusb.c		apldwusb
+device	apliic: i2cbus
+attach	apliic at fdt
+file	arch/arm64/dev/apliic.c			apliic
 
 device	aplintc
 attach	aplintc at fdt
 file	arch/arm64/dev/aplintc.c		aplintc
+
+device	aplhidev {}
+attach	aplhidev at spi
+device	aplkbd: hid, hidkbd, wskbddev
+attach	aplkbd at aplhidev
+device	aplms: hid, hidms, wsmousedev
+attach	aplms at aplhidev
+file	arch/arm64/dev/aplhidev.c		aplhidev | aplkbd | aplms needs-flag
+
+device	aplmbox
+attach	aplmbox at fdt
+file	arch/arm64/dev/aplmbox.c		aplmbox
+
+device	aplmca
+attach	aplmca at fdt
+file	arch/arm64/dev/aplmca.c			aplmca
+
+device	aplnco
+attach	aplnco at fdt
+file	arch/arm64/dev/aplnco.c			aplnco
 
 device	aplpcie: pcibus
 attach	aplpcie at fdt
@@ -160,16 +195,32 @@ device	aplpinctrl
 attach	aplpinctrl at fdt
 file	arch/arm64/dev/aplpinctrl.c		aplpinctrl
 
+device	aplpmgr
+attach	aplpmgr at fdt
+file	arch/arm64/dev/aplpmgr.c		aplpmgr
+
 # Apple NVME Storage
-device	aplns {}
+device	aplns {}: rtkit
 attach	aplns at fdt
 attach	nvme at aplns with nvme_ans
 file	arch/arm64/dev/aplns.c			aplns | nvme_ans
+
+device	aplsart
+attach	aplsart at fdt
+file	arch/arm64/dev/aplsart.c			aplsart | aplns
+
+device	aplsmc
+attach	aplsmc at fdt
+file	arch/arm64/dev/aplsmc.c			aplsmc
 
 define	spmi {}
 device	aplpmu
 attach	aplpmu at spmi
 file	arch/arm64/dev/aplpmu.c			aplpmu
+
+device	aplspi: spi
+attach	aplspi at fdt
+file	arch/arm64/dev/aplspi.c			aplspi
 
 device	aplspmi: spmi
 attach	aplspmi at fdt

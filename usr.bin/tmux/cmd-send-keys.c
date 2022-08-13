@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-send-keys.c,v 1.68 2021/08/21 10:22:39 nicm Exp $ */
+/* $OpenBSD: cmd-send-keys.c,v 1.72 2022/06/07 10:02:19 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -151,7 +151,8 @@ cmd_send_keys_exec(struct cmd *self, struct cmdq_item *item)
 	char				*cause = NULL;
 
 	if (args_has(args, 'N')) {
-		np = args_strtonum(args, 'N', 1, UINT_MAX, &cause);
+		np = args_strtonum_and_expand(args, 'N', 1, UINT_MAX, item,
+			 &cause);
 		if (cause != NULL) {
 			cmdq_error(item, "repeat count %s", cause);
 			free(cause);
@@ -200,6 +201,14 @@ cmd_send_keys_exec(struct cmd *self, struct cmdq_item *item)
 		colour_palette_clear(&wp->palette);
 		input_reset(wp->ictx, 1);
 		wp->flags |= (PANE_STYLECHANGED|PANE_REDRAW);
+	}
+
+	if (count == 0) {
+		if (args_has(args, 'N') || args_has(args, 'R'))
+			return (CMD_RETURN_NORMAL);
+		for (; np != 0; np--)
+			cmd_send_keys_inject_key(item, NULL, event->key);
+		return (CMD_RETURN_NORMAL);
 	}
 
 	for (; np != 0; np--) {

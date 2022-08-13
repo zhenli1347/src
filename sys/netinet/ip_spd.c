@@ -1,4 +1,4 @@
-/* $OpenBSD: ip_spd.c,v 1.104 2021/07/08 16:39:55 mvs Exp $ */
+/* $OpenBSD: ip_spd.c,v 1.117 2022/06/17 13:40:21 bluhm Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
  *
@@ -26,8 +26,6 @@
 #include <sys/socket.h>
 #include <sys/kernel.h>
 #include <sys/socketvar.h>
-#include <sys/domain.h>
-#include <sys/protosw.h>
 #include <sys/pool.h>
 #include <sys/timeout.h>
 
@@ -41,20 +39,31 @@
 #include <netinet/ip_ipsp.h>
 #include <net/pfkeyv2.h>
 
+int	ipsp_spd_inp(struct mbuf *, struct inpcb *, struct ipsec_policy *,
+	    struct tdb **);
 int	ipsp_acquire_sa(struct ipsec_policy *, union sockaddr_union *,
 	    union sockaddr_union *, struct sockaddr_encap *, struct mbuf *);
-struct	ipsec_acquire *ipsp_pending_acquire(struct ipsec_policy *,
-	    union sockaddr_union *);
-void	ipsp_delete_acquire_timo(void *);
+int	ipsp_pending_acquire(struct ipsec_policy *, union sockaddr_union *);
+void	ipsp_delete_acquire_timer(void *);
+void	ipsp_delete_acquire_locked(struct ipsec_acquire *);
 void	ipsp_delete_acquire(struct ipsec_acquire *);
+void	ipsp_unref_acquire_locked(struct ipsec_acquire *);
 
 struct pool ipsec_policy_pool;
 struct pool ipsec_acquire_pool;
 
+/*
+ * For tdb_walk() calling tdb_delete_locked() we need lock order
+ * tdb_sadb_mtx before ipo_tdb_mtx.
+ */
+struct mutex ipo_tdb_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
+
 /* Protected by the NET_LOCK(). */
 struct radix_node_head **spd_tables;
 unsigned int spd_table_max;
-TAILQ_HEAD(ipsec_acquire_head, ipsec_acquire) ipsec_acquire_head =
+
+struct mutex ipsec_acquire_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
+struct ipsec_acquire_head ipsec_acquire_head =
     TAILQ_HEAD_INITIALIZER(ipsec_acquire_head);
 
 struct radix_node_head *
@@ -133,18 +142,19 @@ spd_table_walk(unsigned int rtableid,
  * the mbuf is. hlen is the offset of the transport protocol header
  * in the mbuf.
  *
- * Return combinations (of return value and in *error):
- * - NULL/0 -> no IPsec required on packet
- * - NULL/-EINVAL -> silently drop the packet
- * - NULL/errno -> drop packet and return error
- * or a pointer to a TDB (and 0 in *error).
+ * Return combinations (of return value and *tdbout):
+ * - -EINVAL -> silently drop the packet
+ * - errno   -> drop packet and return error
+ * - 0/NULL  -> no IPsec required on packet
+ * - 0/TDB   -> do IPsec
  *
  * In the case of incoming flows, only the first three combinations are
  * returned.
  */
-struct tdb *
-ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
-    struct tdb *tdbp, struct inpcb *inp, u_int32_t ipsecflowinfo)
+int
+ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int direction,
+    struct tdb *tdbin, struct inpcb *inp, struct tdb **tdbout,
+    struct ipsec_ids *ipsecflowinfo_ids)
 {
 	struct radix_node_head *rnh;
 	struct radix_node *rn;
@@ -152,8 +162,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 	struct sockaddr_encap *ddst, dst;
 	struct ipsec_policy *ipo;
 	struct ipsec_ids *ids = NULL;
-	int signore = 0, dignore = 0;
-	u_int rdomain = rtable_l2(m->m_pkthdr.ph_rtableid);
+	int error, signore = 0, dignore = 0;
+	u_int rdomain;
 
 	NET_ASSERT_LOCKED();
 
@@ -161,10 +171,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 	 * If there are no flows in place, there's no point
 	 * continuing with the SPD lookup.
 	 */
-	if (!ipsec_in_use && inp == NULL) {
-		*error = 0;
-		return NULL;
-	}
+	if (!ipsec_in_use)
+		return ipsp_spd_inp(m, inp, NULL, tdbout);
 
 	/*
 	 * If an input packet is destined to a BYPASS socket, just accept it.
@@ -173,8 +181,9 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 	    (inp->inp_seclevel[SL_ESP_TRANS] == IPSEC_LEVEL_BYPASS) &&
 	    (inp->inp_seclevel[SL_ESP_NETWORK] == IPSEC_LEVEL_BYPASS) &&
 	    (inp->inp_seclevel[SL_AUTH] == IPSEC_LEVEL_BYPASS)) {
-		*error = 0;
-		return NULL;
+		if (tdbout != NULL)
+			*tdbout = NULL;
+		return 0;
 	}
 
 	memset(&dst, 0, sizeof(dst));
@@ -186,10 +195,9 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 
 	switch (af) {
 	case AF_INET:
-		if (hlen < sizeof (struct ip) || m->m_pkthdr.len < hlen) {
-			*error = EINVAL;
-			return NULL;
-		}
+		if (hlen < sizeof (struct ip) || m->m_pkthdr.len < hlen)
+			return EINVAL;
+
 		ddst->sen_direction = direction;
 		ddst->sen_type = SENT_IP4;
 
@@ -213,10 +221,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		case IPPROTO_UDP:
 		case IPPROTO_TCP:
 			/* Make sure there's enough data in the packet. */
-			if (m->m_pkthdr.len < hlen + 2 * sizeof(u_int16_t)) {
-				*error = EINVAL;
-				return NULL;
-			}
+			if (m->m_pkthdr.len < hlen + 2 * sizeof(u_int16_t))
+				return EINVAL;
 
 			/*
 			 * Luckily, the offset of the src/dst ports in
@@ -226,7 +232,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 			 */
 			m_copydata(m, hlen, sizeof(u_int16_t),
 			    (caddr_t) &(ddst->sen_sport));
-			m_copydata(m, hlen + sizeof(u_int16_t), sizeof(u_int16_t),
+			m_copydata(m, hlen + sizeof(u_int16_t),
+			    sizeof(u_int16_t),
 			    (caddr_t) &(ddst->sen_dport));
 			break;
 
@@ -239,10 +246,9 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 
 #ifdef INET6
 	case AF_INET6:
-		if (hlen < sizeof (struct ip6_hdr) || m->m_pkthdr.len < hlen) {
-			*error = EINVAL;
-			return NULL;
-		}
+		if (hlen < sizeof (struct ip6_hdr) || m->m_pkthdr.len < hlen)
+			return EINVAL;
+
 		ddst->sen_type = SENT_IP6;
 		ddst->sen_ip6_direction = direction;
 
@@ -269,10 +275,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		case IPPROTO_UDP:
 		case IPPROTO_TCP:
 			/* Make sure there's enough data in the packet. */
-			if (m->m_pkthdr.len < hlen + 2 * sizeof(u_int16_t)) {
-				*error = EINVAL;
-				return NULL;
-			}
+			if (m->m_pkthdr.len < hlen + 2 * sizeof(u_int16_t))
+				return EINVAL;
 
 			/*
 			 * Luckily, the offset of the src/dst ports in
@@ -282,7 +286,8 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 			 */
 			m_copydata(m, hlen, sizeof(u_int16_t),
 			    (caddr_t) &(ddst->sen_ip6_sport));
-			m_copydata(m, hlen + sizeof(u_int16_t), sizeof(u_int16_t),
+			m_copydata(m, hlen + sizeof(u_int16_t),
+			    sizeof(u_int16_t),
 			    (caddr_t) &(ddst->sen_ip6_dport));
 			break;
 
@@ -295,32 +300,27 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 #endif /* INET6 */
 
 	default:
-		*error = EAFNOSUPPORT;
-		return NULL;
+		return EAFNOSUPPORT;
 	}
 
 	/* Actual SPD lookup. */
+	rdomain = rtable_l2(m->m_pkthdr.ph_rtableid);
 	if ((rnh = spd_table_get(rdomain)) == NULL ||
 	    (rn = rn_match((caddr_t)&dst, rnh)) == NULL) {
 		/*
 		 * Return whatever the socket requirements are, there are no
 		 * system-wide policies.
 		 */
-		*error = 0;
-		return ipsp_spd_inp(m, af, hlen, error, direction,
-		    tdbp, inp, NULL);
+		return ipsp_spd_inp(m, inp, NULL, tdbout);
 	}
 	ipo = (struct ipsec_policy *)rn;
 
 	switch (ipo->ipo_type) {
 	case IPSP_PERMIT:
-		*error = 0;
-		return ipsp_spd_inp(m, af, hlen, error, direction, tdbp,
-		    inp, ipo);
+		return ipsp_spd_inp(m, inp, ipo, tdbout);
 
 	case IPSP_DENY:
-		*error = EHOSTUNREACH;
-		return NULL;
+		return EHOSTUNREACH;
 
 	case IPSP_IPSEC_USE:
 	case IPSP_IPSEC_ACQUIRE:
@@ -330,8 +330,7 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		break;
 
 	default:
-		*error = EINVAL;
-		return NULL;
+		return EINVAL;
 	}
 
 	/* Check for non-specific destination in the policy. */
@@ -368,11 +367,15 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 	}
 
 	/* Do we have a cached entry ? If so, check if it's still valid. */
-	if ((ipo->ipo_tdb) && (ipo->ipo_tdb->tdb_flags & TDBF_INVALID)) {
+	mtx_enter(&ipo_tdb_mtx);
+	if (ipo->ipo_tdb != NULL &&
+	    (ipo->ipo_tdb->tdb_flags & TDBF_INVALID)) {
 		TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head, ipo,
 		    ipo_tdb_next);
+		tdb_unref(ipo->ipo_tdb);
 		ipo->ipo_tdb = NULL;
 	}
+	mtx_leave(&ipo_tdb_mtx);
 
 	/* Outgoing packet policy check. */
 	if (direction == IPSP_DIRECTION_OUT) {
@@ -389,16 +392,15 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 			/* Direct match. */
 			if (dignore ||
 			    !memcmp(&sdst, &ipo->ipo_dst, sdst.sa.sa_len)) {
-				*error = 0;
-				return NULL;
+				if (tdbout != NULL)
+					*tdbout = NULL;
+				return 0;
 			}
 		}
 
-		if (ipsecflowinfo)
-			ids = ipsp_ids_lookup(ipsecflowinfo);
-
 		/* Check that the cached TDB (if present), is appropriate. */
-		if (ipo->ipo_tdb) {
+		mtx_enter(&ipo_tdb_mtx);
+		if (ipo->ipo_tdb != NULL) {
 			if ((ipo->ipo_last_searched <= ipsec_last_added) ||
 			    (ipo->ipo_sproto != ipo->ipo_tdb->tdb_sproto) ||
 			    memcmp(dignore ? &sdst : &ipo->ipo_dst,
@@ -407,19 +409,20 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 				goto nomatchout;
 
 			if (!ipsp_aux_match(ipo->ipo_tdb,
-			    ids ? ids : ipo->ipo_ids,
+			    ipsecflowinfo_ids? ipsecflowinfo_ids: ipo->ipo_ids,
 			    &ipo->ipo_addr, &ipo->ipo_mask))
 				goto nomatchout;
 
 			/* Cached entry is good. */
-			*error = 0;
-			return ipsp_spd_inp(m, af, hlen, error, direction,
-			    tdbp, inp, ipo);
+			error = ipsp_spd_inp(m, inp, ipo, tdbout);
+			mtx_leave(&ipo_tdb_mtx);
+			return error;
 
   nomatchout:
 			/* Cached TDB was not good. */
 			TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head, ipo,
 			    ipo_tdb_next);
+			tdb_unref(ipo->ipo_tdb);
 			ipo->ipo_tdb = NULL;
 			ipo->ipo_last_searched = 0;
 		}
@@ -434,25 +437,50 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 		 * explosion in the number of acquired SAs).
 		 */
 		if (ipo->ipo_last_searched <= ipsec_last_added)	{
+			struct tdb *tdbp_new;
+
 			/* "Touch" the entry. */
 			if (dignore == 0)
 				ipo->ipo_last_searched = getuptime();
 
+			/* gettdb() takes tdb_sadb_mtx, preserve lock order */
+			mtx_leave(&ipo_tdb_mtx);
 			/* Find an appropriate SA from the existing ones. */
-			ipo->ipo_tdb =
-			    gettdbbydst(rdomain,
-				dignore ? &sdst : &ipo->ipo_dst,
-				ipo->ipo_sproto,
-				ids ? ids: ipo->ipo_ids,
-				&ipo->ipo_addr, &ipo->ipo_mask);
-			if (ipo->ipo_tdb) {
-				TAILQ_INSERT_TAIL(&ipo->ipo_tdb->tdb_policy_head,
+			tdbp_new = gettdbbydst(rdomain,
+			    dignore ? &sdst : &ipo->ipo_dst,
+			    ipo->ipo_sproto,
+			    ipsecflowinfo_ids? ipsecflowinfo_ids: ipo->ipo_ids,
+			    &ipo->ipo_addr, &ipo->ipo_mask);
+			ids = NULL;
+			mtx_enter(&ipo_tdb_mtx);
+			if ((tdbp_new != NULL) &&
+			    (tdbp_new->tdb_flags & TDBF_DELETED)) {
+				/*
+				 * After tdb_delete() has released ipo_tdb_mtx
+				 * in tdb_unlink(), never add a new one.
+				 * tdb_cleanspd() has to catch all of them.
+				 */
+				tdb_unref(tdbp_new);
+				tdbp_new = NULL;
+			}
+			if (ipo->ipo_tdb != NULL) {
+				/* Remove cached TDB from parallel thread. */
+				TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head,
 				    ipo, ipo_tdb_next);
-				*error = 0;
-				return ipsp_spd_inp(m, af, hlen, error,
-				    direction, tdbp, inp, ipo);
+				tdb_unref(ipo->ipo_tdb);
+			}
+			ipo->ipo_tdb = tdbp_new;
+			if (ipo->ipo_tdb != NULL) {
+				/* gettdbbydst() has already refcounted tdb */
+				TAILQ_INSERT_TAIL(
+				    &ipo->ipo_tdb->tdb_policy_head,
+				    ipo, ipo_tdb_next);
+				error = ipsp_spd_inp(m, inp, ipo, tdbout);
+				mtx_leave(&ipo_tdb_mtx);
+				return error;
 			}
 		}
+		mtx_leave(&ipo_tdb_mtx);
 
 		/* So, we don't have an SA -- just a policy. */
 		switch (ipo->ipo_type) {
@@ -461,14 +489,12 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 			if (ipsp_acquire_sa(ipo,
 			    dignore ? &sdst : &ipo->ipo_dst,
 			    signore ? NULL : &ipo->ipo_src, ddst, m) != 0) {
-				*error = EACCES;
-				return NULL;
+				return EACCES;
 			}
 
 			/* FALLTHROUGH */
 		case IPSP_IPSEC_DONTACQ:
-			*error = -EINVAL; /* Silently drop packet. */
-			return NULL;
+			return -EINVAL;  /* Silently drop packet. */
 
 		case IPSP_IPSEC_ACQUIRE:
 			/* Acquire SA through key management. */
@@ -477,65 +503,70 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 
 			/* FALLTHROUGH */
 		case IPSP_IPSEC_USE:
-			*error = 0;
-			return ipsp_spd_inp(m, af, hlen, error, direction,
-			    tdbp, inp, ipo);
+			return ipsp_spd_inp(m, inp, ipo, tdbout);
 		}
 	} else { /* IPSP_DIRECTION_IN */
-		if (tdbp != NULL) {
+		if (tdbin != NULL) {
 			/*
 			 * Special case for bundled IPcomp/ESP SAs:
 			 * 1) only IPcomp flows are loaded into kernel
 			 * 2) input processing processes ESP SA first
 			 * 3) then optional IPcomp processing happens
 			 * 4) we only update m_tag for ESP
-			 * => 'tdbp' is always set to ESP SA
+			 * => 'tdbin' is always set to ESP SA
 			 * => flow has ipo_proto for IPcomp
-			 * So if 'tdbp' points to an ESP SA and this 'tdbp' is
-			 * bundled with an IPcomp SA, then we replace 'tdbp'
-			 * with the IPcomp SA at tdbp->tdb_inext.
+			 * So if 'tdbin' points to an ESP SA and this 'tdbin' is
+			 * bundled with an IPcomp SA, then we replace 'tdbin'
+			 * with the IPcomp SA at tdbin->tdb_inext.
 			 */
 			if (ipo->ipo_sproto == IPPROTO_IPCOMP &&
-			    tdbp->tdb_sproto == IPPROTO_ESP &&
-			    tdbp->tdb_inext != NULL &&
-			    tdbp->tdb_inext->tdb_sproto == IPPROTO_IPCOMP)
-				tdbp = tdbp->tdb_inext;
+			    tdbin->tdb_sproto == IPPROTO_ESP &&
+			    tdbin->tdb_inext != NULL &&
+			    tdbin->tdb_inext->tdb_sproto == IPPROTO_IPCOMP)
+				tdbin = tdbin->tdb_inext;
 
 			/* Direct match in the cache. */
-			if (ipo->ipo_tdb == tdbp) {
-				*error = 0;
-				return ipsp_spd_inp(m, af, hlen, error,
-				    direction, tdbp, inp, ipo);
+			mtx_enter(&ipo_tdb_mtx);
+			if (ipo->ipo_tdb == tdbin) {
+				error = ipsp_spd_inp(m, inp, ipo, tdbout);
+				mtx_leave(&ipo_tdb_mtx);
+				return error;
 			}
+			mtx_leave(&ipo_tdb_mtx);
 
 			if (memcmp(dignore ? &ssrc : &ipo->ipo_dst,
-			    &tdbp->tdb_src, tdbp->tdb_src.sa.sa_len) ||
-			    (ipo->ipo_sproto != tdbp->tdb_sproto))
+			    &tdbin->tdb_src, tdbin->tdb_src.sa.sa_len) ||
+			    (ipo->ipo_sproto != tdbin->tdb_sproto))
 				goto nomatchin;
 
 			/* Match source/dest IDs. */
 			if (ipo->ipo_ids)
-				if (tdbp->tdb_ids == NULL ||
-				    !ipsp_ids_match(ipo->ipo_ids, tdbp->tdb_ids))
+				if (tdbin->tdb_ids == NULL ||
+				    !ipsp_ids_match(ipo->ipo_ids,
+				    tdbin->tdb_ids))
 					goto nomatchin;
 
 			/* Add it to the cache. */
-			if (ipo->ipo_tdb)
+			mtx_enter(&ipo_tdb_mtx);
+			if (ipo->ipo_tdb != NULL) {
 				TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head,
 				    ipo, ipo_tdb_next);
-			ipo->ipo_tdb = tdbp;
-			TAILQ_INSERT_TAIL(&tdbp->tdb_policy_head, ipo,
+				tdb_unref(ipo->ipo_tdb);
+			}
+			ipo->ipo_tdb = tdb_ref(tdbin);
+			TAILQ_INSERT_TAIL(&tdbin->tdb_policy_head, ipo,
 			    ipo_tdb_next);
-			*error = 0;
-			return ipsp_spd_inp(m, af, hlen, error, direction,
-			    tdbp, inp, ipo);
+			error = ipsp_spd_inp(m, inp, ipo, tdbout);
+			mtx_leave(&ipo_tdb_mtx);
+			return error;
 
   nomatchin: /* Nothing needed here, falling through */
 	;
 		}
 
 		/* Check whether cached entry applies. */
-		if (ipo->ipo_tdb) {
+		mtx_enter(&ipo_tdb_mtx);
+		if (ipo->ipo_tdb != NULL) {
 			/*
 			 * We only need to check that the correct
 			 * security protocol and security gateway are
@@ -551,53 +582,72 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 			/* Not applicable, unlink. */
 			TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head, ipo,
 			    ipo_tdb_next);
-			ipo->ipo_last_searched = 0;
+			tdb_unref(ipo->ipo_tdb);
 			ipo->ipo_tdb = NULL;
+			ipo->ipo_last_searched = 0;
 		}
 
 		/* Find whether there exists an appropriate SA. */
 		if (ipo->ipo_last_searched <= ipsec_last_added)	{
+			struct tdb *tdbp_new;
+
 			if (dignore == 0)
 				ipo->ipo_last_searched = getuptime();
 
-			ipo->ipo_tdb =
-			    gettdbbysrc(rdomain,
-				dignore ? &ssrc : &ipo->ipo_dst,
-				ipo->ipo_sproto, ipo->ipo_ids,
-				&ipo->ipo_addr, &ipo->ipo_mask);
-			if (ipo->ipo_tdb)
-				TAILQ_INSERT_TAIL(&ipo->ipo_tdb->tdb_policy_head,
+			/* gettdb() takes tdb_sadb_mtx, preserve lock order */
+			mtx_leave(&ipo_tdb_mtx);
+			tdbp_new = gettdbbysrc(rdomain,
+			    dignore ? &ssrc : &ipo->ipo_dst,
+			    ipo->ipo_sproto, ipo->ipo_ids,
+			    &ipo->ipo_addr, &ipo->ipo_mask);
+			mtx_enter(&ipo_tdb_mtx);
+			if ((tdbp_new != NULL) &&
+			    (tdbp_new->tdb_flags & TDBF_DELETED)) {
+				/*
+				 * After tdb_delete() has released ipo_tdb_mtx
+				 * in tdb_unlink(), never add a new one.
+				 * tdb_cleanspd() has to catch all of them.
+				 */
+				tdb_unref(tdbp_new);
+				tdbp_new = NULL;
+			}
+			if (ipo->ipo_tdb != NULL) {
+				/* Remove cached TDB from parallel thread. */
+				TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head,
 				    ipo, ipo_tdb_next);
+				tdb_unref(ipo->ipo_tdb);
+			}
+			ipo->ipo_tdb = tdbp_new;
+			if (ipo->ipo_tdb != NULL) {
+				/* gettdbbysrc() has already refcounted tdb */
+				TAILQ_INSERT_TAIL(
+				    &ipo->ipo_tdb->tdb_policy_head,
+				    ipo, ipo_tdb_next);
+			}
 		}
   skipinputsearch:
+		mtx_leave(&ipo_tdb_mtx);
 
 		switch (ipo->ipo_type) {
 		case IPSP_IPSEC_REQUIRE:
 			/* If appropriate SA exists, don't acquire another. */
-			if (ipo->ipo_tdb) {
-				*error = -EINVAL;
-				return NULL;
-			}
+			if (ipo->ipo_tdb != NULL)
+				return -EINVAL;  /* Silently drop packet. */
 
 			/* Acquire SA through key management. */
-			if ((*error = ipsp_acquire_sa(ipo,
+			if ((error = ipsp_acquire_sa(ipo,
 			    dignore ? &ssrc : &ipo->ipo_dst,
 			    signore ? NULL : &ipo->ipo_src, ddst, m)) != 0)
-				return NULL;
+				return error;
 
 			/* FALLTHROUGH */
 		case IPSP_IPSEC_DONTACQ:
-			/* Drop packet. */
-			*error = -EINVAL;
-			return NULL;
+			return -EINVAL;  /* Silently drop packet. */
 
 		case IPSP_IPSEC_ACQUIRE:
 			/* If appropriate SA exists, don't acquire another. */
-			if (ipo->ipo_tdb) {
-				*error = 0;
-				return ipsp_spd_inp(m, af, hlen, error,
-				    direction, tdbp, inp, ipo);
-			}
+			if (ipo->ipo_tdb != NULL)
+				return ipsp_spd_inp(m, inp, ipo, tdbout);
 
 			/* Acquire SA through key management. */
 			ipsp_acquire_sa(ipo, dignore ? &ssrc : &ipo->ipo_dst,
@@ -605,15 +655,12 @@ ipsp_spd_lookup(struct mbuf *m, int af, int hlen, int *error, int direction,
 
 			/* FALLTHROUGH */
 		case IPSP_IPSEC_USE:
-			*error = 0;
-			return ipsp_spd_inp(m, af, hlen, error, direction,
-			    tdbp, inp, ipo);
+			return ipsp_spd_inp(m, inp, ipo, tdbout);
 		}
 	}
 
 	/* Shouldn't ever get this far. */
-	*error = EINVAL;
-	return NULL;
+	return EINVAL;
 }
 
 /*
@@ -625,11 +672,10 @@ ipsec_delete_policy(struct ipsec_policy *ipo)
 	struct ipsec_acquire *ipa;
 	struct radix_node_head *rnh;
 	struct radix_node *rn = (struct radix_node *)ipo;
-	int err = 0;
 
 	NET_ASSERT_LOCKED();
 
-	if (--ipo->ipo_ref_count > 0)
+	if (refcnt_rele(&ipo->ipo_refcnt) == 0)
 		return 0;
 
 	/* Delete from SPD. */
@@ -637,12 +683,19 @@ ipsec_delete_policy(struct ipsec_policy *ipo)
 	    rn_delete(&ipo->ipo_addr, &ipo->ipo_mask, rnh, rn) == NULL)
 		return (ESRCH);
 
-	if (ipo->ipo_tdb != NULL)
+	mtx_enter(&ipo_tdb_mtx);
+	if (ipo->ipo_tdb != NULL) {
 		TAILQ_REMOVE(&ipo->ipo_tdb->tdb_policy_head, ipo,
 		    ipo_tdb_next);
+		tdb_unref(ipo->ipo_tdb);
+		ipo->ipo_tdb = NULL;
+	}
+	mtx_leave(&ipo_tdb_mtx);
 
+	mtx_enter(&ipsec_acquire_mtx);
 	while ((ipa = TAILQ_FIRST(&ipo->ipo_acquires)) != NULL)
-		ipsp_delete_acquire(ipa);
+		ipsp_delete_acquire_locked(ipa);
+	mtx_leave(&ipsec_acquire_mtx);
 
 	TAILQ_REMOVE(&ipsec_policy_head, ipo, ipo_list);
 
@@ -653,17 +706,18 @@ ipsec_delete_policy(struct ipsec_policy *ipo)
 
 	pool_put(&ipsec_policy_pool, ipo);
 
-	return err;
+	return 0;
 }
 
 void
-ipsp_delete_acquire_timo(void *v)
+ipsp_delete_acquire_timer(void *v)
 {
 	struct ipsec_acquire *ipa = v;
 
-	NET_LOCK();
-	ipsp_delete_acquire(ipa);
-	NET_UNLOCK();
+	mtx_enter(&ipsec_acquire_mtx);
+	refcnt_rele(&ipa->ipa_refcnt);
+	ipsp_delete_acquire_locked(ipa);
+	mtx_leave(&ipsec_acquire_mtx);
 }
 
 /*
@@ -672,13 +726,38 @@ ipsp_delete_acquire_timo(void *v)
 void
 ipsp_delete_acquire(struct ipsec_acquire *ipa)
 {
-	NET_ASSERT_LOCKED();
+	mtx_enter(&ipsec_acquire_mtx);
+	ipsp_delete_acquire_locked(ipa);
+	mtx_leave(&ipsec_acquire_mtx);
+}
 
-	timeout_del(&ipa->ipa_timeout);
+void
+ipsp_delete_acquire_locked(struct ipsec_acquire *ipa)
+{
+	if (timeout_del(&ipa->ipa_timeout) == 1)
+		refcnt_rele(&ipa->ipa_refcnt);
+	ipsp_unref_acquire_locked(ipa);
+}
+
+void
+ipsec_unref_acquire(struct ipsec_acquire *ipa)
+{
+	mtx_enter(&ipsec_acquire_mtx);
+	ipsp_unref_acquire_locked(ipa);
+	mtx_leave(&ipsec_acquire_mtx);
+}
+
+void
+ipsp_unref_acquire_locked(struct ipsec_acquire *ipa)
+{
+	MUTEX_ASSERT_LOCKED(&ipsec_acquire_mtx);
+
+	if (refcnt_rele(&ipa->ipa_refcnt) == 0)
+		return;
 	TAILQ_REMOVE(&ipsec_acquire_head, ipa, ipa_next);
-	if (ipa->ipa_policy != NULL)
-		TAILQ_REMOVE(&ipa->ipa_policy->ipo_acquires, ipa,
-		    ipa_ipo_next);
+	TAILQ_REMOVE(&ipa->ipa_policy->ipo_acquires, ipa, ipa_ipo_next);
+	ipa->ipa_policy = NULL;
+
 	pool_put(&ipsec_acquire_pool, ipa);
 }
 
@@ -686,19 +765,21 @@ ipsp_delete_acquire(struct ipsec_acquire *ipa)
  * Find out if there's an ACQUIRE pending.
  * XXX Need a better structure.
  */
-struct ipsec_acquire *
+int
 ipsp_pending_acquire(struct ipsec_policy *ipo, union sockaddr_union *gw)
 {
 	struct ipsec_acquire *ipa;
 
 	NET_ASSERT_LOCKED();
 
-	TAILQ_FOREACH (ipa, &ipo->ipo_acquires, ipa_ipo_next) {
+	mtx_enter(&ipsec_acquire_mtx);
+	TAILQ_FOREACH(ipa, &ipo->ipo_acquires, ipa_ipo_next) {
 		if (!memcmp(gw, &ipa->ipa_addr, gw->sa.sa_len))
-			return ipa;
+			break;
 	}
+	mtx_leave(&ipsec_acquire_mtx);
 
-	return NULL;
+	return (ipa != NULL);
 }
 
 /*
@@ -714,7 +795,7 @@ ipsp_acquire_sa(struct ipsec_policy *ipo, union sockaddr_union *gw,
 	NET_ASSERT_LOCKED();
 
 	/* Check whether request has been made already. */
-	if ((ipa = ipsp_pending_acquire(ipo, gw)) != NULL)
+	if (ipsp_pending_acquire(ipo, gw))
 		return 0;
 
 	/* Add request in cache and proceed. */
@@ -724,7 +805,8 @@ ipsp_acquire_sa(struct ipsec_policy *ipo, union sockaddr_union *gw,
 
 	ipa->ipa_addr = *gw;
 
-	timeout_set_proc(&ipa->ipa_timeout, ipsp_delete_acquire_timo, ipa);
+	refcnt_init(&ipa->ipa_refcnt);
+	timeout_set(&ipa->ipa_timeout, ipsp_delete_acquire_timer, ipa);
 
 	ipa->ipa_info.sen_len = ipa->ipa_mask.sen_len = SENT_LEN;
 	ipa->ipa_info.sen_family = ipa->ipa_mask.sen_family = PF_KEY;
@@ -805,13 +887,15 @@ ipsp_acquire_sa(struct ipsec_policy *ipo, union sockaddr_union *gw,
 		return 0;
 	}
 
+	mtx_enter(&ipsec_acquire_mtx);
 #ifdef IPSEC
-	timeout_add_sec(&ipa->ipa_timeout, ipsec_expire_acquire);
+	if (timeout_add_sec(&ipa->ipa_timeout, ipsec_expire_acquire) == 1)
+		refcnt_take(&ipa->ipa_refcnt);
 #endif
-
 	TAILQ_INSERT_TAIL(&ipsec_acquire_head, ipa, ipa_next);
 	TAILQ_INSERT_TAIL(&ipo->ipo_acquires, ipa, ipa_ipo_next);
 	ipa->ipa_policy = ipo;
+	mtx_leave(&ipsec_acquire_mtx);
 
 	/* PF_KEYv2 notification message. */
 	return pfkeyv2_acquire(ipo, gw, laddr, &ipa->ipa_seq, ddst);
@@ -820,9 +904,9 @@ ipsp_acquire_sa(struct ipsec_policy *ipo, union sockaddr_union *gw,
 /*
  * Deal with PCB security requirements.
  */
-struct tdb *
-ipsp_spd_inp(struct mbuf *m, int af, int hlen, int *error, int direction,
-    struct tdb *tdbp, struct inpcb *inp, struct ipsec_policy *ipo)
+int
+ipsp_spd_inp(struct mbuf *m, struct inpcb *inp, struct ipsec_policy *ipo,
+    struct tdb **tdbout)
 {
 	/* Sanity check. */
 	if (inp == NULL)
@@ -840,14 +924,16 @@ ipsp_spd_inp(struct mbuf *m, int af, int hlen, int *error, int direction,
 	    inp->inp_seclevel[SL_AUTH] == IPSEC_LEVEL_AVAIL)
 		goto justreturn;
 
-	*error = -EINVAL;
-	return NULL;
+	return -EINVAL;  /* Silently drop packet. */
 
  justreturn:
-	if (ipo != NULL)
-		return ipo->ipo_tdb;
-	else
-		return NULL;
+	if (tdbout != NULL) {
+		if (ipo != NULL)
+			*tdbout = tdb_ref(ipo->ipo_tdb);
+		else
+			*tdbout = NULL;
+	}
+	return 0;
 }
 
 /*
@@ -861,9 +947,14 @@ ipsec_get_acquire(u_int32_t seq)
 
 	NET_ASSERT_LOCKED();
 
-	TAILQ_FOREACH (ipa, &ipsec_acquire_head, ipa_next)
-		if (ipa->ipa_seq == seq)
-			return ipa;
+	mtx_enter(&ipsec_acquire_mtx);
+	TAILQ_FOREACH(ipa, &ipsec_acquire_head, ipa_next) {
+		if (ipa->ipa_seq == seq) {
+			refcnt_take(&ipa->ipa_refcnt);
+			break;
+		}
+	}
+	mtx_leave(&ipsec_acquire_mtx);
 
-	return NULL;
+	return ipa;
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: agp_intel.c,v 1.23 2014/05/27 12:40:00 kettenis Exp $	*/
+/*	$OpenBSD: agp_intel.c,v 1.25 2022/03/11 18:00:45 mpi Exp $	*/
 /*	$NetBSD: agp_intel.c,v 1.3 2001/09/15 00:25:00 thorpej Exp $	*/
 
 /*-
@@ -78,7 +78,7 @@ void	agp_intel_bind_page(void *, bus_addr_t, paddr_t, int);
 void	agp_intel_unbind_page(void *, bus_addr_t);
 void	agp_intel_flush_tlb(void *);
 
-struct cfattach intelagp_ca = {
+const struct cfattach intelagp_ca = {
 	sizeof(struct agp_intel_softc), agp_intel_probe, agp_intel_attach,
 	NULL, agp_intel_activate
 };
@@ -188,7 +188,7 @@ agp_intel_attach(struct device *parent, struct device *self, void *aux)
 			break;
 
 		/*
-		 * almost certainly error allocating contigious dma memory
+		 * almost certainly error allocating contiguous dma memory
 		 * so reduce aperture so that the gatt size reduces.
 		 */
 		isc->isc_apsize /= 2;

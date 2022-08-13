@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_sk.c,v 1.192 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_sk.c,v 1.194 2022/03/11 18:00:48 mpi Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999, 2000
@@ -2223,7 +2223,7 @@ void sk_init_yukon(struct sk_if_softc *sc_if)
 	SK_IF_WRITE_1(sc_if, 0, SK_RXMF1_CTRL_TEST, SK_RFCTL_RESET_CLEAR);
 	SK_IF_WRITE_2(sc_if, 0, SK_RXMF1_CTRL_TEST, v);
 
-	/* Increase flush threshould to 64 bytes */
+	/* Increase flush threshold to 64 bytes */
 	SK_IF_WRITE_2(sc_if, 0, SK_RXMF1_FLUSH_THRESHOLD,
 	    SK_RFCTL_FIFO_THRESHOLD + 1);
 
@@ -2528,7 +2528,7 @@ sk_stop(struct sk_if_softc *sc_if, int softonly)
 	}
 }
 
-struct cfattach skc_ca = {
+const struct cfattach skc_ca = {
 	sizeof(struct sk_softc), skc_probe, skc_attach, skc_detach,
 	skc_activate
 };
@@ -2537,7 +2537,7 @@ struct cfdriver skc_cd = {
 	0, "skc", DV_DULL
 };
 
-struct cfattach sk_ca = {
+const struct cfattach sk_ca = {
 	sizeof(struct sk_if_softc), sk_probe, sk_attach, sk_detach,
 	sk_activate
 };

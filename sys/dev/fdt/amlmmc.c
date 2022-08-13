@@ -1,4 +1,4 @@
-/*	$OpenBSD: amlmmc.c,v 1.10 2021/04/20 19:33:03 kettenis Exp $	*/
+/*	$OpenBSD: amlmmc.c,v 1.12 2022/01/09 05:42:37 jsg Exp $	*/
 /*
  * Copyright (c) 2019 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -156,7 +156,7 @@ struct amlmmc_softc {
 int amlmmc_match(struct device *, void *, void *);
 void amlmmc_attach(struct device *, struct device *, void *);
 
-struct cfattach	amlmmc_ca = {
+const struct cfattach	amlmmc_ca = {
 	sizeof (struct amlmmc_softc), amlmmc_match, amlmmc_attach
 };
 
@@ -227,7 +227,7 @@ amlmmc_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_dmat = faa->fa_dmat;
 	error = amlmmc_alloc_descriptors(sc);
 	if (error) {
-		printf(": can't allocate desctiptors\n");
+		printf(": can't allocate descriptors\n");
 		goto unmap;
 	}
 	error = bus_dmamap_create(sc->sc_dmat, MAXPHYS, AMLMMC_NDESC,

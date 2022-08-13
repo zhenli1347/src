@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_vpm.c,v 1.26 2021/04/24 18:10:12 tb Exp $ */
+/* $OpenBSD: x509_vpm.c,v 1.30 2022/07/04 12:17:32 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 2004.
  */
@@ -67,6 +67,7 @@
 #include <openssl/x509v3.h>
 
 #include "vpm_int.h"
+#include "x509_lcl.h"
 
 /* X509_VERIFY_PARAM functions */
 
@@ -453,6 +454,18 @@ X509_VERIFY_PARAM_set_depth(X509_VERIFY_PARAM *param, int depth)
 }
 
 void
+X509_VERIFY_PARAM_set_auth_level(X509_VERIFY_PARAM *param, int auth_level)
+{
+	param->security_level = auth_level;
+}
+
+time_t
+X509_VERIFY_PARAM_get_time(const X509_VERIFY_PARAM *param)
+{
+	return param->check_time;
+}
+
+void
 X509_VERIFY_PARAM_set_time(X509_VERIFY_PARAM *param, time_t t)
 {
 	param->check_time = t;
@@ -598,6 +611,7 @@ static const X509_VERIFY_PARAM_ID _empty_id = { NULL };
 static const X509_VERIFY_PARAM default_table[] = {
 	{
 		.name = "default",
+		.flags = X509_V_FLAG_TRUSTED_FIRST,
 		.depth = 100,
 		.trust = 0,  /* XXX This is not the default trust value */
 		.id = vpm_empty_id

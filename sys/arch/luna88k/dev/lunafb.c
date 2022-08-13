@@ -1,4 +1,4 @@
-/* $OpenBSD: lunafb.c,v 1.27 2020/05/25 09:55:48 jsg Exp $ */
+/* $OpenBSD: lunafb.c,v 1.30 2022/08/12 13:36:19 aoyama Exp $ */
 /* $NetBSD: lunafb.c,v 1.7.6.1 2002/08/07 01:48:34 lukem Exp $ */
 
 /*-
@@ -243,6 +243,8 @@ omfbioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		wsd_fbip->height = dc->dc_ht;
 		wsd_fbip->width = dc->dc_wid;
 		wsd_fbip->depth = dc->dc_depth;
+		wsd_fbip->stride = dc->dc_rowbytes;
+		wsd_fbip->offset = 8;
 		wsd_fbip->cmsize = dc->dc_cmsize;
 #undef wsd_fbip
 		break;
@@ -299,7 +301,8 @@ omfbmmap(void *v, off_t offset, int prot)
 	if (offset >= 0 && offset < OMFB_SIZE)
 		cookie = (paddr_t)(trunc_page(dc->dc_videobase) + offset);
 #else
-	if (offset >= 0 && offset < dc->dc_rowbytes * dc->dc_ht * hwplanebits)
+	if (offset >= 0 &&
+	    offset < dc->dc_rowbytes * dc->dc_ht * hwplanebits + PAGE_SIZE)
 		cookie = (paddr_t)(trunc_page(OMFB_FB_RADDR) + offset);
 #endif
 	return cookie;
@@ -599,7 +602,27 @@ omfb_set_default_cmap(struct om_hwdevconfig *dc)
 {
 	int i;
 
-	if ((hwplanebits == 1) || (hwplanebits == 4)) {
+	if (hwplanebits == 1) {
+		struct bt454 *odac = (struct bt454 *)OMFB_RAMDAC;
+		/*
+		 * On 1bpp framebuffer, only plane P0 has framebuffer memory
+		 * and other planes seems pulled up, i.e. always 1.
+		 * Set white only for a palette (P0,P1,P2,P3) = (1,1,1,1).
+		 */
+		odac->bt_addr = 0;
+		for (i = 0; i < 15; i++) {
+			odac->bt_cmap = dc->dc_cmap.r[i] = 0;
+			odac->bt_cmap = dc->dc_cmap.g[i] = 0;
+			odac->bt_cmap = dc->dc_cmap.b[i] = 0;
+		}
+		/*
+		 * The B/W video connector is connected to IOG of Bt454,
+		 * and IOR and IOB are unused.
+		 */
+		odac->bt_cmap = dc->dc_cmap.r[15] = 0;
+		odac->bt_cmap = dc->dc_cmap.g[15] = 255;
+		odac->bt_cmap = dc->dc_cmap.b[15] = 0;
+	} else if (hwplanebits == 4) {
 		struct bt454 *odac = (struct bt454 *)OMFB_RAMDAC;
 
 		odac->bt_addr = 0;

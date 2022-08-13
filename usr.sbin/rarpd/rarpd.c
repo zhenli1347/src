@@ -1,4 +1,4 @@
-/*	$OpenBSD: rarpd.c,v 1.77 2020/12/29 19:47:40 benno Exp $ */
+/*	$OpenBSD: rarpd.c,v 1.79 2021/11/15 15:14:24 millert Exp $ */
 /*	$NetBSD: rarpd.c,v 1.25 1998/04/23 02:48:33 mrg Exp $	*/
 
 /*
@@ -83,9 +83,9 @@ void   rarp_reply(struct if_info *, struct if_addr *,
 	    struct ether_header *, u_int32_t, struct hostent *);
 void	arptab_init(void);
 int    arptab_set(u_char *, u_int32_t);
-__dead void   error(const char *,...);
-void   warning(const char *,...);
-void   debug(const char *,...);
+__dead void   error(const char *, ...);
+void   warning(const char *, ...);
+void   debug(const char *, ...);
 u_int32_t ipaddrtonetmask(u_int32_t);
 int    rarp_bootable(u_int32_t);
 
@@ -103,7 +103,6 @@ int
 main(int argc, char *argv[])
 {
 	extern char *__progname;
-	extern int optind, opterr;
 	int op;
 
 	/* All error reporting is done through syslogs. */
@@ -341,9 +340,9 @@ rarp_loop(void)
 	arptab_init();
 
 	if (unveil(TFTP_DIR, "r") == -1)
-		error("unveil");
+		error("unveil %s", TFTP_DIR);
 	if (unveil("/etc/ethers", "r") == -1)
-		error("unveil");
+		error("unveil /etc/ethers");
 	if (pledge("stdio rpath dns", NULL) == -1)
 		error("pledge");
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: acpitz.c,v 1.56 2021/03/10 21:49:55 patrick Exp $ */
+/* $OpenBSD: acpitz.c,v 1.59 2022/08/10 16:58:16 patrick Exp $ */
 /*
  * Copyright (c) 2006 Can Erkin Acar <canacar@openbsd.org>
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
@@ -67,7 +67,7 @@ int	acpitz_match(struct device *, void *, void *);
 void	acpitz_attach(struct device *, struct device *, void *);
 int	acpitz_activate(struct device *, int);
 
-struct cfattach acpitz_ca = {
+const struct cfattach acpitz_ca = {
 	sizeof(struct acpitz_softc), acpitz_match, acpitz_attach,
 	NULL, acpitz_activate
 };
@@ -95,8 +95,6 @@ extern int	perflevel;
 #define ACPITZ_TRIPS	(1L << 0)
 #define ACPITZ_DEVLIST	(1L << 1)
 #define ACPITZ_INIT	(ACPITZ_TRIPS|ACPITZ_DEVLIST)
-
-extern struct aml_node aml_root;
 
 void
 acpitz_init_perf(void *arg)
@@ -214,7 +212,8 @@ acpitz_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_lasttmp = -1;
 	if ((sc->sc_tmp = acpitz_gettempreading(sc, "_TMP")) == -1) {
-		dnprintf(10, ": failed to read _TMP\n");
+		dnprintf(10, ": failed to read _TMP");
+		printf("\n");
 		return;
 	}
 

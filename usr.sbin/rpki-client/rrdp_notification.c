@@ -1,3 +1,4 @@
+/*	$OpenBSD: rrdp_notification.c,v 1.16 2022/06/16 16:09:56 claudio Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -53,6 +54,7 @@ struct notification_xml {
 	XML_Parser		 parser;
 	struct rrdp_session	*repository;
 	struct rrdp_session	*current;
+	const char		*notifyuri;
 	char			*session_id;
 	char			*snapshot_uri;
 	char			 snapshot_hash[SHA256_DIGEST_LENGTH];
@@ -118,7 +120,8 @@ start_notification_elem(struct notification_xml *nxml, const char **attr)
 		    "parse failed - entered notification elem unexpectedely");
 	for (i = 0; attr[i]; i += 2) {
 		const char *errstr;
-		if (strcmp("xmlns", attr[i]) == 0) {
+		if (strcmp("xmlns", attr[i]) == 0 &&
+		    strcmp(RRDP_XMLNS, attr[i + 1]) == 0) {
 			has_xmlns = 1;
 			continue;
 		}
@@ -139,7 +142,7 @@ start_notification_elem(struct notification_xml *nxml, const char **attr)
 				continue;
 		}
 		PARSE_FAIL(p, "parse failed - non conforming "
-		    "attribute found in notification elem");
+		    "attribute '%s' found in notification elem", attr[i]);
 	}
 	if (!(has_xmlns && nxml->version && nxml->session_id && nxml->serial))
 		PARSE_FAIL(p, "parse failed - incomplete "
@@ -171,7 +174,8 @@ start_snapshot_elem(struct notification_xml *nxml, const char **attr)
 	for (i = 0; attr[i]; i += 2) {
 		if (strcmp("uri", attr[i]) == 0 && hasUri++ == 0) {
 			if (valid_uri(attr[i + 1], strlen(attr[i + 1]),
-			    "https://")) {
+			    "https://") &&
+			    valid_origin(attr[i + 1], nxml->notifyuri)) {
 				nxml->snapshot_uri = xstrdup(attr[i + 1]);
 				continue;
 			}
@@ -182,7 +186,7 @@ start_snapshot_elem(struct notification_xml *nxml, const char **attr)
 				continue;
 		}
 		PARSE_FAIL(p, "parse failed - non conforming "
-		    "attribute found in snapshot elem");
+		    "attribute '%s' found in snapshot elem", attr[i]);
 	}
 	if (hasUri != 1 || hasHash != 1)
 		PARSE_FAIL(p, "parse failed - incomplete snapshot attributes");
@@ -216,7 +220,8 @@ start_delta_elem(struct notification_xml *nxml, const char **attr)
 	for (i = 0; attr[i]; i += 2) {
 		if (strcmp("uri", attr[i]) == 0 && hasUri++ == 0) {
 			if (valid_uri(attr[i + 1], strlen(attr[i + 1]),
-			    "https://")) {
+			    "https://") &&
+			    valid_origin(attr[i + 1], nxml->notifyuri)) {
 				delta_uri = attr[i + 1];
 				continue;
 			}
@@ -235,7 +240,7 @@ start_delta_elem(struct notification_xml *nxml, const char **attr)
 				continue;
 		}
 		PARSE_FAIL(p, "parse failed - non conforming "
-		    "attribute found in snapshot elem");
+		    "attribute '%s' found in snapshot elem", attr[i]);
 	}
 	/* Only add to the list if we are relevant */
 	if (hasUri != 1 || hasHash != 1 || delta_serial == 0)
@@ -304,9 +309,19 @@ notification_xml_elem_end(void *data, const char *el)
 		PARSE_FAIL(p, "parse failed - unexpected elem exit found");
 }
 
+static void
+notification_doctype_handler(void *data, const char *doctypeName,
+    const char *sysid, const char *pubid, int subset)
+{
+	struct notification_xml *nxml = data;
+	XML_Parser p = nxml->parser;
+
+	PARSE_FAIL(p, "parse failed - DOCTYPE not allowed");
+}
+
 struct notification_xml *
 new_notification_xml(XML_Parser p, struct rrdp_session *repository,
-    struct rrdp_session *current)
+    struct rrdp_session *current, const char *notifyuri)
 {
 	struct notification_xml *nxml;
 
@@ -316,10 +331,13 @@ new_notification_xml(XML_Parser p, struct rrdp_session *repository,
 	nxml->parser = p;
 	nxml->repository = repository;
 	nxml->current = current;
+	nxml->notifyuri = notifyuri;
 
 	XML_SetElementHandler(nxml->parser, notification_xml_elem_start,
 	    notification_xml_elem_end);
 	XML_SetUserData(nxml->parser, nxml);
+	XML_SetDoctypeDeclHandler(nxml->parser, notification_doctype_handler,
+	    NULL);
 
 	return nxml;
 }
@@ -365,11 +383,20 @@ notification_done(struct notification_xml *nxml, char *last_mod)
 	if (nxml->repository->serial == 0)
 		goto snapshot;
 
-	/* if our serial is equal or bigger, the repo is up to date */
-	if (nxml->repository->serial >= nxml->serial) {
+	if (nxml->repository->serial > nxml->serial)
+		warnx("%s: serial number decreased from %lld to %lld",
+		    nxml->notifyuri, nxml->repository->serial, nxml->serial);
+
+	/* if our serial is equal or plus 2, the repo is up to date */
+	if (nxml->repository->serial >= nxml->serial &&
+	    nxml->repository->serial - nxml->serial <= 2) {
 		nxml->current->serial = nxml->repository->serial;
 		return NOTIFICATION;
 	}
+
+	/* it makes no sense to process too many deltas */
+	if (nxml->serial - nxml->repository->serial > MAX_RRDP_DELTAS)
+		goto snapshot;
 
 	/* check that all needed deltas are available */
 	s = nxml->repository->serial + 1;
@@ -409,7 +436,7 @@ notification_get_next(struct notification_xml *nxml, char *hash, size_t hlen,
 		nxml->current->serial = nxml->serial;
 		return nxml->snapshot_uri;
 	case DELTA:
-		/* first bump serial, then use first delta  */
+		/* first bump serial, then use first delta */
 		nxml->current->serial += 1;
 		d = TAILQ_FIRST(&nxml->delta_q);
 		assert(d->serial == nxml->current->serial);
@@ -443,6 +470,19 @@ notification_delta_done(struct notification_xml *nxml)
 void
 log_notification_xml(struct notification_xml *nxml)
 {
+	struct delta_item *d;
+	char *hash;
+
 	logx("session_id: %s, serial: %lld", nxml->session_id, nxml->serial);
 	logx("snapshot_uri: %s", nxml->snapshot_uri);
+	hash = hex_encode(nxml->snapshot_hash, sizeof(nxml->snapshot_hash));
+	logx("snapshot hash: %s", hash);
+	free(hash);
+
+	TAILQ_FOREACH(d, &nxml->delta_q, q) {
+		logx("delta serial %lld uri: %s", d->serial, d->uri);
+		hash = hex_encode(d->hash, sizeof(d->hash));
+		logx("delta hash: %s", hash);
+		free(hash);
+	}
 }

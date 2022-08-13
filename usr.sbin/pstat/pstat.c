@@ -1,4 +1,4 @@
-/*	$OpenBSD: pstat.c,v 1.124 2021/07/12 15:09:21 beck Exp $	*/
+/*	$OpenBSD: pstat.c,v 1.129 2022/02/22 17:35:01 deraadt Exp $	*/
 /*	$NetBSD: pstat.c,v 1.27 1996/10/23 22:50:06 cgd Exp $	*/
 
 /*-
@@ -30,8 +30,9 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>	/* MAXCOMLEN DEV_BSIZE */
+#include <sys/param.h>	/* DEV_BSIZE */
 #include <sys/types.h>
+#include <sys/signal.h>
 #include <sys/proc.h>
 #include <sys/time.h>
 #include <sys/vnode.h>
@@ -150,8 +151,6 @@ main(int argc, char *argv[])
 	int fileflag = 0, swapflag = 0, ttyflag = 0, vnodeflag = 0, ch;
 	char buf[_POSIX2_LINE_MAX];
 	const char *dformat = NULL;
-	extern char *optarg;
-	extern int optind;
 	int i;
 
 	hideroot = getuid();

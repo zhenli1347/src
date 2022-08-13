@@ -1,4 +1,4 @@
-.\"	$OpenBSD: route.8,v 1.100 2021/08/30 15:46:07 kn Exp $
+.\"	$OpenBSD: route.8,v 1.104 2022/07/29 18:28:32 kn Exp $
 .\"	$NetBSD: route.8,v 1.6 1995/03/18 15:00:13 cgd Exp $
 .\"
 .\" Copyright (c) 1983, 1991, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"	@(#)route.8	8.3 (Berkeley) 3/19/94
 .\"
-.Dd $Mdocdate: August 30 2021 $
+.Dd $Mdocdate: July 29 2022 $
 .Dt ROUTE 8
 .Os
 .Sh NAME
@@ -78,6 +78,8 @@ Suppress all output.
 .It Fl T Ar rtable
 Select an alternate routing table to modify or query.
 The default is to use the current routing table.
+The current routing table can be displayed with
+.Xr id 1 .
 .It Fl t
 Write routing messages to a fake device
 .Pa ( /dev/null )
@@ -152,7 +154,7 @@ modifiers (listed below), only routes having destinations with addresses
 in the delineated family will be shown.
 If the
 .Fl iface
-modifier is used only interface specific messages (link state changes)
+modifier is used, only interface specific messages (link state changes)
 are shown.
 If a routing table is supplied with
 .Fl T ,
@@ -169,11 +171,16 @@ only changes in that routing table will be displayed.
 .Ar interface
 .Op Ar address ...
 .Xc
-Send a list of up to five nameserver address proposals to
-.Xr resolvd 8 .
+Broadcast a list of up to five nameserver address proposals.
+.Pp
+.Xr unwind 8
+will learn them and act according to
+.Xr unwind.conf 5 .
+.Pp
 .Xr resolvd 8
 will replace all existing nameservers for the given interface in
 .Xr resolv.conf 5 .
+.Pp
 If no
 .Ar address
 argument is given, a request to remove the nameservers previously entered for
@@ -287,6 +294,7 @@ have the syntax:
 .Nm route
 .Op Fl dnqtv
 .Op Fl T Ar rtable
+.Tg delete
 .Tg
 .Cm del Ns Op Cm ete
 .Op Ar modifiers
@@ -429,7 +437,7 @@ A specific routing priority can be specified with the optional
 .Tg
 .Fl priority
 qualifier.
-If no priority is specified the kernel will set a priority depending on the
+If no priority is specified, the kernel will set a priority depending on the
 .Dv RTF_STATIC
 flag to either
 .Dv RTP_STATIC
@@ -618,10 +626,12 @@ low on resources and was unable to allocate memory
 to create the new entry.
 .El
 .Sh SEE ALSO
+.Xr id 1 ,
 .Xr netstat 1 ,
 .Xr gethostbyname 3 ,
 .Xr netintro 4 ,
 .Xr route 4 ,
+.Xr rtable 4 ,
 .Xr tcp 4 ,
 .Xr hosts 5 ,
 .Xr mygate 5 ,

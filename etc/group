@@ -22,7 +22,6 @@ _sshagnt:*:34:
 _x11:*:35:
 utmp:*:45:
 _unwind:*:48:
-_switchd:*:49:
 _traceroute:*:50:
 _ping:*:51:
 _unbound:*:53:
@@ -40,6 +39,7 @@ www:*:67:
 _isakmpd:*:68:
 network:*:69:
 _rpki-client:*:70:
+_bgplgd:*:71:
 authpf:*:72:
 _syslogd:*:73:
 _pflogd:*:74:

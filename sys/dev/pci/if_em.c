@@ -31,7 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ***************************************************************************/
 
-/* $OpenBSD: if_em.c,v 1.358 2021/01/24 10:21:43 jsg Exp $ */
+/* $OpenBSD: if_em.c,v 1.362 2022/06/23 09:38:28 jsg Exp $ */
 /* $FreeBSD: if_em.c,v 1.46 2004/09/29 18:28:28 mlaier Exp $ */
 
 #include <dev/pci/if_em.h>
@@ -296,6 +296,7 @@ u_int32_t em_fill_descriptors(u_int64_t address, u_int32_t length,
 void em_flush_tx_ring(struct em_queue *);
 void em_flush_rx_ring(struct em_queue *);
 void em_flush_desc_rings(struct em_softc *);
+int em_get_sffpage(struct em_softc *, struct if_sffpage *);
 
 #ifndef SMALL_KERNEL
 /* MSIX/Multiqueue functions */
@@ -318,7 +319,7 @@ void	em_tbi_adjust_stats(struct em_softc *, uint32_t, uint8_t *);
  *  OpenBSD Device Interface Entry Points
  *********************************************************************/
 
-struct cfattach em_ca = {
+const struct cfattach em_ca = {
 	sizeof(struct em_softc), em_probe, em_attach, em_detach,
 	em_activate
 };
@@ -359,7 +360,7 @@ em_defer_attach(struct device *self)
 	INIT_DEBUGOUT("em_defer_attach: begin");
 
 	if ((gcu = em_lookup_gcu(self)) == 0) {
-		printf("%s: No GCU found, defered attachment failed\n",
+		printf("%s: No GCU found, deferred attachment failed\n",
 		    DEVNAME(sc));
 
 		if (sc->sc_intrhand)
@@ -408,6 +409,8 @@ em_attach(struct device *parent, struct device *self, void *aux)
 
 	timeout_set(&sc->timer_handle, em_local_timer, sc);
 	timeout_set(&sc->tx_fifo_timer_handle, em_82547_move_tail, sc);
+
+	rw_init(&sc->sfflock, "emsff");
 
 	/* Determine hardware revision */
 	em_identify_hardware(sc);
@@ -494,6 +497,8 @@ em_attach(struct device *parent, struct device *self, void *aux)
 		case em_pch_lpt:
 		case em_pch_spt:
 		case em_pch_cnp:
+		case em_pch_tgp:
+		case em_pch_adp:
 		case em_80003es2lan:
 			/* 9K Jumbo Frame size */
 			sc->hw.max_frame_size = 9234;
@@ -764,6 +769,15 @@ em_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		    NULL, EM_MCLBYTES, &sc->queues->rx.sc_rx_ring);
 		break;
 
+	case SIOCGIFSFFPAGE:
+		error = rw_enter(&sc->sfflock, RW_WRITE|RW_INTR);
+		if (error != 0)
+			break;
+
+		error = em_get_sffpage(sc, (struct if_sffpage *)data);
+		rw_exit(&sc->sfflock);
+		break;
+
 	default:
 		error = ether_ioctl(ifp, &sc->sc_ac, command, data);
 	}
@@ -896,6 +910,8 @@ em_init(void *arg)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		pba = E1000_PBA_26K;
 		break;
 	default:
@@ -1628,7 +1644,8 @@ em_legacy_irq_quirk_spt(struct em_softc *sc)
 	uint32_t	reg;
 
 	/* Legacy interrupt: SPT needs a quirk. */
-	if (sc->hw.mac_type != em_pch_spt && sc->hw.mac_type != em_pch_cnp)
+	if (sc->hw.mac_type != em_pch_spt && sc->hw.mac_type != em_pch_cnp &&
+	    sc->hw.mac_type != em_pch_tgp && sc->hw.mac_type != em_pch_adp) 
 		return;
 	if (sc->legacy_irq == 0)
 		return;
@@ -1883,7 +1900,7 @@ em_hardware_init(struct em_softc *sc)
 	 *   received after sending an XOFF.
 	 * - Low water mark works best when it is very near the high water mark.
 	 *   This allows the receiver to restart by sending XON when it has
-	 *   drained a bit.  Here we use an arbitary value of 1500 which will
+	 *   drained a bit.  Here we use an arbitrary value of 1500 which will
 	 *   restart after one full frame is pulled from the buffer.  There
 	 *   could be several smaller frames in the buffer and if so they will
 	 *   not trigger the XON until their total number reduces the buffer
@@ -3831,7 +3848,7 @@ em_allocate_msix(struct em_softc *sc)
 /*
  * Interrupt for a specific queue, (not link interrupts). The EICR bit which
  * maps to the EIMS bit expresses both RX and TX, therefore we can't
- * distringuish if this is a RX completion of TX completion and must do both.
+ * distinguish if this is a RX completion of TX completion and must do both.
  * The bits in EICR are autocleared and we _cannot_ read EICR.
  */
 int
@@ -4024,6 +4041,34 @@ em_allocate_desc_rings(struct em_softc *sc)
 		}
 		que->rx.sc_rx_desc_ring =
 		    (struct em_rx_desc *)que->rx.sc_rx_dma.dma_vaddr;
+	}
+
+	return (0);
+}
+
+int
+em_get_sffpage(struct em_softc *sc, struct if_sffpage *sff)
+{
+	struct em_hw *hw = &sc->hw;
+	size_t i;
+	int off;
+
+	if (hw->mac_type != em_82575 && hw->mac_type != em_82580 &&
+	    hw->mac_type != em_82576 &&
+	    hw->mac_type != em_i210 && hw->mac_type != em_i350)
+		return (ENODEV);
+
+	if (sff->sff_addr == IFSFF_ADDR_EEPROM)
+		off = E1000_I2CCMD_SFP_DATA_ADDR(0);
+	else if (sff->sff_addr == IFSFF_ADDR_DDM)
+		off = E1000_I2CCMD_SFP_DIAG_ADDR(0);
+	else
+		return (EIO);
+
+	for (i = 0; i < sizeof(sff->sff_data); i++) {
+		if (em_read_sfp_data_byte(hw, off + i,
+		    &sff->sff_data[i]) != E1000_SUCCESS)
+			return (EIO);
 	}
 
 	return (0);

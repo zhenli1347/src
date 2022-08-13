@@ -1,4 +1,4 @@
-/*	$OpenBSD: kbd_wscons.c,v 1.34 2020/01/22 06:24:07 tedu Exp $ */
+/*	$OpenBSD: kbd_wscons.c,v 1.36 2022/05/05 16:12:42 bluhm Exp $ */
 
 /*
  * Copyright (c) 2001 Mats O Jansson.  All rights reserved.
@@ -150,7 +150,7 @@ kbd_list(void)
 {
 	int	kbds[SA_MAX];
 	struct wskbd_encoding_data encs[SA_MAX];
-	int	fd, i, kbtype, t;
+	int	fd, i, kbtype, t, error = 0;
 	char	device[PATH_MAX];
 
 	memset(kbds, 0, sizeof(kbds));
@@ -162,9 +162,16 @@ kbd_list(void)
 		fd = open(device, O_WRONLY);
 		if (fd == -1)
 			fd = open(device, O_RDONLY);
-		if (fd >= 0) {
+		if (fd == -1) {
+			/* remember the first error number */
+			if (error == 0)
+				error = errno;
+		} else {
+			/* at least one success, do not print error */
+			error = -1;
+
 			if (ioctl(fd, WSKBDIO_GTYPE, &kbtype) == -1)
-				err(1, "WSKBDIO_GTYPE");
+				err(1, "WSKBDIO_GTYPE %s", device);
 			switch (kbtype) {
 			case WSKBD_TYPE_PC_XT:
 			case WSKBD_TYPE_PC_AT:
@@ -208,6 +215,10 @@ kbd_list(void)
 			close(fd);
 		}
 	}
+	if (error > 0) {
+		errno = error;
+		err(1, "/dev/wskbd0");
+	}
 
 	for (i = 0; i < SA_MAX; i++)
 		if (kbds[i] != 0)
@@ -221,7 +232,7 @@ void
 kbd_set(char *name, int verbose)
 {
 	char	buf[LINE_MAX], *c, *b, device[sizeof "/dev/wskbd00"];
-	int	map = 0, v, i, fd;
+	int	map = 0, v, i, fd, error = 0;
 	struct nameint *n;
 
 	c = name;
@@ -260,19 +271,29 @@ kbd_set(char *name, int verbose)
 		fd = open(device, O_WRONLY);
 		if (fd == -1)
 			fd = open(device, O_RDONLY);
-		if (fd >= 0) {
+		if (fd == -1) {
+			/* remember the first error number */
+			if (error == 0)
+				error = errno;
+		} else {
+			/* at least one success, do not print error */
+			error = -1;
+
 			if (ioctl(fd, WSKBDIO_SETENCODING, &map) == -1) {
-				if (errno == EINVAL) {
-					fprintf(stderr,
-					    "%s: unsupported encoding %s on %s\n",
-					    __progname, name, device);
-				} else
-					err(1, "WSKBDIO_SETENCODING: %s", device);
-				v--;
-			}
-			v++;
+				if (errno != EINVAL)
+					err(1, "WSKBDIO_SETENCODING %s",
+					    device);
+				fprintf(stderr,
+				    "%s: unsupported encoding %s on %s\n",
+				    __progname, name, device);
+			} else
+				v++;
 			close(fd);
 		}
+	}
+	if (error > 0) {
+		errno = error;
+		err(1, "/dev/wskbd0");
 	}
 
 	if (verbose && v > 0)

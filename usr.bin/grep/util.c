@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.63 2020/07/23 20:19:27 martijn Exp $	*/
+/*	$OpenBSD: util.c,v 1.67 2022/07/12 18:09:31 op Exp $	*/
 
 /*-
  * Copyright (c) 1999 James Howard and Dag-Erling Coïdan Smørgrav
@@ -163,7 +163,7 @@ procfile(char *fn)
 			overflow = 1;
 		else
 			c += t;
-		if (mflag && mcount <= 0)
+		if (mflag && mcount <= 0 && tail <= 0)
 			break;
 	}
 	if (Bflag > 0)
@@ -172,13 +172,13 @@ procfile(char *fn)
 
 	if (cflag) {
 		if (!hflag)
-			printf("%s:", ln.file);
+			printf("%s%c", ln.file, nullflag ? '\0' : ':');
 		printf("%llu%s\n", c, overflow ? "+" : "");
 	}
 	if (lflag && c != 0)
-		printf("%s\n", fn);
+		printf("%s%c", fn, nullflag ? '\0' : '\n');
 	if (Lflag && c == 0)
-		printf("%s\n", fn);
+		printf("%s%c", fn, nullflag ? '\0' : '\n');
 	if (c && !cflag && !lflag && !Lflag &&
 	    binbehave == BIN_FILE_BIN && nottext && !qflag)
 		printf("Binary file %s matches\n", fn);
@@ -212,6 +212,8 @@ procline(str_t *l, int nottext)
 		c = 1;
 		goto print;
 	}
+	if (mflag && mcount <= 0)
+		goto print;
 
 	for (i = 0; i < patterns; i++) {
 		offset = 0;
@@ -258,8 +260,8 @@ print:
 
 	if ((tail > 0 || c) && !cflag && !qflag) {
 		if (c) {
-			if (first > 0 && tail == 0 && (Bflag < linesqueued) &&
-			    (Aflag || Bflag))
+			if (first > 0 && tail == 0 && (Aflag || (Bflag &&
+			    Bflag < linesqueued)))
 				printf("--\n");
 			first = 1;
 			tail = Aflag;
@@ -656,7 +658,10 @@ printline(str_t *line, int sep, regmatch_t *pmatch)
 	n = 0;
 	if (!hflag) {
 		fputs(line->file, stdout);
-		++n;
+		if (nullflag)
+			putchar(0);
+		else
+			++n;
 	}
 	if (nflag) {
 		if (n)

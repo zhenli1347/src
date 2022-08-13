@@ -1,4 +1,4 @@
-/*	$OpenBSD: workqueue.h,v 1.6 2021/08/14 03:12:51 jsg Exp $	*/
+/*	$OpenBSD: workqueue.h,v 1.8 2022/03/01 04:08:04 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -137,6 +137,13 @@ INIT_DELAYED_WORK_ONSTACK(struct delayed_work *dwork, work_func_t func)
 	timeout_set(&dwork->to, __delayed_work_tick, &dwork->work);
 }
 
+#define __DELAYED_WORK_INITIALIZER(dw, fn, flags) {			\
+	.to = TIMEOUT_INITIALIZER(__delayed_work_tick, &(dw)),		\
+	.tq = NULL,							\
+	.work.tq = NULL,						\
+	.work.task = TASK_INITIALIZER((void (*)(void *))(fn), &(dw).work)	\
+}
+
 static inline bool
 schedule_work(struct work_struct *work)
 {
@@ -198,8 +205,18 @@ delayed_work_pending(struct delayed_work *dwork)
 void flush_workqueue(struct workqueue_struct *);
 bool flush_work(struct work_struct *);
 bool flush_delayed_work(struct delayed_work *);
-#define flush_scheduled_work()	flush_workqueue(system_wq)
-#define drain_workqueue(x)	flush_workqueue(x)
+
+static inline void
+flush_scheduled_work(void)
+{
+	flush_workqueue(system_wq);
+}
+
+static inline void
+drain_workqueue(struct workqueue_struct *wq)
+{
+	flush_workqueue(wq);
+}
 
 static inline void
 destroy_work_on_stack(struct work_struct *work)
@@ -208,7 +225,10 @@ destroy_work_on_stack(struct work_struct *work)
 		task_del(work->tq, &work->task);
 }
 
-#define destroy_delayed_work_on_stack(x)
+static inline void
+destroy_delayed_work_on_stack(struct delayed_work *dwork)
+{
+}
 
 struct rcu_work {
 	struct work_struct work;

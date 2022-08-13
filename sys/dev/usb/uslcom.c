@@ -1,4 +1,4 @@
-/*	$OpenBSD: uslcom.c,v 1.42 2020/01/05 00:54:13 jsg Exp $	*/
+/*	$OpenBSD: uslcom.c,v 1.44 2022/04/09 20:07:44 naddy Exp $	*/
 
 /*
  * Copyright (c) 2006 Jonathan Gray <jsg@openbsd.org>
@@ -38,7 +38,6 @@ int	uslcomdebug = 0;
 #define DPRINTF(x) DPRINTFN(0, x)
 
 #define USLCOMBUFSZ		256
-#define USLCOM_IFACE_NO		0
 
 #define USLCOM_SET_DATA_BITS(x)	(x << 8)
 
@@ -100,7 +99,7 @@ int	uslcom_open(void *sc, int portno);
 void	uslcom_close(void *, int);
 void	uslcom_break(void *sc, int portno, int onoff);
 
-struct ucom_methods uslcom_methods = {
+const struct ucom_methods uslcom_methods = {
 	uslcom_get_status,
 	uslcom_set,
 	uslcom_param,
@@ -292,21 +291,11 @@ uslcom_attach(struct device *parent, struct device *self, void *aux)
 	struct ucom_attach_args uca;
 	usb_interface_descriptor_t *id;
 	usb_endpoint_descriptor_t *ed;
-	usbd_status error;
 	int i;
 
 	bzero(&uca, sizeof(uca));
 	sc->sc_udev = uaa->device;
-
-	/* get the first interface handle */
-	error = usbd_device2interface_handle(sc->sc_udev, USLCOM_IFACE_NO,
-	    &sc->sc_iface);
-	if (error != 0) {
-		printf("%s: could not get interface handle\n",
-		    sc->sc_dev.dv_xname);
-		usbd_deactivate(sc->sc_udev);
-		return;
-	}
+	sc->sc_iface = uaa->iface;
 
 	id = usbd_get_interface_descriptor(sc->sc_iface);
 
@@ -334,6 +323,7 @@ uslcom_attach(struct device *parent, struct device *self, void *aux)
 		return;
 	}
 
+	uca.portno = id->bInterfaceNumber;
 	uca.ibufsize = USLCOMBUFSZ;
 	uca.obufsize = USLCOMBUFSZ;
 	uca.ibufsizepad = USLCOMBUFSZ;

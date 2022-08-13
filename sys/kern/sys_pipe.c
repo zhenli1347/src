@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_pipe.c,v 1.126 2020/12/30 17:02:32 visa Exp $	*/
+/*	$OpenBSD: sys_pipe.c,v 1.141 2022/07/09 12:48:21 visa Exp $	*/
 
 /*
  * Copyright (c) 1996 John S. Dyson
@@ -40,7 +40,6 @@
 #include <sys/syscallargs.h>
 #include <sys/event.h>
 #include <sys/lock.h>
-#include <sys/poll.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -61,7 +60,6 @@ struct pipe_pair {
 int	pipe_read(struct file *, struct uio *, int);
 int	pipe_write(struct file *, struct uio *, int);
 int	pipe_close(struct file *, struct proc *);
-int	pipe_poll(struct file *, int events, struct proc *);
 int	pipe_kqfilter(struct file *fp, struct knote *kn);
 int	pipe_ioctl(struct file *, u_long, caddr_t, struct proc *);
 int	pipe_stat(struct file *fp, struct stat *ub, struct proc *p);
@@ -70,7 +68,6 @@ static const struct fileops pipeops = {
 	.fo_read	= pipe_read,
 	.fo_write	= pipe_write,
 	.fo_ioctl	= pipe_ioctl,
-	.fo_poll	= pipe_poll,
 	.fo_kqfilter	= pipe_kqfilter,
 	.fo_stat	= pipe_stat,
 	.fo_close	= pipe_close
@@ -79,19 +76,35 @@ static const struct fileops pipeops = {
 void	filt_pipedetach(struct knote *kn);
 int	filt_piperead(struct knote *kn, long hint);
 int	filt_pipewrite(struct knote *kn, long hint);
+int	filt_pipeexcept(struct knote *kn, long hint);
+int	filt_pipemodify(struct kevent *kev, struct knote *kn);
+int	filt_pipeprocess(struct knote *kn, struct kevent *kev);
 
 const struct filterops pipe_rfiltops = {
-	.f_flags	= FILTEROP_ISFD,
+	.f_flags	= FILTEROP_ISFD | FILTEROP_MPSAFE,
 	.f_attach	= NULL,
 	.f_detach	= filt_pipedetach,
 	.f_event	= filt_piperead,
+	.f_modify	= filt_pipemodify,
+	.f_process	= filt_pipeprocess,
 };
 
 const struct filterops pipe_wfiltops = {
-	.f_flags	= FILTEROP_ISFD,
+	.f_flags	= FILTEROP_ISFD | FILTEROP_MPSAFE,
 	.f_attach	= NULL,
 	.f_detach	= filt_pipedetach,
 	.f_event	= filt_pipewrite,
+	.f_modify	= filt_pipemodify,
+	.f_process	= filt_pipeprocess,
+};
+
+const struct filterops pipe_efiltops = {
+	.f_flags	= FILTEROP_ISFD | FILTEROP_MPSAFE,
+	.f_attach	= NULL,
+	.f_detach	= filt_pipedetach,
+	.f_event	= filt_pipeexcept,
+	.f_modify	= filt_pipemodify,
+	.f_process	= filt_pipeprocess,
 };
 
 /*
@@ -358,14 +371,7 @@ pipeselwakeup(struct pipe *cpipe)
 {
 	rw_assert_wrlock(cpipe->pipe_lock);
 
-	if (cpipe->pipe_state & PIPE_SEL) {
-		cpipe->pipe_state &= ~PIPE_SEL;
-		selwakeup(&cpipe->pipe_sel);
-	} else {
-		KERNEL_LOCK();
-		KNOTE(&cpipe->pipe_sel.si_note, NOTE_SUBMIT);
-		KERNEL_UNLOCK();
-	}
+	KNOTE(&cpipe->pipe_klist, 0);
 
 	if (cpipe->pipe_state & PIPE_ASYNC)
 		pgsigio(&cpipe->pipe_sigio, SIGIO, 0);
@@ -710,46 +716,6 @@ pipe_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 }
 
 int
-pipe_poll(struct file *fp, int events, struct proc *p)
-{
-	struct pipe *rpipe = fp->f_data, *wpipe;
-	struct rwlock *lock = rpipe->pipe_lock;
-	int revents = 0;
-
-	rw_enter_write(lock);
-	wpipe = pipe_peer(rpipe);
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (rpipe->pipe_buffer.cnt > 0 ||
-		    (rpipe->pipe_state & PIPE_EOF))
-			revents |= events & (POLLIN | POLLRDNORM);
-	}
-
-	/* NOTE: POLLHUP and POLLOUT/POLLWRNORM are mutually exclusive */
-	if ((rpipe->pipe_state & PIPE_EOF) || wpipe == NULL)
-		revents |= POLLHUP;
-	else if (events & (POLLOUT | POLLWRNORM)) {
-		if (wpipe->pipe_buffer.size - wpipe->pipe_buffer.cnt >= PIPE_BUF)
-			revents |= events & (POLLOUT | POLLWRNORM);
-	}
-
-	if (revents == 0) {
-		if (events & (POLLIN | POLLRDNORM)) {
-			selrecord(p, &rpipe->pipe_sel);
-			rpipe->pipe_state |= PIPE_SEL;
-		}
-		if (events & (POLLOUT | POLLWRNORM)) {
-			selrecord(p, &wpipe->pipe_sel);
-			wpipe->pipe_state |= PIPE_SEL;
-		}
-	}
-
-	rw_exit_write(lock);
-
-	return (revents);
-}
-
-int
 pipe_stat(struct file *fp, struct stat *ub, struct proc *p)
 {
 	struct pipe *pipe = fp->f_data;
@@ -888,7 +854,7 @@ pipe_kqfilter(struct file *fp, struct knote *kn)
 	case EVFILT_READ:
 		kn->kn_fop = &pipe_rfiltops;
 		kn->kn_hook = rpipe;
-		klist_insert_locked(&rpipe->pipe_sel.si_note, kn);
+		klist_insert_locked(&rpipe->pipe_klist, kn);
 		break;
 	case EVFILT_WRITE:
 		if (wpipe == NULL) {
@@ -898,7 +864,22 @@ pipe_kqfilter(struct file *fp, struct knote *kn)
 		}
 		kn->kn_fop = &pipe_wfiltops;
 		kn->kn_hook = wpipe;
-		klist_insert_locked(&wpipe->pipe_sel.si_note, kn);
+		klist_insert_locked(&wpipe->pipe_klist, kn);
+		break;
+	case EVFILT_EXCEPT:
+		if (kn->kn_flags & __EV_SELECT) {
+			/* Prevent triggering exceptfds. */
+			error = EPERM;
+			break;
+		}
+		if ((kn->kn_flags & __EV_POLL) == 0) {
+			/* Disallow usage through kevent(2). */
+			error = EINVAL;
+			break;
+		}
+		kn->kn_fop = &pipe_efiltops;
+		kn->kn_hook = rpipe;
+		klist_insert_locked(&rpipe->pipe_klist, kn);
 		break;
 	default:
 		error = EINVAL;
@@ -914,32 +895,26 @@ filt_pipedetach(struct knote *kn)
 {
 	struct pipe *cpipe = kn->kn_hook;
 
-	klist_remove(&cpipe->pipe_sel.si_note, kn);
+	klist_remove(&cpipe->pipe_klist, kn);
 }
 
 int
 filt_piperead(struct knote *kn, long hint)
 {
 	struct pipe *rpipe = kn->kn_fp->f_data, *wpipe;
-	struct rwlock *lock = rpipe->pipe_lock;
 
-	if ((hint & NOTE_SUBMIT) == 0)
-		rw_enter_read(lock);
+	rw_assert_wrlock(rpipe->pipe_lock);
+
 	wpipe = pipe_peer(rpipe);
 
 	kn->kn_data = rpipe->pipe_buffer.cnt;
 
 	if ((rpipe->pipe_state & PIPE_EOF) || wpipe == NULL) {
-		if ((hint & NOTE_SUBMIT) == 0)
-			rw_exit_read(lock);
 		kn->kn_flags |= EV_EOF; 
 		if (kn->kn_flags & __EV_POLL)
 			kn->kn_flags |= __EV_HUP;
 		return (1);
 	}
-
-	if ((hint & NOTE_SUBMIT) == 0)
-		rw_exit_read(lock);
 
 	return (kn->kn_data > 0);
 }
@@ -948,15 +923,12 @@ int
 filt_pipewrite(struct knote *kn, long hint)
 {
 	struct pipe *rpipe = kn->kn_fp->f_data, *wpipe;
-	struct rwlock *lock = rpipe->pipe_lock;
 
-	if ((hint & NOTE_SUBMIT) == 0)
-		rw_enter_read(lock);
+	rw_assert_wrlock(rpipe->pipe_lock);
+
 	wpipe = pipe_peer(rpipe);
 
 	if (wpipe == NULL) {
-		if ((hint & NOTE_SUBMIT) == 0)
-			rw_exit_read(lock);
 		kn->kn_data = 0;
 		kn->kn_flags |= EV_EOF; 
 		if (kn->kn_flags & __EV_POLL)
@@ -965,10 +937,53 @@ filt_pipewrite(struct knote *kn, long hint)
 	}
 	kn->kn_data = wpipe->pipe_buffer.size - wpipe->pipe_buffer.cnt;
 
-	if ((hint & NOTE_SUBMIT) == 0)
-		rw_exit_read(lock);
-
 	return (kn->kn_data >= PIPE_BUF);
+}
+
+int
+filt_pipeexcept(struct knote *kn, long hint)
+{
+	struct pipe *rpipe = kn->kn_fp->f_data, *wpipe;
+	int active = 0;
+
+	rw_assert_wrlock(rpipe->pipe_lock);
+
+	wpipe = pipe_peer(rpipe);
+
+	if (kn->kn_flags & __EV_POLL) {
+		if ((rpipe->pipe_state & PIPE_EOF) || wpipe == NULL) {
+			kn->kn_flags |= __EV_HUP;
+			active = 1;
+		}
+	}
+
+	return (active);
+}
+
+int
+filt_pipemodify(struct kevent *kev, struct knote *kn)
+{
+	struct pipe *rpipe = kn->kn_fp->f_data;
+	int active;
+
+	rw_enter_write(rpipe->pipe_lock);
+	active = knote_modify(kev, kn);
+	rw_exit_write(rpipe->pipe_lock);
+
+	return (active);
+}
+
+int
+filt_pipeprocess(struct knote *kn, struct kevent *kev)
+{
+	struct pipe *rpipe = kn->kn_fp->f_data;
+	int active;
+
+	rw_enter_write(rpipe->pipe_lock);
+	active = knote_process(kn, kev);
+	rw_exit_write(rpipe->pipe_lock);
+
+	return (active);
 }
 
 void
@@ -996,8 +1011,8 @@ pipe_pair_create(void)
 	pp->pp_wpipe.pipe_lock = &pp->pp_lock;
 	pp->pp_rpipe.pipe_lock = &pp->pp_lock;
 
-	klist_init_rwlock(&pp->pp_wpipe.pipe_sel.si_note, &pp->pp_lock);
-	klist_init_rwlock(&pp->pp_rpipe.pipe_sel.si_note, &pp->pp_lock);
+	klist_init_rwlock(&pp->pp_wpipe.pipe_klist, &pp->pp_lock);
+	klist_init_rwlock(&pp->pp_rpipe.pipe_klist, &pp->pp_lock);
 
 	if (pipe_create(&pp->pp_wpipe) || pipe_create(&pp->pp_rpipe))
 		goto err;
@@ -1011,7 +1026,7 @@ err:
 void
 pipe_pair_destroy(struct pipe_pair *pp)
 {
-	klist_free(&pp->pp_wpipe.pipe_sel.si_note);
-	klist_free(&pp->pp_rpipe.pipe_sel.si_note);
+	klist_free(&pp->pp_wpipe.pipe_klist);
+	klist_free(&pp->pp_rpipe.pipe_klist);
 	pool_put(&pipe_pair_pool, pp);
 }

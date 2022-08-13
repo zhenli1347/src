@@ -1,4 +1,4 @@
-/*	$OpenBSD: malloc.c,v 1.271 2021/07/23 18:04:28 otto Exp $	*/
+/*	$OpenBSD: malloc.c,v 1.274 2022/06/30 17:15:48 guenther Exp $	*/
 /*
  * Copyright (c) 2008, 2010, 2011, 2016 Otto Moerbeek <otto@drijf.net>
  * Copyright (c) 2012 Matthew Dempsky <matthew@openbsd.org>
@@ -100,9 +100,6 @@
 #define MMAPA(a,sz,f)	mmap((a), (sz), PROT_READ | PROT_WRITE, \
     MAP_ANON | MAP_PRIVATE | (f), -1, 0)
 
-#define MQUERY(a,sz,f)	mquery((a), (sz), PROT_READ | PROT_WRITE, \
-    MAP_ANON | MAP_PRIVATE | MAP_FIXED | (f), -1, 0)
-
 struct region_info {
 	void *p;		/* page; low bits used to mark chunks */
 	uintptr_t size;		/* size for pages, or chunk_info pointer */
@@ -113,11 +110,25 @@ struct region_info {
 
 LIST_HEAD(chunk_head, chunk_info);
 
-#define MAX_CACHEABLE_SIZE	32
-struct cache {
-	void *pages[MALLOC_MAXCACHE];
+/*
+ * Two caches, one for "small" regions, one for "big".
+ * Small cache is an array per size, big cache is one array with different
+ * sized regions
+ */
+#define MAX_SMALLCACHEABLE_SIZE	32
+#define MAX_BIGCACHEABLE_SIZE	512
+/* If the total # of pages is larger than this, evict before inserting */
+#define BIGCACHE_FILL(sz)	(MAX_BIGCACHEABLE_SIZE * (sz) / 4)
+
+struct smallcache {
+	void **pages;
 	ushort length;
 	ushort max;
+};
+
+struct bigcache {
+	void *page;
+	size_t psize;
 };
 
 struct dir_info {
@@ -139,7 +150,10 @@ struct dir_info {
 	void *delayed_chunks[MALLOC_DELAYED_CHUNK_MASK + 1];
 	u_char rbytes[32];		/* random bytes */
 					/* free pages cache */
-	struct cache cache[MAX_CACHEABLE_SIZE];
+	struct smallcache smallcache[MAX_SMALLCACHEABLE_SIZE];
+	size_t bigcache_used;
+	size_t bigcache_size;
+	struct bigcache *bigcache;
 #ifdef MALLOC_STATS
 	size_t inserts;
 	size_t insert_collisions;
@@ -207,7 +221,7 @@ struct malloc_readonly {
 #ifdef MALLOC_STATS
 	int	malloc_stats;		/* dump statistics at end */
 #endif
-	u_int32_t malloc_canary;	/* Matched against ones in malloc_pool */
+	u_int32_t malloc_canary;	/* Matched against ones in pool */
 };
 
 /* This object is mapped PROT_READ after initialisation to prevent tampering */
@@ -714,18 +728,61 @@ unmap(struct dir_info *d, void *p, size_t sz, size_t clear)
 	size_t psz = sz >> MALLOC_PAGESHIFT;
 	void *r;
 	u_short i;
-	struct cache *cache;
+	struct smallcache *cache;
 
 	if (sz != PAGEROUND(sz) || psz == 0)
 		wrterror(d, "munmap round");
 
-	if (psz > MAX_CACHEABLE_SIZE || d->cache[psz - 1].max == 0) {
+	if (d->bigcache_size > 0 && psz > MAX_SMALLCACHEABLE_SIZE &&
+	    psz <= MAX_BIGCACHEABLE_SIZE) {
+		u_short base = getrbyte(d);
+		u_short j;
+
+		/* don't look through all slots */
+		for (j = 0; j < d->bigcache_size / 4; j++) {
+			i = (base + j) % d->bigcache_size;
+			if (d->bigcache_used <
+			    BIGCACHE_FILL(d->bigcache_size))  {
+				if (d->bigcache[i].psize == 0)
+					break;
+			} else {
+				if (d->bigcache[i].psize != 0)
+					break;
+			}
+		}
+		/* if we didn't find a preferred slot, use random one */
+		if (d->bigcache[i].psize != 0) {
+			size_t tmp;
+
+			r = d->bigcache[i].page;
+			d->bigcache_used -= d->bigcache[i].psize;
+			tmp = d->bigcache[i].psize << MALLOC_PAGESHIFT;
+			if (!mopts.malloc_freeunmap)
+				validate_junk(d, r, tmp);
+			if (munmap(r, tmp))
+				 wrterror(d, "munmap %p", r);
+			STATS_SUB(d->malloc_used, tmp);
+		}
+		
+		if (clear > 0)
+			explicit_bzero(p, clear);
+		if (mopts.malloc_freeunmap) {
+			if (mprotect(p, sz, PROT_NONE))
+				wrterror(d, "mprotect %p", r);
+		} else
+			junk_free(d->malloc_junk, p, sz);
+		d->bigcache[i].page = p;
+		d->bigcache[i].psize = psz;
+		d->bigcache_used += psz;
+		return;
+	}
+	if (psz > MAX_SMALLCACHEABLE_SIZE || d->smallcache[psz - 1].max == 0) {
 		if (munmap(p, sz))
 			wrterror(d, "munmap %p", p);
 		STATS_SUB(d->malloc_used, sz);
 		return;
 	}
-	cache = &d->cache[psz - 1];
+	cache = &d->smallcache[psz - 1];
 	if (cache->length == cache->max) {
 		/* use a random slot */
 		i = getrbyte(d) % cache->max;
@@ -741,7 +798,7 @@ unmap(struct dir_info *d, void *p, size_t sz, size_t clear)
 
 	/* fill slot */
 	if (clear > 0)
-		memset(p, 0, clear);
+		explicit_bzero(p, clear);
 	if (mopts.malloc_freeunmap)
 		mprotect(p, sz, PROT_NONE);
 	else
@@ -753,9 +810,10 @@ unmap(struct dir_info *d, void *p, size_t sz, size_t clear)
 static void *
 map(struct dir_info *d, size_t sz, int zero_fill)
 {
-	size_t i, psz = sz >> MALLOC_PAGESHIFT;
+	size_t psz = sz >> MALLOC_PAGESHIFT;
+	u_short i;
 	void *p;
-	struct cache *cache;
+	struct smallcache *cache;
 
 	if (mopts.malloc_canary != (d->canary1 ^ (u_int32_t)(uintptr_t)d) ||
 	    d->canary1 != ~d->canary2)
@@ -764,8 +822,35 @@ map(struct dir_info *d, size_t sz, int zero_fill)
 		wrterror(d, "map round");
 
 	
-	if (psz <= MAX_CACHEABLE_SIZE && d->cache[psz - 1].max > 0) {
-		cache = &d->cache[psz - 1];
+	if (d->bigcache_size > 0 && psz > MAX_SMALLCACHEABLE_SIZE &&
+	    psz <= MAX_BIGCACHEABLE_SIZE) {
+		size_t base = getrbyte(d);
+		size_t cached = d->bigcache_used;
+		ushort j;
+
+		for (j = 0; j < d->bigcache_size && cached >= psz; j++) {
+			i = (j + base) % d->bigcache_size;
+			if (d->bigcache[i].psize == psz) {
+				p = d->bigcache[i].page;
+				d->bigcache_used -= psz;
+				d->bigcache[i].page = NULL;
+				d->bigcache[i].psize = 0;
+
+				if (!mopts.malloc_freeunmap)
+					validate_junk(d, p, sz);
+				if (mopts.malloc_freeunmap)
+					mprotect(p, sz, PROT_READ | PROT_WRITE);
+				if (zero_fill)
+					memset(p, 0, sz);
+				else if (mopts.malloc_freeunmap)
+					junk_free(d->malloc_junk, p, sz);
+				return p;
+			}
+			cached -= d->bigcache[i].psize;
+		}
+	}
+	if (psz <= MAX_SMALLCACHEABLE_SIZE && d->smallcache[psz - 1].max > 0) {
+		cache = &d->smallcache[psz - 1];
 		if (cache->length > 0) {
 			if (cache->length == 1)
 				p = cache->pages[--cache->length];
@@ -795,10 +880,12 @@ map(struct dir_info *d, size_t sz, int zero_fill)
 					void *q = (char*)p + i * sz;
 					cache->pages[i] = q;
 					if (!mopts.malloc_freeunmap)
-						junk_free(d->malloc_junk, q, sz);
+						junk_free(d->malloc_junk, q,
+						    sz);
 				}
 				if (mopts.malloc_freeunmap)
-					mprotect(p, (cache->max - 1) * sz, PROT_NONE);
+					mprotect(p, (cache->max - 1) * sz,
+					    PROT_NONE);
 				p = (char*)p + (cache->max - 1) * sz;
 				/* zero fill not needed */
 				return p;
@@ -1161,8 +1248,9 @@ omalloc(struct dir_info *pool, size_t sz, int zero_fill, void *f)
 		} else {
 			if (pool->malloc_junk == 2) {
 				if (zero_fill)
-					memset((char *)p + sz - mopts.malloc_guard,
-					    SOME_JUNK, psz - sz);
+					memset((char *)p + sz -
+					    mopts.malloc_guard, SOME_JUNK,
+					    psz - sz);
 				else
 					memset(p, SOME_JUNK,
 					    psz - mopts.malloc_guard);
@@ -1224,13 +1312,33 @@ _malloc_init(int from_rthreads)
 		if (i == 0) {
 			omalloc_poolinit(&d, MAP_CONCEAL);
 			d->malloc_junk = 2;
-			for (j = 0; j < MAX_CACHEABLE_SIZE; j++)
-				d->cache[j].max = 0;
+			d->bigcache_size = 0;
+			for (j = 0; j < MAX_SMALLCACHEABLE_SIZE; j++)
+				d->smallcache[j].max = 0;
 		} else {
+			size_t sz = 0;
+
 			omalloc_poolinit(&d, 0);
 			d->malloc_junk = mopts.def_malloc_junk;
-			for (j = 0; j < MAX_CACHEABLE_SIZE; j++)
-				d->cache[j].max = mopts.def_maxcache >> (j / 8);
+			d->bigcache_size = mopts.def_maxcache;
+			for (j = 0; j < MAX_SMALLCACHEABLE_SIZE; j++) {
+				d->smallcache[j].max =
+				    mopts.def_maxcache >> (j / 8);
+				sz += d->smallcache[j].max * sizeof(void *);
+			}
+			sz += d->bigcache_size * sizeof(struct bigcache);
+			if (sz > 0) {
+				void *p = MMAP(sz, 0);
+				if (p == MAP_FAILED)
+					wrterror(NULL,
+					    "malloc init mmap failed");
+				for (j = 0; j < MAX_SMALLCACHEABLE_SIZE; j++) {
+					d->smallcache[j].pages = p;
+					p = (char *)p + d->smallcache[j].max *
+					    sizeof(void *);
+				}
+				d->bigcache = p;
+			}
 		}
 		d->mutex = i;
 		mopts.malloc_pool[i] = d;
@@ -1348,8 +1456,11 @@ ofree(struct dir_info **argpool, void *p, int clear, int check, size_t argsz)
 	REALSIZE(sz, r);
 	if (pool->mmap_flag) {
 		clear = 1;
-		if (!check)
+		if (!check) {
 			argsz = sz;
+			if (sz > MALLOC_MAXCHUNK)
+				argsz -= mopts.malloc_guard;
+		}
 	}
 	if (check) {
 		if (sz <= MALLOC_MAXCHUNK) {
@@ -1432,7 +1543,7 @@ ofree(struct dir_info **argpool, void *p, int clear, int check, size_t argsz)
 			}
 		} else if (argsz > 0) {
 			r = find(pool, p);
-			memset(p, 0, argsz);
+			explicit_bzero(p, argsz);
 		}
 		if (p != NULL) {
 			if (r == NULL)
@@ -1573,11 +1684,7 @@ orealloc(struct dir_info **argpool, void *p, size_t newsz, void *f)
 				size_t needed = rnewsz - roldsz;
 
 				STATS_INC(pool->cheap_realloc_tries);
-				q = MQUERY(hint, needed, pool->mmap_flag);
-				if (q == hint)
-					q = MMAPA(hint, needed, pool->mmap_flag);
-				else
-					q = MAP_FAILED;
+				q = MMAPA(hint, needed, MAP_FIXED | __MAP_NOREPLACE | pool->mmap_flag);
 				if (q == hint) {
 					STATS_ADD(pool->malloc_used, needed);
 					if (pool->malloc_junk == 2)
@@ -1595,9 +1702,6 @@ orealloc(struct dir_info **argpool, void *p, size_t newsz, void *f)
 					STATS_INC(pool->cheap_reallocs);
 					ret = p;
 					goto done;
-				} else if (q != MAP_FAILED) {
-					if (munmap(q, needed))
-						wrterror(pool, "munmap %p", q);
 				}
 			}
 		} else if (rnewsz < roldsz) {
@@ -1609,7 +1713,8 @@ orealloc(struct dir_info **argpool, void *p, size_t newsz, void *f)
 					wrterror(pool, "mprotect");
 			}
 			if (munmap((char *)r->p + rnewsz, roldsz - rnewsz))
-				wrterror(pool, "munmap %p", (char *)r->p + rnewsz);
+				wrterror(pool, "munmap %p", (char *)r->p +
+				    rnewsz);
 			STATS_SUB(pool->malloc_used, roldsz - rnewsz);
 			r->size = gnewsz;
 			if (MALLOC_MOVE_COND(gnewsz)) {
@@ -2091,7 +2196,7 @@ putleakinfo(void *f, size_t sz, int cnt)
 {
 	struct leaknode key, *p;
 	static struct leaknode *page;
-	static int used;
+	static unsigned int used;
 
 	if (cnt == 0 || page == MAP_FAILED)
 		return;
@@ -2123,7 +2228,7 @@ static void
 dump_leaks(int fd)
 {
 	struct leaknode *p;
-	int i = 0;
+	unsigned int i = 0;
 
 	dprintf(fd, "Leak report\n");
 	dprintf(fd, "                 f     sum      #    avg\n");
@@ -2196,15 +2301,24 @@ dump_free_chunk_info(int fd, struct dir_info *d)
 static void
 dump_free_page_info(int fd, struct dir_info *d)
 {
-	struct cache *cache;
+	struct smallcache *cache;
 	size_t i, total = 0;
 
-	dprintf(fd, "Cached:\n");
-	for (i = 0; i < MAX_CACHEABLE_SIZE; i++) {
-		cache = &d->cache[i];
+	dprintf(fd, "Cached in small cache:\n");
+	for (i = 0; i < MAX_SMALLCACHEABLE_SIZE; i++) {
+		cache = &d->smallcache[i];
 		if (cache->length != 0)
-			dprintf(fd, "%zu(%u): %u = %zu\n", i + 1, cache->max, cache->length, cache->length * (i + 1));
+			dprintf(fd, "%zu(%u): %u = %zu\n", i + 1, cache->max,
+			    cache->length, cache->length * (i + 1));
 		total += cache->length * (i + 1);
+	}
+
+	dprintf(fd, "Cached in big cache: %zu/%zu\n", d->bigcache_used,
+	    d->bigcache_size);
+	for (i = 0; i < d->bigcache_size; i++) {
+		if (d->bigcache[i].psize != 0)
+			dprintf(fd, "%zu: %zu\n", i, d->bigcache[i].psize);
+		total += d->bigcache[i].psize;
 	}
 	dprintf(fd, "Free pages cached: %zu\n", total);
 }
@@ -2232,7 +2346,8 @@ malloc_dump1(int fd, int poolno, struct dir_info *d)
 	dump_free_chunk_info(fd, d);
 	dump_free_page_info(fd, d);
 	dprintf(fd,
-	    "slot)  hash d  type               page                  f size [free/n]\n");
+	    "slot)  hash d  type               page                  f "
+	    "size [free/n]\n");
 	for (i = 0; i < d->regions_total; i++) {
 		if (d->r[i].p != NULL) {
 			size_t h = hash(d->r[i].p) &
@@ -2298,13 +2413,15 @@ DEF_WEAK(malloc_gdump);
 static void
 malloc_exit(void)
 {
-	int save_errno = errno, fd, i;
+	int save_errno = errno, fd;
+	unsigned i;
 
 	fd = open("malloc.out", O_RDWR|O_APPEND);
 	if (fd != -1) {
 		dprintf(fd, "******** Start dump %s *******\n", __progname);
 		dprintf(fd,
-		    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u G=%zu\n",
+		    "MT=%d M=%u I=%d F=%d U=%d J=%d R=%d X=%d C=%d cache=%u "
+		    "G=%zu\n",
 		    mopts.malloc_mt, mopts.malloc_mutexes,
 		    mopts.internal_funcs, mopts.malloc_freecheck,
 		    mopts.malloc_freeunmap, mopts.def_malloc_junk,

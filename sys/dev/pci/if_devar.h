@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_devar.h,v 1.39 2018/11/25 19:52:08 jmc Exp $	*/
+/*	$OpenBSD: if_devar.h,v 1.41 2022/03/11 18:00:45 mpi Exp $	*/
 /*	$NetBSD: if_devar.h,v 1.13 1997/06/08 18:46:36 thorpej Exp $	*/
 
 /*-
@@ -506,7 +506,7 @@ struct _tulip_softc_t {
 
     tulip_media_info_t *tulip_mediums[TULIP_MEDIA_MAX];	/* indexes into mediainfo */
     tulip_media_t tulip_media;			/* current media type */
-    u_int32_t tulip_abilities;	/* remote system's abiltities (as defined in IEEE 802.3u) */
+    u_int32_t tulip_abilities;	/* remote system's abilities (as defined in IEEE 802.3u) */
 
     u_int8_t tulip_revinfo;			/* revision of chip */
     u_int8_t tulip_phyaddr;			/* 0..31 -- address of current phy */
@@ -792,7 +792,6 @@ static const struct {
 			  TULIP_MAX_TXSEG, TULIP_DATA_PER_DESC, \
 			  0, BUS_DMA_NOWAIT, (mapp))
 
-extern struct cfattach de_ca;
 extern struct cfdriver de_cd;
 #define	TULIP_UNIT_TO_SOFTC(unit)	((tulip_softc_t *) de_cd.cd_devs[unit])
 #define TULIP_IFP_TO_SOFTC(ifp)         ((tulip_softc_t *)((ifp)->if_softc))

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath_rdac.c,v 1.25 2020/06/30 18:43:37 krw Exp $ */
+/*	$OpenBSD: mpath_rdac.c,v 1.27 2022/07/02 08:50:42 visa Exp $ */
 
 /*
  * Copyright (c) 2010 David Gwynne <dlg@openbsd.org>
@@ -28,8 +28,6 @@
 #include <sys/rwlock.h>
 #include <sys/pool.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 
 #include <scsi/scsi_all.h>
 #include <scsi/scsiconf.h>
@@ -129,7 +127,7 @@ void		rdac_attach(struct device *, struct device *, void *);
 int		rdac_detach(struct device *, int);
 int		rdac_activate(struct device *, int);
 
-struct cfattach rdac_ca = {
+const struct cfattach rdac_ca = {
 	sizeof(struct rdac_softc),
 	rdac_match,
 	rdac_attach,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: print-pflog.c,v 1.33 2021/01/20 13:40:15 bluhm Exp $	*/
+/*	$OpenBSD: print-pflog.c,v 1.35 2022/02/22 17:35:01 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1990, 1991, 1993, 1994, 1995, 1996
@@ -21,19 +21,16 @@
  * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#include <sys/param.h>	/* MAXCOMLEN */
+#include <sys/types.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
-#include <sys/mbuf.h>
 
 #ifndef NO_PID
 #define NO_PID	(99999+1)
 #endif
-
-struct rtentry;
 
 #include <netinet/in.h>
 #include <netinet/ip.h>

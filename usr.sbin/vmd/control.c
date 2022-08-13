@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.37 2021/06/16 16:55:02 dv Exp $	*/
+/*	$OpenBSD: control.c,v 1.39 2022/01/04 15:22:53 claudio Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -17,7 +17,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* nitems */
+#include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -94,7 +94,6 @@ control_dispatch_vmd(int fd, struct privsep_proc *p, struct imsg *imsg)
 	case IMSG_VMDOP_START_VM_RESPONSE:
 	case IMSG_VMDOP_PAUSE_VM_RESPONSE:
 	case IMSG_VMDOP_SEND_VM_RESPONSE:
-	case IMSG_VMDOP_RECEIVE_VM_RESPONSE:
 	case IMSG_VMDOP_UNPAUSE_VM_RESPONSE:
 	case IMSG_VMDOP_GET_INFO_VM_DATA:
 	case IMSG_VMDOP_GET_INFO_VM_END_DATA:

@@ -1,4 +1,4 @@
-/* $OpenBSD: auixp.c,v 1.43 2020/06/27 00:33:59 jsg Exp $ */
+/* $OpenBSD: auixp.c,v 1.48 2022/03/21 19:22:40 miod Exp $ */
 /* $NetBSD: auixp.c,v 1.9 2005/06/27 21:13:09 thorpej Exp $ */
 
 /*
@@ -37,7 +37,7 @@
  *   codec support problem.
  * - 32 bit recording works but can't try out playing: see above.
  * - no suspend/resume support yet.
- * - multiple codecs are `supported' but not tested; the implemetation needs
+ * - multiple codecs are `supported' but not tested; the implementation needs
  *   some cleaning up.
  */
 
@@ -95,7 +95,7 @@ int	auixp_detach(struct device *, int);
 
 int	auixp_activate(struct device *, int);
 
-struct cfattach auixp_ca = {
+const struct cfattach auixp_ca = {
 	sizeof(struct auixp_softc), auixp_match, auixp_attach,
 	NULL, auixp_activate
 };
@@ -154,7 +154,7 @@ void	auixp_update_busbusy(struct auixp_softc *);
 #define DPRINTF(x)
 #endif
 
-struct audio_hw_if auixp_hw_if = {
+const struct audio_hw_if auixp_hw_if = {
 	auixp_open,
 	auixp_close,
 	auixp_set_params,
@@ -263,7 +263,7 @@ auixp_commit_settings(void *hdl)
 		value &= ~ATI_REG_CMD_SPDF_CONFIG_MASK;
 		value |=  ATI_REG_CMD_SPDF_CONFIG_34; /* NetBSD AC'97 default */
 
-		/* XXX this is probably not necessary unless splitted XXX */
+		/* XXX this is probably not necessary unless split XXX */
 		value &= ~ATI_REG_CMD_INTERLEAVE_SPDF;
 		if (params->precision <= 16)
 			value |= ATI_REG_CMD_INTERLEAVE_SPDF;
@@ -1035,7 +1035,7 @@ auixp_post_config(struct device *self)
 		return;
 	}
 
-	audio_attach_mi(&auixp_hw_if, &sc->sc_codec, &sc->sc_dev);
+	audio_attach_mi(&auixp_hw_if, &sc->sc_codec, NULL, &sc->sc_dev);
 
 	if (sc->has_spdif)
 		sc->has_spdif = 0;
@@ -1372,7 +1372,7 @@ auixp_enable_dma(struct auixp_softc *sc, struct auixp_dma *dma)
 
 	iot = sc->sc_iot;
 	ioh = sc->sc_ioh;
-	/* lets not stress the DMA engine more than necesssary */
+	/* lets not stress the DMA engine more than necessary */
 	value = bus_space_read_4(iot, ioh, ATI_REG_CMD);
 	if (!(value & dma->dma_enable_bit)) {
 		value |= dma->dma_enable_bit;

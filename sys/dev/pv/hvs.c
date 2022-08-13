@@ -247,7 +247,7 @@ const struct cfattach hvs_ca = {
 	sizeof(struct hvs_softc), hvs_match, hvs_attach
 };
 
-struct scsi_adapter hvs_switch = {
+const struct scsi_adapter hvs_switch = {
 	hvs_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -546,7 +546,7 @@ hvs_intr(void *xsc)
 		}
 
 #ifdef HVS_DEBUG_IO
-		DPRINTF("%s: rid %llu opertaion %u flags %#x status %#x\n",
+		DPRINTF("%s: rid %llu operation %u flags %#x status %#x\n",
 		    sc->sc_dev.dv_xname, rid, cmd.cmd_op, cmd.cmd_flags,
 		    cmd.cmd_status);
 #endif

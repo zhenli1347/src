@@ -1,4 +1,4 @@
-/*	$OpenBSD: aic6360.c,v 1.38 2020/09/22 19:32:52 krw Exp $	*/
+/*	$OpenBSD: aic6360.c,v 1.40 2022/04/16 19:19:58 naddy Exp $	*/
 /*	$NetBSD: aic6360.c,v 1.52 1996/12/10 21:27:51 thorpej Exp $	*/
 
 #ifdef DDB
@@ -184,7 +184,7 @@ struct cfdriver aic_cd = {
 	NULL, "aic", DV_DULL
 };
 
-struct scsi_adapter aic_switch = {
+const struct scsi_adapter aic_switch = {
 	aic_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -1589,7 +1589,7 @@ aicintr(void *arg)
 
 	/*
 	 * Clear INTEN.  We enable it again before returning.  This makes the
-	 * interrupt esssentially level-triggered.
+	 * interrupt essentially level-triggered.
 	 */
 	bus_space_write_1(iot, ioh, DMACNTRL0, 0);
 

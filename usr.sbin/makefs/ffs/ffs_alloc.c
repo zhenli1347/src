@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_alloc.c,v 1.13 2016/12/17 16:26:46 krw Exp $	*/
+/*	$OpenBSD: ffs_alloc.c,v 1.15 2022/01/11 05:34:33 jsg Exp $	*/
 /*	$NetBSD: ffs_alloc.c,v 1.29 2016/06/24 19:24:11 christos Exp $	*/
 /* From: NetBSD: ffs_alloc.c,v 1.50 2001/09/06 02:16:01 lukem Exp */
 
@@ -42,9 +42,8 @@
  *	@(#)ffs_alloc.c	8.19 (Berkeley) 7/13/95
  */
 
-#include <sys/param.h>
-
-#include <errno.h>
+#include <sys/param.h>	/* DEV_BSIZE setbit clrbit NBBY howmany */
+#include <sys/types.h>
 
 #include <ufs/ufs/dinode.h>
 #include <ufs/ffs/fs.h>
@@ -53,6 +52,7 @@
 #include "ffs/ufs_inode.h"
 #include "ffs/ffs_extern.h"
 
+#include <errno.h>
 
 static int scanc(u_int, const u_char *, const u_char *, int);
 
@@ -72,13 +72,13 @@ static int32_t ffs_mapsearch(struct fs *, struct cg *, daddr_t, int);
  *   1) allocate the requested block.
  *   2) allocate a rotationally optimal block in the same cylinder.
  *   3) allocate a block in the same cylinder group.
- *   4) quadradically rehash into other cylinder groups, until an
+ *   4) quadratically rehash into other cylinder groups, until an
  *      available block is located.
  * If no block preference is given the following hierarchy is used
  * to allocate a block:
  *   1) allocate a block in the cylinder group that contains the
  *      inode for the file.
- *   2) quadradically rehash into other cylinder groups, until an
+ *   2) quadratically rehash into other cylinder groups, until an
  *      available block is located.
  */
 int
@@ -222,7 +222,7 @@ ffs_blkpref_ufs2(struct inode *ip, daddr_t lbn, int indx, int64_t *bap)
  *
  * The policy implemented by this algorithm is:
  *   1) allocate the block in its requested cylinder group.
- *   2) quadradically rehash on the cylinder group number.
+ *   2) quadratically rehash on the cylinder group number.
  *   3) brute force search for a free block.
  *
  * `size':	size for data blocks, mode for inodes

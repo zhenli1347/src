@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bnxt.c,v 1.34 2021/07/24 05:49:59 jmatthew Exp $	*/
+/*	$OpenBSD: if_bnxt.c,v 1.37 2022/06/27 10:02:20 bluhm Exp $	*/
 /*-
  * Broadcom NetXtreme-C/E network driver.
  *
@@ -399,7 +399,7 @@ int bnxt_hwrm_fw_set_time(struct bnxt_softc *softc, uint16_t year,
 #endif
 
 
-struct cfattach bnxt_ca = {
+const struct cfattach bnxt_ca = {
 	sizeof(struct bnxt_softc), bnxt_match, bnxt_attach
 };
 
@@ -452,6 +452,7 @@ bdmfree:
 void
 bnxt_dmamem_free(struct bnxt_softc *sc, struct bnxt_dmamem *m)
 {
+	bus_dmamap_unload(sc->sc_dmat, m->bdm_map);
 	bus_dmamem_unmap(sc->sc_dmat, m->bdm_kva, m->bdm_size);
 	bus_dmamem_free(sc->sc_dmat, &m->bdm_seg, 1);
 	bus_dmamap_destroy(sc->sc_dmat, m->bdm_map);
@@ -1542,6 +1543,7 @@ bnxt_intr(void *xq)
 {
 	struct bnxt_queue *q = (struct bnxt_queue *)xq;
 	struct bnxt_softc *sc = q->q_sc;
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	struct bnxt_cp_ring *cpr = &q->q_cp;
 	struct bnxt_rx_queue *rx = &q->q_rx;
 	struct bnxt_tx_queue *tx = &q->q_tx;
@@ -1564,10 +1566,13 @@ bnxt_intr(void *xq)
 			bnxt_handle_async_event(sc, cmpl);
 			break;
 		case CMPL_BASE_TYPE_RX_L2:
-			rollback = bnxt_rx(sc, rx, cpr, &ml, &rxfree, &agfree, cmpl);
+			if (ISSET(ifp->if_flags, IFF_RUNNING))
+				rollback = bnxt_rx(sc, rx, cpr, &ml, &rxfree,
+				    &agfree, cmpl);
 			break;
 		case CMPL_BASE_TYPE_TX_L2:
-			bnxt_txeof(sc, tx, &txfree, cmpl);
+			if (ISSET(ifp->if_flags, IFF_RUNNING))
+				bnxt_txeof(sc, tx, &txfree, cmpl);
 			break;
 		default:
 			printf("%s: unexpected completion type %u\n",

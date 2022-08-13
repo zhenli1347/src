@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.141 2021/08/31 17:40:59 dv Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.147 2022/08/12 02:20:36 cheloha Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 2003/04/26 18:39:39 fvdl Exp $	*/
 
 /*-
@@ -44,7 +44,6 @@
 #ifdef _KERNEL
 #include <machine/frame.h>
 #include <machine/segments.h>		/* USERMODE */
-#include <machine/cacheinfo.h>
 #include <machine/intrdefs.h>
 #endif /* _KERNEL */
 
@@ -90,6 +89,12 @@ union vmm_cpu_cap {
 	struct svm vcc_svm;
 };
 
+/*
+ *  Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	a	atomic operations
+ *	o	owned (read/modified only) by this CPU
+ */
 struct x86_64_tss;
 struct cpu_info {
 	/*
@@ -99,32 +104,36 @@ struct cpu_info {
 	 * the part that is *not* visible begins, so don't put anything
 	 * above it that must be kept hidden from userspace!
 	 */
-	u_int64_t	ci_kern_cr3;	/* U+K page table */
-	u_int64_t	ci_scratch;	/* for U<-->K transition */
+	u_int64_t	ci_kern_cr3;	/* [o] U+K page table */
+	u_int64_t	ci_scratch;	/* [o] for U<-->K transition */
 
 #define ci_PAGEALIGN	ci_dev
-	struct device *ci_dev;
-	struct cpu_info *ci_self;
+	struct device *ci_dev;		/* [I] */
+	struct cpu_info *ci_self;	/* [I] */
 	struct schedstate_percpu ci_schedstate; /* scheduler state */
-	struct cpu_info *ci_next;
+	struct cpu_info *ci_next;	/* [I] */
 
-	struct proc *ci_curproc;
-	u_int ci_cpuid;
-	u_int ci_apicid;
-	u_int ci_acpi_proc_id;
-	u_int32_t ci_randseed;
+	struct proc *ci_curproc;	/* [o] */
+	u_int ci_cpuid;			/* [I] */
+	u_int ci_apicid;		/* [I] */
+	u_int ci_acpi_proc_id;		/* [I] */
+	u_int32_t ci_randseed;		/* [o] */
 
-	u_int64_t ci_kern_rsp;	/* kernel-only stack */
-	u_int64_t ci_intr_rsp;	/* U<-->K trampoline stack */
-	u_int64_t ci_user_cr3;	/* U-K page table */
+	u_int64_t ci_kern_rsp;		/* [o] kernel-only stack */
+	u_int64_t ci_intr_rsp;		/* [o] U<-->K trampoline stack */
+	u_int64_t ci_user_cr3;		/* [o] U-K page table */
 
 	/* bits for mitigating Micro-architectural Data Sampling */
-	char		ci_mds_tmp[32];		/* 32byte aligned */
-	void		*ci_mds_buf;
+	char		ci_mds_tmp[32];	/* [o] 32byte aligned */
+	void		*ci_mds_buf;	/* [I] */
 
 	struct pmap *ci_proc_pmap;	/* last userspace pmap */
-	struct pcb *ci_curpcb;
-	struct pcb *ci_idle_pcb;
+	struct pcb *ci_curpcb;		/* [o] */
+	struct pcb *ci_idle_pcb;	/* [o] */
+
+	u_int	ci_pflags;		/* [o] */
+#define CPUPF_USERSEGS		0x01	/* CPU has curproc's segs and FS.base */
+#define CPUPF_USERXSTATE	0x02	/* CPU has curproc's xsave state */
 
 	struct intrsource *ci_isources[MAX_INTR_SOURCES];
 	u_int64_t	ci_ipending;
@@ -137,40 +146,37 @@ struct cpu_info {
 	int		ci_mutex_level;
 #endif
 
-	volatile u_int	ci_flags;
-	u_int32_t	ci_ipis;
+	volatile u_int	ci_flags;	/* [a] */
+	u_int32_t	ci_ipis;	/* [a] */
 
-	u_int32_t	ci_feature_flags;
-	u_int32_t	ci_feature_eflags;
-	u_int32_t	ci_feature_sefflags_ebx;
-	u_int32_t	ci_feature_sefflags_ecx;
-	u_int32_t	ci_feature_sefflags_edx;
-	u_int32_t	ci_feature_amdspec_ebx;
-	u_int32_t	ci_feature_tpmflags;
-	u_int32_t	ci_pnfeatset;
-	u_int32_t	ci_efeature_eax;
-	u_int32_t	ci_efeature_ecx;
-	u_int32_t	ci_brand[12];
-	u_int32_t	ci_amdcacheinfo[4];
-	u_int32_t	ci_extcacheinfo[4];
-	u_int32_t	ci_signature;
-	u_int32_t	ci_family;
-	u_int32_t	ci_model;
-	u_int32_t	ci_cflushsz;
+	u_int32_t	ci_feature_flags;	/* [I] */
+	u_int32_t	ci_feature_eflags;	/* [I] */
+	u_int32_t	ci_feature_sefflags_ebx;/* [I] */
+	u_int32_t	ci_feature_sefflags_ecx;/* [I] */
+	u_int32_t	ci_feature_sefflags_edx;/* [I] */
+	u_int32_t	ci_feature_amdspec_ebx;	/* [I] */
+	u_int32_t	ci_feature_tpmflags;	/* [I] */
+	u_int32_t	ci_pnfeatset;		/* [I] */
+	u_int32_t	ci_efeature_eax;	/* [I] */
+	u_int32_t	ci_efeature_ecx;	/* [I] */
+	u_int32_t	ci_brand[12];		/* [I] */
+	u_int32_t	ci_signature;		/* [I] */
+	u_int32_t	ci_family;		/* [I] */
+	u_int32_t	ci_model;		/* [I] */
+	u_int32_t	ci_cflushsz;		/* [I] */
 
-	int		ci_inatomic;
+	int		ci_inatomic;		/* [o] */
 
 #define __HAVE_CPU_TOPOLOGY
-	u_int32_t	ci_smt_id;
-	u_int32_t	ci_core_id;
-	u_int32_t	ci_pkg_id;
+	u_int32_t	ci_smt_id;		/* [I] */
+	u_int32_t	ci_core_id;		/* [I] */
+	u_int32_t	ci_pkg_id;		/* [I] */
 
-	struct cpu_functions *ci_func;
-	void (*cpu_setup)(struct cpu_info *);
-	void (*ci_info)(struct cpu_info *);
+	struct cpu_functions *ci_func;		/* [I] */
+	void (*cpu_setup)(struct cpu_info *);	/* [I] */
 
-	struct device	*ci_acpicpudev;
-	volatile u_int	ci_mwait;
+	struct device	*ci_acpicpudev;		/* [I] */
+	volatile u_int	ci_mwait;		/* [a] */
 #define	MWAIT_IN_IDLE		0x1	/* don't need IPI to wake */
 #define	MWAIT_KEEP_IDLING	0x2	/* cleared by other cpus to wake me */
 #define	MWAIT_ONLY		0x4	/* set if all idle states use mwait */
@@ -178,10 +184,8 @@ struct cpu_info {
 
 	int		ci_want_resched;
 
-	struct x86_cache_info ci_cinfo[CAI_COUNT];
-
-	struct	x86_64_tss *ci_tss;
-	void		*ci_gdt;
+	struct	x86_64_tss *ci_tss;		/* [o] */
+	void		*ci_gdt;		/* [o] */
 
 	volatile int	ci_ddb_paused;
 #define CI_DDB_RUNNING		0
@@ -196,6 +200,9 @@ struct cpu_info {
 
 	struct ksensordev	ci_sensordev;
 	struct ksensor		ci_sensor;
+	struct ksensor		ci_hz_sensor;
+	u_int64_t		ci_hz_mperf;
+	u_int64_t		ci_hz_aperf;
 #if defined(GPROF) || defined(DDBPROF)
 	struct gmonparam	*ci_gmon;
 #endif
@@ -209,8 +216,6 @@ struct cpu_info {
 	paddr_t		ci_vmxon_region_pa;
 	struct vmxon_region *ci_vmxon_region;
 
-	int64_t		ci_tsc_skew;		/* counter skew vs cpu0 */
-
 	char		ci_panicbuf[512];
 
 	paddr_t		ci_vmcs_pa;
@@ -218,19 +223,16 @@ struct cpu_info {
 };
 
 #define CPUF_BSP	0x0001		/* CPU is the original BSP */
-#define CPUF_AP		0x0002		/* CPU is an AP */ 
-#define CPUF_SP		0x0004		/* CPU is only processor */  
+#define CPUF_AP		0x0002		/* CPU is an AP */
+#define CPUF_SP		0x0004		/* CPU is only processor */
 #define CPUF_PRIMARY	0x0008		/* CPU is active primary processor */
 
 #define CPUF_IDENTIFY	0x0010		/* CPU may now identify */
 #define CPUF_IDENTIFIED	0x0020		/* CPU has been identified */
 
 #define CPUF_CONST_TSC	0x0040		/* CPU has constant TSC */
-#define CPUF_USERSEGS	0x0080		/* CPU has curproc's segs and FS.base */
 #define CPUF_INVAR_TSC	0x0100		/* CPU has invariant TSC */
-#define CPUF_USERXSTATE	0x0200		/* CPU has curproc's xsave state */
 
-#define CPUF_SYNCTSC	0x0800		/* Synchronize TSC */
 #define CPUF_PRESENT	0x1000		/* CPU is present */
 #define CPUF_RUNNING	0x2000		/* CPU is running */
 #define CPUF_PAUSE	0x4000		/* CPU is paused in DDB */
@@ -253,7 +255,7 @@ extern struct cpu_info *cpu_info_list;
 
 #define CPU_INFO_UNIT(ci)	((ci)->ci_dev ? (ci)->ci_dev->dv_unit : 0)
 
-/*      
+/*
  * Preempt the current process if in interrupt from user mode,
  * or after the current trap/syscall if in system mode.
  */
@@ -386,6 +388,9 @@ extern int cpu_meltdown;
 extern u_int cpu_mwait_size;
 extern u_int cpu_mwait_states;
 
+/* cacheinfo.c */
+void	x86_print_cacheinfo(struct cpu_info *);
+
 /* identcpu.c */
 void	identifycpu(struct cpu_info *);
 int	cpu_amd64speed(int *);
@@ -449,7 +454,7 @@ void mp_setperf_init(void);
 
 #endif /* _KERNEL */
 
-/* 
+/*
  * CTL_MACHDEP definitions.
  */
 #define	CPU_CONSDEV		1	/* dev_t: console terminal device */

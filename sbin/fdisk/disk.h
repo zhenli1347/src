@@ -1,4 +1,4 @@
-/*	$OpenBSD: disk.h,v 1.31 2021/07/26 13:05:14 krw Exp $	*/
+/*	$OpenBSD: disk.h,v 1.33 2022/04/25 17:10:09 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -16,9 +16,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _DISK_H
-#define _DISK_H
-
 struct disk {
 	struct prt	 dk_bootprt;
 	char		*dk_name;
@@ -34,11 +31,8 @@ struct disk {
 
 void		 DISK_open(const char *, const int);
 void		 DISK_printgeometry(const char *);
-char		*DISK_readsectors(const uint64_t, const uint32_t);
-int		 DISK_writesectors(const char *, const uint64_t,
-	const uint32_t);
+int		 DISK_readbytes(void *, const uint64_t, const size_t);
+int		 DISK_writebytes(const void *, const uint64_t, const size_t);
 
 extern struct disk		disk;
 extern struct disklabel		dl;
-
-#endif /* _DISK_H */

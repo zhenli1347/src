@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_pppx.c,v 1.111 2021/07/20 16:44:55 mvs Exp $ */
+/*	$OpenBSD: if_pppx.c,v 1.121 2022/07/25 08:29:26 mvs Exp $ */
 
 /*
  * Copyright (c) 2010 Claudio Jeker <claudio@openbsd.org>
@@ -53,11 +53,9 @@
 #include <sys/pool.h>
 #include <sys/mbuf.h>
 #include <sys/errno.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/vnode.h>
-#include <sys/poll.h>
 #include <sys/selinfo.h>
 
 #include <net/if.h>
@@ -449,27 +447,6 @@ pppxioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 }
 
 int
-pppxpoll(dev_t dev, int events, struct proc *p)
-{
-	struct pppx_dev *pxd = pppx_dev2pxd(dev);
-	int revents = 0;
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (!mq_empty(&pxd->pxd_svcq))
-			revents |= events & (POLLIN | POLLRDNORM);
-	}
-	if (events & (POLLOUT | POLLWRNORM))
-		revents |= events & (POLLOUT | POLLWRNORM);
-
-	if (revents == 0) {
-		if (events & (POLLIN | POLLRDNORM))
-			selrecord(p, &pxd->pxd_rsel);
-	}
-
-	return (revents);
-}
-
-int
 pppxkqfilter(dev_t dev, struct knote *kn)
 {
 	struct pppx_dev *pxd = pppx_dev2pxd(dev);
@@ -660,8 +637,6 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	ifp->if_softc = pxi;
 	/* ifp->if_rdomain = req->pr_rdomain; */
 	if_counters_alloc(ifp);
-	/* XXXSMP: be sure pppx_if_qstart() called with NET_LOCK held */
-	ifq_set_maxlen(&ifp->if_snd, 1);
 
 	/* XXXSMP breaks atomicity */
 	NET_UNLOCK();
@@ -802,7 +777,6 @@ pppx_if_qstart(struct ifqueue *ifq)
 	struct mbuf *m;
 	int proto;
 
-	NET_ASSERT_LOCKED();
 	while ((m = ifq_dequeue(ifq)) != NULL) {
 		proto = *mtod(m, int *);
 		m_adj(m, sizeof(proto));
@@ -818,7 +792,9 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	struct pppx_if *pxi = (struct pppx_if *)ifp->if_softc;
 	struct pppx_hdr *th;
 	int error = 0;
-	int proto;
+	int pipex_enable_local, proto;
+
+	pipex_enable_local = atomic_load_int(&pipex_enable);
 
 	NET_ASSERT_LOCKED();
 
@@ -832,7 +808,7 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	if (ifp->if_bpf)
 		bpf_mtap_af(ifp->if_bpf, dst->sa_family, m, BPF_DIRECTION_OUT);
 #endif
-	if (pipex_enable) {
+	if (pipex_enable_local) {
 		switch (dst->sa_family) {
 #ifdef INET6
 		case AF_INET6:
@@ -857,7 +833,7 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	}
 	*mtod(m, int *) = proto;
 
-	if (pipex_enable)
+	if (pipex_enable_local)
 		error = if_enqueue(ifp, m);
 	else {
 		M_PREPEND(m, sizeof(struct pppx_hdr), M_DONTWAIT);
@@ -920,16 +896,10 @@ pppx_if_ioctl(struct ifnet *ifp, u_long cmd, caddr_t addr)
 
 RBT_GENERATE(pppx_ifs, pppx_if, pxi_entry, pppx_if_cmp);
 
-/*
- * Locks used to protect struct members and global data
- *       I       immutable after creation
- *       K       kernel lock
- *       N       net lock
- */
-
 struct pppac_softc {
 	struct ifnet	sc_if;
 	dev_t		sc_dev;		/* [I] */
+	int		sc_ready;	/* [K] */
 	LIST_ENTRY(pppac_softc)
 			sc_entry;	/* [K] */
 
@@ -985,8 +955,12 @@ pppac_lookup(dev_t dev)
 	struct pppac_softc *sc;
 
 	LIST_FOREACH(sc, &pppac_devs, sc_entry) {
-		if (sc->sc_dev == dev)
+		if (sc->sc_dev == dev) {
+			if (sc->sc_ready == 0)
+				break;
+
 			return (sc);
+		}
 	}
 
 	return (NULL);
@@ -1001,29 +975,29 @@ pppacattach(int n)
 int
 pppacopen(dev_t dev, int flags, int mode, struct proc *p)
 {
-	struct pppac_softc *sc;
+	struct pppac_softc *sc, *tmp;
 	struct ifnet *ifp;
 	struct pipex_session *session;
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK|M_ZERO);
-	if (pppac_lookup(dev) != NULL) {
-		free(sc, M_DEVBUF, sizeof(*sc));
-		return (EBUSY);
+	sc->sc_dev = dev;
+	LIST_FOREACH(tmp, &pppac_devs, sc_entry) {
+		if (tmp->sc_dev == dev) {
+			free(sc, M_DEVBUF, sizeof(*sc));
+			return (EBUSY);
+		}
 	}
+	LIST_INSERT_HEAD(&pppac_devs, sc, sc_entry);
 
 	/* virtual pipex_session entry for multicast */
 	session = pool_get(&pipex_session_pool, PR_WAITOK | PR_ZERO);
-	session->is_multicast = 1;
+	session->flags |= PIPEX_SFLAGS_MULTICAST;
 	session->ownersc = sc;
 	sc->sc_multicast_session = session;
-
-	sc->sc_dev = dev;
 
 	mtx_init(&sc->sc_rsel_mtx, IPL_SOFTNET);
 	mtx_init(&sc->sc_wsel_mtx, IPL_SOFTNET);
 	mq_init(&sc->sc_mq, IFQ_MAXLEN, IPL_SOFTNET);
-
-	LIST_INSERT_HEAD(&pppac_devs, sc, sc_entry);
 
 	ifp = &sc->sc_if;
 	snprintf(ifp->if_xname, sizeof(ifp->if_xname), "pppac%u", minor(dev));
@@ -1038,8 +1012,6 @@ pppacopen(dev_t dev, int flags, int mode, struct proc *p)
 	ifp->if_output = pppac_output;
 	ifp->if_qstart = pppac_qstart;
 	ifp->if_ioctl = pppac_ioctl;
-	/* XXXSMP: be sure pppac_qstart() called with NET_LOCK held */
-	ifq_set_maxlen(&ifp->if_snd, 1);
 
 	if_counters_alloc(ifp);
 	if_attach(ifp);
@@ -1048,6 +1020,8 @@ pppacopen(dev_t dev, int flags, int mode, struct proc *p)
 #if NBPFILTER > 0
 	bpfattach(&ifp->if_bpf, ifp, DLT_LOOP, sizeof(uint32_t));
 #endif
+
+	sc->sc_ready = 1;
 
 	return (0);
 }
@@ -1180,7 +1154,6 @@ pppacioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 	struct pppac_softc *sc = pppac_lookup(dev);
 	int error = 0;
 
-	NET_LOCK();
 	switch (cmd) {
 	case FIONBIO:
 		break;
@@ -1199,30 +1172,8 @@ pppacioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 		error = pipex_ioctl(sc, cmd, data);
 		break;
 	}
-	NET_UNLOCK();
 
 	return (error);
-}
-
-int
-pppacpoll(dev_t dev, int events, struct proc *p)
-{
-	struct pppac_softc *sc = pppac_lookup(dev);
-	int revents = 0;
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (!mq_empty(&sc->sc_mq))
-			revents |= events & (POLLIN | POLLRDNORM);
-	}
-	if (events & (POLLOUT | POLLWRNORM))
-		revents |= events & (POLLOUT | POLLWRNORM);
-
-	if (revents == 0) {
-		if (events & (POLLIN | POLLRDNORM))
-			selrecord(p, &sc->sc_rsel);
-	}
-
-	return (revents);
 }
 
 int
@@ -1302,6 +1253,8 @@ pppacclose(dev_t dev, int flags, int mode, struct proc *p)
 	struct ifnet *ifp = &sc->sc_if;
 	int s;
 
+	sc->sc_ready = 0;
+
 	NET_LOCK();
 	CLR(ifp->if_flags, IFF_RUNNING);
 	NET_UNLOCK();
@@ -1314,9 +1267,7 @@ pppacclose(dev_t dev, int flags, int mode, struct proc *p)
 	splx(s);
 
 	pool_put(&pipex_session_pool, sc->sc_multicast_session);
-	NET_LOCK();
 	pipex_destroy_all_sessions(sc);
-	NET_UNLOCK();
 
 	LIST_REMOVE(sc, sc_entry);
 	free(sc, M_DEVBUF, sizeof(*sc));
@@ -1376,12 +1327,18 @@ pppac_del_session(struct pppac_softc *sc, struct pipex_session_close_req *req)
 {
 	struct pipex_session *session;
 
-	session = pipex_lookup_by_session_id(req->pcr_protocol,
+	mtx_enter(&pipex_list_mtx);
+
+	session = pipex_lookup_by_session_id_locked(req->pcr_protocol,
 	    req->pcr_session_id);
-	if (session == NULL || session->ownersc != sc)
+	if (session == NULL || session->ownersc != sc) {
+		mtx_leave(&pipex_list_mtx);
 		return (EINVAL);
-	pipex_unlink_session(session);
+	}
+	pipex_unlink_session_locked(session);
 	pipex_rele_session(session);
+
+	mtx_leave(&pipex_list_mtx);
 
 	return (0);
 }
@@ -1427,7 +1384,6 @@ pppac_qstart(struct ifqueue *ifq)
 	struct ip ip;
 	int rv;
 
-	NET_ASSERT_LOCKED();
 	while ((m = ifq_dequeue(ifq)) != NULL) {
 #if NBPFILTER > 0
 		if (ifp->if_bpf) {
@@ -1453,6 +1409,7 @@ pppac_qstart(struct ifqueue *ifq)
 				session = pipex_lookup_by_ip_address(ip.ip_dst);
 				if (session != NULL) {
 					pipex_ip_output(m, session);
+					pipex_rele_session(session);
 					m = NULL;
 				}
 			}

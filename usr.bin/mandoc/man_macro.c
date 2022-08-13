@@ -1,7 +1,7 @@
-/* $OpenBSD: man_macro.c,v 1.107 2020/09/09 16:57:05 schwarze Exp $ */
+/* $OpenBSD: man_macro.c,v 1.109 2022/04/27 17:04:15 schwarze Exp $ */
 /*
+ * Copyright (c) 2012-2015,2017-2020,2022 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008, 2009, 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2012-2015, 2017-2020 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2013 Franco Fichtner <franco@lastsummer.de>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -63,10 +63,10 @@ static const struct man_macro man_macros[MAN_MAX - MAN_TH] = {
 	{ in_line_eoln, 0 }, /* RI */
 	{ blk_close, MAN_XSCOPE }, /* RE */
 	{ blk_exp, MAN_XSCOPE }, /* RS */
-	{ in_line_eoln, 0 }, /* DT */
-	{ in_line_eoln, 0 }, /* UC */
+	{ in_line_eoln, MAN_NSCOPED }, /* DT */
+	{ in_line_eoln, MAN_NSCOPED }, /* UC */
 	{ in_line_eoln, MAN_NSCOPED }, /* PD */
-	{ in_line_eoln, 0 }, /* AT */
+	{ in_line_eoln, MAN_NSCOPED }, /* AT */
 	{ in_line_eoln, MAN_NSCOPED }, /* in */
 	{ blk_imp, MAN_XSCOPE }, /* SY */
 	{ blk_close, MAN_XSCOPE }, /* YS */
@@ -106,7 +106,8 @@ man_unscope(struct roff_man *man, const struct roff_node *to)
 				    n->line, n->pos,
 				    "EOF breaks %s", roff_name[n->tok]);
 				if (man->flags & MAN_ELINE) {
-					if ((man_macro(n->parent->tok)->flags &
+					if (n->parent->type == ROFFT_ROOT ||
+					    (man_macro(n->parent->tok)->flags &
 					    MAN_ESCOPED) == 0)
 						man->flags &= ~MAN_ELINE;
 				} else {

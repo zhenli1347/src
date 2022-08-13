@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_var.h,v 1.88 2021/03/30 08:37:11 sashan Exp $	*/
+/*	$OpenBSD: ip_var.h,v 1.96 2022/08/12 14:49:15 bluhm Exp $	*/
 /*	$NetBSD: ip_var.h,v 1.16 1996/02/13 23:43:20 christos Exp $	*/
 
 /*
@@ -70,7 +70,7 @@ struct	ipstat {
 	u_long	ips_noproto;		/* unknown or unsupported protocol */
 	u_long	ips_delivered;		/* datagrams delivered to upper level*/
 	u_long	ips_localout;		/* total ip packets generated here */
-	u_long	ips_odropped;		/* lost packets due to nobufs, etc. */
+	u_long	ips_odropped;		/* lost output due to nobufs, etc. */
 	u_long	ips_reassembled;	/* total packets reassembled ok */
 	u_long	ips_fragmented;		/* datagrams successfully fragmented */
 	u_long	ips_ofragments;		/* output fragments created */
@@ -88,6 +88,7 @@ struct	ipstat {
 	u_long	ips_outswcsum;		/* software checksummed on output */
 	u_long	ips_notmember;		/* multicasts for unregistered groups */
 	u_long	ips_wrongif;		/* packet received on wrong interface */
+	u_long	ips_idropped;		/* lost input due to nobufs, etc. */
 };
 
 struct ipoption {
@@ -115,7 +116,7 @@ enum ipstat_counters {
 	ips_noproto,		/* unknown or unsupported protocol */
 	ips_delivered,		/* datagrams delivered to upper level*/
 	ips_localout,		/* total ip packets generated here */
-	ips_odropped,		/* lost packets due to nobufs, etc. */
+	ips_odropped,		/* lost output packets due to nobufs, etc. */
 	ips_reassembled,	/* total packets reassembled ok */
 	ips_fragmented,		/* datagrams successfully fragmented */
 	ips_ofragments,		/* output fragments created */
@@ -133,6 +134,7 @@ enum ipstat_counters {
 	ips_outswcsum,		/* software checksummed on output */
 	ips_notmember,		/* multicasts for unregistered groups */
 	ips_wrongif,		/* packet received on wrong interface */
+	ips_idropped,		/* lost input packets due to nobufs, etc. */
 
 	ips_ncounters
 };
@@ -174,7 +176,7 @@ struct ipqent {
 	LIST_ENTRY(ipqent) ipqe_q;
 	struct ip	*ipqe_ip;
 	struct mbuf	*ipqe_m;	/* mbuf contains packet */
-	u_int8_t	ipqe_mff;	/* for IP fragmentation */
+	uint16_t	 ipqe_mff;	/* for IP fragmentation */
 };
 
 /*
@@ -204,7 +206,7 @@ extern int ip_defttl;			/* default IP ttl */
 #define IPMTUDISCTIMEOUT (10 * 60)	/* as per RFC 1191 */
 
 extern int ip_mtudisc;			/* mtu discovery */
-extern u_int ip_mtudisc_timeout;	/* seconds to timeout mtu discovery */
+extern int ip_mtudisc_timeout;		/* seconds to timeout mtu discovery */
 
 extern int ipport_firstauto;		/* min port for port allocation */
 extern int ipport_lastauto;		/* max port for port allocation */
@@ -217,15 +219,13 @@ extern int ipmforwarding;		/* enable multicast forwarding */
 extern int ipmultipath;			/* enable multipath routing */
 extern int la_hold_total;
 
-extern struct rttimer_queue *ip_mtudisc_timeout_q;
+extern struct rttimer_queue ip_mtudisc_timeout_q;
 extern struct pool ipqent_pool;
 struct route;
 struct inpcb;
 
 int	 ip_ctloutput(int, struct socket *, int, int, struct mbuf *);
-void	 ip_flush(void);
 int	 ip_fragment(struct mbuf *, struct mbuf_list *, struct ifnet *, u_long);
-void	 ip_freef(struct ipq *);
 void	 ip_freemoptions(struct ip_moptions *);
 int	 ip_getmoptions(int, struct ip_moptions *, struct mbuf *);
 void	 ip_init(void);
@@ -235,8 +235,6 @@ int	 ip_mforward(struct mbuf *, struct ifnet *);
 int	 ip_optcopy(struct ip *, struct ip *);
 int	 ip_output(struct mbuf *, struct mbuf *, struct route *, int,
 	    struct ip_moptions *, struct inpcb *, u_int32_t);
-struct mbuf *
-	 ip_reass(struct ipqent *, struct ipq *);
 u_int16_t
 	 ip_randomid(void);
 void	 ip_send(struct mbuf *);
@@ -248,7 +246,6 @@ void	 ip_stripoptions(struct mbuf *);
 int	 ip_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 void	 ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
 	    struct mbuf *);
-void	 ipintr(void);
 int	 ip_input_if(struct mbuf **, int *, int, int, struct ifnet *);
 int	 ip_deliver(struct mbuf **, int *, int, int);
 void	 ip_forward(struct mbuf *, struct ifnet *, struct rtentry *, int);

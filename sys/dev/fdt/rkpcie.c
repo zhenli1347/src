@@ -1,4 +1,4 @@
-/*	$OpenBSD: rkpcie.c,v 1.14 2021/05/17 17:25:13 kettenis Exp $	*/
+/*	$OpenBSD: rkpcie.c,v 1.16 2022/01/09 05:42:37 jsg Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -113,7 +113,7 @@ struct rkpcie_softc {
 int rkpcie_match(struct device *, void *, void *);
 void rkpcie_attach(struct device *, struct device *, void *);
 
-struct cfattach	rkpcie_ca = {
+const struct cfattach	rkpcie_ca = {
 	sizeof (struct rkpcie_softc), rkpcie_match, rkpcie_attach
 };
 
@@ -467,7 +467,7 @@ rkpcie_atr_init(struct rkpcie_softc *sc)
 		}
 	}
 
-	/* Passthrought inbound translations unmodified. */
+	/* Passthrough inbound translations unmodified. */
 	HWRITE4(sc, PCIE_ATR_IB_ADDR0(2), 32 - 1);
 	HWRITE4(sc, PCIE_ATR_IB_ADDR1(2), 0);
 

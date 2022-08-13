@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.71 2021/09/04 16:26:12 jsing Exp $
+# $OpenBSD: Makefile,v 1.76 2022/07/24 14:28:16 jsing Exp $
 
 .include <bsd.own.mk>
 .ifndef NOMAN
@@ -24,6 +24,7 @@ CFLAGS+= -DLIBRESSL_HAS_TLS1_3_SERVER
 CFLAGS+= -DTLS13_DEBUG
 .endif
 CFLAGS+= -I${.CURDIR}
+CFLAGS+= -I${.CURDIR}/../libcrypto/bio
 
 LDADD+= -L${BSDOBJDIR}/lib/libcrypto -lcrypto
 
@@ -57,6 +58,7 @@ SRCS= \
 	ssl_packet.c \
 	ssl_pkt.c \
 	ssl_rsa.c \
+	ssl_seclevel.c \
 	ssl_sess.c \
 	ssl_sigalgs.c \
 	ssl_srvr.c \
@@ -70,19 +72,20 @@ SRCS= \
 	tls12_key_schedule.c \
 	tls12_lib.c \
 	tls12_record_layer.c \
-	tls13_buffer.c \
 	tls13_client.c \
 	tls13_error.c \
 	tls13_handshake.c \
 	tls13_handshake_msg.c \
 	tls13_key_schedule.c \
-	tls13_key_share.c \
 	tls13_legacy.c \
 	tls13_lib.c \
+	tls13_quic.c \
 	tls13_record.c \
 	tls13_record_layer.c \
 	tls13_server.c \
-	tls_content.c
+	tls_buffer.c \
+	tls_content.c \
+	tls_key_share.c
 
 HDRS=	dtls1.h srtp.h ssl.h ssl2.h ssl23.h ssl3.h tls1.h
 

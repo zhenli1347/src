@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_var.h,v 1.104 2021/05/17 11:44:22 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_var.h,v 1.111 2022/03/14 15:07:24 stsp Exp $	*/
 /*	$NetBSD: ieee80211_var.h,v 1.7 2004/05/06 03:07:10 dyoung Exp $	*/
 
 /*-
@@ -120,6 +120,7 @@ enum ieee80211_protmode {
 struct ieee80211_channel {
 	u_int16_t	ic_freq;	/* setting in MHz */
 	u_int16_t	ic_flags;	/* see below */
+	u_int32_t	ic_xflags;	/* extra flags; see below */
 };
 
 /*
@@ -134,6 +135,13 @@ struct ieee80211_channel {
 #define IEEE80211_CHAN_XR	0x1000	/* Extended range OFDM channel */
 #define IEEE80211_CHAN_HT	0x2000	/* 11n/HT channel */
 #define IEEE80211_CHAN_VHT	0x4000	/* 11ac/VHT channel */
+#define IEEE80211_CHAN_40MHZ	0x8000	/* use of 40 MHz is allowed */
+
+/*
+ * Extra channel flags.
+ */
+#define IEEE80211_CHANX_80MHZ	0x00000001 /* use of 80 MHz is allowed */
+#define IEEE80211_CHANX_160MHZ	0x00000002 /* use of 160 MHz is allowed */
 
 /*
  * Useful combinations of channel characteristics.
@@ -170,6 +178,13 @@ struct ieee80211_channel {
 	(((_c)->ic_flags & IEEE80211_CHAN_CCK) != 0)
 #define	IEEE80211_IS_CHAN_XR(_c) \
 	(((_c)->ic_flags & IEEE80211_CHAN_XR) != 0)
+
+#define	IEEE80211_CHAN_40MHZ_ALLOWED(_c) \
+	(((_c)->ic_flags & IEEE80211_CHAN_40MHZ) != 0)
+#define	IEEE80211_CHAN_80MHZ_ALLOWED(_c) \
+	(((_c)->ic_xflags & IEEE80211_CHANX_80MHZ) != 0)
+#define	IEEE80211_CHAN_160MHZ_ALLOWED(_c) \
+	(((_c)->ic_xflags & IEEE80211_CHANX_160MHZ) != 0)
 
 /*
  * EDCA AC parameters.
@@ -211,6 +226,8 @@ struct ieee80211_defrag {
 
 #define IEEE80211_GROUP_NKID	6
 
+struct ieee80211_node_switch_bss_arg;
+
 struct ieee80211com {
 	struct arpcom		ic_ac;
 	LIST_ENTRY(ieee80211com) ic_list;	/* chain of all ieee80211com */
@@ -245,7 +262,12 @@ struct ieee80211com {
 	void			(*ic_ampdu_rx_stop)(struct ieee80211com *,
 				    struct ieee80211_node *, u_int8_t);
 	void			(*ic_updateprot)(struct ieee80211com *);
+	void			(*ic_updatechan)(struct ieee80211com *);
+	void			(*ic_updatedtim)(struct ieee80211com *);
 	int			(*ic_bgscan_start)(struct ieee80211com *);
+	void			(*ic_bgscan_done)(struct ieee80211com *,
+				    struct ieee80211_node_switch_bss_arg *,
+				    size_t);
 	struct timeout		ic_bgscan_timeout;
 	uint32_t		ic_bgscan_fail;
 	u_int8_t		ic_myaddr[IEEE80211_ADDR_LEN];
@@ -299,6 +321,7 @@ struct ieee80211com {
 	struct timeout		ic_inact_timeout; /* node inactivity timeout */
 	struct timeout		ic_node_cache_timeout;
 #endif
+	struct task		ic_rtm_80211info_task;
 	int			ic_des_esslen;
 	u_int8_t		ic_des_essid[IEEE80211_NWID_LEN];
 	struct ieee80211_channel *ic_des_chan;	/* desired channel */
@@ -353,6 +376,13 @@ struct ieee80211com {
 	u_int8_t		ic_aselcaps;
 	u_int8_t		ic_dialog_token;
 	int			ic_fixed_mcs;
+
+	uint32_t		ic_vhtcaps;
+	uint16_t		ic_vht_rxmcs;
+	uint16_t		ic_vht_rx_max_lgi_mbit_s;
+	uint16_t		ic_vht_txmcs;
+	uint16_t		ic_vht_tx_max_lgi_mbit_s;
+
 	TAILQ_HEAD(, ieee80211_ess)	 ic_ess;
 };
 #define	ic_if		ic_ac.ac_if
@@ -432,6 +462,7 @@ struct ieee80211_ess {
 #define IEEE80211_C_RAWCTL	0x00004000	/* CAPABILITY: raw ctl */
 #define IEEE80211_C_SCANALLBAND	0x00008000	/* CAPABILITY: scan all bands */
 #define IEEE80211_C_TX_AMPDU	0x00010000	/* CAPABILITY: send A-MPDU */
+#define IEEE80211_C_ADDBA_OFFLOAD 0x00020000	/* CAPABILITY: ADDBA offload */
 
 /* flags for ieee80211_fix_rate() */
 #define	IEEE80211_F_DOSORT	0x00000001	/* sort rate list */

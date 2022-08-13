@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_hibernate.c,v 1.129 2021/08/31 14:45:25 deraadt Exp $	*/
+/*	$OpenBSD: subr_hibernate.c,v 1.135 2022/07/29 17:47:12 semarie Exp $	*/
 
 /*
  * Copyright (c) 2011 Ariane van der Steldt <ariane@stack.nl>
@@ -34,6 +34,9 @@
 #include <uvm/uvm_swap.h>
 
 #include <machine/hibernate.h>
+
+/* Make sure the signature can fit in one block */
+CTASSERT(sizeof(union hibernate_info) <= DEV_BSIZE);
 
 /*
  * Hibernate piglet layout information
@@ -548,17 +551,6 @@ uvm_page_rle(paddr_t addr)
 }
 
 /*
- * Calculate a hopefully unique version # for this kernel, based upon
- * how it was linked.
- */
-u_int32_t
-hibsum(void)
-{
-	return ((long)malloc ^ (long)km_alloc ^ (long)printf ^ (long)strlen);
-}
-
-
-/*
  * Fills out the hibernate_info union pointed to by hib
  * with information about this machine (swap signature block
  * offsets, number of memory ranges, kernel in use, etc)
@@ -568,6 +560,9 @@ get_hibernate_info(union hibernate_info *hib, int suspend)
 {
 	struct disklabel dl;
 	char err_string[128], *dl_ret;
+	int part;
+	SHA2_CTX ctx;
+	void *fn;
 
 #ifndef NO_PROPOLICE
 	/* Save propolice guard */
@@ -591,26 +586,30 @@ get_hibernate_info(union hibernate_info *hib, int suspend)
 	}
 
 	/* Make sure we have a swap partition. */
-	if (dl.d_partitions[1].p_fstype != FS_SWAP ||
-	    DL_GETPSIZE(&dl.d_partitions[1]) == 0)
-		return (1);
-
-	/* Make sure the signature can fit in one block */
-	if (sizeof(union hibernate_info) > DEV_BSIZE)
+	part = DISKPART(hib->dev);
+	if (dl.d_npartitions <= part ||
+	    dl.d_partitions[part].p_fstype != FS_SWAP ||
+	    DL_GETPSIZE(&dl.d_partitions[part]) == 0)
 		return (1);
 
 	/* Magic number */
 	hib->magic = HIBERNATE_MAGIC;
 
 	/* Calculate signature block location */
-	hib->sig_offset = DL_GETPSIZE(&dl.d_partitions[1]) -
+	hib->sig_offset = DL_GETPSIZE(&dl.d_partitions[part]) -
 	    sizeof(union hibernate_info)/DEV_BSIZE;
 
-	/* Stash kernel version information */
-	memset(&hib->kernel_version, 0, 128);
-	bcopy(version, &hib->kernel_version,
-	    min(strlen(version), sizeof(hib->kernel_version)-1));
-	hib->kernel_sum = hibsum();
+	SHA256Init(&ctx);
+	SHA256Update(&ctx, version, strlen(version));
+	fn = printf;
+	SHA256Update(&ctx, &fn, sizeof(fn));
+	fn = malloc;
+	SHA256Update(&ctx, &fn, sizeof(fn));
+	fn = km_alloc;
+	SHA256Update(&ctx, &fn, sizeof(fn));
+	fn = strlen;
+	SHA256Update(&ctx, &fn, sizeof(fn));
+	SHA256Final((u_int8_t *)&hib->kern_hash, &ctx);
 
 	if (suspend) {
 		/* Grab the previously-allocated piglet addresses */
@@ -626,8 +625,8 @@ get_hibernate_info(union hibernate_info *hib, int suspend)
 		 * a matching HIB_DONE call performed after the write is
 		 * completed.
 		 */
-		if (hib->io_func(hib->dev, DL_GETPOFFSET(&dl.d_partitions[1]),
-		    (vaddr_t)NULL, DL_GETPSIZE(&dl.d_partitions[1]),
+		if (hib->io_func(hib->dev, DL_GETPOFFSET(&dl.d_partitions[part]),
+		    (vaddr_t)NULL, DL_GETPSIZE(&dl.d_partitions[part]),
 		    HIB_INIT, hib->io_page))
 			goto fail;
 
@@ -916,23 +915,18 @@ hibernate_write_chunktable(union hibernate_info *hib)
  * guaranteed to not match any valid hib.
  */
 int
-hibernate_clear_signature(void)
+hibernate_clear_signature(union hibernate_info *hib)
 {
 	union hibernate_info blank_hiber_info;
-	union hibernate_info hib;
 
 	/* Zero out a blank hiber_info */
 	memset(&blank_hiber_info, 0, sizeof(union hibernate_info));
 
-	/* Get the signature block location */
-	if (get_hibernate_info(&hib, 0))
-		return (1);
-
 	/* Write (zeroed) hibernate info to disk */
 	DPRINTF("clearing hibernate signature block location: %lld\n",
-		hib.sig_offset);
-	if (hibernate_block_io(&hib,
-	    hib.sig_offset,
+		hib->sig_offset);
+	if (hibernate_block_io(hib,
+	    hib->sig_offset,
 	    DEV_BSIZE, (vaddr_t)&blank_hiber_info, 1))
 		printf("Warning: could not clear hibernate signature\n");
 
@@ -957,12 +951,7 @@ hibernate_compare_signature(union hibernate_info *mine,
 		return (1);
 	}
 
-	if (strcmp(mine->kernel_version, disk->kernel_version) != 0) {
-		printf("unhibernate failed: original kernel changed\n");
-		return (1);
-	}
-
-	if (hibsum() != disk->kernel_sum) {
+	if (bcmp(mine->kern_hash, disk->kern_hash, SHA256_DIGEST_LENGTH) != 0) {
 		printf("unhibernate failed: original kernel changed\n");
 		return (1);
 	}
@@ -1158,7 +1147,7 @@ hibernate_resume(void)
 	 * We (possibly) found a hibernate signature. Clear signature first,
 	 * to prevent accidental resume or endless resume cycles later.
 	 */
-	if (hibernate_clear_signature()) {
+	if (hibernate_clear_signature(&hib)) {
 		DPRINTF("error clearing hibernate signature block\n");
 		splx(s);
 		return;
@@ -1173,6 +1162,7 @@ hibernate_resume(void)
 		splx(s);
 		return;
 	}
+	disk_hib.dev = hib.dev;
 
 #ifdef MULTIPROCESSOR
 	/* XXX - if we fail later, we may need to rehatch APs on some archs */
@@ -1194,7 +1184,7 @@ hibernate_resume(void)
 
 	(void) splhigh();
 	hibernate_disable_intr_machdep();
-	cold = 1;
+	cold = 2;
 
 	DPRINTF("hibernate: suspending devices\n");
 	if (config_suspend_all(DVACT_SUSPEND) != 0) {
@@ -1928,7 +1918,7 @@ hibernate_suspend(void)
 
 	if (end - start < 1000) {
 		printf("hibernate: insufficient swap (%lu is too small)\n",
-			end - start);
+			end - start + 1);
 		return (1);
 	}
 
@@ -1936,7 +1926,7 @@ hibernate_suspend(void)
 	hib.image_offset = ctod(start);
 
 	DPRINTF("hibernate @ block %lld max-length %lu blocks\n",
-	    hib.image_offset, ctod(end) - ctod(start));
+	    hib.image_offset, ctod(end) - ctod(start) + 1);
 
 	pmap_activate(curproc);
 	DPRINTF("hibernate: writing chunks\n");

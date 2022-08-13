@@ -1,4 +1,5 @@
-/*	$OpenBSD: resolver.c,v 1.149 2021/08/31 20:18:03 kn Exp $	*/
+/*	$OpenBSD: resolver.c,v 1.155 2022/03/12 14:35:29 florian Exp $	*/
+
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -534,8 +535,9 @@ resolver_dispatch_frontend(int fd, short event, void *bula)
 			show_mem(imsg.hdr.pid);
 			break;
 		case IMSG_NEW_TA:
-			/* make sure this is a string */
-			((char *)imsg.data)[IMSG_DATA_SIZE(imsg) - 1] = '\0';
+			if (((char *)imsg.data)[IMSG_DATA_SIZE(imsg) - 1] !=
+			    '\0')
+				fatalx("Invalid trust anchor");
 			ta = imsg.data;
 			add_new_ta(&new_trust_anchors, ta);
 			break;
@@ -772,6 +774,7 @@ try_next_resolver(struct running_query *rq)
 	struct timespec		 tp, elapsed;
 	struct timeval		 tv = {0, 0};
 	int64_t			 ms;
+	int			 i;
 
 	while(rq->next_resolver < rq->res_pref.len &&
 	    ((res = resolvers[rq->res_pref.types[rq->next_resolver]]) == NULL ||
@@ -804,7 +807,12 @@ try_next_resolver(struct running_query *rq)
 	ms = res->median;
 	if (ms > NEXT_RES_MAX)
 		ms = NEXT_RES_MAX;
-	if (res->type == resolver_conf->res_pref.types[0])
+
+	/* skip over unavailable resolvers in preferences */
+	for (i = 0; i < resolver_conf->res_pref.len &&
+		 resolvers[resolver_conf->res_pref.types[i]] == NULL; i++)
+		;
+	if (res->type == resolver_conf->res_pref.types[i])
 		tv.tv_usec = 1000 * (PREF_RESOLVER_MEDIAN_SKEW + ms);
 	else
 		tv.tv_usec = 1000 * ms;
@@ -1963,9 +1971,9 @@ replace_autoconf_forwarders(struct imsg_rdns_proposal *rdns_proposal)
 {
 	struct uw_forwarder_head	 new_forwarder_list;
 	struct uw_forwarder		*uw_forwarder, *tmp;
+	size_t				 addrsz;
 	int				 i, rdns_count, af, changed = 0;
-	char				 ntopbuf[INET6_ADDRSTRLEN], *src;
-	const char			*ns;
+	char				 hostbuf[INET6_ADDRSTRLEN], *src;
 
 	TAILQ_INIT(&new_forwarder_list);
 	af = rdns_proposal->rtdns.sr_family;
@@ -1973,52 +1981,66 @@ replace_autoconf_forwarders(struct imsg_rdns_proposal *rdns_proposal)
 
 	switch (af) {
 	case AF_INET:
-		rdns_count = (rdns_proposal->rtdns.sr_len -
-		    offsetof(struct sockaddr_rtdns, sr_dns)) /
-		    sizeof(struct in_addr);
+		addrsz = sizeof(struct in_addr);
 		break;
 	case AF_INET6:
-		rdns_count = (rdns_proposal->rtdns.sr_len -
-		    offsetof(struct sockaddr_rtdns, sr_dns)) /
-		    sizeof(struct in6_addr);
+		addrsz = sizeof(struct in6_addr);
 		break;
 	default:
 		log_warnx("%s: unsupported address family: %d", __func__, af);
 		return;
 	}
 
-	for (i = 0; i < rdns_count; i++) {
-		struct in_addr addr4;
-		struct in6_addr addr6;
+	if ((rdns_proposal->rtdns.sr_len - 2) % addrsz != 0) {
+		log_warnx("ignoring invalid RTM_PROPOSAL");
+		return;
+	}
+	rdns_count = (rdns_proposal->rtdns.sr_len -
+	    offsetof(struct sockaddr_rtdns, sr_dns)) / addrsz;
 
+	for (i = 0; i < rdns_count; i++) {
+		struct sockaddr_storage ss;
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&ss;
+		struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
+		int err;
+
+		memset(&ss, 0, sizeof(ss));
+		ss.ss_family = af;
 		switch (af) {
 		case AF_INET:
-			memcpy(&addr4, src, sizeof(struct in_addr));
-			src += sizeof(struct in_addr);
-			if (addr4.s_addr == htonl(INADDR_LOOPBACK))
-				continue;
-			ns = inet_ntop(af, &addr4, ntopbuf,
-			    INET6_ADDRSTRLEN);
+			memcpy(&sin->sin_addr, src, addrsz);
+			if (sin->sin_addr.s_addr == htonl(INADDR_LOOPBACK))
+				goto skip;
+			ss.ss_len = sizeof(*sin);
 			break;
 		case AF_INET6:
-			memcpy(&addr6, src, sizeof(struct in6_addr));
-			src += sizeof(struct in6_addr);
-			if (IN6_IS_ADDR_LOOPBACK(&addr6))
-				continue;
-			ns = inet_ntop(af, &addr6, ntopbuf,
-			    INET6_ADDRSTRLEN);
+			memcpy(&sin6->sin6_addr, src, addrsz);
+			if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
+				goto skip;
+			if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr))
+				sin6->sin6_scope_id = rdns_proposal->if_index;
+			ss.ss_len = sizeof(*sin6);
+			break;
+		}
+		if ((err = getnameinfo((struct sockaddr *)&ss, ss.ss_len,
+		    hostbuf, sizeof(hostbuf), NULL, 0, NI_NUMERICHOST)) != 0) {
+			log_warnx("getnameinfo: %s", gai_strerror(err));
+			goto skip;
 		}
 
 		if ((uw_forwarder = calloc(1, sizeof(struct uw_forwarder))) ==
 		    NULL)
 			fatal(NULL);
-		if (strlcpy(uw_forwarder->ip, ns, sizeof(uw_forwarder->ip))
+		if (strlcpy(uw_forwarder->ip, hostbuf, sizeof(uw_forwarder->ip))
 		    >= sizeof(uw_forwarder->ip))
 			fatalx("strlcpy");
 		uw_forwarder->port = 53;
 		uw_forwarder->if_index = rdns_proposal->if_index;
 		uw_forwarder->src = rdns_proposal->src;
 		TAILQ_INSERT_TAIL(&new_forwarder_list, uw_forwarder, entry);
+
+skip:
+		src += addrsz;
 	}
 
 	TAILQ_FOREACH(tmp, &autoconf_forwarder_list, entry) {
@@ -2227,7 +2249,7 @@ check_dns64(void)
 	}
 
 	if ((asr_ctx = asr_resolver_from_string(resolv_conf)) != NULL) {
-		if ((aq = res_query_async("ipv4only.arpa", LDNS_RR_CLASS_IN,
+		if ((aq = res_query_async("ipv4only.arpa.", LDNS_RR_CLASS_IN,
 		    LDNS_RR_TYPE_AAAA, asr_ctx)) == NULL) {
 			log_warn("%s: res_query_async", __func__);
 			asr_resolver_free(asr_ctx);

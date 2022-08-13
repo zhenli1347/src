@@ -1,4 +1,4 @@
-/*	$OpenBSD: envy.c,v 1.81 2020/01/05 01:07:58 jsg Exp $	*/
+/*	$OpenBSD: envy.c,v 1.84 2022/03/21 19:22:41 miod Exp $	*/
 /*
  * Copyright (c) 2007 Alexandre Ratchov <alex@caoua.org>
  *
@@ -170,7 +170,7 @@ void ak5365_adc_devinfo(struct envy_softc *, struct mixer_devinfo *, int);
 void ak5365_adc_get(struct envy_softc *, struct mixer_ctrl *, int);
 int ak5365_adc_set(struct envy_softc *, struct mixer_ctrl *, int);
 
-struct cfattach envy_ca = {
+const struct cfattach envy_ca = {
 	sizeof(struct envy_softc), envymatch, envyattach, envydetach,
 	envyactivate
 };
@@ -179,7 +179,7 @@ struct cfdriver envy_cd = {
 	NULL, "envy", DV_DULL
 };
 
-struct audio_hw_if envy_hw_if = {
+const struct audio_hw_if envy_hw_if = {
 	envy_open,		/* open */
 	envy_close,		/* close */
 	envy_set_params,	/* set_params */
@@ -205,7 +205,7 @@ struct audio_hw_if envy_hw_if = {
 };
 
 #if NMIDI > 0
-struct midi_hw_if envy_midi_hw_if = {
+const struct midi_hw_if envy_midi_hw_if = {
 	envy_midi_open,
 	envy_midi_close,
 	envy_midi_output,
@@ -1761,7 +1761,7 @@ envyattach(struct device *parent, struct device *self, void *aux)
 	printf("%s: %s, %u inputs, %u outputs\n", DEVNAME(sc),
 	    sc->card->name, sc->card->nich, sc->card->noch);
 	envy_reset(sc);
-	sc->audio = audio_attach_mi(&envy_hw_if, sc, &sc->dev);
+	sc->audio = audio_attach_mi(&envy_hw_if, sc, NULL, &sc->dev);
 #if NMIDI > 0
 	if (sc->card->nmidi > 0 && (!sc->isht ||
 		sc->eeprom[ENVY_EEPROM_CONF] & ENVY_CONF_MIDI)) {

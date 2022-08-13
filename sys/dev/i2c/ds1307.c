@@ -1,4 +1,4 @@
-/*	$OpenBSD: ds1307.c,v 1.3 2021/04/24 10:15:15 mpi Exp $ */
+/*	$OpenBSD: ds1307.c,v 1.5 2022/04/06 18:59:28 naddy Exp $ */
 
 /*
  * Copyright (c) 2016 Marcus Glocker <mglocker@openbsd.org>
@@ -76,7 +76,7 @@ int	maxrtc_settime(struct todr_chip_handle *, struct timeval *);
 /*
  * Driver glue structures.
  */
-struct cfattach maxrtc_ca = {
+const struct cfattach maxrtc_ca = {
 	sizeof(struct maxrtc_softc), maxrtc_match, maxrtc_attach
 };
 
@@ -171,7 +171,7 @@ maxrtc_enable_osc(struct maxrtc_softc *sc)
 		return (-1);
 	}
 	if ((data_r & DS1307_SEC_MASK_CH) == 0) {
-		/* oscilliator is already enabled */
+		/* oscillator is already enabled */
 		printf(": rtc is ok\n");
 		return (0);
 	}

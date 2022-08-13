@@ -1,4 +1,4 @@
-.\"	$OpenBSD: disklabel.8,v 1.140 2020/04/23 21:28:08 jmc Exp $
+.\"	$OpenBSD: disklabel.8,v 1.148 2022/07/31 14:29:19 krw Exp $
 .\"	$NetBSD: disklabel.8,v 1.9 1995/03/18 14:54:38 cgd Exp $
 .\"
 .\" Copyright (c) 1987, 1988, 1991, 1993
@@ -33,7 +33,7 @@
 .\"
 .\"	@(#)disklabel.8	8.2 (Berkeley) 4/19/94
 .\"
-.Dd $Mdocdate: April 23 2020 $
+.Dd $Mdocdate: July 31 2022 $
 .Dt DISKLABEL 8
 .Os
 .Sh NAME
@@ -352,24 +352,7 @@ Delete an existing partition (or
 to delete all partitions).
 If no partition is specified, the user will be prompted for one.
 .It Cm e
-Edit drive parameters.
-This option is used to set the following parameters:
-disk type, a descriptive label string, sectors/track,
-tracks/cylinder, sectors/cylinder, number of cylinders,
-total sectors, rpm, and interleave.
-.It Xo
-.Cm g
-.Op Ar d | u
-.Xc
-Set disk geometry based on what the
-.Em disk
-or
-.Em user
-thinks (the
-.Em user
-geometry is simply what the label said before
-.Nm
-made any changes).
+Edit disk type, e.g. 'SCSI', and label description, e.g. 'UMIS RPJTJ256MED'.
 .It Cm i
 Change the disklabel UID, specified as a 16-character hexadecimal string.
 If set to all zeros, a new UID will automatically be allocated when the
@@ -411,7 +394,7 @@ If a
 is given, the size and offsets are displayed in terms of the
 specified unit.
 If the unit is
-.Sq *
+.Sq * ,
 it is automatically determined by the size of the smallest
 partition.
 .It Cm q
@@ -528,11 +511,11 @@ and may vary from architecture to architecture.
 /		 5% of disk.  150M \(en 1G
 swap		10% of disk.   80M \(en 2x max physical memory
 /tmp		 8% of disk.  120M \(en 4G
-/var		13% of disk.   80M \(en 2x size of crash dump
-/usr		10% of disk. 1500M \(en 6G
+/var		13% of disk.   80M \(en 4G + 2x size of crash dump
+/usr		10% of disk. 1500M \(en 30G
 /usr/X11R6	 3% of disk.  384M \(en 1G
 /usr/local	15% of disk.    1G \(en 20G
-/usr/src	 2% of disk. 1300M \(en 2G
+/usr/src	 2% of disk. 1500M \(en 3G
 /usr/obj	 4% of disk.    5G \(en 6G
 /home		30% of disk.    1G \(en 300G
 .Ed
@@ -568,7 +551,7 @@ swap		80M-256M 10%
 /usr		1.5G-3G	5%
 /usr/X11R6	512M-1G	3%
 /usr/local	2G-10G	10%
-/usr/src	1G-2G	2%
+/usr/src	1.5G-3G	2%
 /usr/obj	1.3G-2G	4%
 /home		1G-*	45%
 .Ed

@@ -31,7 +31,7 @@
 
 *******************************************************************************/
 
-/* $OpenBSD: if_em_hw.c,v 1.110 2021/01/24 10:21:43 jsg Exp $ */
+/* $OpenBSD: if_em_hw.c,v 1.116 2022/06/23 09:47:04 jsg Exp $ */
 /*
  * if_em_hw.c Shared functions for accessing and configuring the MAC
  */
@@ -646,12 +646,16 @@ em_set_mac_type(struct em_hw *hw)
 	case E1000_DEV_ID_PCH_CMP_I219_V10:
 	case E1000_DEV_ID_PCH_CMP_I219_LM11:
 	case E1000_DEV_ID_PCH_CMP_I219_V11:
+		hw->mac_type = em_pch_cnp;
+		break;
 	case E1000_DEV_ID_PCH_TGP_I219_LM13:
 	case E1000_DEV_ID_PCH_TGP_I219_V13:
 	case E1000_DEV_ID_PCH_TGP_I219_LM14:
 	case E1000_DEV_ID_PCH_TGP_I219_V14:
 	case E1000_DEV_ID_PCH_TGP_I219_LM15:
 	case E1000_DEV_ID_PCH_TGP_I219_V15:
+		hw->mac_type = em_pch_tgp;
+		break;
 	case E1000_DEV_ID_PCH_ADP_I219_LM16:
 	case E1000_DEV_ID_PCH_ADP_I219_V16:
 	case E1000_DEV_ID_PCH_ADP_I219_LM17:
@@ -660,7 +664,7 @@ em_set_mac_type(struct em_hw *hw)
 	case E1000_DEV_ID_PCH_MTP_I219_V18:
 	case E1000_DEV_ID_PCH_MTP_I219_LM19:
 	case E1000_DEV_ID_PCH_MTP_I219_V19:
-		hw->mac_type = em_pch_cnp;
+		hw->mac_type = em_pch_adp;
 		break;
 	case E1000_DEV_ID_EP80579_LAN_1:
 		hw->mac_type = em_icp_xxxx;
@@ -694,6 +698,8 @@ em_set_mac_type(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		hw->swfwhw_semaphore_present = TRUE;
 		hw->asf_firmware_present = TRUE;
 		break;
@@ -724,6 +730,75 @@ em_set_mac_type(struct em_hw *hw)
 	return E1000_SUCCESS;
 }
 
+/**
+ *  em_set_sfp_media_type_82575 - derives SFP module media type.
+ *  @hw: pointer to the HW structure
+ *
+ *  The media type is chosen based on SFP module.
+ *  compatibility flags retrieved from SFP ID EEPROM.
+ **/
+STATIC int32_t em_set_sfp_media_type_82575(struct em_hw *hw)
+{
+	struct sfp_e1000_flags eth_flags;
+	int32_t ret_val = E1000_ERR_CONFIG;
+	uint32_t ctrl_ext = 0;
+	uint8_t transceiver_type = 0;
+	int32_t timeout = 3;
+
+	/* Turn I2C interface ON and power on sfp cage */
+	ctrl_ext = E1000_READ_REG(hw, CTRL_EXT);
+	ctrl_ext &= ~E1000_CTRL_EXT_SDP3_DATA;
+	E1000_WRITE_REG(hw, CTRL_EXT, ctrl_ext | E1000_CTRL_I2C_ENA);
+
+	E1000_WRITE_FLUSH(hw);
+
+	/* Read SFP module data */
+	while (timeout) {
+		ret_val = em_read_sfp_data_byte(hw,
+			E1000_I2CCMD_SFP_DATA_ADDR(E1000_SFF_IDENTIFIER_OFFSET),
+			&transceiver_type);
+		if (ret_val == E1000_SUCCESS)
+			break;
+		msec_delay(100);
+		timeout--;
+	}
+	if (ret_val != E1000_SUCCESS)
+		goto out;
+
+	ret_val = em_read_sfp_data_byte(hw,
+			E1000_I2CCMD_SFP_DATA_ADDR(E1000_SFF_ETH_FLAGS_OFFSET),
+			(uint8_t *)&eth_flags);
+	if (ret_val != E1000_SUCCESS)
+		goto out;
+
+	/* Check if there is some SFP module plugged and powered */
+	if ((transceiver_type == E1000_SFF_IDENTIFIER_SFP) ||
+	    (transceiver_type == E1000_SFF_IDENTIFIER_SFF)) {
+		if (eth_flags.e1000_base_lx || eth_flags.e1000_base_sx) {
+			hw->media_type = em_media_type_internal_serdes;
+		} else if (eth_flags.e100_base_fx || eth_flags.e100_base_lx) {
+			hw->media_type = em_media_type_internal_serdes;
+			hw->sgmii_active = TRUE;
+		} else if (eth_flags.e1000_base_t) {
+			hw->media_type = em_media_type_copper;
+			hw->sgmii_active = TRUE;
+		} else {
+			DEBUGOUT("PHY module has not been recognized\n");
+			ret_val = E1000_ERR_CONFIG;
+			goto out;
+		}
+	} else {
+		ret_val = E1000_ERR_CONFIG;
+		goto out;
+	}
+	ret_val = E1000_SUCCESS;
+out:
+	/* Restore I2C interface setting */
+	E1000_WRITE_REG(hw, CTRL_EXT, ctrl_ext);
+	return ret_val;
+}
+
+
 /*****************************************************************************
  * Set media type and TBI compatibility.
  *
@@ -732,7 +807,7 @@ em_set_mac_type(struct em_hw *hw)
 void
 em_set_media_type(struct em_hw *hw)
 {
-	uint32_t status, ctrl_ext;
+	uint32_t status, ctrl_ext, mdic;
 	DEBUGFUNC("em_set_media_type");
 
 	if (hw->mac_type != em_82543) {
@@ -744,16 +819,39 @@ em_set_media_type(struct em_hw *hw)
 	    hw->mac_type == em_82576 ||
 	    hw->mac_type == em_i210 || hw->mac_type == em_i350) {
 		hw->media_type = em_media_type_copper;
-	
+		hw->sgmii_active = FALSE;
+
 		ctrl_ext = E1000_READ_REG(hw, CTRL_EXT);
 		switch (ctrl_ext & E1000_CTRL_EXT_LINK_MODE_MASK) {
-		case E1000_CTRL_EXT_LINK_MODE_SGMII:
-			ctrl_ext |= E1000_CTRL_I2C_ENA;
-			break;
 		case E1000_CTRL_EXT_LINK_MODE_1000BASE_KX:
-		case E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES:
 			hw->media_type = em_media_type_internal_serdes;
 			ctrl_ext |= E1000_CTRL_I2C_ENA;
+			break;
+		case E1000_CTRL_EXT_LINK_MODE_SGMII:
+			mdic = EM_READ_REG(hw, E1000_MDICNFG);
+			ctrl_ext |= E1000_CTRL_I2C_ENA;
+			if (mdic & E1000_MDICNFG_EXT_MDIO) {
+				hw->media_type = em_media_type_copper;
+				hw->sgmii_active = TRUE;
+				break;
+			}
+			/* FALLTHROUGH */
+		case E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES:
+			ctrl_ext |= E1000_CTRL_I2C_ENA;
+			if (em_set_sfp_media_type_82575(hw) != 0) {
+				hw->media_type = em_media_type_internal_serdes;
+				if ((ctrl_ext & E1000_CTRL_EXT_LINK_MODE_MASK) ==
+				    E1000_CTRL_EXT_LINK_MODE_SGMII) {
+					hw->media_type = em_media_type_copper;
+					hw->sgmii_active = TRUE;
+				}
+			}
+
+			ctrl_ext &= ~E1000_CTRL_EXT_LINK_MODE_MASK;
+			if (hw->sgmii_active)
+				ctrl_ext |= E1000_CTRL_EXT_LINK_MODE_SGMII;
+			else
+				ctrl_ext |= E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES;
 			break;
 		default:
 			ctrl_ext &= ~E1000_CTRL_I2C_ENA;
@@ -795,6 +893,8 @@ em_set_media_type(struct em_hw *hw)
 		case em_pch_lpt:
 		case em_pch_spt:
 		case em_pch_cnp:
+		case em_pch_tgp:
+		case em_pch_adp:
 		case em_82573:
 		case em_82574:
 			/*
@@ -955,6 +1055,8 @@ em_reset_hw(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		if (!hw->phy_reset_disable &&
 		    em_check_phy_reset_block(hw) == E1000_SUCCESS) {
 			/*
@@ -1217,6 +1319,8 @@ em_initialize_hardware_bits(struct em_softc *sc)
 		case em_pch_lpt:
 		case em_pch_spt:
 		case em_pch_cnp:
+		case em_pch_tgp:
+		case em_pch_adp:
 			if (hw->mac_type == em_ich8lan)
 				/* Set TARC0 bits 29 and 28 */
 				reg_tarc0 |= 0x30000000;
@@ -1481,7 +1585,9 @@ em_init_hw(struct em_softc *sc)
 		hw->mac_type == em_pch2lan ||
 		hw->mac_type == em_pch_lpt ||
 		hw->mac_type == em_pch_spt ||
-		hw->mac_type == em_pch_cnp) {
+		hw->mac_type == em_pch_cnp ||
+		hw->mac_type == em_pch_tgp ||
+		hw->mac_type == em_pch_adp) {
 		/*
 		 * The MAC-PHY interconnect may still be in SMBus mode
 		 * after Sx->S0.  Toggle the LANPHYPC Value bit to force
@@ -1506,7 +1612,7 @@ em_init_hw(struct em_softc *sc)
 
 		em_disable_ulp_lpt_lp(hw, TRUE);
 		/*
-		 * Reset the PHY before any acccess to it.  Doing so,
+		 * Reset the PHY before any access to it.  Doing so,
 		 * ensures that the PHY is in a known good state before
 		 * we read/write PHY registers.  The generic reset is
 		 * sufficient here, because we haven't determined
@@ -1581,7 +1687,7 @@ em_init_hw(struct em_softc *sc)
 		E1000_WRITE_REG_ARRAY(hw, MTA, i, 0);
 		/*
 		 * use write flush to prevent Memory Write Block (MWB) from
-		 * occuring when accessing our register space
+		 * occurring when accessing our register space
 		 */
 		E1000_WRITE_FLUSH(hw);
 	}
@@ -1700,6 +1806,8 @@ em_init_hw(struct em_softc *sc)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		/*
 		 * Old code always initialized queue 1,
 		 * even when unused, keep behaviour
@@ -1736,6 +1844,13 @@ em_init_hw(struct em_softc *sc)
 			snoop = (u_int32_t) ~ (PCI_EX_NO_SNOOP_ALL);
 			
 		em_set_pci_ex_no_snoop(hw, snoop);
+	}
+
+	/* ungate DMA clock to avoid packet loss */
+	if (hw->mac_type >= em_pch_tgp) {
+		uint32_t fflt_dbg = E1000_READ_REG(hw, FFLT_DBG);
+		fflt_dbg |= (1 << 12);
+		E1000_WRITE_REG(hw, FFLT_DBG, fflt_dbg);
 	}
 
 	if (hw->device_id == E1000_DEV_ID_82546GB_QUAD_COPPER ||
@@ -1839,6 +1954,8 @@ em_setup_link(struct em_hw *hw)
 		case em_pch_lpt:
 		case em_pch_spt:
 		case em_pch_cnp:
+		case em_pch_tgp:
+		case em_pch_adp:
 		case em_82573:
 		case em_82574:
 			hw->fc = E1000_FC_FULL;
@@ -1976,6 +2093,10 @@ em_power_up_serdes_link_82575(struct em_hw *hw)
 {
 	uint32_t reg;
 
+	if (hw->media_type != em_media_type_internal_serdes &&
+	    hw->sgmii_active == FALSE)
+		return;
+
 	/* Enable PCS to turn on link */
 	reg = E1000_READ_REG(hw, PCS_CFG0);
 	reg |= E1000_PCS_CFG_PCS_EN;
@@ -2010,6 +2131,11 @@ em_setup_fiber_serdes_link(struct em_hw *hw)
 	uint32_t signal = 0;
 	int32_t  ret_val;
 	DEBUGFUNC("em_setup_fiber_serdes_link");
+
+	if (hw->media_type != em_media_type_internal_serdes &&
+	    hw->sgmii_active == FALSE)
+		return -E1000_ERR_CONFIG;
+
 	/*
 	 * On 82571 and 82572 Fiber connections, SerDes loopback mode
 	 * persists until explicitly turned off or a power cycle is
@@ -2135,7 +2261,7 @@ em_setup_fiber_serdes_link(struct em_hw *hw)
 	/*
 	 * Since auto-negotiation is enabled, take the link out of reset (the
 	 * link will be in reset, because we previously reset the chip). This
-	 * will restart auto-negotiation.  If auto-neogtiation is successful
+	 * will restart auto-negotiation.  If auto-negotiation is successful
 	 * then the link-up status bit will be set and the flow control
 	 * enable bits (RFCE and TFCE) will be set according to their
 	 * negotiated value.
@@ -2241,6 +2367,20 @@ em_copper_link_preconfig(struct em_hw *hw)
 	    hw->mac_type == em_82541 || hw->mac_type == em_82547 ||
 	    hw->mac_type == em_82541_rev_2 || hw->mac_type == em_82547_rev_2)
 		hw->phy_reset_disable = FALSE;
+	if ((hw->mac_type == em_82575 || hw->mac_type == em_82580 ||
+	    hw->mac_type == em_82576 ||
+	    hw->mac_type == em_i210 || hw->mac_type == em_i350) &&
+	    hw->sgmii_active) {
+		/* allow time for SFP cage time to power up phy */
+		msec_delay(300);
+
+		/*
+		 * SFP documentation requires the following to configure the SFP module
+		 * to work on SGMII.  No further documentation is given.
+		 */
+		em_write_phy_reg(hw, 0x1B, 0x8084);
+		em_phy_hw_reset(hw);
+	}
 
 	return E1000_SUCCESS;
 }
@@ -2291,7 +2431,9 @@ em_copper_link_igp_setup(struct em_hw *hw)
 		hw->mac_type == em_pch2lan ||
 		hw->mac_type == em_pch_lpt ||
 		hw->mac_type == em_pch_spt ||
-		hw->mac_type == em_pch_cnp)
+		hw->mac_type == em_pch_cnp ||
+		hw->mac_type == em_pch_tgp ||
+		hw->mac_type == em_pch_adp)
 		ret_val = em_set_lplu_state_pchlan(hw, FALSE);
 	else
 		ret_val = em_set_d0_lplu_state(hw, FALSE);
@@ -2565,7 +2707,9 @@ em_copper_link_mgp_setup(struct em_hw *hw)
 		hw->mac_type == em_pch2lan ||
 		hw->mac_type == em_pch_lpt ||
 		hw->mac_type == em_pch_spt ||
-		hw->mac_type == em_pch_cnp)
+		hw->mac_type == em_pch_cnp ||
+		hw->mac_type == em_pch_tgp ||
+		hw->mac_type == em_pch_adp)
 		ret_val = em_set_lplu_state_pchlan(hw, FALSE);
 
 	/* Enable CRS on TX. This must be set for half-duplex operation. */
@@ -2673,7 +2817,7 @@ em_copper_link_mgp_setup(struct em_hw *hw)
 		/*
 	    	 * Set PHY page 0, register 29 to 0x0003
 	         * The next two writes are supposed to lower BER for gig
-	         * conection
+	         * connection
 		 */
 		ret_val = em_write_phy_reg(hw, BM_REG_BIAS1, 0x0003);
 		if (ret_val)
@@ -3038,6 +3182,8 @@ em_setup_copper_link(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		/*
 		 * Set the mac to wait the maximum time between each
 		 * iteration and increase the max iterations when polling the
@@ -3870,7 +4016,7 @@ em_force_mac_fc(struct em_hw *hw)
  * Forces MAC flow control settings if link was forced. When in MII/GMII mode
  * and autonegotiation is enabled, the MAC flow control settings will be set
  * based on the flow control negotiated by the PHY. In TBI mode, the TFCE
- * and RFCE bits will be automaticaly set to the negotiated flow control mode.
+ * and RFCE bits will be automatically set to the negotiated flow control mode.
  *****************************************************************************/
 STATIC int32_t
 em_config_fc_after_link_up(struct em_hw *hw)
@@ -4207,7 +4353,9 @@ em_check_for_link(struct em_hw *hw)
 			if (hw->mac_type == em_pch2lan ||
 			    hw->mac_type == em_pch_lpt ||
 			    hw->mac_type == em_pch_spt ||
-			    hw->mac_type == em_pch_cnp) {
+			    hw->mac_type == em_pch_cnp ||
+			    hw->mac_type == em_pch_tgp ||
+			    hw->mac_type == em_pch_adp) {
 				ret_val = em_set_eee_pchlan(hw);
 				if (ret_val)
 					return ret_val;
@@ -4994,7 +5142,9 @@ em_read_phy_reg(struct em_hw *hw, uint32_t reg_addr, uint16_t *phy_data)
 		hw->mac_type == em_pch2lan ||
 		hw->mac_type == em_pch_lpt ||
 		hw->mac_type == em_pch_spt ||
-		hw->mac_type == em_pch_cnp)
+		hw->mac_type == em_pch_cnp ||
+		hw->mac_type == em_pch_tgp ||
+		hw->mac_type == em_pch_adp)
 		return (em_access_phy_reg_hv(hw, reg_addr, phy_data, TRUE));
 
 	if (((hw->mac_type == em_80003es2lan) || (hw->mac_type == em_82575) ||
@@ -5066,6 +5216,14 @@ em_read_phy_reg_ex(struct em_hw *hw, uint32_t reg_addr, uint16_t *phy_data)
 	uint32_t mdic = 0;
 	DEBUGFUNC("em_read_phy_reg_ex");
 
+	/* SGMII active is only set on some specific chips */
+	if (hw->sgmii_active && !em_sgmii_uses_mdio_82575(hw)) {
+		if (reg_addr > E1000_MAX_SGMII_PHY_REG_ADDR) {
+			DEBUGOUT1("PHY Address %d is out of range\n", reg_addr);
+			return -E1000_ERR_PARAM;
+		}
+		return em_read_phy_reg_i2c(hw, reg_addr, phy_data);
+	}
 	if (reg_addr > MAX_PHY_REG_ADDRESS) {
 		DEBUGOUT1("PHY Address %d is out of range\n", reg_addr);
 		return -E1000_ERR_PARAM;
@@ -5109,7 +5267,8 @@ em_read_phy_reg_ex(struct em_hw *hw, uint32_t reg_addr, uint16_t *phy_data)
 		*phy_data = (uint16_t) mdic;
 
 		if (hw->mac_type == em_pch2lan || hw->mac_type == em_pch_lpt ||
-		    hw->mac_type == em_pch_spt || hw->mac_type == em_pch_cnp)
+		    hw->mac_type == em_pch_spt || hw->mac_type == em_pch_cnp ||
+		    hw->mac_type == em_pch_tgp || hw->mac_type == em_pch_adp)
 			usec_delay(100);
 	} else {
 		/*
@@ -5162,7 +5321,9 @@ em_write_phy_reg(struct em_hw *hw, uint32_t reg_addr, uint16_t phy_data)
 		hw->mac_type == em_pch2lan ||
 		hw->mac_type == em_pch_lpt ||
 		hw->mac_type == em_pch_spt ||
-		hw->mac_type == em_pch_cnp)
+		hw->mac_type == em_pch_cnp ||
+		hw->mac_type == em_pch_tgp ||
+		hw->mac_type == em_pch_adp)
 		return (em_access_phy_reg_hv(hw, reg_addr, &phy_data, FALSE));
 
 	if (em_swfw_sync_acquire(hw, hw->swfw))
@@ -5227,6 +5388,14 @@ em_write_phy_reg_ex(struct em_hw *hw, uint32_t reg_addr, uint16_t phy_data)
 	uint32_t mdic = 0;
 	DEBUGFUNC("em_write_phy_reg_ex");
 
+	/* SGMII active is only set on some specific chips */
+	if (hw->sgmii_active && !em_sgmii_uses_mdio_82575(hw)) {
+		if (reg_addr > E1000_MAX_SGMII_PHY_REG_ADDR) {
+			DEBUGOUT1("PHY Address %d is out of range\n", reg_addr);
+			return -E1000_ERR_PARAM;
+		}
+		return em_write_phy_reg_i2c(hw, reg_addr, phy_data);
+	}
 	if (reg_addr > MAX_PHY_REG_ADDRESS) {
 		DEBUGOUT1("PHY Address %d is out of range\n", reg_addr);
 		return -E1000_ERR_PARAM;
@@ -5263,7 +5432,8 @@ em_write_phy_reg_ex(struct em_hw *hw, uint32_t reg_addr, uint16_t phy_data)
 		}
 
 		if (hw->mac_type == em_pch2lan || hw->mac_type == em_pch_lpt ||
-		    hw->mac_type == em_pch_spt || hw->mac_type == em_pch_cnp)
+		    hw->mac_type == em_pch_spt || hw->mac_type == em_pch_cnp ||
+		    hw->mac_type == em_pch_tgp || hw->mac_type == em_pch_adp)
 			usec_delay(100);
 	} else {
 		/*
@@ -5334,6 +5504,195 @@ em_write_kmrn_reg(struct em_hw *hw, uint32_t reg_addr, uint16_t data)
 	usec_delay(2);
 
 	em_swfw_sync_release(hw, hw->swfw);
+	return E1000_SUCCESS;
+}
+
+/**
+ *  em_sgmii_uses_mdio_82575 - Determine if I2C pins are for external MDIO
+ *  @hw: pointer to the HW structure
+ *
+ *  Called to determine if the I2C pins are being used for I2C or as an
+ *  external MDIO interface since the two options are mutually exclusive.
+ **/
+int em_sgmii_uses_mdio_82575(struct em_hw *hw)
+{
+	uint32_t reg = 0;
+	int ext_mdio = 0;
+
+	DEBUGFUNC("em_sgmii_uses_mdio_82575");
+
+	switch (hw->mac_type) {
+	case em_82575:
+	case em_82576:
+		reg = E1000_READ_REG(hw, MDIC);
+		ext_mdio = !!(reg & E1000_MDIC_DEST);
+		break;
+	case em_82580:
+	case em_i350:
+	case em_i210:
+		reg = E1000_READ_REG(hw, MDICNFG);
+		ext_mdio = !!(reg & E1000_MDICNFG_EXT_MDIO);
+		break;
+	default:
+		break;
+	}
+	return ext_mdio;
+}
+
+/**
+ *  em_read_phy_reg_i2c - Read PHY register using i2c
+ *  @hw: pointer to the HW structure
+ *  @offset: register offset to be read
+ *  @data: pointer to the read data
+ *
+ *  Reads the PHY register at offset using the i2c interface and stores the
+ *  retrieved information in data.
+ **/
+int32_t em_read_phy_reg_i2c(struct em_hw *hw, uint32_t offset, uint16_t *data)
+{
+	uint32_t i, i2ccmd = 0;
+
+	DEBUGFUNC("em_read_phy_reg_i2c");
+
+	/* Set up Op-code, Phy Address, and register address in the I2CCMD
+	 * register.  The MAC will take care of interfacing with the
+	 * PHY to retrieve the desired data.
+	 */
+	i2ccmd = ((offset << E1000_I2CCMD_REG_ADDR_SHIFT) |
+		  (hw->phy_addr << E1000_I2CCMD_PHY_ADDR_SHIFT) |
+		  (E1000_I2CCMD_OPCODE_READ));
+
+	E1000_WRITE_REG(hw, I2CCMD, i2ccmd);
+
+	/* Poll the ready bit to see if the I2C read completed */
+	for (i = 0; i < E1000_I2CCMD_PHY_TIMEOUT; i++) {
+		usec_delay(50);
+		i2ccmd = E1000_READ_REG(hw, I2CCMD);
+		if (i2ccmd & E1000_I2CCMD_READY)
+			break;
+	}
+	if (!(i2ccmd & E1000_I2CCMD_READY)) {
+		DEBUGOUT("I2CCMD Read did not complete\n");
+		return -E1000_ERR_PHY;
+	}
+	if (i2ccmd & E1000_I2CCMD_ERROR) {
+		DEBUGOUT("I2CCMD Error bit set\n");
+		return -E1000_ERR_PHY;
+	}
+
+	/* Need to byte-swap the 16-bit value. */
+	*data = ((i2ccmd >> 8) & 0x00FF) | ((i2ccmd << 8) & 0xFF00);
+
+	return E1000_SUCCESS;
+}
+
+/**
+ *  em_write_phy_reg_i2c - Write PHY register using i2c
+ *  @hw: pointer to the HW structure
+ *  @offset: register offset to write to
+ *  @data: data to write at register offset
+ *
+ *  Writes the data to PHY register at the offset using the i2c interface.
+ **/
+int32_t em_write_phy_reg_i2c(struct em_hw *hw, uint32_t offset, uint16_t data)
+{
+	uint32_t i, i2ccmd = 0;
+	uint16_t phy_data_swapped;
+
+	DEBUGFUNC("em_write_phy_reg_i2c");
+
+	/* Prevent overwriting SFP I2C EEPROM which is at A0 address.*/
+	if ((hw->phy_addr == 0) || (hw->phy_addr > 7)) {
+		DEBUGOUT1("PHY I2C Address %d is out of range.\n",
+			  hw->phy_addr);
+		return -E1000_ERR_CONFIG;
+	}
+
+	/* Swap the data bytes for the I2C interface */
+	phy_data_swapped = ((data >> 8) & 0x00FF) | ((data << 8) & 0xFF00);
+
+	/* Set up Op-code, Phy Address, and register address in the I2CCMD
+	 * register.  The MAC will take care of interfacing with the
+	 * PHY to retrieve the desired data.
+	 */
+	i2ccmd = ((offset << E1000_I2CCMD_REG_ADDR_SHIFT) |
+		  (hw->phy_addr << E1000_I2CCMD_PHY_ADDR_SHIFT) |
+		  E1000_I2CCMD_OPCODE_WRITE |
+		  phy_data_swapped);
+
+	E1000_WRITE_REG(hw, I2CCMD, i2ccmd);
+
+	/* Poll the ready bit to see if the I2C read completed */
+	for (i = 0; i < E1000_I2CCMD_PHY_TIMEOUT; i++) {
+		usec_delay(50);
+		i2ccmd = E1000_READ_REG(hw, I2CCMD);
+		if (i2ccmd & E1000_I2CCMD_READY)
+			break;
+	}
+	if (!(i2ccmd & E1000_I2CCMD_READY)) {
+		DEBUGOUT("I2CCMD Write did not complete\n");
+		return -E1000_ERR_PHY;
+	}
+	if (i2ccmd & E1000_I2CCMD_ERROR) {
+		DEBUGOUT("I2CCMD Error bit set\n");
+		return -E1000_ERR_PHY;
+	}
+
+	return E1000_SUCCESS;
+}
+
+/**
+ *  em_read_sfp_data_byte - Reads SFP module data.
+ *  @hw: pointer to the HW structure
+ *  @offset: byte location offset to be read
+ *  @data: read data buffer pointer
+ *
+ *  Reads one byte from SFP module data stored
+ *  in SFP resided EEPROM memory or SFP diagnostic area.
+ *  Function should be called with
+ *  E1000_I2CCMD_SFP_DATA_ADDR(<byte offset>) for SFP module database access
+ *  E1000_I2CCMD_SFP_DIAG_ADDR(<byte offset>) for SFP diagnostics parameters
+ *  access
+ **/
+int32_t em_read_sfp_data_byte(struct em_hw *hw, uint16_t offset, uint8_t *data)
+{
+	uint32_t i = 0;
+	uint32_t i2ccmd = 0;
+	uint32_t data_local = 0;
+
+	DEBUGFUNC("em_read_sfp_data_byte");
+
+	if (offset > E1000_I2CCMD_SFP_DIAG_ADDR(255)) {
+		DEBUGOUT("I2CCMD command address exceeds upper limit\n");
+		return -E1000_ERR_PHY;
+	}
+
+	/* Set up Op-code, EEPROM Address,in the I2CCMD
+	 * register. The MAC will take care of interfacing with the
+	 * EEPROM to retrieve the desired data.
+	 */
+	i2ccmd = ((offset << E1000_I2CCMD_REG_ADDR_SHIFT) |
+		  E1000_I2CCMD_OPCODE_READ);
+
+	E1000_WRITE_REG(hw, I2CCMD, i2ccmd);
+
+	/* Poll the ready bit to see if the I2C read completed */
+	for (i = 0; i < E1000_I2CCMD_PHY_TIMEOUT; i++) {
+		usec_delay(50);
+		data_local = E1000_READ_REG(hw, I2CCMD);
+		if (data_local & E1000_I2CCMD_READY)
+			break;
+	}
+	if (!(data_local & E1000_I2CCMD_READY)) {
+		DEBUGOUT("I2CCMD Read did not complete\n");
+		return -E1000_ERR_PHY;
+	}
+	if (data_local & E1000_I2CCMD_ERROR) {
+		DEBUGOUT("I2CCMD Error bit set\n");
+		return -E1000_ERR_PHY;
+	}
+	*data = (uint8_t) data_local & 0xFF;
+
 	return E1000_SUCCESS;
 }
 
@@ -5501,7 +5860,7 @@ out:
  *
  * hw - Struct containing variables accessed by shared code
  *
- * Sets bit 15 of the MII Control regiser
+ * Sets bit 15 of the MII Control register
  *****************************************************************************/
 int32_t
 em_phy_reset(struct em_hw *hw)
@@ -5713,16 +6072,19 @@ em_match_gig_phy(struct em_hw *hw)
 		    hw->phy_id == I210_I_PHY_ID ||
 		    hw->phy_id == I347AT4_E_PHY_ID ||
 		    hw->phy_id == I350_I_PHY_ID ||
+		    hw->phy_id == M88E1111_I_PHY_ID ||
 		    hw->phy_id == M88E1112_E_PHY_ID ||
 		    hw->phy_id == M88E1543_E_PHY_ID ||
 		    hw->phy_id == M88E1512_E_PHY_ID) {
 			uint32_t mdic;
 
 			mdic = EM_READ_REG(hw, E1000_MDICNFG);
-			mdic &= E1000_MDICNFG_PHY_MASK;
-			hw->phy_addr = mdic >> E1000_MDICNFG_PHY_SHIFT;
-			DEBUGOUT1("MDICNFG PHY ADDR %d",
-			    mdic >> E1000_MDICNFG_PHY_SHIFT);
+			if (mdic & E1000_MDICNFG_EXT_MDIO) {
+				mdic &= E1000_MDICNFG_PHY_MASK;
+				hw->phy_addr = mdic >> E1000_MDICNFG_PHY_SHIFT;
+				DEBUGOUT1("MDICNFG PHY ADDR %d",
+				    mdic >> E1000_MDICNFG_PHY_SHIFT);
+			}
 			match = TRUE;
 		}
 		break;
@@ -5755,6 +6117,8 @@ em_match_gig_phy(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		if (hw->phy_id == I217_E_PHY_ID)
 			match = TRUE;
 		break;
@@ -5858,11 +6222,12 @@ em_detect_gig_phy(struct em_hw *hw)
 		uint32_t ctrl_ext = EM_READ_REG(hw, E1000_CTRL_EXT);
 		EM_WRITE_REG(hw, E1000_CTRL_EXT,
 		    ctrl_ext & ~E1000_CTRL_EXT_SDP3_DATA);
-		delay(300);
+		E1000_WRITE_FLUSH(hw);
+		msec_delay(300);
 	}
 
 	/* Read the PHY ID Registers to identify which PHY is onboard. */
-	for (i = 1; i < 4; i++) {
+	for (i = 1; i < 8; i++) {
 		/*
 		 * hw->phy_addr may be modified down in the call stack,
 		 * we can't use it as loop variable.
@@ -6090,6 +6455,8 @@ em_init_eeprom_params(struct em_hw *hw)
 		}
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		{
 			int32_t         i = 0;
 			uint32_t        flash_size = EM_READ_REG(hw, 0xc /* STRAP */);
@@ -6530,7 +6897,7 @@ em_read_eeprom(struct em_hw *hw, uint16_t offset, uint16_t words,
 		if (em_acquire_eeprom(hw) != E1000_SUCCESS)
 			return -E1000_ERR_EEPROM;
 	}
-	/* Eerd register EEPROM access requires no eeprom aquire/release */
+	/* Eerd register EEPROM access requires no eeprom acquire/release */
 	if (eeprom->use_eerd == TRUE)
 		return em_read_eeprom_eerd(hw, offset, words, data);
 
@@ -6544,7 +6911,7 @@ em_read_eeprom(struct em_hw *hw, uint16_t offset, uint16_t words,
 
 	/*
 	 * Set up the SPI or Microwire EEPROM for bit-bang reading.  We have
-	 * acquired the EEPROM at this point, so any returns should relase it
+	 * acquired the EEPROM at this point, so any returns should release it
 	 */
 	if (eeprom->type == em_eeprom_spi) {
 		uint16_t word_in;
@@ -6805,6 +7172,8 @@ em_validate_eeprom_checksum(struct em_hw *hw)
 		case em_pch_lpt:
 		case em_pch_spt:
 		case em_pch_cnp:
+		case em_pch_tgp:
+		case em_pch_adp:
 			word = EEPROM_COMPAT;
 			valid_csum_mask = EEPROM_COMPAT_VALID_CSUM;
 			break;
@@ -7298,7 +7667,7 @@ em_read_part_num(struct em_hw *hw, uint32_t *part_num)
 		return -E1000_ERR_EEPROM;
 	}
 	/* Save word 0 in upper half of part_num */
-	*part_num = (uint32_t) (eeprom_data << 16);
+	*part_num = (uint32_t)eeprom_data << 16;
 
 	/* Get word 1 from EEPROM */
 	if (em_read_eeprom(hw, ++offset, 1, &eeprom_data) < 0) {
@@ -7457,7 +7826,7 @@ out:
  * hw - Struct containing variables accessed by shared code
  *
  * Places the MAC address in receive address register 0 and clears the rest
- * of the receive addresss registers. Clears the multicast table. Assumes
+ * of the receive address registers. Clears the multicast table. Assumes
  * the receiver is in reset when the routine is called.
  *****************************************************************************/
 STATIC void
@@ -7468,7 +7837,8 @@ em_init_rx_addrs(struct em_hw *hw)
 	DEBUGFUNC("em_init_rx_addrs");
 
 	if (hw->mac_type == em_pch_lpt || hw->mac_type == em_pch_spt ||
-	    hw->mac_type == em_pch_cnp || hw->mac_type == em_pch2lan)
+	    hw->mac_type == em_pch_cnp || hw->mac_type == em_pch_tgp ||
+	    hw->mac_type == em_pch_adp || hw->mac_type == em_pch2lan)
 		if (em_phy_no_cable_workaround(hw))
 			printf(" ...failed to apply em_phy_no_cable_"
 			    "workaround.\n");
@@ -8026,7 +8396,8 @@ em_clear_hw_cntrs(struct em_hw *hw)
 	    hw->mac_type == em_ich10lan ||
 	    hw->mac_type == em_pchlan ||
 	    (hw->mac_type != em_pch2lan && hw->mac_type != em_pch_lpt &&
-	     hw->mac_type != em_pch_spt && hw->mac_type != em_pch_cnp))
+	     hw->mac_type != em_pch_spt && hw->mac_type != em_pch_cnp &&
+	     hw->mac_type != em_pch_tgp && hw->mac_type != em_pch_adp))
 		return;
 
 	temp = E1000_READ_REG(hw, ICRXPTC);
@@ -8089,6 +8460,8 @@ em_get_bus_info(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		hw->bus_type = em_bus_type_pci_express;
 		hw->bus_speed = em_bus_speed_2500;
 		hw->bus_width = em_bus_width_pciex_1;
@@ -8347,11 +8720,11 @@ em_get_cable_length(struct em_hw *hw, uint16_t *min_length,
 }
 
 /******************************************************************************
- * Check if Downshift occured
+ * Check if Downshift occurred
  *
  * hw - Struct containing variables accessed by shared code
- * downshift - output parameter : 0 - No Downshift ocured.
- *                                1 - Downshift ocured.
+ * downshift - output parameter : 0 - No Downshift occurred.
+ *                                1 - Downshift occurred.
  *
  * returns: - E1000_ERR_XXX
  *            E1000_SUCCESS
@@ -8985,7 +9358,7 @@ em_host_if_read_cookie(struct em_hw *hw, uint8_t *buffer)
 }
 
 /*****************************************************************************
- * This function checks whether the HOST IF is enabled for command operaton
+ * This function checks whether the HOST IF is enabled for command operation
  * and also checks whether the previous command is completed.
  * It busy waits in case of previous command is not completed.
  *
@@ -9284,6 +9657,8 @@ em_get_auto_rd_done(struct em_hw *hw)
 	case em_pch_lpt:
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		while (timeout) {
 			if (E1000_READ_REG(hw, EECD) & E1000_EECD_AUTO_RD)
 				break;
@@ -9685,6 +10060,8 @@ em_valid_nvm_bank_detect_ich8lan(struct em_hw *hw, uint32_t *bank)
 	switch (hw->mac_type) {
 	case em_pch_spt:
 	case em_pch_cnp:
+	case em_pch_tgp:
+	case em_pch_adp:
 		bank1_offset = hw->flash_bank_size * 2;
 		act_offset = E1000_ICH_NVM_SIG_WORD * 2;
 
@@ -10786,7 +11163,9 @@ em_init_lcd_from_nvm(struct em_hw *hw)
 	    hw->mac_type == em_pch2lan ||
 	    hw->mac_type == em_pch_lpt ||
 	    hw->mac_type == em_pch_spt ||
-	    hw->mac_type == em_pch_cnp)
+	    hw->mac_type == em_pch_cnp ||
+	    hw->mac_type == em_pch_tgp ||
+	    hw->mac_type == em_pch_adp)
 		sw_cfg_mask = FEXTNVM_SW_CONFIG_ICH8M;
 	else
 		sw_cfg_mask = FEXTNVM_SW_CONFIG;
@@ -10857,7 +11236,7 @@ em_set_pciex_completion_timeout(struct em_hw *hw)
 	DEBUGOUT("PCIe completion timeout not set by system BIOS.");
 
 	/*
-	 * If capababilities version is type 1 we can write the
+	 * If capabilities version is type 1 we can write the
 	 * timeout of 10ms to 200ms through the GCR register
 	 */
 

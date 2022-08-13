@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sched.c,v 1.72 2021/07/06 09:34:07 kettenis Exp $	*/
+/*	$OpenBSD: kern_sched.c,v 1.74 2022/01/20 11:06:57 bluhm Exp $	*/
 /*
  * Copyright (c) 2007, 2008 Artur Grabowski <art@openbsd.org>
  *
@@ -258,10 +258,11 @@ setrunqueue(struct cpu_info *ci, struct proc *p, uint8_t prio)
 
 	spc = &p->p_cpu->ci_schedstate;
 	spc->spc_nrun++;
-	TRACEPOINT(sched, enqueue, p->p_tid, p->p_p->ps_pid);
+	TRACEPOINT(sched, enqueue, p->p_tid + THREAD_PID_OFFSET,
+	    p->p_p->ps_pid);
 
 	TAILQ_INSERT_TAIL(&spc->spc_qs[queue], p, p_runq);
-	spc->spc_whichqs |= (1 << queue);
+	spc->spc_whichqs |= (1U << queue);
 	cpuset_add(&sched_queued_cpus, p->p_cpu);
 
 	if (cpuset_isset(&sched_idle_cpus, p->p_cpu))
@@ -280,11 +281,12 @@ remrunqueue(struct proc *p)
 	SCHED_ASSERT_LOCKED();
 	spc = &p->p_cpu->ci_schedstate;
 	spc->spc_nrun--;
-	TRACEPOINT(sched, dequeue, p->p_tid, p->p_p->ps_pid);
+	TRACEPOINT(sched, dequeue, p->p_tid + THREAD_PID_OFFSET,
+	    p->p_p->ps_pid);
 
 	TAILQ_REMOVE(&spc->spc_qs[queue], p, p_runq);
 	if (TAILQ_EMPTY(&spc->spc_qs[queue])) {
-		spc->spc_whichqs &= ~(1 << queue);
+		spc->spc_whichqs &= ~(1U << queue);
 		if (spc->spc_whichqs == 0)
 			cpuset_del(&sched_queued_cpus, p->p_cpu);
 	}
@@ -755,21 +757,21 @@ void
 cpuset_add(struct cpuset *cs, struct cpu_info *ci)
 {
 	unsigned int num = CPU_INFO_UNIT(ci);
-	atomic_setbits_int(&cs->cs_set[num/32], (1 << (num % 32)));
+	atomic_setbits_int(&cs->cs_set[num/32], (1U << (num % 32)));
 }
 
 void
 cpuset_del(struct cpuset *cs, struct cpu_info *ci)
 {
 	unsigned int num = CPU_INFO_UNIT(ci);
-	atomic_clearbits_int(&cs->cs_set[num/32], (1 << (num % 32)));
+	atomic_clearbits_int(&cs->cs_set[num/32], (1U << (num % 32)));
 }
 
 int
 cpuset_isset(struct cpuset *cs, struct cpu_info *ci)
 {
 	unsigned int num = CPU_INFO_UNIT(ci);
-	return (cs->cs_set[num/32] & (1 << (num % 32)));
+	return (cs->cs_set[num/32] & (1U << (num % 32)));
 }
 
 void

@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.7 2021/03/26 22:55:48 kn Exp $	*/
+/*	$OpenBSD: apm.c,v 1.17 2022/07/13 09:28:18 kettenis Exp $	*/
 
 /*-
  * Copyright (c) 2001 Alexander Guy.  All rights reserved.
@@ -32,7 +32,6 @@
  */
 
 #include "apm.h"
-#include "wsdisplay.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -41,7 +40,6 @@
 #include <sys/device.h>
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
-#include <sys/buf.h>
 #include <sys/event.h>
 #include <sys/reboot.h>
 #include <sys/hibernate.h>
@@ -51,7 +49,10 @@
 #include <machine/acpiapm.h>
 #include <machine/apmvar.h>
 
-#include <dev/wscons/wsdisplayvar.h>
+#include "psci.h"
+#if NPSCI > 0
+#include <dev/fdt/pscivar.h>
+#endif
 
 #if defined(APMDEBUG)
 #define DPRINTF(x)	printf x
@@ -68,7 +69,7 @@ struct apm_softc {
 int apmmatch(struct device *, void *, void *);
 void apmattach(struct device *, struct device *, void *);
 
-struct cfattach apm_ca = {
+const struct cfattach apm_ca = {
 	sizeof(struct apm_softc), apmmatch, apmattach
 };
 
@@ -109,7 +110,7 @@ int (*get_apminfo)(struct apm_power_info *) = apm_getdefaultinfo;
 #define SCFLAG_PCTPRINT	0x0004000
 #define SCFLAG_PRINT	(SCFLAG_NOPRINT|SCFLAG_PCTPRINT)
 
-#define	SCFLAG_OREAD 	(1 << 0)
+#define	SCFLAG_OREAD	(1 << 0)
 #define	SCFLAG_OWRITE	(1 << 1)
 #define	SCFLAG_OPEN	(SCFLAG_OREAD|SCFLAG_OWRITE)
 
@@ -208,20 +209,31 @@ apmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		return ENXIO;
 
 	switch (cmd) {
-		/* some ioctl names from linux */
+#ifdef SUSPEND
 	case APM_IOC_STANDBY:
-	case APM_IOC_STANDBY_REQ:
 	case APM_IOC_SUSPEND:
-	case APM_IOC_SUSPEND_REQ:
+		if ((flag & FWRITE) == 0) {
+			error = EBADF;
+			break;
+		}
+		sleep_state(NULL, SLEEP_SUSPEND);
+		break;
 #ifdef HIBERNATE
 	case APM_IOC_HIBERNATE:
-#endif
-	case APM_IOC_DEV_CTL:
-		if ((flag & FWRITE) == 0)
+		if ((error = suser(p)) != 0)
+			break;
+		if ((flag & FWRITE) == 0) {
 			error = EBADF;
-		else
-			error = EOPNOTSUPP; /* XXX */
+			break;
+		}
+		if (get_hibernate_io_function(swdevt[0].sw_dev) == NULL) {
+			error = EOPNOTSUPP;
+			break;
+		}
+		sleep_state(NULL, SLEEP_HIBERNATE);
 		break;
+#endif
+#endif
 	case APM_IOC_PRN_CTL:
 		if ((flag & FWRITE) == 0)
 			error = EBADF;
@@ -247,7 +259,7 @@ apmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		}
 		break;
 	case APM_IOC_GETPOWER:
-	        power = (struct apm_power_info *)data;
+		power = (struct apm_power_info *)data;
 		error = (*get_apminfo)(power);
 		break;
 	default:
@@ -337,3 +349,80 @@ apm_record_event(u_int event, const char *src, const char *msg)
 
 	return (0);
 }
+
+#ifdef SUSPEND
+
+#ifdef MULTIPROCESSOR
+
+void
+sleep_mp(void)
+{
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci;
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (CPU_IS_PRIMARY(ci))
+			continue;
+		arm_send_ipi(ci, ARM_IPI_HALT);
+		while (ci->ci_flags & CPUF_RUNNING)
+			CPU_BUSY_CYCLE();
+	}
+}
+
+void
+resume_mp(void)
+{
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci;
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (CPU_IS_PRIMARY(ci))
+			continue;
+		cpu_resume_secondary(ci);
+	}
+	cpu_boot_secondary_processors();
+}
+
+#endif /* MULTIPROCESSOR */
+
+int
+sleep_showstate(void *v, int sleepmode)
+{
+#if NPSCI > 0
+	if (sleepmode == SLEEP_SUSPEND && psci_can_suspend())
+		return 0;
+#endif
+
+	return EOPNOTSUPP;
+}
+
+int
+sleep_setstate(void *v)
+{
+	return 0;
+}
+
+int
+gosleep(void *v)
+{
+	return cpu_suspend_primary();
+}
+
+void
+sleep_abort(void *v)
+{
+}
+
+int
+sleep_resume(void *v)
+{
+	return 0;
+}
+
+int
+suspend_finish(void *v)
+{
+	return 0;
+}
+
+#endif /* SUSPEND */

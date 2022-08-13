@@ -1,4 +1,4 @@
-/*	$OpenBSD: lom.c,v 1.27 2019/10/12 15:55:31 cheloha Exp $	*/
+/*	$OpenBSD: lom.c,v 1.29 2022/07/04 19:06:10 miod Exp $	*/
 /*
  * Copyright (c) 2009 Mark Kettenis
  *
@@ -181,7 +181,7 @@ int	lom_match(struct device *, void *, void *);
 void	lom_attach(struct device *, struct device *, void *);
 int	lom_activate(struct device *, int);
 
-struct cfattach lom_ca = {
+const struct cfattach lom_ca = {
 	sizeof(struct lom_softc), lom_match, lom_attach,
 	NULL, lom_activate
 };
@@ -955,7 +955,7 @@ lom_refresh(void *arg)
 			lom1_write_hostname(sc);
 		else
 			lom2_write_hostname(sc);
-		strlcpy(sc->sc_hostname, hostname, sizeof(hostname));
+		strlcpy(sc->sc_hostname, hostname, sizeof(sc->sc_hostname));
 	}
 }
 

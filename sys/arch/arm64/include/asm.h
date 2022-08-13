@@ -1,4 +1,4 @@
-/*	$OpenBSD: asm.h,v 1.6 2019/05/04 16:18:35 kettenis Exp $	*/
+/*	$OpenBSD: asm.h,v 1.9 2022/05/24 22:34:02 guenther Exp $	*/
 /*	$NetBSD: asm.h,v 1.4 2001/07/16 05:43:32 matt Exp $	*/
 
 /*
@@ -38,16 +38,8 @@
 #ifndef _MACHINE_ASM_H_
 #define _MACHINE_ASM_H_
 
-#ifdef __ELF__
-# define _C_LABEL(x)	x
-#else
-# ifdef __STDC__
-#  define _C_LABEL(x)	_ ## x
-# else
-#  define _C_LABEL(x)	_/**/x
-# endif
-#endif
-#define	_ASM_LABEL(x)	x
+#define _C_LABEL(x)	x
+#define _ASM_LABEL(x)	x
 
 #ifdef __STDC__
 # define __CONCAT(x,y)	x ## y
@@ -69,8 +61,10 @@
  */
 #define _ASM_TYPE_FUNCTION	#function
 #define _ASM_TYPE_OBJECT	#object
-#define _ENTRY(x) \
-	.text; _ALIGN_TEXT; .globl x; .type x,_ASM_TYPE_FUNCTION; x:
+/* NB == No Binding: use .globl or .weak as necessary */
+#define _ENTRY_NB(x) \
+	.text; _ALIGN_TEXT; .type x,_ASM_TYPE_FUNCTION; x:
+#define _ENTRY(x)	.globl x; _ENTRY_NB(x)
 
 #if defined(PROF) || defined(GPROF)
 #  define _PROF_PROLOGUE	\
@@ -133,43 +127,34 @@
 
 #define	ENTRY(y)	_ENTRY(_C_LABEL(y)); _PROF_PROLOGUE
 #define	ENTRY_NP(y)	_ENTRY(_C_LABEL(y))
+#define	ENTRY_NB(y)	_ENTRY_NB(y); _PROF_PROLOGUE
 #define	ASENTRY(y)	_ENTRY(_ASM_LABEL(y)); _PROF_PROLOGUE
 #define	ASENTRY_NP(y)	_ENTRY(_ASM_LABEL(y))
 #define	END(y)		.size y, . - y
 #define EENTRY(sym)	 .globl  sym; sym:
 #define EEND(sym)
 
-#if defined(__ELF__) && defined(__PIC__)
-#ifdef __STDC__
-#define	PIC_SYM(x,y)	x ## ( ## y ## )
-#else
-#define	PIC_SYM(x,y)	x/**/(/**/y/**/)
-#endif
+#ifdef __PIC__
+#define	PIC_SYM(x,y)	x(y)
 #else
 #define	PIC_SYM(x,y)	x
 #endif
 
-#ifdef __ELF__
 #define	STRONG_ALIAS(alias,sym)						\
 	.global alias;							\
 	alias = sym
 #define	WEAK_ALIAS(alias,sym)						\
 	.weak alias;							\
 	alias = sym
-#endif
 
 #ifdef __STDC__
 #define	WARN_REFERENCES(sym,msg)					\
 	.stabs msg ## ,30,0,0,0 ;					\
 	.stabs __STRING(_C_LABEL(sym)) ## ,1,0,0,0
-#elif defined(__ELF__)
-#define	WARN_REFERENCES(sym,msg)					\
-	.stabs msg,30,0,0,0 ;						\
-	.stabs __STRING(sym),1,0,0,0
 #else
 #define	WARN_REFERENCES(sym,msg)					\
 	.stabs msg,30,0,0,0 ;						\
-	.stabs __STRING(_/**/sym),1,0,0,0
-#endif /* __STDC__ */
+	.stabs __STRING(sym),1,0,0,0
+#endif
 
 #endif /* !_MACHINE_ASM_H_ */

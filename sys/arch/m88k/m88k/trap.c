@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.119 2020/10/30 17:11:20 deraadt Exp $	*/
+/*	$OpenBSD: trap.c,v 1.122 2022/08/12 08:31:06 jsg Exp $	*/
 /*
  * Copyright (c) 2004, Miodrag Vallat.
  * Copyright (c) 1998 Steve Murphree, Jr.
@@ -156,7 +156,7 @@ panictrap(int type, struct trapframe *frame)
 	if (panicing++ == 0)
 		printtrap(type, frame);
 	if ((u_int)type < trap_types)
-		panic(trap_type[type]);
+		panic("%s", trap_type[type]);
 	else
 		panic("trap %d", type);
 	/*NOTREACHED*/
@@ -868,7 +868,17 @@ m88110_user_fault:
 #endif
 		} else {
 			fault_addr = frame->tf_dlar;
-			if (frame->tf_dsr & CMMU_DSR_RW) {
+			/*
+			 * Unlike the 88100, there is no specific bit telling
+			 * us this is the read part of an xmem operation.
+			 * However, if the WE (Write Exception) bit is set,
+			 * then obviously this is not a read fault.
+			 * But the value of this bit can not be relied upon
+			 * if either PI or SI are set...
+			 */
+			if ((frame->tf_dsr & CMMU_DSR_RW) != 0 &&
+			    ((frame->tf_dsr & (CMMU_DSR_PI|CMMU_DSR_SI)) != 0 ||
+			     (frame->tf_dsr & CMMU_DSR_WE) == 0)) {
 				access_type = PROT_READ;
 				fault_code = PROT_READ;
 			} else {
@@ -1141,8 +1151,8 @@ error_fatal(struct trapframe *frame)
 void
 m88100_syscall(register_t code, struct trapframe *tf)
 {
-	int i, nsys, nap;
-	struct sysent *callp;
+	int i, nap;
+	const struct sysent *callp;
 	struct proc *p = curproc;
 	int error;
 	register_t args[8] __aligned(8);
@@ -1150,9 +1160,6 @@ m88100_syscall(register_t code, struct trapframe *tf)
 	register_t *ap;
 
 	uvmexp.syscalls++;
-
-	callp = p->p_p->ps_emul->e_sysent;
-	nsys  = p->p_p->ps_emul->e_nsysent;
 
 	p->p_md.md_tf = tf;
 
@@ -1172,16 +1179,15 @@ m88100_syscall(register_t code, struct trapframe *tf)
 		nap--;
 		break;
 	case SYS___syscall:
-		if (callp != sysent)
-			break;
 		code = ap[_QUAD_LOWWORD];
 		ap += 2;
 		nap -= 2;
 		break;
 	}
 
-	if (code < 0 || code >= nsys)
-		callp += p->p_p->ps_emul->e_nosys;
+	callp = sysent;
+	if (code < 0 || code >= SYS_MAXSYSCALL)
+		callp += SYS_syscall;
 	else
 		callp += code;
 
@@ -1264,8 +1270,8 @@ m88100_syscall(register_t code, struct trapframe *tf)
 void
 m88110_syscall(register_t code, struct trapframe *tf)
 {
-	int i, nsys, nap;
-	struct sysent *callp;
+	int i, nap;
+	const struct sysent *callp;
 	struct proc *p = curproc;
 	int error;
 	register_t args[8] __aligned(8);
@@ -1273,9 +1279,6 @@ m88110_syscall(register_t code, struct trapframe *tf)
 	register_t *ap;
 
 	uvmexp.syscalls++;
-
-	callp = p->p_p->ps_emul->e_sysent;
-	nsys  = p->p_p->ps_emul->e_nsysent;
 
 	p->p_md.md_tf = tf;
 
@@ -1295,16 +1298,15 @@ m88110_syscall(register_t code, struct trapframe *tf)
 		nap--;
 		break;
 	case SYS___syscall:
-		if (callp != sysent)
-			break;
 		code = ap[_QUAD_LOWWORD];
 		ap += 2;
 		nap -= 2;
 		break;
 	}
 
-	if (code < 0 || code >= nsys)
-		callp += p->p_p->ps_emul->e_nosys;
+	callp = sysent;
+	if (code < 0 || code >= SYS_MAXSYSCALL)
+		callp += SYS_syscall;
 	else
 		callp += code;
 

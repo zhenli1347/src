@@ -1,4 +1,4 @@
-/*	$OpenBSD: head.c,v 1.21 2016/03/20 17:14:51 tb Exp $	*/
+/*	$OpenBSD: head.c,v 1.24 2022/02/07 17:19:57 cheloha Exp $	*/
 
 /*
  * Copyright (c) 1980, 1987 Regents of the University of California.
@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <unistd.h>
 
+int head_file(const char *, long, int);
 static void usage(void);
 
 /*
@@ -48,11 +49,9 @@ static void usage(void);
 int
 main(int argc, char *argv[])
 {
-	FILE	*fp;
-	long	cnt;
-	int	ch, firsttime;
+	const char *errstr;
+	int	ch;
 	long	linecnt = 10;
-	char	*p = NULL;
 	int	status = 0;
 
 	if (pledge("stdio rpath", NULL) == -1)
@@ -61,7 +60,9 @@ main(int argc, char *argv[])
 	/* handle obsolete -number syntax */
 	if (argc > 1 && argv[1][0] == '-' &&
 	    isdigit((unsigned char)argv[1][1])) {
-		p = argv[1] + 1;
+		linecnt = strtonum(argv[1] + 1, 1, LONG_MAX, &errstr);
+		if (errstr != NULL)
+			errx(1, "count is %s: %s", errstr, argv[1] + 1);
 		argc--;
 		argv++;
 	}
@@ -69,7 +70,9 @@ main(int argc, char *argv[])
 	while ((ch = getopt(argc, argv, "n:")) != -1) {
 		switch (ch) {
 		case 'n':
-			p = optarg;
+			linecnt = strtonum(optarg, 1, LONG_MAX, &errstr);
+			if (errstr != NULL)
+				errx(1, "count is %s: %s", errstr, optarg);
 			break;
 		default:
 			usage();
@@ -77,41 +80,59 @@ main(int argc, char *argv[])
 	}
 	argc -= optind, argv += optind;
 
-	if (p) {
-		const char *errstr;
+	if (argc == 0) {
+		if (pledge("stdio", NULL) == -1)
+			err(1, "pledge");
 
-		linecnt = strtonum(p, 1, LONG_MAX, &errstr);
-		if (errstr)
-			errx(1, "line count %s: %s", errstr, p);
+		status = head_file(NULL, linecnt, 0);
+	} else {
+		for (; *argv != NULL; argv++)
+			status |= head_file(*argv, linecnt, argc > 1);
 	}
 
-	for (firsttime = 1; ; firsttime = 0) {
-		if (!*argv) {
-			if (!firsttime)
-				exit(status);
-			fp = stdin;
-			if (pledge("stdio", NULL) == -1)
-				err(1, "pledge");
-		} else {
-			if ((fp = fopen(*argv, "r")) == NULL) {
-				warn("%s", *argv++);
-				status = 1;
-				continue;
-			}
-			if (argc > 1) {
-				if (!firsttime)
-					putchar('\n');
-				printf("==> %s <==\n", *argv);
-			}
-			++argv;
+	return status;
+}
+
+int
+head_file(const char *path, long count, int need_header)
+{
+	const char *name;
+	FILE *fp;
+	int ch, status = 0;
+	static int first = 1;
+
+	if (path != NULL) {
+		name = path;
+		fp = fopen(name, "r");
+		if (fp == NULL) {
+			warn("%s", name);
+			return 1;
 		}
-		for (cnt = linecnt; cnt && !feof(fp); --cnt)
-			while ((ch = getc(fp)) != EOF)
-				if (putchar(ch) == '\n')
-					break;
-		fclose(fp);
+		if (need_header) {
+			printf("%s==> %s <==\n", first ? "" : "\n", name);
+			if (ferror(stdout))
+				err(1, "stdout");
+			first = 0;
+		}
+	} else {
+		name = "stdin";
+		fp = stdin;
 	}
-	/*NOTREACHED*/
+
+	while ((ch = getc(fp)) != EOF) {
+		if (putchar(ch) == EOF)
+			err(1, "stdout");
+		if (ch == '\n' && --count == 0)
+			break;
+	}
+	if (ferror(fp)) {
+		warn("%s", name);
+		status = 1;
+	}
+
+	fclose(fp);
+
+	return status;
 }
 
 

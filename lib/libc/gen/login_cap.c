@@ -1,4 +1,4 @@
-/*	$OpenBSD: login_cap.c,v 1.39 2021/06/03 13:19:45 deraadt Exp $	*/
+/*	$OpenBSD: login_cap.c,v 1.45 2022/03/23 14:39:52 millert Exp $	*/
 
 /*
  * Copyright (c) 2000-2004 Todd C. Miller <millert@openbsd.org>
@@ -52,6 +52,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 
 #include <err.h>
 #include <errno.h>
@@ -80,9 +81,10 @@ static	int gsetrl(login_cap_t *, int, char *, int);
 login_cap_t *
 login_getclass(char *class)
 {
-	char *classfiles[2] = {_PATH_LOGIN_CONF, NULL};
+	char *classfiles[] = { NULL, NULL, NULL };
+	char classpath[PATH_MAX];
 	login_cap_t *lc;
-	int res;
+	int res, i = 0;
 
 	if ((lc = calloc(1, sizeof(login_cap_t))) == NULL) {
 		syslog(LOG_ERR, "%s:%d malloc: %m", __FILE__, __LINE__);
@@ -91,6 +93,15 @@ login_getclass(char *class)
 
 	if (class == NULL || class[0] == '\0')
 		class = LOGIN_DEFCLASS;
+	else {
+		res = snprintf(classpath, PATH_MAX, "%s/%s",
+			_PATH_LOGIN_CONF_D, class);
+		if (res >= 0 && res < PATH_MAX)
+			classfiles[i++] = classpath;
+	}
+
+	classfiles[i++] = _PATH_LOGIN_CONF;
+	classfiles[i] = NULL;
 
     	if ((lc->lc_class = strdup(class)) == NULL) {
 		syslog(LOG_ERR, "%s:%d strdup: %m", __FILE__, __LINE__);
@@ -106,7 +117,7 @@ login_getclass(char *class)
 				lc->lc_class);
 			break;
 		case -1:
-			if ((res = open(classfiles[0], 0)) >= 0)
+			if ((res = open(_PATH_LOGIN_CONF, O_RDONLY)) >= 0)
 				close(res);
 			if (strcmp(lc->lc_class, LOGIN_DEFCLASS) == 0 &&
 			    res < 0)
@@ -562,7 +573,7 @@ setclasscontext(char *class, u_int flags)
 	login_cap_t *lc;
 
 	flags &= LOGIN_SETRESOURCES | LOGIN_SETPRIORITY | LOGIN_SETUMASK |
-	    LOGIN_SETPATH;
+	    LOGIN_SETPATH | LOGIN_SETRTABLE;
 
 	lc = login_getclass(class);
 	ret = lc ? setusercontext(lc, NULL, 0, flags) : -1;
@@ -574,7 +585,7 @@ int
 setusercontext(login_cap_t *lc, struct passwd *pwd, uid_t uid, u_int flags)
 {
 	login_cap_t *flc;
-	quad_t p;
+	quad_t p, rtable;
 	int i;
 
 	flc = NULL;
@@ -623,6 +634,13 @@ setusercontext(login_cap_t *lc, struct passwd *pwd, uid_t uid, u_int flags)
 	if (flags & LOGIN_SETUMASK) {
 		p = login_getcapnum(lc, "umask", LOGIN_DEFUMASK,LOGIN_DEFUMASK);
 		umask((mode_t)p);
+	}
+
+	if (flags & LOGIN_SETRTABLE) {
+		rtable = login_getcapnum(lc, "rtable", -1, -1);
+
+		if (rtable >= 0 && setrtable((int)rtable) == -1)
+			syslog(LOG_ERR, "%s: setrtable: %m", lc->lc_class);
 	}
 
 	if (flags & LOGIN_SETGROUP) {
@@ -690,8 +708,11 @@ setuserpath(login_cap_t *lc, const struct passwd *pwd)
 	char *path = NULL, *opath = NULL, *op, *np;
 	int len, error;
 
+	/*
+	 * If we have no capabilities then set _PATH_DEFPATH.
+	 */
 	if (lc->lc_cap == NULL)
-		goto setit;		/* impossible */
+		goto setit;
 
 	if ((len = cgetustr(lc->lc_cap, "path", &opath)) <= 0)
 		goto setit;
@@ -743,8 +764,12 @@ setuserenv(login_cap_t *lc, const struct passwd *pwd)
 	char *beg, *end, *ep, *list, *value;
 	int len, error;
 
+	/*
+	 * If we have no capabilities then there is nothing to do and
+	 * we can just return success.
+	 */
 	if (lc->lc_cap == NULL)
-		return (-1);		/* impossible */
+		return (0);
 
 	if ((len = cgetustr(lc->lc_cap, "setenv", &list)) <= 0)
 		return (0);

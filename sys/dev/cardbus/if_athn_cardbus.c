@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_athn_cardbus.c,v 1.16 2021/04/15 18:25:43 stsp Exp $	*/
+/*	$OpenBSD: if_athn_cardbus.c,v 1.18 2022/07/24 17:22:12 kn Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -81,7 +81,7 @@ uint32_t	athn_cardbus_read(struct athn_softc *, uint32_t);
 void		athn_cardbus_write(struct athn_softc *, uint32_t, uint32_t);
 void		athn_cardbus_write_barrier(struct athn_softc *);
 
-struct cfattach athn_cardbus_ca = {
+const struct cfattach athn_cardbus_ca = {
 	sizeof (struct athn_cardbus_softc),
 	athn_cardbus_match,
 	athn_cardbus_attach,
@@ -93,7 +93,7 @@ static const struct pci_matchid athn_cardbus_devices[] = {
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR5418 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9160 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9280 },
-	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9281 },
+	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR928X },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9285 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR2427 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9227 },

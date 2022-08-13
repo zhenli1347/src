@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.114 2021/03/15 22:44:57 patrick Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.121 2022/08/10 16:58:16 patrick Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -23,6 +23,7 @@
 
 #ifndef _ACPI_WAKECODE
 
+#include <sys/event.h>
 #include <sys/timeout.h>
 #include <sys/rwlock.h>
 
@@ -45,7 +46,6 @@ extern int acpi_debug;
 extern int acpi_hasprocfvs;
 extern int acpi_haspci;
 
-struct klist;
 struct acpiec_softc;
 struct acpipwrres_softc;
 
@@ -55,6 +55,10 @@ struct acpivideo_softc {
 	struct acpi_softc *sc_acpi;
 	struct aml_node	*sc_devnode;
 };
+
+#define ACPIDEVCF_ADDR		0
+#define acpidevcf_addr		cf_loc[ACPIDEVCF_ADDR]
+#define ACPIDEVCF_ADDR_UNK	-1
 
 struct acpi_attach_args {
 	char		*aaa_name;
@@ -235,7 +239,7 @@ struct acpi_softc {
 	 */
 	struct acpi_facs	*sc_facs;	/* Shared with firmware! */
 
-	struct klist		*sc_note;
+	struct klist		sc_note;
 	struct acpi_reg_map	sc_pmregs[ACPIREG_MAXREG];
 	bus_space_handle_t	sc_ioh_pm1a_evt;
 
@@ -256,6 +260,7 @@ struct acpi_softc {
 	uint32_t		sc_gpe_en;
 	struct acpi_thread	*sc_thread;
 
+	struct aml_node		*sc_root;
 	struct aml_node		*sc_tts;
 	struct aml_node		*sc_pts;
 	struct aml_node		*sc_bfs;
@@ -291,7 +296,6 @@ extern struct acpi_softc *acpi_softc;
 #define GPE_NONE	0x00
 #define GPE_LEVEL	0x01
 #define GPE_EDGE	0x02
-#define GPE_DIRECT	0x04
 
 struct acpi_table {
 	int	offset;
@@ -331,20 +335,11 @@ int	 acpi_interrupt(void *);
 void	 acpi_powerdown(void);
 void	 acpi_reset(void);
 
-
-#define ACPI_SLEEP_SUSPEND	0x01
-#define ACPI_SLEEP_HIBERNATE	0x02
-
-int	 acpi_sleep_state(struct acpi_softc *, int);
-void	 acpi_sleep_clocks(struct acpi_softc *, int);
 int	 acpi_sleep_cpu(struct acpi_softc *, int);
-void	 acpi_sleep_mp(void);
 void	 acpi_sleep_pm(struct acpi_softc *, int);
 void	 acpi_resume_pm(struct acpi_softc *, int);
 void	 acpi_resume_cpu(struct acpi_softc *, int);
-void	 acpi_resume_mp(void);
 void	 acpi_sleep_walk(struct acpi_softc *, int);
-
 
 #define ACPI_IOREAD 0
 #define ACPI_IOWRITE 1
@@ -379,10 +374,15 @@ void	acpi_sleep(int, char *);
 int	acpi_matchcls(struct acpi_attach_args *, int, int, int);
 int	acpi_matchhids(struct acpi_attach_args *, const char *[], const char *);
 int	acpi_parsehid(struct aml_node *, void *, char *, char *, size_t);
+void	acpi_parse_crs(struct acpi_softc *, struct acpi_attach_args *);
 int64_t	acpi_getsta(struct acpi_softc *sc, struct aml_node *);
 
 int	acpi_getprop(struct aml_node *, const char *, void *, int);
-uint32_t acpi_getpropint(struct aml_node *, const char *, uint32_t);
+uint64_t acpi_getpropint(struct aml_node *, const char *, uint64_t);
+
+void	acpi_indicator(struct acpi_softc *, int);
+void	acpi_disable_allgpes(struct acpi_softc *);
+void	acpi_enable_wakegpes(struct acpi_softc *, int);
 
 int	acpi_record_event(struct acpi_softc *, u_int);
 

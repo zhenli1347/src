@@ -1,4 +1,4 @@
-/*	$OpenBSD: bwi.c,v 1.131 2021/05/16 15:10:19 deraadt Exp $	*/
+/*	$OpenBSD: bwi.c,v 1.133 2022/04/21 21:03:02 stsp Exp $	*/
 
 /*
  * Copyright (c) 2007 The DragonFly Project.  All rights reserved.
@@ -6693,7 +6693,7 @@ bwi_bbp_attach(struct bwi_softc *sc)
 		}
 	}
 
-	/* At least one MAC shold exist */
+	/* At least one MAC should exist */
 	if (!BWI_REGWIN_EXIST(&sc->sc_mac[0].mac_regwin)) {
 		printf("%s: no MAC was found\n", sc->sc_dev.dv_xname);
 		return (ENXIO);
@@ -8454,6 +8454,7 @@ bwi_rxeof(struct bwi_softc *sc, int end_idx)
 		ni = ieee80211_find_rxnode(ic, wh);
 		type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
 
+		memset(&rxi, 0, sizeof(rxi));
 		rxi.rxi_rssi = hdr->rxh_rssi;
 		rxi.rxi_tstamp = letoh16(hdr->rxh_tsf);
 		ieee80211_inputm(ifp, m, ni, &rxi, &ml);
@@ -8670,7 +8671,7 @@ bwi_plcp_header(void *plcp, int pkt_len, uint8_t rate)
 	else if (modtype == IEEE80211_MODTYPE_DS)
 		bwi_ds_plcp_header(plcp, pkt_len, rate);
 	else
-		panic("unsupport modulation type %u", modtype);
+		panic("unsupported modulation type %u", modtype);
 }
 
 enum bwi_modtype
@@ -9203,7 +9204,7 @@ bwi_bus_attach(struct bwi_softc *sc)
 	if (!bwi_regwin_is_enabled(sc, bus))
 		bwi_regwin_enable(sc, bus, 0);
 
-	/* Disable interripts */
+	/* Disable interrupts */
 	CSR_WRITE_4(sc, BWI_INTRVEC, 0);
 
 	return (bwi_regwin_switch(sc, old, NULL));

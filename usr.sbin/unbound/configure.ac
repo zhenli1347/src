@@ -10,15 +10,15 @@ sinclude(dnscrypt/dnscrypt.m4)
 
 # must be numbers. ac_defun because of later processing
 m4_define([VERSION_MAJOR],[1])
-m4_define([VERSION_MINOR],[13])
-m4_define([VERSION_MICRO],[2])
+m4_define([VERSION_MINOR],[16])
+m4_define([VERSION_MICRO],[0])
 AC_INIT([unbound],m4_defn([VERSION_MAJOR]).m4_defn([VERSION_MINOR]).m4_defn([VERSION_MICRO]),[unbound-bugs@nlnetlabs.nl or https://github.com/NLnetLabs/unbound/issues],[unbound])
 AC_SUBST(UNBOUND_VERSION_MAJOR, [VERSION_MAJOR])
 AC_SUBST(UNBOUND_VERSION_MINOR, [VERSION_MINOR])
 AC_SUBST(UNBOUND_VERSION_MICRO, [VERSION_MICRO])
 
 LIBUNBOUND_CURRENT=9
-LIBUNBOUND_REVISION=13
+LIBUNBOUND_REVISION=16
 LIBUNBOUND_AGE=1
 # 1.0.0 had 0:12:0
 # 1.0.1 had 0:13:0
@@ -99,6 +99,9 @@ LIBUNBOUND_AGE=1
 # 1.13.0 had 9:11:1
 # 1.13.1 had 9:12:1
 # 1.13.2 had 9:13:1
+# 1.14.0 had 9:14:1
+# 1.15.0 had 9:15:1
+# 1.16.0 had 9:16:1
 
 #   Current  -- the number of the binary API that we're implementing
 #   Revision -- which iteration of the implementation of the binary
@@ -411,6 +414,39 @@ AC_CHECK_HEADERS([net/if.h],,, [
 
 # Check for Apple header. This uncovers TARGET_OS_IPHONE, TARGET_OS_TV or TARGET_OS_WATCH
 AC_CHECK_HEADERS([TargetConditionals.h],,, [AC_INCLUDES_DEFAULT])
+AC_CHECK_HEADERS([netioapi.h],,, [AC_INCLUDES_DEFAULT
+#if HAVE_SYS_PARAM_H
+#include <sys/param.h>
+#endif
+
+#ifdef HAVE_SYS_SOCKET_H
+#include <sys/socket.h>
+#endif
+
+#ifdef HAVE_SYS_UIO_H
+#include <sys/uio.h>
+#endif
+
+#ifdef HAVE_NETINET_IN_H
+#include <netinet/in.h>
+#endif
+
+#ifdef HAVE_NETINET_TCP_H
+#include <netinet/tcp.h>
+#endif
+
+#ifdef HAVE_ARPA_INET_H
+#include <arpa/inet.h>
+#endif
+
+#ifdef HAVE_WINSOCK2_H
+#include <winsock2.h>
+#endif
+
+#ifdef HAVE_WS2TCPIP_H
+#include <ws2tcpip.h>
+#endif
+])
 
 # check for types.  
 # Using own tests for int64* because autoconf builtin only give 32bit.
@@ -457,7 +493,7 @@ AC_SUBST(RUNTIME_PATH)
 AC_SEARCH_LIBS([inet_pton], [nsl])
 AC_SEARCH_LIBS([socket], [socket])
 
-# check wether strptime also works
+# check whether strptime also works
 AC_DEFUN([AC_CHECK_STRPTIME_WORKS],
 [AC_REQUIRE([AC_PROG_CC])
 AC_MSG_CHECKING(whether strptime works)
@@ -491,6 +527,7 @@ ACX_SYS_LARGEFILE
 ACX_CHECK_NONBLOCKING_BROKEN
 ACX_MKDIR_ONE_ARG
 AC_CHECK_FUNCS([strptime],[AC_CHECK_STRPTIME_WORKS],[AC_LIBOBJ([strptime])])
+
 
 # check if we can use SO_REUSEPORT
 reuseport_default=0
@@ -699,11 +736,15 @@ if test x_$ub_test_python != x_no; then
       AC_SUBST(PY_MAJOR_VERSION)
       # Have Python
       AC_DEFINE(HAVE_PYTHON,1,[Define if you have Python libraries and header files.])
-      if test -n "$LIBS"; then
-        LIBS="$PYTHON_LDFLAGS $LIBS"
-      else
-        LIBS="$PYTHON_LDFLAGS"
+      if test x_$ub_with_pythonmod != x_no; then
+        if test -n "$LIBS"; then
+          LIBS="$PYTHON_LDFLAGS $LIBS"
+        else
+          LIBS="$PYTHON_LDFLAGS"
+        fi
       fi
+      PYTHON_LIBS="$PYTHON_LDFLAGS"
+      AC_SUBST(PYTHON_LIBS)
       if test -n "$CPPFLAGS"; then
         CPPFLAGS="$CPPFLAGS $PYTHON_CPPFLAGS"
       else
@@ -776,6 +817,12 @@ if test "`uname`" = "NetBSD"; then
 	NETBSD_LINTFLAGS='"-D__RENAME(x)=" -D_NETINET_IN_H_'
 	AC_SUBST(NETBSD_LINTFLAGS)
 fi
+
+if test "`uname`" = "Linux"; then
+	# splint cannot parse modern c99 header files
+	GCC_DOCKER_LINTFLAGS='-syntax'
+	AC_SUBST(GCC_DOCKER_LINTFLAGS)
+fi
 CONFIG_DATE=`date +%Y%m%d`
 AC_SUBST(CONFIG_DATE)
 
@@ -830,7 +877,7 @@ ACX_WITH_SSL
 ACX_LIB_SSL
 SSLLIB="-lssl"
 
-PC_CRYPTO_DEPENDENCY="libcrypto libssl"
+PC_CRYPTO_DEPENDENCY=""
 AC_SUBST(PC_CRYPTO_DEPENDENCY)
 
 # check if -lcrypt32 is needed because CAPIENG needs that. (on windows)
@@ -850,7 +897,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[
 ])
 
 AC_MSG_CHECKING([for LibreSSL])
-if grep VERSION_TEXT $ssldir/include/openssl/opensslv.h | grep "LibreSSL" >/dev/null; then
+if grep VERSION_TEXT $ssldir_include/openssl/opensslv.h | grep "LibreSSL" >/dev/null; then
 	AC_MSG_RESULT([yes])
 	AC_DEFINE([HAVE_LIBRESSL], [1], [Define if we have LibreSSL])
 	# libressl provides these compat functions, but they may also be
@@ -860,7 +907,7 @@ else
 	AC_MSG_RESULT([no])
 fi
 AC_CHECK_HEADERS([openssl/conf.h openssl/engine.h openssl/bn.h openssl/dh.h openssl/dsa.h openssl/rsa.h openssl/core_names.h openssl/param_build.h],,, [AC_INCLUDES_DEFAULT])
-AC_CHECK_FUNCS([OPENSSL_config EVP_sha1 EVP_sha256 EVP_sha512 FIPS_mode EVP_MD_CTX_new OpenSSL_add_all_digests OPENSSL_init_crypto EVP_cleanup ENGINE_cleanup ERR_load_crypto_strings CRYPTO_cleanup_all_ex_data ERR_free_strings RAND_cleanup DSA_SIG_set0 EVP_dss1 EVP_DigestVerify EVP_aes_256_cbc EVP_EncryptInit_ex HMAC_Init_ex CRYPTO_THREADID_set_callback EVP_MAC_CTX_set_params OSSL_PARAM_BLD_new])
+AC_CHECK_FUNCS([OPENSSL_config EVP_sha1 EVP_sha256 EVP_sha512 FIPS_mode EVP_MD_CTX_new OpenSSL_add_all_digests OPENSSL_init_crypto EVP_cleanup ENGINE_cleanup ERR_load_crypto_strings CRYPTO_cleanup_all_ex_data ERR_free_strings RAND_cleanup DSA_SIG_set0 EVP_dss1 EVP_DigestVerify EVP_aes_256_cbc EVP_EncryptInit_ex HMAC_Init_ex CRYPTO_THREADID_set_callback EVP_MAC_CTX_set_params OSSL_PARAM_BLD_new BIO_set_callback_ex])
 
 # these check_funcs need -lssl
 BAKLIBS="$LIBS"
@@ -973,14 +1020,14 @@ case "$enable_subnet" in
 	;;
 esac
 
-# check wether gost also works
+# check whether gost also works
 AC_DEFUN([AC_CHECK_GOST_WORKS],
 [AC_REQUIRE([AC_PROG_CC])
 AC_MSG_CHECKING([if GOST works])
 if test c${cross_compiling} = cno; then
 BAKCFLAGS="$CFLAGS"
 if test -n "$ssldir"; then
-	CFLAGS="$CFLAGS -Wl,-rpath,$ssldir/lib"
+	CFLAGS="$CFLAGS -Wl,-rpath,$ssldir_lib"
 fi
 AC_RUN_IFELSE([AC_LANG_SOURCE([[
 #include <string.h>
@@ -1103,8 +1150,8 @@ case "$enable_ecdsa" in
 	      ])
 	      # see if OPENSSL 1.0.0 or later (has EVP MD and Verify independency)
 	      AC_MSG_CHECKING([if openssl supports SHA2 and ECDSA with EVP])
-	      if grep OPENSSL_VERSION_TEXT $ssldir/include/openssl/opensslv.h | grep "OpenSSL" >/dev/null; then
-		if grep OPENSSL_VERSION_NUMBER $ssldir/include/openssl/opensslv.h | grep 0x0 >/dev/null; then
+	      if grep OPENSSL_VERSION_TEXT $ssldir_include/openssl/opensslv.h | grep "OpenSSL" >/dev/null; then
+		if grep OPENSSL_VERSION_NUMBER $ssldir_include/openssl/opensslv.h | grep 0x0 >/dev/null; then
 		  AC_MSG_RESULT([no])
 		  AC_DEFINE_UNQUOTED([USE_ECDSA_EVP_WORKAROUND], [1], [Define this to enable an EVP workaround for older openssl])
 		else
@@ -1508,6 +1555,7 @@ if test "$USE_WINSOCK" = 1; then
 	AC_SUBST(WIN_CONTROL_OBJ_LINK)
 	WIN_CHECKCONF_OBJ_LINK="rsrc_unbound_checkconf.o"
 	AC_SUBST(WIN_CHECKCONF_OBJ_LINK)
+	AC_DEFINE(__USE_MINGW_ANSI_STDIO, 1, [defined to use gcc ansi snprintf and sscanf that understands %lld when compiled for windows.])
 fi
 if test $ac_cv_func_getaddrinfo = no; then
 	AC_LIBOBJ([fake-rfc2553])
@@ -1594,7 +1642,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([
   AC_MSG_RESULT(no))
 
 AC_SEARCH_LIBS([setusercontext], [util])
-AC_CHECK_FUNCS([tzset sigprocmask fcntl getpwnam endpwent getrlimit setrlimit setsid chroot kill chown sleep usleep random srandom recvmsg sendmsg writev socketpair glob initgroups strftime localtime_r setusercontext _beginthreadex endservent endprotoent fsync shmget accept4 getifaddrs])
+AC_CHECK_FUNCS([tzset sigprocmask fcntl getpwnam endpwent getrlimit setrlimit setsid chroot kill chown sleep usleep random srandom recvmsg sendmsg writev socketpair glob initgroups strftime localtime_r setusercontext _beginthreadex endservent endprotoent fsync shmget accept4 getifaddrs if_nametoindex])
 AC_CHECK_FUNCS([setresuid],,[AC_CHECK_FUNCS([setreuid])])
 AC_CHECK_FUNCS([setresgid],,[AC_CHECK_FUNCS([setregid])])
 
@@ -1833,11 +1881,17 @@ case "$enable_ipset" in
 			withval="/usr/local /opt/local /usr/lib /usr/pkg /usr/sfw /usr"
 		fi
 		for dir in $withval ; do
-			if test -f "$dir/include/libmnl/libmnl.h"; then
+			if test -f "$dir/include/libmnl/libmnl.h" -o -f "$dir/include/libmnl/libmnl/libmnl.h"; then
 				found_libmnl="yes"
 				dnl assume /usr is in default path.
+				extralibmnl=""
+				if test -f "$dir/include/libmnl/libmnl/libmnl.h"; then
+					extralibmnl="/libmnl"
+				fi
+				if test "$dir" != "/usr" -o -n "$extralibmnl"; then
+					CPPFLAGS="$CPPFLAGS -I$dir/include$extralibmnl"
+				fi
 				if test "$dir" != "/usr"; then
-					CPPFLAGS="$CPPFLAGS -I$dir/include"
 					LDFLAGS="$LDFLAGS -L$dir/lib"
 				fi
 				AC_MSG_RESULT(found in $dir)
@@ -2015,7 +2069,7 @@ dnl includes
 #include <ws2tcpip.h>
 #endif
 
-#ifndef USE_WINSOCK
+#if !defined(USE_WINSOCK) || !defined(HAVE_SNPRINTF) || defined(SNPRINTF_RET_BROKEN) || defined(__USE_MINGW_ANSI_STDIO)
 #define ARG_LL "%ll"
 #else
 #define ARG_LL "%I64"

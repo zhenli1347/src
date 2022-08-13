@@ -343,6 +343,7 @@
 #define SHT_PREINIT_ARRAY 16		/* Array of ptrs to pre-init funcs */
 #define SHT_GROUP	  17		/* Section contains a section group */
 #define SHT_SYMTAB_SHNDX  18		/* Indicies for SHN_XINDEX entries */
+#define SHT_RELR	  19		/* relative-only relocation section */
 
 #define SHT_LOOS	0x60000000	/* First of OS specific semantics */
 #define SHT_HIOS	0x6fffffff	/* Last of OS specific semantics */
@@ -570,6 +571,9 @@
 #define DT_ENCODING	31
 #define DT_PREINIT_ARRAY   32
 #define DT_PREINIT_ARRAYSZ 33
+#define DT_RELRSZ	35
+#define DT_RELR		36
+#define DT_RELRENT	37
 
 /* Note, the Oct 4, 1999 draft of the ELF ABI changed the values
    for DT_LOOS and DT_HIOS.  Some implementations however, use
@@ -665,6 +669,19 @@
 #define DF_1_NODEFLIB	0x00000800
 #define DF_1_NODUMP	0x00001000
 #define DF_1_CONLFAT	0x00002000
+#define DF_1_ENDFILTEE	0x00004000
+#define DF_1_DISPRELDNE	0x00008000
+#define DF_1_DISPRELPND	0x00010000
+#define DF_1_NODIRECT	0x00020000
+#define DF_1_IGNMULDEF	0x00040000
+#define DF_1_NOKSYMS	0x00080000
+#define DF_1_NOHDR	0x00100000
+#define DF_1_EDITED	0x00200000
+#define DF_1_NORELOC	0x00400000
+#define DF_1_SYMINTPOSE	0x00800000
+#define DF_1_GLOBAUDIT	0x01000000
+#define DF_1_SINGLETON	0x02000000
+#define DF_1_PIE	0x08000000
 
 /* Flag values for the DT_FLAGS entry.	*/
 #define DF_ORIGIN	(1 << 0)

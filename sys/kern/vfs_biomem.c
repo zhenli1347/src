@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_biomem.c,v 1.49 2021/06/16 09:02:21 mpi Exp $ */
+/*	$OpenBSD: vfs_biomem.c,v 1.51 2021/10/24 00:02:25 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 Artur Grabowski <art@openbsd.org>
@@ -238,7 +238,7 @@ buf_unmap(struct buf *bp)
 	TAILQ_REMOVE(&buf_valist, bp, b_valist);
 	bcstats.kvaslots_avail--;
 	va = (vaddr_t)bp->b_data;
-	bp->b_data = 0;
+	bp->b_data = NULL;
 	pmap_kremove(va, bp->b_bufsize);
 	pmap_update(pmap_kernel());
 
@@ -259,7 +259,7 @@ buf_alloc_pages(struct buf *bp, vsize_t size)
 	KASSERT(bp->b_data == NULL);
 	splassert(IPL_BIO);
 
-	uvm_obj_init(&bp->b_uobj, NULL, 1);
+	uvm_obj_init(&bp->b_uobj, &bufcache_pager, 1);
 
 	/*
 	 * Attempt to allocate with NOWAIT. if we can't, then throw

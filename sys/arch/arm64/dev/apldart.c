@@ -1,4 +1,4 @@
-/*	$OpenBSD: apldart.c,v 1.5 2021/06/25 17:41:22 patrick Exp $	*/
+/*	$OpenBSD: apldart.c,v 1.16 2022/07/21 18:24:24 kettenis Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -31,11 +31,6 @@
 #include <dev/ofw/fdt.h>
 
 /*
- * This driver is based on preliminary device tree bindings and will
- * almost certainly need changes once the official bindings land in
- * mainline Linux.  Support for these preliminary bindings will be
- * dropped as soon as official bindings are available.
- *
  * This driver largely ignores stream IDs and simply uses a single
  * translation table for all the devices that it serves.  This is good
  * enough for the PCIe host bridge that serves the on-board devices on
@@ -43,55 +38,124 @@
  * single PCIe device behind each DART.
  */
 
-#define DART_TLB_OP		0x0020
-#define  DART_TLB_OP_FLUSH	(1 << 20)
-#define  DART_TLB_OP_BUSY	(1 << 2)
-#define DART_TLB_OP_SIDMASK	0x0034
-#define DART_CONFIG(sid)	(0x0100 + 4 *(sid))
-#define  DART_CONFIG_TXEN	(1 << 7)
-#define DART_TTBR(sid, idx)	(0x0200 + 16 * (sid) + 4 * (idx))
-#define  DART_TTBR_VALID	(1U << 31)
-#define  DART_TTBR_SHIFT	12
+#define DART_PARAMS2			0x0004
+#define  DART_PARAMS2_BYPASS_SUPPORT		(1 << 0)
+
+#define DART_T8020_TLB_CMD		0x0020
+#define  DART_T8020_TLB_CMD_FLUSH		(1 << 20)
+#define  DART_T8020_TLB_CMD_BUSY		(1 << 2)
+#define DART_T8020_TLB_SIDMASK		0x0034
+#define DART_T8020_ERROR		0x0040
+#define DART_T8020_ERROR_ADDR_LO	0x0050
+#define DART_T8020_ERROR_ADDR_HI	0x0054
+#define DART_T8020_CONFIG		0x0060
+#define  DART_T8020_CONFIG_LOCK			(1 << 15)
+#define DART_T8020_SID_ENABLE		0x00fc
+#define DART_T8020_TCR_BASE		0x0100
+#define  DART_T8020_TCR_TRANSLATE_ENABLE	(1 << 7)
+#define  DART_T8020_TCR_BYPASS_DART		(1 << 8)
+#define  DART_T8020_TCR_BYPASS_DAPF		(1 << 12)
+#define DART_T8020_TTBR_BASE		0x0200
+#define  DART_T8020_TTBR_VALID			(1U << 31)
+
+#define DART_T8110_PARAMS4		0x000c
+#define  DART_T8110_PARAMS4_NSID_MASK		(0x1ff << 0)
+#define DART_T8110_TLB_CMD		0x0080
+#define  DART_T8110_TLB_CMD_BUSY		(1U << 31)
+#define  DART_T8110_TLB_CMD_FLUSH_ALL		(0 << 8)
+#define DART_T8110_ERROR		0x0100
+#define DART_T8110_ERROR_MASK		0x0104
+#define DART_T8110_ERROR_ADDR_LO	0x0170
+#define DART_T8110_ERROR_ADDR_HI	0x0174
+#define DART_T8110_PROTECT		0x0200
+#define  DART_T8110_PROTECT_TTBR_TCR		(1 << 0)
+#define DART_T8110_SID_ENABLE_BASE	0x0c00
+#define DART_T8110_TCR_BASE		0x1000
+#define  DART_T8110_TCR_BYPASS_DAPF		(1 << 2)
+#define  DART_T8110_TCR_BYPASS_DART		(1 << 1)
+#define  DART_T8110_TCR_TRANSLATE_ENABLE	(1 << 0)
+#define DART_T8110_TTBR_BASE		0x1400
+#define  DART_T8110_TTBR_VALID			(1 << 0)
 
 #define DART_PAGE_SIZE		16384
 #define DART_PAGE_MASK		(DART_PAGE_SIZE - 1)
 
-#define DART_L1_TABLE		0xb
-#define DART_L2_INVAL		0x0
-#define DART_L2_PAGE		0x3
+#define DART_SID_ENABLE(sc, idx) \
+    ((sc)->sc_sid_enable_base + 4 * (idx))
+#define DART_TCR(sc, sid)	((sc)->sc_tcr_base + 4 * (sid))
+#define DART_TTBR(sc, sid, idx)	\
+    ((sc)->sc_ttbr_base + 4 * (sc)->sc_nttbr * (sid) + 4 * (idx))
+#define  DART_TTBR_SHIFT	12
 
-inline paddr_t
+#define DART_ALL_STREAMS(sc)	((1U << (sc)->sc_nsid) - 1)
+
+
+/*
+ * Some hardware (e.g. bge(4)) will always use (aligned) 64-bit memory
+ * access.  To make sure this doesn't fault, round the subpage limits
+ * down and up accordingly.
+ */
+#define DART_OFFSET_MASK	7
+
+#define DART_L1_TABLE		0x3
+#define DART_L2_INVAL		0
+#define DART_L2_VALID		(1 << 0)
+#define DART_L2_FULL_PAGE	(1 << 1)
+#define DART_L2_START(addr)	((((addr) & DART_PAGE_MASK) >> 2) << 52)
+#define DART_L2_END(addr)	((((addr) & DART_PAGE_MASK) >> 2) << 40)
+
+static inline paddr_t
 apldart_round_page(paddr_t pa)
 {
 	return ((pa + DART_PAGE_MASK) & ~DART_PAGE_MASK);
 }
 
-inline paddr_t
+static inline paddr_t
 apldart_trunc_page(paddr_t pa)
 {
 	return (pa & ~DART_PAGE_MASK);
 }
 
+static inline psize_t
+apldart_round_offset(psize_t off)
+{
+	return ((off + DART_OFFSET_MASK) & ~DART_OFFSET_MASK);
+}
+
+static inline psize_t
+apldart_trunc_offset(psize_t off)
+{
+	return (off & ~DART_OFFSET_MASK);
+}
+
 #define HREAD4(sc, reg)							\
-	(bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh[0], (reg)))
+	(bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg)))
 #define HWRITE4(sc, reg, val)						\
-	apldart_write(sc, (reg), (val))
+	bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
 
 struct apldart_softc {
 	struct device		sc_dev;
 	bus_space_tag_t		sc_iot;
-	bus_space_handle_t	sc_ioh[2];
+	bus_space_handle_t	sc_ioh;
 	bus_dma_tag_t		sc_dmat;
+	int			sc_node;
 
-	uint32_t		sc_sid_mask;
 	int			sc_nsid;
-	int			sc_subdart;
+	int			sc_nttbr;
+	bus_addr_t		sc_sid_enable_base;
+	bus_addr_t		sc_tcr_base;
+	uint32_t		sc_tcr_translate_enable;
+	uint32_t		sc_tcr_bypass;
+	bus_addr_t		sc_ttbr_base;
+	uint32_t		sc_ttbr_valid;
+	void			(*sc_flush_tlb)(struct apldart_softc *);
 
 	bus_addr_t		sc_dvabase;
 	bus_addr_t		sc_dvaend;
 	struct extent		*sc_dvamap;
 	struct mutex		sc_dvamap_mtx;
 
+	int			sc_shift;
 	struct apldart_dmamem	*sc_l1;
 	struct apldart_dmamem	**sc_l2;
 
@@ -124,7 +188,7 @@ void	apldart_dmamem_free(bus_dma_tag_t, struct apldart_dmamem *);
 int	apldart_match(struct device *, void *, void *);
 void	apldart_attach(struct device *, struct device *, void *);
 
-struct cfattach	apldart_ca = {
+const struct cfattach apldart_ca = {
 	sizeof (struct apldart_softc), apldart_match, apldart_attach
 };
 
@@ -134,9 +198,11 @@ struct cfdriver apldart_cd = {
 
 bus_dma_tag_t apldart_map(void *, uint32_t *, bus_dma_tag_t);
 void	apldart_reserve(void *, uint32_t *, bus_addr_t, bus_size_t);
-int	apldart_intr(void *);
+int	apldart_t8020_intr(void *);
+int	apldart_t8110_intr(void *);
 
-void	apldart_flush_tlb(struct apldart_softc *);
+void	apldart_t8020_flush_tlb(struct apldart_softc *);
+void	apldart_t8110_flush_tlb(struct apldart_softc *);
 int	apldart_load_map(struct apldart_softc *, bus_dmamap_t);
 void	apldart_unload_map(struct apldart_softc *, bus_dmamap_t);
 
@@ -160,7 +226,9 @@ apldart_match(struct device *parent, void *match, void *aux)
 {
 	struct fdt_attach_args *faa = aux;
 
-	return OF_is_compatible(faa->fa_node, "apple,dart-m1");
+	return OF_is_compatible(faa->fa_node, "apple,t6000-dart") ||
+	    OF_is_compatible(faa->fa_node, "apple,t8103-dart") ||
+	    OF_is_compatible(faa->fa_node, "apple,t8110-dart");
 }
 
 void
@@ -171,6 +239,7 @@ apldart_attach(struct device *parent, struct device *self, void *aux)
 	paddr_t pa;
 	volatile uint64_t *l1;
 	int ntte, nl1, nl2;
+	uint32_t config, params2, params4, tcr, ttbr;
 	int sid, idx;
 
 	if (faa->fa_nreg < 1) {
@@ -180,26 +249,93 @@ apldart_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_iot = faa->fa_iot;
 	if (bus_space_map(sc->sc_iot, faa->fa_reg[0].addr,
-	    faa->fa_reg[0].size, 0, &sc->sc_ioh[0])) {
+	    faa->fa_reg[0].size, 0, &sc->sc_ioh)) {
 		printf(": can't map registers\n");
 		return;
 	}
 
-	if (faa->fa_nreg > 1) {
-		if (bus_space_map(sc->sc_iot, faa->fa_reg[1].addr,
-		    faa->fa_reg[1].size, 0, &sc->sc_ioh[1])) {
-			printf(": can't map registers\n");
-			return;
-		}
-		sc->sc_subdart = 1;
-	}
-
 	sc->sc_dmat = faa->fa_dmat;
 
-	printf("\n");
+	sc->sc_node = faa->fa_node;
+	if (OF_is_compatible(sc->sc_node, "apple,t8110-dart")) {
+		params4 = HREAD4(sc, DART_T8110_PARAMS4);
+		sc->sc_nsid = params4 & DART_T8110_PARAMS4_NSID_MASK;
+		sc->sc_nttbr = 1;
+		sc->sc_sid_enable_base = DART_T8110_SID_ENABLE_BASE;
+		sc->sc_tcr_base = DART_T8110_TCR_BASE;
+		sc->sc_tcr_translate_enable = DART_T8110_TCR_TRANSLATE_ENABLE;
+		sc->sc_tcr_bypass =
+		    DART_T8110_TCR_BYPASS_DAPF | DART_T8110_TCR_BYPASS_DART;
+		sc->sc_ttbr_base = DART_T8110_TTBR_BASE;
+		sc->sc_ttbr_valid = DART_T8110_TTBR_VALID;
+		sc->sc_flush_tlb = apldart_t8110_flush_tlb;
+	} else {
+		sc->sc_nsid = 16;
+		sc->sc_nttbr = 4;
+		sc->sc_sid_enable_base = DART_T8020_SID_ENABLE;
+		sc->sc_tcr_base = DART_T8020_TCR_BASE;
+		sc->sc_tcr_translate_enable = DART_T8020_TCR_TRANSLATE_ENABLE;
+		sc->sc_tcr_bypass =
+		    DART_T8020_TCR_BYPASS_DAPF | DART_T8020_TCR_BYPASS_DART;
+		sc->sc_ttbr_base = DART_T8020_TTBR_BASE;
+		sc->sc_ttbr_valid = DART_T8020_TTBR_VALID;
+		sc->sc_flush_tlb = apldart_t8020_flush_tlb;
+	}
 
-	sc->sc_sid_mask = OF_getpropint(faa->fa_node, "sid-mask", 0xffff);
-	sc->sc_nsid = fls(sc->sc_sid_mask);
+	if (OF_is_compatible(sc->sc_node, "apple,t6000-dart") ||
+	    OF_is_compatible(sc->sc_node, "apple,t8110-dart"))
+		sc->sc_shift = 4;
+
+	/* Skip locked DARTs for now. */
+	if (OF_is_compatible(sc->sc_node, "apple,t8110-dart")) {
+		config = HREAD4(sc, DART_T8110_PROTECT);
+		if (config & DART_T8110_PROTECT_TTBR_TCR) {
+			printf(": locked\n");
+			return;
+		}
+	} else {
+		config = HREAD4(sc, DART_T8020_CONFIG);
+		if (config & DART_T8020_CONFIG_LOCK) {
+			printf(": locked\n");
+			return;
+		}
+	}
+
+	/*
+	 * Resetting the DART used for the display controller will
+	 * kill the framebuffer.  This should be the only DART that
+	 * has translation enabled and a valid translation table
+	 * installed.  Skip this DART for now.
+	 */
+	for (sid = 0; sid < sc->sc_nsid; sid++) {
+		tcr = HREAD4(sc, DART_TCR(sc, sid));
+		if ((tcr & sc->sc_tcr_translate_enable) == 0)
+			continue;
+
+		for (idx = 0; idx < sc->sc_nttbr; idx++) {
+			ttbr = HREAD4(sc, DART_TTBR(sc, sid, idx));
+			if (ttbr & sc->sc_ttbr_valid) {
+				printf(": translating\n");
+				return;
+			}
+		}
+	}
+
+	/*
+	 * Use bypass mode if supported.  This avoids an issue with
+	 * the USB3 controllers which need mappings entered into two
+	 * IOMMUs, which is somewhat difficult to implement with our
+	 * current kernel interfaces.
+	 */
+	params2 = HREAD4(sc, DART_PARAMS2);
+	if (params2 & DART_PARAMS2_BYPASS_SUPPORT) {
+		for (sid = 0; sid < sc->sc_nsid; sid++)
+			HWRITE4(sc, DART_TCR(sc, sid), sc->sc_tcr_bypass);
+		printf(": bypass\n");
+		return;
+	}
+
+	printf("\n");
 
 	/*
 	 * Skip the first page to help catching bugs where a device is
@@ -212,14 +348,14 @@ apldart_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Disable translations. */
 	for (sid = 0; sid < sc->sc_nsid; sid++)
-		HWRITE4(sc, DART_CONFIG(sid), 0);
+		HWRITE4(sc, DART_TCR(sc, sid), 0);
 
 	/* Remove page tables. */
 	for (sid = 0; sid < sc->sc_nsid; sid++) {
-		for (idx = 0; idx < 4; idx++)
-			HWRITE4(sc, DART_TTBR(sid, idx), 0);
+		for (idx = 0; idx < sc->sc_nttbr; idx++)
+			HWRITE4(sc, DART_TTBR(sc, sid, idx), 0);
 	}
-	apldart_flush_tlb(sc);
+	sc->sc_flush_tlb(sc);
 
 	/*
 	 * Build translation tables.  We pre-allocate the translation
@@ -240,26 +376,39 @@ apldart_attach(struct device *parent, struct device *self, void *aux)
 	for (idx = 0; idx < nl2; idx++) {
 		sc->sc_l2[idx] = apldart_dmamem_alloc(sc->sc_dmat,
 		    DART_PAGE_SIZE, DART_PAGE_SIZE);
-		l1[idx] = APLDART_DMA_DVA(sc->sc_l2[idx]) | DART_L1_TABLE;
+		pa = APLDART_DMA_DVA(sc->sc_l2[idx]);
+		l1[idx] = (pa >> sc->sc_shift) | DART_L1_TABLE;
 	}
 
 	/* Install page tables. */
 	for (sid = 0; sid < sc->sc_nsid; sid++) {
 		pa = APLDART_DMA_DVA(sc->sc_l1);
 		for (idx = 0; idx < nl1; idx++) {
-			HWRITE4(sc, DART_TTBR(sid, idx),
-			    (pa >> DART_TTBR_SHIFT) | DART_TTBR_VALID);
+			HWRITE4(sc, DART_TTBR(sc, sid, idx),
+			    (pa >> DART_TTBR_SHIFT) | sc->sc_ttbr_valid);
 			pa += DART_PAGE_SIZE;
 		}
 	}
-	apldart_flush_tlb(sc);
+	sc->sc_flush_tlb(sc);
+
+	/* Enable all streams. */
+	for (idx = 0; idx < howmany(sc->sc_nsid, 32); idx++)
+		HWRITE4(sc, DART_SID_ENABLE(sc, idx), ~0);
 
 	/* Enable translations. */
 	for (sid = 0; sid < sc->sc_nsid; sid++)
-		HWRITE4(sc, DART_CONFIG(sid), DART_CONFIG_TXEN);
+		HWRITE4(sc, DART_TCR(sc, sid), sc->sc_tcr_translate_enable);
 
-	fdt_intr_establish(faa->fa_node, IPL_NET, apldart_intr,
-	    sc, sc->sc_dev.dv_xname);
+	if (OF_is_compatible(sc->sc_node, "apple,t8110-dart")) {
+		HWRITE4(sc, DART_T8110_ERROR, HREAD4(sc, DART_T8110_ERROR));
+		HWRITE4(sc, DART_T8110_ERROR_MASK, 0);
+		fdt_intr_establish(faa->fa_node, IPL_NET, apldart_t8110_intr,
+		    sc, sc->sc_dev.dv_xname);
+	} else {
+		HWRITE4(sc, DART_T8020_ERROR, HREAD4(sc, DART_T8020_ERROR));
+		fdt_intr_establish(faa->fa_node, IPL_NET, apldart_t8020_intr,
+		    sc, sc->sc_dev.dv_xname);
+	}
 
 	sc->sc_dvamap = extent_create(sc->sc_dev.dv_xname,
 	    sc->sc_dvabase, sc->sc_dvaend, M_DEVBUF,
@@ -298,21 +447,45 @@ apldart_reserve(void *cookie, uint32_t *cells, bus_addr_t addr, bus_size_t size)
 }
 
 int
-apldart_intr(void *arg)
+apldart_t8020_intr(void *arg)
 {
 	struct apldart_softc *sc = arg;
 
-	panic("%s: %s", sc->sc_dev.dv_xname, __func__);
+	panic("%s: error 0x%08x addr 0x%08x%08x\n",
+	    sc->sc_dev.dv_xname, HREAD4(sc, DART_T8020_ERROR),
+	    HREAD4(sc, DART_T8020_ERROR_ADDR_HI),
+	    HREAD4(sc, DART_T8020_ERROR_ADDR_LO));
+}
+
+int
+apldart_t8110_intr(void *arg)
+{
+	struct apldart_softc *sc = arg;
+
+	panic("%s: error 0x%08x addr 0x%08x%08x\n",
+	    sc->sc_dev.dv_xname, HREAD4(sc, DART_T8110_ERROR),
+	    HREAD4(sc, DART_T8110_ERROR_ADDR_HI),
+	    HREAD4(sc, DART_T8110_ERROR_ADDR_LO));
 }
 
 void
-apldart_flush_tlb(struct apldart_softc *sc)
+apldart_t8020_flush_tlb(struct apldart_softc *sc)
 {
 	__asm volatile ("dsb sy" ::: "memory");
 
-	HWRITE4(sc, DART_TLB_OP_SIDMASK, sc->sc_sid_mask);
-	HWRITE4(sc, DART_TLB_OP, DART_TLB_OP_FLUSH);
-	while (HREAD4(sc, DART_TLB_OP) & DART_TLB_OP_BUSY)
+	HWRITE4(sc, DART_T8020_TLB_SIDMASK, DART_ALL_STREAMS(sc));
+	HWRITE4(sc, DART_T8020_TLB_CMD, DART_T8020_TLB_CMD_FLUSH);
+	while (HREAD4(sc, DART_T8020_TLB_CMD) & DART_T8020_TLB_CMD_BUSY)
+		CPU_BUSY_CYCLE();
+}
+
+void
+apldart_t8110_flush_tlb(struct apldart_softc *sc)
+{
+	__asm volatile ("dsb sy" ::: "memory");
+
+	HWRITE4(sc, DART_T8110_TLB_CMD, DART_T8110_TLB_CMD_FLUSH_ALL);
+	while (HREAD4(sc, DART_T8110_TLB_CMD) & DART_T8110_TLB_CMD_BUSY)
 		CPU_BUSY_CYCLE();
 }
 
@@ -339,6 +512,7 @@ apldart_load_map(struct apldart_softc *sc, bus_dmamap_t map)
 	for (seg = 0; seg < map->dm_nsegs; seg++) {
 		paddr_t pa = map->dm_segs[seg]._ds_paddr;
 		psize_t off = pa - apldart_trunc_page(pa);
+		psize_t start, end;
 		u_long len, dva;
 
 		len = apldart_round_page(map->dm_segs[seg].ds_len + off);
@@ -358,17 +532,24 @@ apldart_load_map(struct apldart_softc *sc, bus_dmamap_t map)
 		map->dm_segs[seg].ds_addr = dva + off;
 
 		pa = apldart_trunc_page(pa);
+		start = apldart_trunc_offset(off);
+		end = DART_PAGE_MASK;
 		while (len > 0) {
+			if (len < DART_PAGE_SIZE)
+				end = apldart_round_offset(len) - 1;
+
 			tte = apldart_lookup_tte(sc, dva);
-			*tte = pa | DART_L2_PAGE;
+			*tte = (pa >> sc->sc_shift) | DART_L2_VALID |
+			    DART_L2_START(start) | DART_L2_END(end);
 
 			pa += DART_PAGE_SIZE;
 			dva += DART_PAGE_SIZE;
 			len -= DART_PAGE_SIZE;
+			start = 0;
 		}
 	}
 
-	apldart_flush_tlb(sc);
+	sc->sc_flush_tlb(sc);
 
 	return 0;
 }
@@ -409,7 +590,7 @@ apldart_unload_map(struct apldart_softc *sc, bus_dmamap_t map)
 		ams[seg].ams_len = 0;
 	}
 
-	apldart_flush_tlb(sc);
+	sc->sc_flush_tlb(sc);
 }
 
 int
@@ -443,6 +624,9 @@ apldart_dmamap_destroy(bus_dma_tag_t t, bus_dmamap_t map)
 {
 	struct apldart_softc *sc = t->_cookie;
 	struct apldart_map_state *ams = map->_dm_cookie;
+
+	if (map->dm_nsegs)
+		apldart_dmamap_unload(t, map);
 
 	free(ams, M_DEVBUF, map->_dm_segcnt * sizeof(*ams));
 	sc->sc_dmat->_dmamap_destroy(sc->sc_dmat, map);
@@ -579,12 +763,4 @@ apldart_dmamem_free(bus_dma_tag_t dmat, struct apldart_dmamem *adm)
 	bus_dmamem_free(dmat, &adm->adm_seg, 1);
 	bus_dmamap_destroy(dmat, adm->adm_map);
 	free(adm, M_DEVBUF, sizeof(*adm));
-}
-
-void
-apldart_write(struct apldart_softc *sc, bus_size_t offset, uint32_t value)
-{
-	bus_space_write_4(sc->sc_iot, sc->sc_ioh[0], offset, value);
-	if (sc->sc_subdart)
-		bus_space_write_4(sc->sc_iot, sc->sc_ioh[1], offset, value);
 }

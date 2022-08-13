@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfkey.c,v 1.61 2020/04/23 16:13:11 claudio Exp $ */
+/*	$OpenBSD: pfkey.c,v 1.66 2022/07/28 13:11:50 deraadt Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -37,18 +37,18 @@
 
 extern struct bgpd_sysdep sysdep;
 
-#define	PFKEY2_CHUNK sizeof(u_int64_t)
+#define	PFKEY2_CHUNK sizeof(uint64_t)
 #define	ROUNDUP(x) (((x) + (PFKEY2_CHUNK - 1)) & ~(PFKEY2_CHUNK - 1))
 #define	IOV_CNT	20
 
-static u_int32_t	sadb_msg_seq = 0;
-static u_int32_t	pid = 0; /* should pid_t but pfkey needs u_int32_t */
+static uint32_t	sadb_msg_seq = 0;
+static uint32_t	pid = 0; /* should pid_t but pfkey needs uint32_t */
 static int		pfkey_fd;
 
-int	pfkey_reply(int, u_int32_t *);
+int	pfkey_reply(int, uint32_t *);
 int	pfkey_send(int, uint8_t, uint8_t, uint8_t,
 	    struct bgpd_addr *, struct bgpd_addr *,
-	    u_int32_t, uint8_t, int, char *, uint8_t, int, char *,
+	    uint32_t, uint8_t, int, char *, uint8_t, int, char *,
 	    uint16_t, uint16_t);
 
 #define pfkey_flow(fd, satype, cmd, dir, from, to, sport, dport) \
@@ -69,7 +69,7 @@ pfkey_localaddr(struct peer *p)
 
 int
 pfkey_send(int sd, uint8_t satype, uint8_t mtype, uint8_t dir,
-    struct bgpd_addr *src, struct bgpd_addr *dst, u_int32_t spi,
+    struct bgpd_addr *src, struct bgpd_addr *dst, uint32_t spi,
     uint8_t aalg, int alen, char *akey, uint8_t ealg, int elen, char *ekey,
     uint16_t sport, uint16_t dport)
 {
@@ -448,12 +448,12 @@ pfkey_read(int sd, struct sadb_msg *h)
 }
 
 int
-pfkey_reply(int sd, u_int32_t *spi)
+pfkey_reply(int sd, uint32_t *spi)
 {
 	struct sadb_msg hdr, *msg;
 	struct sadb_ext *ext;
 	struct sadb_sa *sa;
-	u_int8_t *data;
+	uint8_t *data;
 	ssize_t len;
 	int rv;
 
@@ -469,6 +469,9 @@ pfkey_reply(int sd, u_int32_t *spi)
 			return (0);
 		else {
 			log_warn("pfkey");
+			/* discard error message */
+			if (read(sd, &hdr, sizeof(hdr)) == -1)
+				log_warn("pfkey read");
 			return (-1);
 		}
 	}
@@ -492,9 +495,9 @@ pfkey_reply(int sd, u_int32_t *spi)
 
 		msg = (struct sadb_msg *)data;
 		for (ext = (struct sadb_ext *)(msg + 1);
-		    (size_t)((u_int8_t *)ext - (u_int8_t *)msg) <
+		    (size_t)((uint8_t *)ext - (uint8_t *)msg) <
 		    msg->sadb_msg_len * PFKEY2_CHUNK;
-		    ext = (struct sadb_ext *)((u_int8_t *)ext +
+		    ext = (struct sadb_ext *)((uint8_t *)ext +
 		    ext->sadb_ext_len * PFKEY2_CHUNK)) {
 			if (ext->sadb_ext_type == SADB_EXT_SA) {
 				sa = (struct sadb_sa *) ext;
@@ -508,8 +511,8 @@ pfkey_reply(int sd, u_int32_t *spi)
 }
 
 static int
-pfkey_sa_add(struct bgpd_addr *src, struct bgpd_addr *dst, u_int8_t keylen,
-    char *key, u_int32_t *spi)
+pfkey_sa_add(struct bgpd_addr *src, struct bgpd_addr *dst, uint8_t keylen,
+    char *key, uint32_t *spi)
 {
 	if (pfkey_send(pfkey_fd, SADB_X_SATYPE_TCPSIGNATURE, SADB_GETSPI, 0,
 	    src, dst, 0, 0, 0, NULL, 0, 0, NULL, 0, 0) == -1)
@@ -525,7 +528,7 @@ pfkey_sa_add(struct bgpd_addr *src, struct bgpd_addr *dst, u_int8_t keylen,
 }
 
 static int
-pfkey_sa_remove(struct bgpd_addr *src, struct bgpd_addr *dst, u_int32_t *spi)
+pfkey_sa_remove(struct bgpd_addr *src, struct bgpd_addr *dst, uint32_t *spi)
 {
 	if (pfkey_send(pfkey_fd, SADB_X_SATYPE_TCPSIGNATURE, SADB_DELETE, 0,
 	    src, dst, *spi, 0, 0, NULL, 0, 0, NULL, 0, 0) == -1)
@@ -539,8 +542,8 @@ pfkey_sa_remove(struct bgpd_addr *src, struct bgpd_addr *dst, u_int32_t *spi)
 static int
 pfkey_md5sig_establish(struct peer *p)
 {
-	u_int32_t spi_out = 0;
-	u_int32_t spi_in = 0;
+	uint32_t spi_out = 0;
+	uint32_t spi_in = 0;
 
 	if (pfkey_sa_add(pfkey_localaddr(p), &p->conf.remote_addr,
 	    p->conf.auth.md5key_len, p->conf.auth.md5key,
@@ -564,7 +567,7 @@ pfkey_md5sig_establish(struct peer *p)
 	return (0);
 
 fail:
-	log_peer_warn(&p->conf, "%s: failed to insert md5sig", __func__);
+	log_peer_warn(&p->conf, "failed to insert md5sig");
 	return (-1);
 }
 
@@ -586,8 +589,34 @@ pfkey_md5sig_remove(struct peer *p)
 	return (0);
 
 fail:
-	log_peer_warn(&p->conf, "%s: failed to remove md5sig", __func__);
+	log_peer_warn(&p->conf, "failed to remove md5sig");
 	return (-1);
+}
+
+static uint8_t
+pfkey_auth_alg(enum auth_alg alg)
+{
+	switch (alg) {
+	case AUTH_AALG_SHA1HMAC:
+		return SADB_AALG_SHA1HMAC;
+	case AUTH_AALG_MD5HMAC:
+		return SADB_AALG_MD5HMAC;
+	default:
+		return SADB_AALG_NONE;
+	}
+}
+
+static uint8_t
+pfkey_enc_alg(enum auth_enc_alg alg)
+{
+	switch (alg) {
+	case AUTH_EALG_3DESCBC:
+		return SADB_EALG_3DESCBC;
+	case AUTH_EALG_AES:
+		return SADB_X_EALG_AES;
+	default:
+		return SADB_AALG_NONE;
+	}
 }
 
 static int
@@ -616,10 +645,10 @@ pfkey_ipsec_establish(struct peer *p)
 		if (pfkey_send(pfkey_fd, satype, SADB_ADD, 0,
 		    local_addr, &p->conf.remote_addr,
 		    p->conf.auth.spi_out,
-		    p->conf.auth.auth_alg_out,
+		    pfkey_auth_alg(p->conf.auth.auth_alg_out),
 		    p->conf.auth.auth_keylen_out,
 		    p->conf.auth.auth_key_out,
-		    p->conf.auth.enc_alg_out,
+		    pfkey_enc_alg(p->conf.auth.enc_alg_out),
 		    p->conf.auth.enc_keylen_out,
 		    p->conf.auth.enc_key_out,
 		    0, 0) == -1)
@@ -629,10 +658,10 @@ pfkey_ipsec_establish(struct peer *p)
 		if (pfkey_send(pfkey_fd, satype, SADB_ADD, 0,
 		    &p->conf.remote_addr, local_addr,
 		    p->conf.auth.spi_in,
-		    p->conf.auth.auth_alg_in,
+		    pfkey_auth_alg(p->conf.auth.auth_alg_in),
 		    p->conf.auth.auth_keylen_in,
 		    p->conf.auth.auth_key_in,
-		    p->conf.auth.enc_alg_in,
+		    pfkey_enc_alg(p->conf.auth.enc_alg_in),
 		    p->conf.auth.enc_keylen_in,
 		    p->conf.auth.enc_key_in,
 		    0, 0) == -1)
@@ -675,10 +704,10 @@ pfkey_ipsec_establish(struct peer *p)
 	return (0);
 
 fail_key:
-	log_peer_warn(&p->conf, "%s: failed to insert ipsec key", __func__);
+	log_peer_warn(&p->conf, "failed to insert ipsec key");
 	return (-1);
 fail_flow:
-	log_peer_warn(&p->conf, "%s: failed to insert flow", __func__);
+	log_peer_warn(&p->conf, "failed to insert ipsec flow");
 	return (-1);
 }
 
@@ -748,10 +777,10 @@ pfkey_ipsec_remove(struct peer *p)
 	return (0);
 
 fail_key:
-	log_peer_warn(&p->conf, "%s: failed to remove ipsec key", __func__);
+	log_peer_warn(&p->conf, "failed to remove ipsec key");
 	return (-1);
 fail_flow:
-	log_peer_warn(&p->conf, "%s: failed to remove flow", __func__);
+	log_peer_warn(&p->conf, "failed to remove ipsec flow");
 	return (-1);
 }
 
@@ -835,7 +864,7 @@ tcp_md5_check(int fd, struct peer *p)
 		if (getsockopt(fd, IPPROTO_TCP, TCP_MD5SIG,
 		    &opt, &len) == -1)
 			fatal("getsockopt TCP_MD5SIG");
-		if (!opt) {     /* non-md5'd connection! */
+		if (!opt) {	/* non-md5'd connection! */
 			log_peer_warnx(&p->conf,
 			    "connection attempt without md5 signature");
 			return -1;

@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.15 2021/08/02 08:50:51 patrick Exp $
+# $OpenBSD: Makefile,v 1.26 2022/08/08 09:25:13 fcambus Exp $
 
 .include <bsd.own.mk>
 
@@ -10,7 +10,6 @@ SUBDIR+=libLLVMSupport
 SUBDIR+=libLLVMTableGen
 SUBDIR+=llvm-tblgen
 SUBDIR+=include/llvm/IR
-SUBDIR+=include/llvm/Transforms/InstCombine
 SUBDIR+=include/llvm/Frontend/OpenACC
 SUBDIR+=include/llvm/Frontend/OpenMP
 
@@ -52,6 +51,7 @@ SUBDIR+=liblldELF
 SUBDIR+=lld
 
 
+.if ${BUILD_LLDB:L} == "yes" || make(obj)
 SUBDIR+=lldb-tblgen
 SUBDIR+=include/lldb/Commands
 SUBDIR+=include/lldb/Core
@@ -98,10 +98,23 @@ SUBDIR+=liblldbUtility
 
 SUBDIR+=lldb
 SUBDIR+=lldb-server
+.endif
 
 SUBDIR+=include/llvm-objcopy
 SUBDIR+=llvm-objcopy
+SUBDIR+=include/llvm-objdump
 SUBDIR+=llvm-objdump
+SUBDIR+=include/llvm-readobj
+SUBDIR+=llvm-readobj
+
+SUBDIR+=llvm-profdata
+SUBDIR+=llvm-cov
+
+.if ${AR_VERSION:L} == "llvm" || make(obj)
+SUBDIR+=libLLVMDlltoolDriver
+SUBDIR+=libLLVMLibDriver
+SUBDIR+=llvm-ar
+.endif
 
 .include <bsd.obj.mk>
 .include <bsd.subdir.mk>

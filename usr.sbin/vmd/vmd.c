@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmd.c,v 1.126 2021/07/18 11:55:45 dv Exp $	*/
+/*	$OpenBSD: vmd.c,v 1.131 2022/05/08 14:44:54 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -16,10 +16,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* nitems */
+#include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/wait.h>
-#include <sys/cdefs.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/tty.h>
@@ -400,9 +399,9 @@ vmd_dispatch_vmm(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 
 		if (vmr.vmr_result) {
-			errno = vmr.vmr_result;
-			log_warn("%s: failed to start vm", vcp->vcp_name);
+			log_warnx("%s: failed to start vm", vcp->vcp_name);
 			vm_remove(vm, __func__);
+			errno = vmr.vmr_result;
 			break;
 		}
 
@@ -966,7 +965,7 @@ vmd_configure(void)
 
 	if (!(env->vmd_cfg.cfg_flags & VMD_CFG_STAGGERED_START)) {
 		env->vmd_cfg.delay.tv_sec = VMD_DEFAULT_STAGGERED_START_DELAY;
-		if (sysctl(ncpu_mib, NELEM(ncpu_mib), &ncpus, &ncpus_sz, NULL, 0) == -1)
+		if (sysctl(ncpu_mib, nitems(ncpu_mib), &ncpus, &ncpus_sz, NULL, 0) == -1)
 			ncpus = 1;
 		env->vmd_cfg.parallelism = ncpus;
 		log_debug("%s: setting staggered start configuration to "
@@ -1163,7 +1162,8 @@ vm_stop(struct vmd_vm *vm, int keeptty, const char *caller)
 	    __func__, ps->ps_title[privsep_process], caller,
 	    vm->vm_vmid, keeptty ? ", keeping tty open" : "");
 
-	vm->vm_state &= ~(VM_STATE_RUNNING | VM_STATE_SHUTDOWN);
+	vm->vm_state &= ~(VM_STATE_RECEIVED | VM_STATE_RUNNING
+	    | VM_STATE_SHUTDOWN);
 
 	user_inc(&vm->vm_params.vmc_params, vm->vm_user, 0);
 	user_put(vm->vm_user);
@@ -1422,7 +1422,6 @@ vm_instance(struct privsep *ps, struct vmd_vm **vm_parent,
 	struct vm_create_params	*vcpp;
 	struct vmd_vm		*vm = NULL;
 	unsigned int		 i, j;
-	uint32_t		 id;
 
 	/* return without error if the parent is NULL (nothing to inherit) */
 	if ((vmc->vmc_flags & VMOP_CREATE_INSTANCE) == 0 ||
@@ -1443,7 +1442,6 @@ vm_instance(struct privsep *ps, struct vmd_vm **vm_parent,
 		return (ENAMETOOLONG);
 	}
 
-	id = vcp->vcp_id;
 	name = vcp->vcp_name;
 
 	if ((vm = vm_getbyname(vcp->vcp_name)) != NULL ||

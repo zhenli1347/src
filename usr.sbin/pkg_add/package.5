@@ -1,4 +1,4 @@
-.\"	$OpenBSD: package.5,v 1.28 2019/12/04 11:01:37 espie Exp $
+.\"	$OpenBSD: package.5,v 1.31 2022/06/04 10:12:38 espie Exp $
 .\" Copyright (c) 2005-2006 Marc Espie <espie@openbsd.org>
 .\"
 .\" Permission to use, copy, modify, and distribute this software for any
@@ -12,7 +12,7 @@
 .\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-.Dd $Mdocdate: December 4 2019 $
+.Dd $Mdocdate: June 4 2022 $
 .Dt PACKAGE 5
 .Os
 .Sh NAME
@@ -100,6 +100,18 @@ tarballs are stored
 each archive entry will match an entry in the packing-list (and all file-like
 entries will be matched), but the order will be adjusted so that most recently
 changed files come first, in order to allow faster updates.
+.Pp
+Starting with
+.Ox 5.7 ,
+by default, timestamps are stored directly in the packing-list as
+.Cm @ts
+annotations.
+The files in the archive will have a null timestamp.
+.Pp
+The combination of the LRU archive order, null timestamps and compression
+in fixed chunks starting from the end, means a substantial amount of data
+doesn't change from snapshot to snapshot, thus reducing the pressure on
+mirroring bandwidth.
 .Sh PACKING LIST ANNOTATIONS
 User annotations are described in
 .Xr pkg_create 1 .
@@ -139,12 +151,12 @@ of
 .It Xo
 .Cm @digital-signature
 .Sm off
-.Ar style :
+.Ar signify2 :
 .Ar date :
-.Ar details
+.Ar external
 .Sm on
 .Xc
-Record a digital signature of the packing-list, synthetized by
+Record the date of signature of a package, synthetized by
 .Xr pkg_add 1
 from
 .Xr signify 1
@@ -169,11 +181,15 @@ for later deinstallation.
 will derive this field from the package file name.
 .Pp
 .It Cm @option Ar name
-Some options are automatically inserted by the package tools:
+Some options are automatically inserted/modified by the package tools:
 .Bl -tag -width indent
+.It Ar always-update
+.Xr pkg_create 1
+will complete the option line with a sha256 digest of the whole packing-list
+encoded in base64.
 .It Ar firmware
 Set by
-.Xr fw_update 1
+.Xr fw_update 8
 to trigger firmware-specific handling.
 In particular, firmware is hidden from normal updates.
 .It Ar manual-installation
@@ -192,9 +208,11 @@ to record the files's cryptographic checksum,
 as a sha256 digest encoded in base64.
 .Pp
 .It Cm @signer
-Internal annotation necessary to identify packages signed with
+Record the signing key for a package, synthetized by
+.Xr pkg_add 1
+from
 .Xr signify 1
-keys, as those keys don't carry any identity.
+output.
 .Pp
 .It Cm @size
 Added after a file entry by
@@ -207,18 +225,16 @@ Added after a file entry by
 to record that the entry is actually a symbolic link.
 .Pp
 .It Cm @url
-Original location of the package, automatically recorded in installed packages
-by
-.Xr pkg_add 1 .
+Original location of the package, synthetized by
+.Xr pkg_add 1
+during installation.
 .Pp
 .It Cm @ts Ar timestamp
-Added after a file entry to record the actual file timestamp.
-The package tools read and process that annotation correctly.
-Starting with
-.Ox 5.7 ,
-.Xr pkg_create 1
-will migrate timestamps from the tarball meta-info to the packing-list
-to better create unchanging archive chunks.
+Added after a file entry to record the actual file timestamp, instead
+of storing it as tarball meta-info.
+The package tools read and process that annotation correctly, whereas
+.Xr tar 1
+will only see files dated from the epoch.
 .Pp
 .It Cm @version Ar number
 Record a global (system) version number for the package.

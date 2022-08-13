@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.99 2021/02/16 08:29:16 claudio Exp $ */
+/*	$OpenBSD: config.c,v 1.103 2022/07/20 12:43:27 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -31,7 +31,7 @@
 #include "session.h"
 #include "log.h"
 
-int		host_ip(const char *, struct bgpd_addr *, u_int8_t *);
+int		host_ip(const char *, struct bgpd_addr *, uint8_t *);
 void		free_networks(struct network_head *);
 
 struct bgpd_config *
@@ -86,14 +86,21 @@ copy_config(struct bgpd_config *to, struct bgpd_config *from)
 }
 
 void
+network_free(struct network *n)
+{
+	rtlabel_unref(n->net.rtlabel);
+	filterset_free(&n->net.attrset);
+	free(n);
+}
+
+void
 free_networks(struct network_head *networks)
 {
 	struct network		*n;
 
 	while ((n = TAILQ_FIRST(networks)) != NULL) {
 		TAILQ_REMOVE(networks, n, entry);
-		filterset_free(&n->net.attrset);
-		free(n);
+		network_free(n);
 	}
 }
 
@@ -229,9 +236,9 @@ merge_config(struct bgpd_config *xconf, struct bgpd_config *conf)
 	/* adjust FIB priority if changed */
 	/* if xconf is uninitialized we get RTP_NONE */
 	if (xconf->fib_priority != conf->fib_priority) {
-		kr_fib_decouple_all(xconf->fib_priority);
-		kr_fib_update_prio_all(conf->fib_priority);
-		kr_fib_couple_all(conf->fib_priority);
+		kr_fib_decouple_all();
+		kr_fib_prio_set(conf->fib_priority);
+		kr_fib_couple_all();
 	}
 
 	/* take over the easy config changes */
@@ -356,11 +363,11 @@ merge_config(struct bgpd_config *xconf, struct bgpd_config *conf)
 	free_config(conf);
 }
 
-u_int32_t
+uint32_t
 get_bgpid(void)
 {
 	struct ifaddrs		*ifap, *ifa;
-	u_int32_t		 ip = 0, cur, localnet;
+	uint32_t		 ip = 0, cur, localnet;
 
 	localnet = htonl(INADDR_LOOPBACK & IN_CLASSA_NET);
 
@@ -383,7 +390,7 @@ get_bgpid(void)
 }
 
 int
-host(const char *s, struct bgpd_addr *h, u_int8_t *len)
+host(const char *s, struct bgpd_addr *h, uint8_t *len)
 {
 	int			 mask = 128;
 	char			*p, *ps;
@@ -417,7 +424,7 @@ host(const char *s, struct bgpd_addr *h, u_int8_t *len)
 }
 
 int
-host_ip(const char *s, struct bgpd_addr *h, u_int8_t *len)
+host_ip(const char *s, struct bgpd_addr *h, uint8_t *len)
 {
 	struct addrinfo		 hints, *res;
 	int			 bits;
@@ -431,7 +438,8 @@ host_ip(const char *s, struct bgpd_addr *h, u_int8_t *len)
 		sa2addr(res->ai_addr, h, NULL);
 		freeaddrinfo(res);
 	} else {	/* ie. for 10/8 parsing */
-		if ((bits = inet_net_pton(AF_INET, s, &h->v4, sizeof(h->v4))) == -1)
+		if ((bits = inet_net_pton(AF_INET, s, &h->v4,
+		    sizeof(h->v4))) == -1)
 			return (0);
 		*len = bits;
 		h->aid = AID_INET;
@@ -446,30 +454,6 @@ prepare_listeners(struct bgpd_config *conf)
 	struct listen_addr	*la, *next;
 	int			 opt = 1;
 	int			 r = 0;
-
-	if (TAILQ_EMPTY(conf->listen_addrs)) {
-		if ((la = calloc(1, sizeof(struct listen_addr))) == NULL)
-			fatal("setup_listeners calloc");
-		la->fd = -1;
-		la->flags = DEFAULT_LISTENER;
-		la->reconf = RECONF_REINIT;
-		la->sa_len = sizeof(struct sockaddr_in);
-		((struct sockaddr_in *)&la->sa)->sin_family = AF_INET;
-		((struct sockaddr_in *)&la->sa)->sin_addr.s_addr =
-		    htonl(INADDR_ANY);
-		((struct sockaddr_in *)&la->sa)->sin_port = htons(BGP_PORT);
-		TAILQ_INSERT_TAIL(conf->listen_addrs, la, entry);
-
-		if ((la = calloc(1, sizeof(struct listen_addr))) == NULL)
-			fatal("setup_listeners calloc");
-		la->fd = -1;
-		la->flags = DEFAULT_LISTENER;
-		la->reconf = RECONF_REINIT;
-		la->sa_len = sizeof(struct sockaddr_in6);
-		((struct sockaddr_in6 *)&la->sa)->sin6_family = AF_INET6;
-		((struct sockaddr_in6 *)&la->sa)->sin6_port = htons(BGP_PORT);
-		TAILQ_INSERT_TAIL(conf->listen_addrs, la, entry);
-	}
 
 	for (la = TAILQ_FIRST(conf->listen_addrs); la != NULL; la = next) {
 		next = TAILQ_NEXT(la, entry);
@@ -526,10 +510,9 @@ prepare_listeners(struct bgpd_config *conf)
 }
 
 void
-expand_networks(struct bgpd_config *c)
+expand_networks(struct bgpd_config *c, struct network_head *nw)
 {
 	struct network		*n, *m, *tmp;
-	struct network_head	*nw = &c->networks;
 	struct prefixset	*ps;
 	struct prefixset_item	*psi;
 
@@ -551,8 +534,7 @@ expand_networks(struct bgpd_config *c)
 				    &m->net.attrset);
 				TAILQ_INSERT_TAIL(nw, m, entry);
 			}
-			filterset_free(&n->net.attrset);
-			free(n);
+			network_free(n);
 		}
 	}
 }

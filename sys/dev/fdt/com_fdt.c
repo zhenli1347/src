@@ -1,4 +1,4 @@
-/* $OpenBSD: com_fdt.c,v 1.5 2021/04/24 10:33:09 kettenis Exp $ */
+/* $OpenBSD: com_fdt.c,v 1.7 2022/01/11 11:51:14 uaa Exp $ */
 /*
  * Copyright (c) 2016 Patrick Wildt <patrick@blueri.se>
  *
@@ -33,13 +33,11 @@
 #include <dev/ofw/ofw_clock.h>
 #include <dev/ofw/ofw_pinctrl.h>
 
-#define com_usr 31	/* Synopsys DesignWare UART */
-
 int	com_fdt_match(struct device *, void *, void *);
 void	com_fdt_attach(struct device *, struct device *, void *);
 int	com_fdt_intr_designware(void *);
 
-struct cfattach com_fdt_ca = {
+const struct cfattach com_fdt_ca = {
 	sizeof (struct com_softc), com_fdt_match, com_fdt_attach
 };
 
@@ -144,8 +142,10 @@ com_fdt_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_reg_shift = OF_getpropint(faa->fa_node, "reg-shift", shift);
 
 	if (OF_is_compatible(faa->fa_node, "snps,dw-apb-uart") ||
-	    OF_is_compatible(faa->fa_node, "marvell,armada-38x-uart"))
+	    OF_is_compatible(faa->fa_node, "marvell,armada-38x-uart")) {
+		sc->sc_uarttype = COM_UART_DW_APB;
 		intr = com_fdt_intr_designware;
+	}
 
 	if (OF_is_compatible(faa->fa_node, "ti,omap3-uart") ||
 	    OF_is_compatible(faa->fa_node, "ti,omap4-uart"))

@@ -1,4 +1,4 @@
-/* $OpenBSD: ampintc.c,v 1.29 2021/03/25 04:12:00 jsg Exp $ */
+/* $OpenBSD: ampintc.c,v 1.31 2022/03/12 14:40:41 mpi Exp $ */
 /*
  * Copyright (c) 2007,2009,2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -199,7 +199,7 @@ int		 ampintc_ipi_nop(void *);
 int		 ampintc_ipi_ddb(void *);
 void		 ampintc_send_ipi(struct cpu_info *, int);
 
-struct cfattach	ampintc_ca = {
+const struct cfattach	ampintc_ca = {
 	sizeof (struct ampintc_softc), ampintc_match, ampintc_attach
 };
 
@@ -668,7 +668,7 @@ ampintc_irq_handler(void *frame)
 			KERNEL_LOCK();
 #endif
 
-		if (ih->ih_arg != 0)
+		if (ih->ih_arg)
 			arg = ih->ih_arg;
 		else
 			arg = frame;
@@ -836,7 +836,7 @@ struct ampintc_msi_softc {
 	struct interrupt_controller	 sc_ic;
 };
 
-struct cfattach	ampintcmsi_ca = {
+const struct cfattach	ampintcmsi_ca = {
 	sizeof (struct ampintc_msi_softc), ampintc_msi_match, ampintc_msi_attach
 };
 

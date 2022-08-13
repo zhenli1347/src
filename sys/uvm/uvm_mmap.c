@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_mmap.c,v 1.164 2021/03/26 13:40:05 mpi Exp $	*/
+/*	$OpenBSD: uvm_mmap.c,v 1.172 2022/08/01 14:56:59 deraadt Exp $	*/
 /*	$NetBSD: uvm_mmap.c,v 1.49 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
@@ -122,7 +122,6 @@ sys_mquery(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) prot;
 		syscallarg(int) flags;
 		syscallarg(int) fd;
-		syscallarg(long) pad;
 		syscallarg(off_t) pos;
 	} */ *uap = v;
 	struct file *fp;
@@ -184,12 +183,14 @@ uvm_wxcheck(struct proc *p, char *call)
 		return 0;
 
 	if (uvm_wxabort) {
+		KERNEL_LOCK();
 		/* Report W^X failures */
 		if (pr->ps_wxcounter++ == 0)
 			log(LOG_NOTICE, "%s(%d): %s W^X violation\n",
 			    pr->ps_comm, pr->ps_pid, call);
 		/* Send uncatchable SIGABRT for coredump */
 		sigexit(p, SIGABRT);
+		KERNEL_UNLOCK();
 	}
 
 	return ENOTSUP;
@@ -212,7 +213,6 @@ sys_mmap(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) prot;
 		syscallarg(int) flags;
 		syscallarg(int) fd;
-		syscallarg(long) pad;
 		syscallarg(off_t) pos;
 	} */ *uap = v;
 	vaddr_t addr;
@@ -438,6 +438,38 @@ out:
 		FRELE(fp, p);
 	return error;
 }
+
+#if 1
+int
+sys_pad_mquery(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_mquery_args *uap = v;
+	struct sys_mquery_args unpad;
+
+	SCARG(&unpad, addr) = SCARG(uap, addr);
+	SCARG(&unpad, len) = SCARG(uap, len);
+	SCARG(&unpad, prot) = SCARG(uap, prot);
+	SCARG(&unpad, flags) = SCARG(uap, flags);
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, pos) = SCARG(uap, pos);
+	return sys_mquery(p, &unpad, retval);
+}
+
+int
+sys_pad_mmap(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_mmap_args *uap = v;
+	struct sys_mmap_args unpad;
+
+	SCARG(&unpad, addr) = SCARG(uap, addr);
+	SCARG(&unpad, len) = SCARG(uap, len);
+	SCARG(&unpad, prot) = SCARG(uap, prot);
+	SCARG(&unpad, flags) = SCARG(uap, flags);
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, pos) = SCARG(uap, pos);
+	return sys_mmap(p, &unpad, retval);
+}
+#endif
 
 /*
  * sys_msync: the msync system call (a front-end for flush)
@@ -1094,8 +1126,8 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 	vaddr_t baseva, last_baseva, endva, pageoffset, kva;
 	size_t psize, s;
 	u_long pc;
-	int count, i;
-	int error;
+	int count, i, extra;
+	int error, sigill = 0;
 
 	/*
 	 * extract syscall args from uap
@@ -1103,21 +1135,42 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 	paramp = SCARG(uap, param);
 	psize = SCARG(uap, psize);
 
-	/* a NULL paramp disables the syscall for the process */
-	if (paramp == NULL) {
-		pr->ps_kbind_addr = BOGO_PC;
-		return 0;
-	}
-
-	/* security checks */
+	/*
+	 * If paramp is NULL and we're uninitialized, disable the syscall
+	 * for the process.  Raise SIGILL if paramp is NULL and we're
+	 * already initialized.
+	 *
+	 * If paramp is non-NULL and we're uninitialized, do initialization.
+	 * Otherwise, do security checks and raise SIGILL on failure.
+	 */
 	pc = PROC_PC(p);
-	if (pr->ps_kbind_addr == 0) {
+	mtx_enter(&pr->ps_mtx);
+	if (paramp == NULL) {
+		if (pr->ps_kbind_addr == 0)
+			pr->ps_kbind_addr = BOGO_PC;
+		else
+			sigill = 1;
+	} else if (pr->ps_kbind_addr == 0) {
 		pr->ps_kbind_addr = pc;
 		pr->ps_kbind_cookie = SCARG(uap, proc_cookie);
-	} else if (pc != pr->ps_kbind_addr || pc == BOGO_PC)
+	} else if (pc != pr->ps_kbind_addr || pc == BOGO_PC ||
+	    pr->ps_kbind_cookie != SCARG(uap, proc_cookie)) {
+		sigill = 1;
+	}
+	mtx_leave(&pr->ps_mtx);
+
+	/* Raise SIGILL if something is off. */
+	if (sigill) {
+		KERNEL_LOCK();
 		sigexit(p, SIGILL);
-	else if (pr->ps_kbind_cookie != SCARG(uap, proc_cookie))
-		sigexit(p, SIGILL);
+		/* NOTREACHED */
+		KERNEL_UNLOCK();
+	}
+
+	/* We're done if we were disabling the syscall. */
+	if (paramp == NULL)
+		return 0;
+
 	if (psize < sizeof(struct __kbind) || psize > sizeof(param))
 		return EINVAL;
 	if ((error = copyin(paramp, &param, psize)))
@@ -1143,7 +1196,6 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 		    paramp[count].kb_size > KBIND_DATA_MAX ||
 		    baseva >= VM_MAXUSER_ADDRESS ||
 		    endva >= VM_MAXUSER_ADDRESS ||
-		    trunc_page(baseva) != trunc_page(endva) ||
 		    s < paramp[count].kb_size)
 			return EINVAL;
 
@@ -1157,11 +1209,20 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 	last_baseva = VM_MAXUSER_ADDRESS;
 	kva = 0;
 	TAILQ_INIT(&dead_entries);
+	KERNEL_LOCK();
 	for (i = 0; i < count; i++) {
 		baseva = (vaddr_t)paramp[i].kb_addr;
+		s = paramp[i].kb_size;
 		pageoffset = baseva & PAGE_MASK;
 		baseva = trunc_page(baseva);
 
+		/* hppa at least runs PLT entries over page edge */
+		extra = (pageoffset + s) & PAGE_MASK;
+		if (extra > pageoffset)
+			extra = 0;
+		else
+			s -= extra;
+redo:
 		/* make sure sure the desired page is mapped into kernel_map */
 		if (baseva != last_baseva) {
 			if (kva != 0) {
@@ -1178,10 +1239,17 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 		}
 
 		/* do the update */
-		if ((error = kcopy(data, (char *)kva + pageoffset,
-		    paramp[i].kb_size)))
+		if ((error = kcopy(data, (char *)kva + pageoffset, s)))
 			break;
-		data += paramp[i].kb_size;
+		data += s;
+
+		if (extra > 0) {
+			baseva += PAGE_SIZE;
+			s = extra;
+			pageoffset = 0;
+			extra = 0;
+			goto redo;
+		}
 	}
 
 	if (kva != 0) {
@@ -1191,6 +1259,7 @@ sys_kbind(struct proc *p, void *v, register_t *retval)
 		vm_map_unlock(kernel_map);
 	}
 	uvm_unmap_detach(&dead_entries, AMAP_REFALL);
+	KERNEL_UNLOCK();
 
 	return error;
 }

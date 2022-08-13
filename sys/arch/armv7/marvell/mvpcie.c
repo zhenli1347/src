@@ -1,4 +1,4 @@
-/*	$OpenBSD: mvpcie.c,v 1.4 2021/03/25 04:12:01 jsg Exp $	*/
+/*	$OpenBSD: mvpcie.c,v 1.6 2022/02/13 16:44:50 tobhe Exp $	*/
 /*
  * Copyright (c) 2018 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -106,7 +106,7 @@ struct mvpcie_port {
 	int			 po_fn;
 
 	uint32_t		*po_gpio;
-	size_t			 po_gpiolen;
+	int			 po_gpiolen;
 
 	struct arm32_pci_chipset po_pc;
 	int			 po_bus;
@@ -161,7 +161,7 @@ struct mvpcie_softc {
 int mvpcie_match(struct device *, void *, void *);
 void mvpcie_attach(struct device *, struct device *, void *);
 
-struct cfattach	mvpcie_ca = {
+const struct cfattach	mvpcie_ca = {
 	sizeof (struct mvpcie_softc), mvpcie_match, mvpcie_attach
 };
 
@@ -353,7 +353,7 @@ mvpcie_port_attach(struct mvpcie_softc *sc, struct mvpcie_port *po, int node)
 	po->po_bridge_iolimit = 1;
 
 	po->po_gpiolen = OF_getproplen(po->po_node, "reset-gpios");
-	if (po->po_gpiolen) {
+	if (po->po_gpiolen > 0) {
 		po->po_gpio = malloc(po->po_gpiolen, M_DEVBUF, M_WAITOK);
 		OF_getpropintarray(po->po_node, "reset-gpios",
 		    po->po_gpio, po->po_gpiolen);

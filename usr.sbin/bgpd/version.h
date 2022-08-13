@@ -1,3 +1,3 @@
-/* $OpenBSD: version.h,v 1.2 2021/06/20 08:05:47 claudio Exp $ */
+/* $OpenBSD: version.h,v 1.6 2022/07/14 09:16:09 claudio Exp $ */
 
-#define BGPD_VERSION	"7.1"
+#define BGPD_VERSION	"7.5"

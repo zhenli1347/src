@@ -1,4 +1,4 @@
-/*	$OpenBSD: abl.c,v 1.3 2020/10/25 08:31:40 mglocker Exp $ */
+/*	$OpenBSD: abl.c,v 1.5 2022/04/06 18:59:27 naddy Exp $ */
 
 /*
  * Copyright (c) 2020 Marcus Glocker <mglocker@openbsd.org>
@@ -69,7 +69,7 @@ int	abl_set_brightness(struct abl_softc *, uint8_t);
 int	abl_get_param(struct wsdisplay_param *);
 int	abl_set_param(struct wsdisplay_param *);
 
-struct cfattach abl_ca = {
+const struct cfattach abl_ca = {
 	sizeof(struct abl_softc), abl_match, abl_attach, NULL, NULL
 };
 
@@ -123,7 +123,7 @@ abl_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	/*
-	 * We need to check on what type of PCI controler we're running on to
+	 * We need to check on what type of PCI controller we're running on to
 	 * access the right I/O space.
 	 */
 	pc = pci_lookup_segment(0);

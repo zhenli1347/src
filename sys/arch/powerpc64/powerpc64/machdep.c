@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.69 2021/05/13 22:42:14 kettenis Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.72 2022/05/19 05:43:48 miod Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -239,7 +239,7 @@ init_powernv(void *fdt, void *tocbase)
 	 * Initialize all traps with the stub that calls the generic
 	 * trap handler.
 	 */
-	for (trap = EXC_RST; trap < EXC_LAST; trap += 32)
+	for (trap = EXC_RST; trap < EXC_END; trap += 32)
 		memcpy((void *)trap, trapcode, trapcodeend - trapcode);
 
 	/* Hypervisor interrupts needs special handling. */
@@ -262,7 +262,7 @@ init_powernv(void *fdt, void *tocbase)
 	*((void **)TRAP_RSTENTRY) = cpu_idle_restore_context;
 
 	/* Make the stubs visible to the CPU. */
-	__syncicache(EXC_RSVD, EXC_LAST - EXC_RSVD);
+	__syncicache(EXC_RSVD, EXC_END - EXC_RSVD);
 
 	/* We're now ready to take traps. */
 	msr = mfmsr();
@@ -305,7 +305,7 @@ init_powernv(void *fdt, void *tocbase)
 
 	/* Remove interrupt vectors. */
 	reg.addr = trunc_page(EXC_RSVD);
-	reg.size = round_page(EXC_LAST);
+	reg.size = round_page(EXC_END);
 	memreg_remove(&reg);
 
 	/* Remove kernel. */
@@ -900,7 +900,7 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 	frame->fixreg[3] = retval[0] = arginfo.ps_nargvstr;
 	frame->fixreg[4] = retval[1] = (register_t)arginfo.ps_argvstr;
 	frame->fixreg[5] = (register_t)arginfo.ps_envstr;
-	frame->fixreg[6] = (register_t)pack->ep_emul_argp;
+	frame->fixreg[6] = (register_t)pack->ep_auxinfo;
 	frame->fixreg[12] = pack->ep_entry;
 	frame->srr0 = pack->ep_entry;
 	frame->srr1 = PSL_USER;
@@ -911,19 +911,19 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 }
 
 int
-sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
+sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
+    int info, int onstack)
 {
 	struct proc *p = curproc;
 	struct pcb *pcb = &p->p_addr->u_pcb;
 	struct trapframe *tf = p->p_md.md_regs;
 	struct sigframe *fp, frame;
-	struct sigacts *psp = p->p_p->ps_sigacts;
 	siginfo_t *sip = NULL;
 	int i;
 
 	/* Allocate space for the signal handler context. */
 	if ((p->p_sigstk.ss_flags & SS_DISABLE) == 0 &&
-	    !sigonstack(tf->fixreg[1]) && (psp->ps_sigonstack & sigmask(sig)))
+	    !sigonstack(tf->fixreg[1]) && onstack)
 		fp = (struct sigframe *)
 		    trunc_page((vaddr_t)p->p_sigstk.ss_sp + p->p_sigstk.ss_size);
 	else
@@ -964,7 +964,7 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	/* Save signal mask. */
 	frame.sf_sc.sc_mask = mask;
 
-	if (psp->ps_siginfo & sigmask(sig)) {
+	if (info) {
 		sip = &fp->sf_si;
 		frame.sf_si = *ksip;
 	}

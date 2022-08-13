@@ -1,4 +1,4 @@
-/* $OpenBSD: procname.c,v 1.17 2020/04/08 11:26:07 nicm Exp $ */
+/* $OpenBSD: procname.c,v 1.20 2022/02/22 17:35:01 deraadt Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -16,8 +16,8 @@
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* MAXCOMLEN */
 #include <sys/types.h>
+#include <sys/signal.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
@@ -138,7 +138,7 @@ char *
 get_proc_cwd(int fd)
 {
         int             name[] = { CTL_KERN, KERN_PROC_CWD, 0 };
-        static char     path[MAXPATHLEN];
+        static char     path[PATH_MAX];
         size_t          pathlen = sizeof path;
 
         if ((name[2] = tcgetpgrp(fd)) == -1)

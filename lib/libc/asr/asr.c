@@ -1,4 +1,4 @@
-/*	$OpenBSD: asr.c,v 1.65 2021/01/06 19:54:17 otto Exp $	*/
+/*	$OpenBSD: asr.c,v 1.68 2022/01/20 14:18:10 naddy Exp $	*/
 /*
  * Copyright (c) 2010-2012 Eric Faurot <eric@openbsd.org>
  *
@@ -131,8 +131,6 @@ _asr_resolver_done(void *arg)
 static void
 _asr_resolver_done_tp(void *arg)
 {
-	char buf[100];
-	int len;
 	struct asr **priv = arg;
 	struct asr *asr;
 
@@ -663,7 +661,8 @@ pass0(char **tok, int n, struct asr_ctx *ac)
 				d = strtonum(tok[i] + 6, 1, 16, &e);
 				if (e == NULL)
 					ac->ac_ndots = d;
-			}
+			} else if (!strcmp(tok[i], "trust-ad"))
+				ac->ac_options |= RES_TRUSTAD;
 		}
 	}
 }
@@ -674,7 +673,10 @@ pass0(char **tok, int n, struct asr_ctx *ac)
 static int
 asr_ctx_from_string(struct asr_ctx *ac, const char *str)
 {
-	char		 buf[512], *ch;
+	struct sockaddr_in6	*sin6;
+	struct sockaddr_in	*sin;
+	int			 i, trustad;
+	char			 buf[512], *ch;
 
 	asr_ctx_parse(ac, str);
 
@@ -703,6 +705,27 @@ asr_ctx_from_string(struct asr_ctx *ac, const char *str)
 			if (ch && asr_ndots(++ch) == 0)
 				break;
 		}
+
+	trustad = 1;
+	for (i = 0; i < ac->ac_nscount && trustad; i++) {
+		switch (ac->ac_ns[i]->sa_family) {
+		case AF_INET:
+			sin = (struct sockaddr_in *)ac->ac_ns[i];
+			if (sin->sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+				trustad = 0;
+			break;
+		case AF_INET6:
+			sin6 = (struct sockaddr_in6 *)ac->ac_ns[i];
+			if (!IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
+				trustad = 0;
+			break;
+		default:
+			trustad = 0;
+			break;
+		}
+	}
+	if (trustad)
+		ac->ac_options |= RES_TRUSTAD;
 
 	return (0);
 }
@@ -830,7 +853,7 @@ _asr_strdname(const char *_dname, char *buf, size_t max)
 {
 	const unsigned char *dname = _dname;
 	char	*res;
-	size_t	 left, n, count;
+	size_t	 left, count;
 
 	if (_dname[0] == 0) {
 		strlcpy(buf, ".", max);
@@ -839,7 +862,7 @@ _asr_strdname(const char *_dname, char *buf, size_t max)
 
 	res = buf;
 	left = max - 1;
-	for (n = 0; dname[0] && left; n += dname[0]) {
+	while (dname[0] && left) {
 		count = (dname[0] < (left - 1)) ? dname[0] : (left - 1);
 		memmove(buf, dname + 1, count);
 		dname += dname[0] + 1;

@@ -1,4 +1,4 @@
-.TH "nsd.conf" "5" "Jul 22, 2021" "NLnet Labs" "nsd 4.3.7"
+.TH "nsd.conf" "5" "Jun 30, 2022" "NLnet Labs" "nsd 4.6.0"
 .\" Copyright (c) 2001\-2008, NLnet Labs. All rights reserved.
 .\" See LICENSE for the license.
 .SH "NAME"
@@ -298,12 +298,28 @@ negotiation between server and client.
 .TP
 .B outgoing\-tcp\-mss:\fR <number>
 Maximum segment size (MSS) of TCP socket for outgoing XFR request
-to other namesevers. Value lower than
+to other nameservers. Value lower than
 common MSS on Ethernet (1220 for example) will
 address path MTU problem.
 Note that not all platform supports socket option to set MSS (TCP_MAXSEG).
 Default is system default MSS determined by interface MTU and
 negotiation between NSD and other servers.
+.TP
+.B xfrd\-tcp\-max:\fR <number>
+Number of sockets for xfrd to use for outgoing zone transfers. Default 128.
+Increase it to allow more zone transfer sockets, like to 256.
+To save memory, this can be lowered, set it lower together with some other
+settings to have reduced memory footprint for NSD. xfrd\-tcp\-max: 32
+and xfrd\-tcp\-pipeline: 128 and rrl\-size: 1000
+.IP
+This reduces memory footprint, other memory usage is caused mainly by
+the server\-count setting, the number of server processes, and the
+tcp\-count setting, which keeps buffers per server process, and by the
+size of the zone data.
+.TP
+.B xfrd\-tcp\-pipeline:\fR <number>
+Number of simultaneous outgoing zone transfers that are possible on the
+tcp sockets of xfrd. Max is 65536, default is 128.
 .TP
 .B ipv4\-edns\-size:\fR <number>
 Preferred EDNS buffer size for IPv4.  Default 1232.
@@ -493,7 +509,7 @@ With the value 0 the rate is unlimited.
 .\" rrlend
 .TP
 .B answer\-cookie:\fR <yes or no>
-Enable to answer to requests containig DNS Cookies as specified in RFC7873.
+Enable to answer to requests containing DNS Cookies as specified in RFC7873.
 Default is yes.
 .TP
 .B cookie\-secret:\fR <128 bit hex string>
@@ -635,6 +651,10 @@ The zone options such as
 .BR notify ,
 .BR notify\-retry ,
 .BR provide\-xfr ,
+.BR store\-ixfr ,
+.BR ixfr\-number ,
+.BR ixfr\-size ,
+.BR create\-ixfr ,
 .BR zonestats ,
 and
 .B outgoing\-interface 
@@ -794,6 +814,35 @@ A port number can be added using a suffix of @number, for example
 1.2.3.4@5300.
 .RE
 .TP
+.B store\-ixfr:\fR <yes or no>
+If enabled, IXFR contents are stored and provided to the set of clients
+specified in the provide\-xfr statement. Default is no. IXFR contents is
+a smaller set of changes that differ between zone versions, where an AXFR
+contains the full contents of the zone.
+.TP
+.B ixfr\-number:\fR <number>
+The number of IXFR versions to store for this zone, at most. Default is 5.
+.TP
+.B ixfr\-size:\fR <number>
+The max storage to use for IXFR versions for this zone, in bytes.
+Default is 1048576. A value of 0 means unlimited, if you want to turn off
+IXFR storage, use the store\-ixfr option.
+NSD does not elide IXFR contents from versions that add and remove the same
+data, that merges version changes together to shorten the data, but leaves
+the data and change sequence as it was transmitted by another server.
+.TP
+.B create\-ixfr:\fR <yes or no>
+If enabled, IXFR data is created when a zonefile is read by the server.
+Also set store\-ixfr enabled, so that the contents are stored, when you use
+this. Default is off. If the server is not running, the nsd\-checkzone \-i
+option can be used to create an IXFR file. When an IXFR is created, the server
+spools a version of the zone to a temporary file, at the location where the
+ixfr files are stored. This creates IXFR data when the zone is read from file,
+but not when a zone is read by AXFR transfer from a server, because then
+the topmost server that originates the data is the one place where ixfr
+differences are computed and those differences are then transmitted verbatim
+to all the other servers.
+.TP
 .B max\-refresh\-time:\fR <seconds>
 Limit refresh time for secondary zones.  This is the timer which checks to see
 if the zone has to be refetched when it expires.  Normally the value from the
@@ -884,8 +933,24 @@ It has the following attributes.
 The tls-auth name. Used to refer to this TLS authentication information in the
 access control list.
 .TP
-.B auth-domain-name:\fR <string>
+.B auth\-domain\-name:\fR <string>
 The authentication domain name as defined in RFC8310.
+.TP
+.B client\-cert: <file name of clientcert.pem>
+If you want to use mutual TLS authentication, this is where the client
+certificates can be configured that NSD uses to connect to the upstream
+server to download the zone. The client public key pem cert file can
+be configured here. Also configure a private key with client\-key.
+.TP
+.B client\-key: <file name of clientkey.key>
+If you want to use mutual TLS authentication, the private key file can
+be configured here for the client authentication.
+.TP
+.B client\-key\-pw: <string>
+If the client\-key file uses a password to decrypt the key before it can
+be used, then the password can be specified here as a string.
+It is possible to include other config files with the include: option, and
+this can be used to move that sensitive data to another file, if you wish.
 .SS DNSTAP Logging Options
 DNSTAP support, when compiled in, is enabled in the \fBdnstap:\fR section.
 This starts a collector process that writes the log information to the

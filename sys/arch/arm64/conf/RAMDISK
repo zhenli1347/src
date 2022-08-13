@@ -1,4 +1,4 @@
-# $OpenBSD: RAMDISK,v 1.157 2021/09/03 14:53:09 patrick Exp $
+# $OpenBSD: RAMDISK,v 1.174 2022/06/26 20:05:06 sthen Exp $
 
 machine		arm64
 maxusers	4
@@ -44,6 +44,8 @@ pci*		at acpipci?
 ahci*		at acpi?
 ccp*		at acpi?		# AMD Cryptographic Co-processor
 com*		at acpi?
+ehci*		at acpi?
+ohci*		at acpi?
 pluart*		at acpi?
 sdhc*		at acpi?
 xhci*		at acpi?
@@ -80,6 +82,8 @@ ccp*		at fdt?		# AMD Cryptographic Co-processor
 com*		at fdt?
 
 # Generic devices
+iicmux*		at fdt?
+iic*		at iicmux?
 pinctrl*	at fdt? early 1
 plgpio*		at fdt? early 1
 plrtc*		at fdt?
@@ -100,18 +104,27 @@ simplefb*	at fdt?
 wsdisplay*	at simplefb?
 
 # Apple
-apldart*	at fdt?
+apldart*	at fdt? early 1
 apldog*		at fdt? early 1
-apldwusb*	at fdt?
+apliic*		at fdt?
+iic*		at apliic?
 aplintc*	at fdt? early 1
+aplmbox*	at fdt?
+aplns*		at fdt?			# Apple NVME Storage controllers
+nvme*		at aplns?
 aplpcie*	at fdt?
 pci*		at aplpcie?
 aplpinctrl*	at fdt? early 1
+aplpmgr*	at fdt? early 1
+aplsart*	at fdt?
+aplsmc*		at fdt?
+aplspi*		at fdt?
+aplhidev*	at spi?
+aplkbd*		at aplhidev?
+wskbd*		at aplkbd? mux 1
 aplspmi*	at fdt?
 aplpmu*		at aplspmi?
 exuart*		at fdt?
-aplns*		at fdt?			# Apple NVME Storage controllers
-nvme*		at aplns?
 
 # iMX
 imxccm*		at fdt? early 1
@@ -228,14 +241,19 @@ sxitwi*		at fdt?		# I2C controller
 iic*		at sxitwi?	# I2C bus
 dwxe*		at fdt?
 
+# Xilinx Zynq UltraScale+ SoCs
+cduart*		at fdt?
+
 # PCI
 ppb*		at pci?			# PCI-PCI bridges
 pci*		at ppb?
 
 # PCI Ethernet
+aq*		at pci?			# Aquantia aQtion Ethernet
 bnxt*		at pci?			# Broadcom BCM573xx, BCM574xx
 bge*		at pci?			# Broadcom BCM57xx
 em*		at pci?			# Intel Pro/1000 Ethernet
+igc*		at pci?			# Intel I225 Ethernet
 ix*		at pci?			# Intel 82598EB 10Gb Ethernet
 ixl*		at pci?			# Intel Ethernet 700 Series
 mcx*		at pci?			# Mellanox ConnectX-4/5 Ethernet
@@ -243,6 +261,7 @@ mskc*		at pci?			# Marvell Yukon-2
 msk*		at mskc?		#  each port of above
 re*		at pci?			# Realtek 8169/8169S/8110S
 rge*		at pci?			# Realtek 8125
+vmx*		at pci?			# VMware VMXNET3 virtual interface
 
 # PCI WiFi
 athn*		at pci?			# Atheros AR9k (802.11a/g/n)
@@ -294,6 +313,7 @@ uath*		at uhub?		# Atheros AR5005UG/AR5005UX
 ural*		at uhub?		# Ralink RT2500USB
 rum*		at uhub?		# Ralink RT2501USB/RT2601USB
 run*		at uhub?		# Ralink RT2700U/RT2800U/RT3000U
+mtw*		at uhub?		# MediaTek MT7601U
 otus*		at uhub?		# Atheros AR9001U
 athn*		at uhub?		# Atheros AR9002U
 zyd*		at uhub?		# Zydas ZD1211
@@ -312,13 +332,6 @@ rlphy*		at mii?			# Realtek 8139 internal PHYs
 ukphy*		at mii?			# "unknown" PHYs
 urlphy*		at mii?			# Realtek RTL8150L internal PHY
 
-scsibus*	at scsi?
-sd*		at scsibus?
-cd*		at scsibus?
-st*		at scsibus?
-ch*		at scsibus?
-uk*		at scsibus?
-
 # I2C devices
 abcrtc*		at iic?			# Abracon x80x RTC
 dsxrtc*		at iic?			# DS3231 RTC
@@ -329,6 +342,7 @@ mcprtc*		at iic?			# MCP794XX RTC
 mfokrtc*	at iic?			# M41T8X RTC
 pcfrtc*		at iic?			# PCF8523 RTC
 pcxrtc*		at iic?			# PCF8563 RTC
+pcyrtc*		at iic?			# PCF85063A/TP RTC
 rkpmic*		at iic?			# RK808 PMIC
 tcpci*		at iic?			# USB Type-C controller
 

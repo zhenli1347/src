@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_vfsops.c,v 1.94 2020/08/10 05:18:46 jsg Exp $	*/
+/*	$OpenBSD: msdosfs_vfsops.c,v 1.96 2022/08/12 14:30:52 visa Exp $	*/
 /*	$NetBSD: msdosfs_vfsops.c,v 1.48 1997/10/18 02:54:57 briggs Exp $	*/
 
 /*-
@@ -200,25 +200,8 @@ msdosfs_mount(struct mount *mp, const char *path, void *data,
 	if (pmp->pm_flags & MSDOSFSMNT_NOWIN95)
 		pmp->pm_flags |= MSDOSFSMNT_SHORTNAME;
 	else if (!(pmp->pm_flags &
-	    (MSDOSFSMNT_SHORTNAME | MSDOSFSMNT_LONGNAME))) {
-		struct vnode *rvp;
-
-		/*
-		 * Try to divine whether to support Win'95 long filenames
-		 */
-		if (FAT32(pmp))
-		        pmp->pm_flags |= MSDOSFSMNT_LONGNAME;
-		else {
-		        if ((error = msdosfs_root(mp, &rvp)) != 0) {
-			        msdosfs_unmount(mp, MNT_FORCE, p);
-			        goto error;
-			}
-			pmp->pm_flags |= findwin95(VTODE(rvp))
-			     ? MSDOSFSMNT_LONGNAME
-			     : MSDOSFSMNT_SHORTNAME;
-			vput(rvp);
-		}
-	}
+	    (MSDOSFSMNT_SHORTNAME | MSDOSFSMNT_LONGNAME)))
+	        pmp->pm_flags |= MSDOSFSMNT_LONGNAME;
 
 	if (pmp->pm_flags & MSDOSFSMNT_LONGNAME)
 		mp->mnt_stat.f_namemax = WIN_MAXLEN;
@@ -657,16 +640,22 @@ int
 msdosfs_sync_vnode(struct vnode *vp, void *arg)
 {
 	struct msdosfs_sync_arg *msa = arg;
-	int error;
 	struct denode *dep;
+	int error;
+	int s, skip = 0;
 
 	dep = VTODE(vp);
+	s = splbio();
 	if (vp->v_type == VNON ||
 	    ((dep->de_flag & (DE_ACCESS | DE_CREATE | DE_UPDATE | DE_MODIFIED)) == 0
 	      && LIST_EMPTY(&vp->v_dirtyblkhd)) ||
 	    msa->waitfor == MNT_LAZY) {
-		return (0);
+		skip = 1;
 	}
+	splx(s);
+
+	if (skip)
+		return (0);
 
 	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT))
 		return (0);

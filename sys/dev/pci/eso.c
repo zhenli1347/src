@@ -1,4 +1,4 @@
-/*	$OpenBSD: eso.c,v 1.47 2020/01/19 00:18:34 cheloha Exp $	*/
+/*	$OpenBSD: eso.c,v 1.50 2022/03/21 19:22:41 miod Exp $	*/
 /*	$NetBSD: eso.c,v 1.48 2006/12/18 23:13:39 kleink Exp $	*/
 
 /*
@@ -90,7 +90,7 @@ void eso_attach(struct device *, struct device *, void *);
 int eso_activate(struct device *, int);
 void eso_defer(struct device *);
 
-struct cfattach eso_ca = {
+const struct cfattach eso_ca = {
 	sizeof (struct eso_softc), eso_match, eso_attach, NULL,
 	eso_activate
 };
@@ -123,7 +123,7 @@ int	eso_trigger_input(void *, void *, void *, int,
 		    void (*)(void *), void *, struct audio_params *);
 void	eso_setup(struct eso_softc *, int, int);
 
-struct audio_hw_if eso_hw_if = {
+const struct audio_hw_if eso_hw_if = {
 	eso_open,
 	eso_close,
 	eso_set_params,
@@ -289,7 +289,7 @@ eso_attach(struct device *parent, struct device *self, void *aux)
 		config_defer((struct device *)sc, eso_defer);
 	}
 	
-	audio_attach_mi(&eso_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&eso_hw_if, sc, NULL, &sc->sc_dev);
 
 	aa.type = AUDIODEV_TYPE_OPL;
 	aa.hwif = NULL;

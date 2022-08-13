@@ -245,6 +245,13 @@ query_reset(query_type *q, size_t maxlen, int is_tcp)
 	q->axfr_current_rrset = NULL;
 	q->axfr_current_rr = 0;
 
+	q->ixfr_is_done = 0;
+	q->ixfr_data = NULL;
+	q->ixfr_count_newsoa = 0;
+	q->ixfr_count_oldsoa = 0;
+	q->ixfr_count_del = 0;
+	q->ixfr_count_add = 0;
+
 #ifdef RATELIMIT
 	q->wildcard_domain = NULL;
 #endif
@@ -1424,6 +1431,7 @@ answer_lookup_zone(struct nsd *nsd, struct query *q, answer_type *answer,
 		}
 
 		if (!q->delegation_domain
+		    || !q->delegation_rrset
 		    || (exact && q->qtype == TYPE_DS && closest_encloser == q->delegation_domain))
 		{
 			if (q->qclass == CLASS_ANY) {
@@ -1668,7 +1676,8 @@ query_process(query_type *q, nsd_type *nsd, uint32_t *now_p)
 		}
 	}
 	query_state = answer_axfr_ixfr(nsd, q);
-	if (query_state == QUERY_PROCESSED || query_state == QUERY_IN_AXFR) {
+	if (query_state == QUERY_PROCESSED || query_state == QUERY_IN_AXFR
+		|| query_state == QUERY_IN_IXFR) {
 		return query_state;
 	}
 	if(q->qtype == TYPE_ANY && nsd->options->refuse_any && !q->tcp) {

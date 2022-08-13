@@ -1,4 +1,4 @@
-/* $OpenBSD: pcppi.c,v 1.17 2021/03/07 06:17:04 jsg Exp $ */
+/* $OpenBSD: pcppi.c,v 1.19 2022/04/06 18:59:28 naddy Exp $ */
 /* $NetBSD: pcppi.c,v 1.1 1998/04/15 20:26:18 drochner Exp $ */
 
 /*
@@ -69,7 +69,7 @@ struct pcppi_softc {
 int	pcppi_match(struct device *, void *, void *);
 void	pcppi_attach(struct device *, struct device *, void *);
 
-struct cfattach pcppi_ca = {
+const struct cfattach pcppi_ca = {
 	sizeof(struct pcppi_softc), pcppi_match, pcppi_attach,
 };
 
@@ -111,7 +111,7 @@ pcppi_match(struct device *parent, void *match, void *aux)
 	 *
 	 * We don't want to have any chance of changing speaker output (which
 	 * this test might, if it crashes in the middle, or something;
-	 * normally it's be to quick to produce anthing audible), but
+	 * normally it's too quick to produce anything audible), but
 	 * many "combo chip" mock-PPI's don't seem to support the top bit
 	 * of Port B as a settable bit.  The bottom bit has to be settable,
 	 * since the speaker driver hardware still uses it.

@@ -1,4 +1,4 @@
-#	$OpenBSD: changelist,v 1.128 2021/07/30 07:00:02 bket Exp $
+#	$OpenBSD: changelist,v 1.132 2022/07/02 03:32:05 danj Exp $
 #
 # List of files which the security script backs up and checks
 # for modifications.
@@ -14,6 +14,7 @@
 /etc/bgpd.conf
 /etc/boot.conf
 /etc/bootparams
+/etc/bsd.re-config
 /etc/changelist
 /etc/chio.conf
 /etc/crontab
@@ -61,6 +62,7 @@
 /etc/ldpd.conf
 /etc/locate.rc
 /etc/login.conf
+/etc/login.conf.d/*
 /etc/login_ldap.conf
 /etc/mail.rc
 /etc/mail/aliases
@@ -116,6 +118,7 @@
 /etc/rpki/arin.tal
 /etc/rpki/lacnic.tal
 /etc/rpki/ripe.tal
+/etc/rpki/skiplist
 /etc/sasyncd.conf
 /etc/sensorsd.conf
 /etc/services
@@ -139,7 +142,6 @@
 /etc/suid_profile
 /etc/sysctl.conf
 /etc/syslog.conf
-/etc/switchd.conf
 /etc/sysmerge.ignore
 /etc/ttys
 /etc/unwind.conf

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pas.c,v 1.30 2021/03/07 06:17:04 jsg Exp $	*/
+/*	$OpenBSD: pas.c,v 1.33 2022/04/06 18:59:28 naddy Exp $	*/
 /*	$NetBSD: pas.c,v 1.37 1998/01/12 09:43:43 thorpej Exp $	*/
 
 /*
@@ -108,7 +108,7 @@ void	pasconf(int, int, int, int);
  * Define our interface to the higher level audio driver.
  */
 
-struct audio_hw_if pas_hw_if = {
+const struct audio_hw_if pas_hw_if = {
 	sbdsp_open,
 	sbdsp_close,
 	sbdsp_set_params,
@@ -227,7 +227,7 @@ pasconf(int model, int sbbase, int sbirq, int sbdrq)
 int	pasprobe(struct device *, void *, void *);
 void	pasattach(struct device *, struct device *, void *);
 
-struct cfattach pas_ca = {
+const struct cfattach pas_ca = {
 	sizeof(struct pas_softc), pasprobe, pasattach
 };
 
@@ -398,5 +398,5 @@ pasattach(struct device *parent, struct device *self, void *aux)
 	
 	sbdsp_attach(&sc->sc_sbdsp);
 
-	audio_attach_mi(&pas_hw_if, &sc->sc_sbdsp, &sc->sc_sbdsp.sc_dev);
+	audio_attach_mi(&pas_hw_if, &sc->sc_sbdsp, NULL, &sc->sc_sbdsp.sc_dev);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_run.c,v 1.132 2020/11/27 14:45:03 krw Exp $	*/
+/*	$OpenBSD: if_run.c,v 1.137 2022/05/10 08:20:36 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2008-2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -259,6 +259,7 @@ static const struct usb_devno run_devs[] = {
 	USB_ID(RALINK,		RT3572),
 	USB_ID(RALINK,		RT3573),
 	USB_ID(RALINK,		RT5370),
+	USB_ID(RALINK,		RT5372),
 	USB_ID(RALINK,		RT5572),
 	USB_ID(RALINK,		RT8070),
 	USB_ID(SAMSUNG,		WIS09ABGN),
@@ -1664,7 +1665,7 @@ run_read_eeprom(struct run_softc *sc)
 struct ieee80211_node *
 run_node_alloc(struct ieee80211com *ic)
 {
-	return malloc(sizeof (struct run_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+	return malloc(sizeof (struct run_node), M_USBDEV, M_NOWAIT | M_ZERO);
 }
 
 int
@@ -1701,14 +1702,17 @@ void
 run_next_scan(void *arg)
 {
 	struct run_softc *sc = arg;
+	int s;
 
 	if (usbd_is_dying(sc->sc_udev))
 		return;
 
 	usbd_ref_incr(sc->sc_udev);
 
+	s = splnet();
 	if (sc->sc_ic.ic_state == IEEE80211_S_SCAN)
 		ieee80211_next_scan(&sc->sc_ic.ic_if);
+	splx(s);
 
 	usbd_ref_decr(sc->sc_udev);
 }
@@ -1965,7 +1969,7 @@ run_set_key_cb(struct run_softc *sc, void *arg)
 		wcid = 0;	/* NB: update WCID0 for group keys */
 		base = RT2860_SKEY(0, k->k_id);
 	} else {
-		wcid = RUN_AID2WCID(cmd->ni->ni_associd);
+		wcid = (cmd->ni != NULL) ? RUN_AID2WCID(cmd->ni->ni_associd) : 0;
 		base = RT2860_PKEY(wcid);
 	}
 
@@ -2018,7 +2022,8 @@ run_set_key_cb(struct run_softc *sc, void *arg)
 	}
 
 	if (sc->sc_key_tasks == 0) {
-		cmd->ni->ni_port_valid = 1;
+		if (cmd->ni != NULL)
+			cmd->ni->ni_port_valid = 1;
 		ieee80211_set_link_state(ic, LINK_STATE_UP);
 	}
 }
@@ -2056,7 +2061,7 @@ run_delete_key_cb(struct run_softc *sc, void *arg)
 
 	} else {
 		/* remove pairwise key */
-		wcid = RUN_AID2WCID(cmd->ni->ni_associd);
+		wcid = (cmd->ni != NULL) ? RUN_AID2WCID(cmd->ni->ni_associd) : 0;
 		run_read(sc, RT2860_WCID_ATTR(wcid), &attr);
 		attr &= ~0xf;
 		run_write(sc, RT2860_WCID_ATTR(wcid), attr);
@@ -2223,7 +2228,7 @@ run_rx_frame(struct run_softc *sc, uint8_t *buf, int dmalen,
 	}
 
 	wh = (struct ieee80211_frame *)(buf + rxwisize);
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
 		wh->i_fc[1] &= ~IEEE80211_FC1_PROTECTED;
 		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
@@ -2306,7 +2311,6 @@ run_rx_frame(struct run_softc *sc, uint8_t *buf, int dmalen,
 	s = splnet();
 	ni = ieee80211_find_rxnode(ic, wh);
 	rxi.rxi_rssi = rssi;
-	rxi.rxi_tstamp = 0;	/* unused */
 	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* node is no longer needed */
@@ -4712,8 +4716,10 @@ run_init(struct ifnet *ifp)
 
 	if (ic->ic_flags & IEEE80211_F_WEPON) {
 		/* install WEP keys */
-		for (i = 0; i < IEEE80211_WEP_NKID; i++)
-			(void)run_set_key(ic, NULL, &ic->ic_nw_keys[i]);
+		for (i = 0; i < IEEE80211_WEP_NKID; i++) {
+			if (ic->ic_nw_keys[i].k_cipher != IEEE80211_CIPHER_NONE)
+				(void)run_set_key(ic, NULL, &ic->ic_nw_keys[i]);
+		}
 	}
 
 	if (ic->ic_opmode == IEEE80211_M_MONITOR)

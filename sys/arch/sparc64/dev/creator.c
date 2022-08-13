@@ -1,4 +1,4 @@
-/*	$OpenBSD: creator.c,v 1.53 2020/05/25 09:55:48 jsg Exp $	*/
+/*	$OpenBSD: creator.c,v 1.55 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2002 Jason L. Wright (jason@thought.net)
@@ -77,7 +77,7 @@ struct cfdriver creator_cd = {
 	NULL, "creator", DV_DULL
 };
 
-struct cfattach creator_ca = {
+const struct cfattach creator_ca = {
 	sizeof(struct creator_softc), creator_match, creator_attach
 };
 
@@ -258,6 +258,8 @@ creator_ioctl(v, cmd, data, flags, p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = 32;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 0;
 		break;
 	case WSDISPLAYIO_GETSUPPORTEDDEPTH:

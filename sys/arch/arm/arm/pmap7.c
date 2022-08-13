@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap7.c,v 1.61 2021/03/25 04:12:00 jsg Exp $	*/
+/*	$OpenBSD: pmap7.c,v 1.63 2022/02/21 19:15:58 kettenis Exp $	*/
 /*	$NetBSD: pmap.c,v 1.147 2004/01/18 13:03:50 scw Exp $	*/
 
 /*
@@ -625,7 +625,8 @@ printf("%s: %d\n", __func__, ++nl1);
 
 	/* Allocate a L1 page table */
 	for (;;) {
-		va = uvm_km_valloc(kernel_map, L1_TABLE_SIZE);
+		va = (vaddr_t)km_alloc(L1_TABLE_SIZE, &kv_any, &kp_none,
+		    &kd_nowait);
 		if (va != 0)
 			break;
 		uvm_wait("alloc_l1_va");
@@ -686,7 +687,7 @@ pmap_free_l1(pmap_t pm)
 	uvm_pglistfree(&mlist);
 
 	/* free backing va */
-	uvm_km_free(kernel_map, (vaddr_t)l1->l1_kva, L1_TABLE_SIZE);
+	km_free(l1->l1_kva, L1_TABLE_SIZE, &kv_any, &kp_none);
 
 	free(l1, M_VMPMAP, 0);
 }
@@ -1968,6 +1969,8 @@ pmap_grow_map(vaddr_t va, pt_entry_t cache_mode, paddr_t *pap)
 	pt_entry_t *ptep;
 	paddr_t pa;
 
+	KASSERT((va & PAGE_MASK) == 0);
+
 	if (uvm.page_init_done == 0) {
 		if (uvm_page_physget(&pa) == 0)
 			return (1);
@@ -2032,7 +2035,8 @@ pmap_grow_l2_bucket(pmap_t pm, vaddr_t va)
 			 * The new l2_dtable straddles a page boundary.
 			 * Map in another page to cover it.
 			 */
-			if (pmap_grow_map(nva, pte_l2_s_cache_mode, NULL))
+			if (pmap_grow_map(trunc_page(nva),
+			    pte_l2_s_cache_mode, NULL))
 				return (NULL);
 		}
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: disklabel.c,v 1.237 2021/06/24 21:11:40 jmc Exp $	*/
+/*	$OpenBSD: disklabel.c,v 1.241 2022/07/31 14:29:19 krw Exp $	*/
 
 /*
  * Copyright (c) 1987, 1993
@@ -89,8 +89,10 @@ int	quiet;
 int	donothing;
 
 void	makedisktab(FILE *, struct disklabel *);
-void	makelabel(char *, char *, struct disklabel *);
-int	writelabel(int, struct disklabel *);
+int	checklabel(struct disklabel *);
+void	readlabel(int);
+void	parsefstab(void);
+void	parsedisktab(char *, struct disklabel *);
 int	edit(struct disklabel *, int);
 int	editit(const char *);
 char	*skip(char *);
@@ -224,8 +226,9 @@ main(int argc, char *argv[])
 
 		if (autotable != NULL)
 			parse_autotable(autotable);
-		error = parselabel();
-		if (op == WRITE && aflag && error)
+		parsefstab();
+		error = aflag ? editor_allocspace(&lab) : 0;
+		if (op == WRITE && error)
 			errx(1, "autoalloc failed");
 	} else if (argc == 2 || argc == 3) {
 		/* Ensure f is a disk device before pledging. */
@@ -235,7 +238,9 @@ main(int argc, char *argv[])
 		if (pledge("stdio rpath wpath disklabel", NULL) == -1)
 			err(1, "pledge");
 
-		makelabel(argv[1], argc == 3 ? argv[2] : NULL, &lab);
+		parsedisktab(argv[1], &lab);
+		if (argc == 3)
+			strncpy(lab.d_packname, argv[2], sizeof(lab.d_packname));
 	} else
 		usage();
 
@@ -287,12 +292,10 @@ main(int argc, char *argv[])
 }
 
 /*
- * Construct a prototype disklabel from /etc/disktab.  As a side
- * effect, set the names of the primary and secondary boot files
- * if specified.
+ * Construct a prototype disklabel from /etc/disktab.
  */
 void
-makelabel(char *type, char *name, struct disklabel *lp)
+parsedisktab(char *type, struct disklabel *lp)
 {
 	struct disklabel *dp;
 
@@ -300,12 +303,7 @@ makelabel(char *type, char *name, struct disklabel *lp)
 	if (dp == NULL)
 		errx(1, "unknown disk type: %s", type);
 	*lp = *dp;
-	/* d_packname is union d_boot[01], so zero */
-	memset(lp->d_packname, 0, sizeof(lp->d_packname));
-	if (name)
-		(void)strncpy(lp->d_packname, name, sizeof(lp->d_packname));
 }
-
 
 int
 writelabel(int f, struct disklabel *lp)
@@ -339,6 +337,7 @@ writelabel(int f, struct disklabel *lp)
 void
 readlabel(int f)
 {
+	struct disklabel	dl;
 
 	if (cflag && ioctl(f, DIOCRLDINFO) == -1)
 		err(4, "DIOCRLDINFO");
@@ -349,11 +348,18 @@ readlabel(int f)
 	} else {
 		if (ioctl(f, DIOCGDINFO, &lab) == -1)
 			err(4, "DIOCGDINFO");
+		if (ioctl(f, DIOCGPDINFO, &dl) == -1)
+			err(4, "DIOCGPDINFO");
+		lab.d_secsize = dl.d_secsize;
+		lab.d_nsectors = dl.d_nsectors;
+		lab.d_ntracks = dl.d_ntracks;
+		lab.d_secpercyl = dl.d_secpercyl;
+		lab.d_ncylinders = dl.d_ncylinders;
 	}
 }
 
-int
-parselabel(void)
+void
+parsefstab(void)
 {
 	char *partname, *partduid;
 	struct fstab *fsent;
@@ -381,10 +387,6 @@ parselabel(void)
 	endfsent();
 	free(partduid);
 	free(partname);
-
-	if (aflag)
-		return editor_allocspace(&lab);
-	return 0;
 }
 
 void
@@ -928,51 +930,6 @@ getasciilabel(FILE *f, struct disklabel *lp)
 			}
 			continue;
 		}
-		if (!strcmp(cp, "bytes/sector")) {
-			v = GETNUM(lp->d_secsize, tp, 1, &errstr);
-			if (errstr || (v % 512) != 0) {
-				warnx("line %d: bad %s: %s", lineno, cp, tp);
-				errors++;
-			} else
-				lp->d_secsize = v;
-			continue;
-		}
-		if (!strcmp(cp, "sectors/track")) {
-			v = GETNUM(lp->d_nsectors, tp, 1, &errstr);
-			if (errstr) {
-				warnx("line %d: bad %s: %s", lineno, cp, tp);
-				errors++;
-			} else
-				lp->d_nsectors = v;
-			continue;
-		}
-		if (!strcmp(cp, "sectors/cylinder")) {
-			v = GETNUM(lp->d_secpercyl, tp, 1, &errstr);
-			if (errstr) {
-				warnx("line %d: bad %s: %s", lineno, cp, tp);
-				errors++;
-			} else
-				lp->d_secpercyl = v;
-			continue;
-		}
-		if (!strcmp(cp, "tracks/cylinder")) {
-			v = GETNUM(lp->d_ntracks, tp, 1, &errstr);
-			if (errstr) {
-				warnx("line %d: bad %s: %s", lineno, cp, tp);
-				errors++;
-			} else
-				lp->d_ntracks = v;
-			continue;
-		}
-		if (!strcmp(cp, "cylinders")) {
-			v = GETNUM(lp->d_ncylinders, tp, 1, &errstr);
-			if (errstr) {
-				warnx("line %d: bad %s: %s", lineno, cp, tp);
-				errors++;
-			} else
-				lp->d_ncylinders = v;
-			continue;
-		}
 
 		/* Ignore fields that are no longer in the disklabel. */
 		if (!strcmp(cp, "rpm") ||
@@ -986,7 +943,12 @@ getasciilabel(FILE *f, struct disklabel *lp)
 		/* Ignore fields that are forcibly set when label is read. */
 		if (!strcmp(cp, "total sectors") ||
 		    !strcmp(cp, "boundstart") ||
-		    !strcmp(cp, "boundend"))
+		    !strcmp(cp, "boundend") ||
+		    !strcmp(cp, "bytes/sector") ||
+		    !strcmp(cp, "sectors/track") ||
+		    !strcmp(cp, "sectors/cylinder") ||
+		    !strcmp(cp, "tracks/cylinder") ||
+		    !strcmp(cp, "cylinders"))
 			continue;
 
 		if ('a' <= *cp && *cp <= 'z' && cp[1] == '\0') {

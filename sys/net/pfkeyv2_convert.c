@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfkeyv2_convert.c,v 1.74 2021/07/27 17:13:03 mvs Exp $	*/
+/*	$OpenBSD: pfkeyv2_convert.c,v 1.79 2022/01/20 17:13:12 bluhm Exp $	*/
 /*
  * The author of this code is Angelos D. Keromytis (angelos@keromytis.org)
  *
@@ -122,6 +122,7 @@ import_sa(struct tdb *tdb, struct sadb_sa *sadb_sa, struct ipsecinit *ii)
 	if (!sadb_sa)
 		return;
 
+	mtx_enter(&tdb->tdb_mtx);
 	if (ii) {
 		ii->ii_encalg = sadb_sa->sadb_sa_encrypt;
 		ii->ii_authalg = sadb_sa->sadb_sa_auth;
@@ -145,6 +146,7 @@ import_sa(struct tdb *tdb, struct sadb_sa *sadb_sa, struct ipsecinit *ii)
 
 	if (sadb_sa->sadb_sa_state != SADB_SASTATE_MATURE)
 		tdb->tdb_flags |= TDBF_INVALID;
+	mtx_leave(&tdb->tdb_mtx);
 }
 
 /*
@@ -170,9 +172,6 @@ export_sa(void **p, struct tdb *tdb)
 		switch (tdb->tdb_compalgxform->type) {
 		case CRYPTO_DEFLATE_COMP:
 			sadb_sa->sadb_sa_encrypt = SADB_X_CALG_DEFLATE;
-			break;
-		case CRYPTO_LZS_COMP:
-			sadb_sa->sadb_sa_encrypt = SADB_X_CALG_LZS;
 			break;
 		}
 	}
@@ -285,6 +284,7 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 	if (!sadb_lifetime)
 		return;
 
+	mtx_enter(&tdb->tdb_mtx);
 	switch (type) {
 	case PFKEYV2_LIFETIME_HARD:
 		if ((tdb->tdb_exp_allocations =
@@ -302,8 +302,9 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 		if ((tdb->tdb_exp_timeout =
 		    sadb_lifetime->sadb_lifetime_addtime) != 0) {
 			tdb->tdb_flags |= TDBF_TIMER;
-			timeout_add_sec(&tdb->tdb_timer_tmo,
-			    tdb->tdb_exp_timeout);
+			if (timeout_add_sec(&tdb->tdb_timer_tmo,
+			    tdb->tdb_exp_timeout))
+				tdb_ref(tdb);
 		} else
 			tdb->tdb_flags &= ~TDBF_TIMER;
 
@@ -330,8 +331,9 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 		if ((tdb->tdb_soft_timeout =
 		    sadb_lifetime->sadb_lifetime_addtime) != 0) {
 			tdb->tdb_flags |= TDBF_SOFT_TIMER;
-			timeout_add_sec(&tdb->tdb_stimer_tmo,
-			    tdb->tdb_soft_timeout);
+			if (timeout_add_sec(&tdb->tdb_stimer_tmo,
+			    tdb->tdb_soft_timeout))
+				tdb_ref(tdb);
 		} else
 			tdb->tdb_flags &= ~TDBF_SOFT_TIMER;
 
@@ -349,6 +351,7 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 		tdb->tdb_established = sadb_lifetime->sadb_lifetime_addtime;
 		tdb->tdb_first_use = sadb_lifetime->sadb_lifetime_usetime;
 	}
+	mtx_leave(&tdb->tdb_mtx);
 }
 
 /*
@@ -429,13 +432,15 @@ import_flow(struct sockaddr_encap *flow, struct sockaddr_encap *flowmask,
     struct sadb_protocol *sab, struct sadb_protocol *ftype)
 {
 	u_int8_t transproto = 0;
-	union sockaddr_union *src = (union sockaddr_union *)(ssrc + 1);
-	union sockaddr_union *dst = (union sockaddr_union *)(ddst + 1);
-	union sockaddr_union *srcmask = (union sockaddr_union *)(ssrcmask + 1);
-	union sockaddr_union *dstmask = (union sockaddr_union *)(ddstmask + 1);
+	union sockaddr_union *src, *dst, *srcmask, *dstmask;
 
 	if (ssrc == NULL)
 		return 0; /* There wasn't any information to begin with. */
+
+	src = (union sockaddr_union *)(ssrc + 1);
+	dst = (union sockaddr_union *)(ddst + 1);
+	srcmask = (union sockaddr_union *)(ssrcmask + 1);
+	dstmask = (union sockaddr_union *)(ddstmask + 1);
 
 	bzero(flow, sizeof(*flow));
 	bzero(flowmask, sizeof(*flowmask));
@@ -960,18 +965,21 @@ export_satype(void **p, struct tdb *tdb)
 void
 export_counter(void **p, struct tdb *tdb)
 {
+	uint64_t counters[tdb_ncounters];
 	struct sadb_x_counter *scnt = (struct sadb_x_counter *)*p;
+
+	counters_read(tdb->tdb_counters, counters, tdb_ncounters);
 
 	scnt->sadb_x_counter_len = sizeof(struct sadb_x_counter) /
 	    sizeof(uint64_t);
 	scnt->sadb_x_counter_pad = 0;
-	scnt->sadb_x_counter_ipackets = tdb->tdb_ipackets;
-	scnt->sadb_x_counter_opackets = tdb->tdb_opackets;
-	scnt->sadb_x_counter_ibytes = tdb->tdb_ibytes;
-	scnt->sadb_x_counter_obytes = tdb->tdb_obytes;
-	scnt->sadb_x_counter_idrops = tdb->tdb_idrops;
-	scnt->sadb_x_counter_odrops = tdb->tdb_odrops;
-	scnt->sadb_x_counter_idecompbytes = tdb->tdb_idecompbytes;
-	scnt->sadb_x_counter_ouncompbytes = tdb->tdb_ouncompbytes;
+	scnt->sadb_x_counter_ipackets = counters[tdb_ipackets];
+	scnt->sadb_x_counter_opackets = counters[tdb_opackets];
+	scnt->sadb_x_counter_ibytes = counters[tdb_ibytes];
+	scnt->sadb_x_counter_obytes = counters[tdb_obytes];
+	scnt->sadb_x_counter_idrops = counters[tdb_idrops];
+	scnt->sadb_x_counter_odrops = counters[tdb_odrops];
+	scnt->sadb_x_counter_idecompbytes = counters[tdb_idecompbytes];
+	scnt->sadb_x_counter_ouncompbytes = counters[tdb_ouncompbytes];
 	*p += sizeof(struct sadb_x_counter);
 }

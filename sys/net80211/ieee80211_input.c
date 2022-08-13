@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_input.c,v 1.238 2021/09/03 12:39:43 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_input.c,v 1.247 2022/03/20 12:01:58 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2001 Atsushi Onoe
@@ -1053,7 +1053,7 @@ ieee80211_enqueue_data(struct ieee80211com *ic, struct mbuf *m,
 	eh = mtod(m, struct ether_header *);
 
 	if ((ic->ic_flags & IEEE80211_F_RSNON) && !ni->ni_port_valid &&
-	    eh->ether_type != htons(ETHERTYPE_PAE)) {
+	    eh->ether_type != htons(ETHERTYPE_EAPOL)) {
 		DPRINTF(("port not valid: %s\n",
 		    ether_sprintf(eh->ether_dhost)));
 		ic->ic_stats.is_rx_unauth++;
@@ -1070,7 +1070,7 @@ ieee80211_enqueue_data(struct ieee80211com *ic, struct mbuf *m,
 #ifndef IEEE80211_STA_ONLY
 	if (ic->ic_opmode == IEEE80211_M_HOSTAP &&
 	    !(ic->ic_userflags & IEEE80211_F_NOBRIDGE) &&
-	    eh->ether_type != htons(ETHERTYPE_PAE)) {
+	    eh->ether_type != htons(ETHERTYPE_EAPOL)) {
 		struct ieee80211_node *ni1;
 
 		if (ETHER_IS_MULTICAST(eh->ether_dhost)) {
@@ -1095,7 +1095,7 @@ ieee80211_enqueue_data(struct ieee80211com *ic, struct mbuf *m,
 #endif
 	if (m != NULL) {
 		if ((ic->ic_flags & IEEE80211_F_RSNON) &&
-		    eh->ether_type == htons(ETHERTYPE_PAE)) {
+		    eh->ether_type == htons(ETHERTYPE_EAPOL)) {
 			ifp->if_ipackets++;
 #if NBPFILTER > 0
 			/*
@@ -1605,10 +1605,10 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 	struct ieee80211_node *ni;
 	const struct ieee80211_frame *wh;
 	const u_int8_t *frm, *efrm;
-	const u_int8_t *tstamp, *ssid, *rates, *xrates, *edcaie, *wmmie;
-	const u_int8_t *rsnie, *wpaie, *htcaps, *htop;
+	const u_int8_t *tstamp, *ssid, *rates, *xrates, *edcaie, *wmmie, *tim;
+	const u_int8_t *rsnie, *wpaie, *htcaps, *htop, *vhtcaps, *vhtop;
 	u_int16_t capinfo, bintval;
-	u_int8_t chan, bchan, erp, dtim_count, dtim_period;
+	u_int8_t chan, bchan, erp;
 	int is_new;
 
 	/*
@@ -1646,12 +1646,14 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 	bintval = LE_READ_2(frm); frm += 2;
 	capinfo = LE_READ_2(frm); frm += 2;
 
-	ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = NULL;
-	htcaps = htop = NULL;
-	bchan = ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan);
+	ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = tim = NULL;
+	htcaps = htop = vhtcaps = vhtop = NULL;
+	if (rxi->rxi_chan)
+		bchan = rxi->rxi_chan;
+	else
+		bchan = ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan);
 	chan = bchan;
 	erp = 0;
-	dtim_count = dtim_period = 0;
 	while (frm + 2 <= efrm) {
 		if (frm + 2 + frm[1] > efrm) {
 			ic->ic_stats.is_rx_elem_toosmall++;
@@ -1693,11 +1695,18 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 		case IEEE80211_ELEMID_HTOP:
 			htop = frm;
 			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			vhtcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTOP:
+			vhtop = frm;
+			break;
 		case IEEE80211_ELEMID_TIM:
-			if (frm[1] > 3) {
-				dtim_count = frm[2];
-				dtim_period = frm[3];
+			if (frm[1] < 4) {
+				ic->ic_stats.is_rx_elem_toosmall++;
+				break;
 			}
+			tim = frm;
 			break;
 		case IEEE80211_ELEMID_VENDOR:
 			if (frm[1] < 4) {
@@ -1730,15 +1739,18 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 #if IEEE80211_CHAN_MAX < 255
 	    chan > IEEE80211_CHAN_MAX ||
 #endif
-	    isclr(ic->ic_chan_active, chan)) {
+	    (isclr(ic->ic_chan_active, chan) &&
+	     ((ic->ic_caps & IEEE80211_C_SCANALL) == 0 ||
+	     (ic->ic_flags & IEEE80211_F_BGSCAN) == 0))) {
 		DPRINTF(("ignore %s with invalid channel %u\n",
 		    isprobe ? "probe response" : "beacon", chan));
 		ic->ic_stats.is_rx_badchan++;
 		return;
 	}
-	if ((ic->ic_state != IEEE80211_S_SCAN ||
+	if ((rxi->rxi_chan != 0 && chan != rxi->rxi_chan) ||
+	    ((ic->ic_state != IEEE80211_S_SCAN ||
 	     !(ic->ic_caps & IEEE80211_C_SCANALL)) &&
-	    chan != bchan) {
+	    chan != bchan)) {
 		/*
 		 * Frame was received on a channel different from the
 		 * one indicated in the DS params element id;
@@ -1749,36 +1761,6 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 		DPRINTF(("ignore %s on channel %u marked for channel %u\n",
 		    isprobe ? "probe response" : "beacon", bchan, chan));
 		ic->ic_stats.is_rx_chanmismatch++;
-		return;
-	}
-	/*
-	 * Use mac, channel and rssi so we collect only the
-	 * best potential AP with the equal bssid while scanning.
-	 * Collecting all potential APs may result in bloat of
-	 * the node tree. This call will return NULL if the node
-	 * for this APs does not exist or if the new node is the
-	 * potential better one.
-	 */
-	ni = ieee80211_find_node_for_beacon(ic, wh->i_addr2,
-	    &ic->ic_channels[chan], ssid, rxi->rxi_rssi);
-	if (ni != NULL) {
-		/*
-		 * If we are doing a directed scan for an AP with a hidden SSID
-		 * we must collect the SSID from a probe response to override
-		 * a non-zero-length SSID filled with zeroes that we may have
-		 * received earlier in a beacon.
-		 */
-		if (isprobe && ssid[1] != 0 && ni->ni_essid[0] == '\0') {
-			ni->ni_esslen = ssid[1];
-			memset(ni->ni_essid, 0, sizeof(ni->ni_essid));
-			/* we know that ssid[1] <= IEEE80211_NWID_LEN */
-			memcpy(ni->ni_essid, &ssid[2], ssid[1]);
-		}
-
-		/* Update channel in case AP has switched */
-		if (ic->ic_opmode == IEEE80211_M_STA)
-			ni->ni_chan = rni->ni_chan;
-
 		return;
 	}
 
@@ -1805,13 +1787,22 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 	} else
 		is_new = 0;
 
+	ni->ni_chan = &ic->ic_channels[chan];
+
 	if (htcaps)
 		ieee80211_setup_htcaps(ni, htcaps + 2, htcaps[1]);
 	if (htop && !ieee80211_setup_htop(ni, htop + 2, htop[1], 1))
 		htop = NULL; /* invalid HTOP */
+	if (htcaps && vhtcaps && IEEE80211_IS_CHAN_5GHZ(ni->ni_chan)) {
+		ieee80211_setup_vhtcaps(ni, vhtcaps + 2, vhtcaps[1]);
+		if (vhtop && !ieee80211_setup_vhtop(ni, vhtop + 2, vhtop[1], 1))
+			vhtop = NULL; /* invalid VHTOP */
+	}
 
-	ni->ni_dtimcount = dtim_count;
-	ni->ni_dtimperiod = dtim_period;
+	if (tim) {
+		ni->ni_dtimcount = tim[2];
+		ni->ni_dtimperiod = tim[3];
+	}
 
 	/*
 	 * When operating in station mode, check for state updates
@@ -1858,6 +1849,27 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 			ic->ic_updateprot(ic);
 
 		/*
+		 * Check if 40MHz channel mode has changed since last beacon.
+		 */
+		if (htop && (ic->ic_bss->ni_flags & IEEE80211_NODE_HT) &&
+		    (ic->ic_htcaps & IEEE80211_HTCAP_CBW20_40)) {
+			uint8_t chw_last, chw, sco_last, sco;
+			chw_last = (ic->ic_bss->ni_htop0 & IEEE80211_HTOP0_CHW);
+			chw = (ni->ni_htop0 & IEEE80211_HTOP0_CHW);
+			sco_last =
+			    ((ic->ic_bss->ni_htop0 & IEEE80211_HTOP0_SCO_MASK)
+			    >> IEEE80211_HTOP0_SCO_SHIFT);
+			sco = ((ni->ni_htop0 & IEEE80211_HTOP0_SCO_MASK) >>
+			    IEEE80211_HTOP0_SCO_SHIFT);
+			ic->ic_bss->ni_htop0 = ni->ni_htop0;
+			if (chw_last != chw || sco_last != sco) {
+				if (ic->ic_updatechan != NULL)
+					ic->ic_updatechan(ic);
+			}
+		} else if (htop)
+			ic->ic_bss->ni_htop0 = ni->ni_htop0;
+
+		/*
 		 * Check if AP short slot time setting has changed
 		 * since last beacon and give the driver a chance to
 		 * update the hardware.
@@ -1867,6 +1879,14 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 			ieee80211_set_shortslottime(ic,
 			    ic->ic_curmode == IEEE80211_MODE_11A ||
 			    (capinfo & IEEE80211_CAPINFO_SHORT_SLOTTIME));
+		}
+
+		if (tim && ic->ic_bss->ni_dtimperiod != ni->ni_dtimperiod) {
+			ic->ic_bss->ni_dtimperiod = ni->ni_dtimperiod;
+			ic->ic_bss->ni_dtimcount = ni->ni_dtimcount;
+
+			if (ic->ic_updatedtim != NULL)
+				ic->ic_updatedtim(ic);
 		}
 
 		/* 
@@ -1956,6 +1976,13 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 		}
 	}
 
+	/*
+	 * Set our SSID if we do not know it yet.
+	 * If we are doing a directed scan for an AP with a hidden SSID
+	 * we must collect the SSID from a probe response to override
+	 * a non-zero-length SSID filled with zeroes that we may have
+	 * received earlier in a beacon.
+	 */
 	if (ssid[1] != 0 && ni->ni_essid[0] == '\0') {
 		ni->ni_esslen = ssid[1];
 		memset(ni->ni_essid, 0, sizeof(ni->ni_essid));
@@ -1963,8 +1990,6 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 		memcpy(ni->ni_essid, &ssid[2], ssid[1]);
 	}
 	IEEE80211_ADDR_COPY(ni->ni_bssid, wh->i_addr3);
-	/* XXX validate channel # */
-	ni->ni_chan = &ic->ic_channels[chan];
 	if (ic->ic_state == IEEE80211_S_SCAN &&
 	    IEEE80211_IS_CHAN_5GHZ(ni->ni_chan)) {
 		/*
@@ -1989,7 +2014,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 #ifndef IEEE80211_STA_ONLY
 	if (ic->ic_opmode == IEEE80211_M_IBSS && is_new && isprobe) {
 		/*
-		 * Fake an association so the driver can setup it's
+		 * Fake an association so the driver can setup its
 		 * private state.  The rate set has been setup above;
 		 * there is no handshake as in ap/station operation.
 		 */
@@ -2013,7 +2038,7 @@ ieee80211_recv_probe_req(struct ieee80211com *ic, struct mbuf *m,
 {
 	const struct ieee80211_frame *wh;
 	const u_int8_t *frm, *efrm;
-	const u_int8_t *ssid, *rates, *xrates, *htcaps;
+	const u_int8_t *ssid, *rates, *xrates, *htcaps, *vhtcaps;
 	u_int8_t rate;
 
 	if (ic->ic_opmode == IEEE80211_M_STA ||
@@ -2024,7 +2049,7 @@ ieee80211_recv_probe_req(struct ieee80211com *ic, struct mbuf *m,
 	frm = (const u_int8_t *)&wh[1];
 	efrm = mtod(m, u_int8_t *) + m->m_len;
 
-	ssid = rates = xrates = htcaps = NULL;
+	ssid = rates = xrates = htcaps = vhtcaps = NULL;
 	while (frm + 2 <= efrm) {
 		if (frm + 2 + frm[1] > efrm) {
 			ic->ic_stats.is_rx_elem_toosmall++;
@@ -2042,6 +2067,9 @@ ieee80211_recv_probe_req(struct ieee80211com *ic, struct mbuf *m,
 			break;
 		case IEEE80211_ELEMID_HTCAPS:
 			htcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			vhtcaps = frm;
 			break;
 		}
 		frm += 2 + frm[1];
@@ -2093,6 +2121,10 @@ ieee80211_recv_probe_req(struct ieee80211com *ic, struct mbuf *m,
 		ieee80211_setup_htcaps(ni, htcaps + 2, htcaps[1]);
 	else
 		ieee80211_clear_htcaps(ni);
+	if (htcaps && vhtcaps && IEEE80211_IS_CHAN_5GHZ(ic->ic_bss->ni_chan))
+		ieee80211_setup_vhtcaps(ni, vhtcaps + 2, vhtcaps[1]);
+	else
+		ieee80211_clear_vhtcaps(ni);
 	IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_PROBE_RESP, 0);
 }
 #endif	/* IEEE80211_STA_ONLY */
@@ -2162,7 +2194,8 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, struct mbuf *m,
 {
 	const struct ieee80211_frame *wh;
 	const u_int8_t *frm, *efrm;
-	const u_int8_t *ssid, *rates, *xrates, *rsnie, *wpaie, *wmeie, *htcaps;
+	const u_int8_t *ssid, *rates, *xrates, *rsnie, *wpaie, *wmeie;
+	const u_int8_t *htcaps, *vhtcaps;
 	u_int16_t capinfo, bintval;
 	int resp, status = 0;
 	struct ieee80211_rsnparams rsn;
@@ -2196,7 +2229,7 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, struct mbuf *m,
 	} else
 		resp = IEEE80211_FC0_SUBTYPE_ASSOC_RESP;
 
-	ssid = rates = xrates = rsnie = wpaie = wmeie = htcaps = NULL;
+	ssid = rates = xrates = rsnie = wpaie = wmeie = htcaps = vhtcaps = NULL;
 	while (frm + 2 <= efrm) {
 		if (frm + 2 + frm[1] > efrm) {
 			ic->ic_stats.is_rx_elem_toosmall++;
@@ -2219,6 +2252,9 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, struct mbuf *m,
 			break;
 		case IEEE80211_ELEMID_HTCAPS:
 			htcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			vhtcaps = frm;
 			break;
 		case IEEE80211_ELEMID_VENDOR:
 			if (frm[1] < 4) {
@@ -2471,6 +2507,10 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, struct mbuf *m,
 		ieee80211_setup_htcaps(ni, htcaps + 2, htcaps[1]);
 	else
 		ieee80211_clear_htcaps(ni);
+	if (htcaps && vhtcaps && IEEE80211_IS_CHAN_5GHZ(ic->ic_bss->ni_chan))
+		ieee80211_setup_vhtcaps(ni, vhtcaps + 2, vhtcaps[1]);
+	else
+		ieee80211_clear_vhtcaps(ni);
  end:
 	if (status != 0) {
 		IEEE80211_SEND_MGMT(ic, ni, resp, status);
@@ -2499,6 +2539,7 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, struct mbuf *m,
 	const struct ieee80211_frame *wh;
 	const u_int8_t *frm, *efrm;
 	const u_int8_t *rates, *xrates, *edcaie, *wmmie, *htcaps, *htop;
+	const u_int8_t *vhtcaps, *vhtop;
 	u_int16_t capinfo, status, associd;
 	u_int8_t rate;
 
@@ -2533,6 +2574,7 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, struct mbuf *m,
 	associd = LE_READ_2(frm); frm += 2;
 
 	rates = xrates = edcaie = wmmie = htcaps = htop = NULL;
+	vhtcaps = vhtop = NULL;
 	while (frm + 2 <= efrm) {
 		if (frm + 2 + frm[1] > efrm) {
 			ic->ic_stats.is_rx_elem_toosmall++;
@@ -2553,6 +2595,12 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, struct mbuf *m,
 			break;
 		case IEEE80211_ELEMID_HTOP:
 			htop = frm;
+			break;
+		case IEEE80211_ELEMID_VHTCAPS:
+			vhtcaps = frm;
+			break;
+		case IEEE80211_ELEMID_VHTOP:
+			vhtop = frm;
 			break;
 		case IEEE80211_ELEMID_VENDOR:
 			if (frm[1] < 4) {
@@ -2601,8 +2649,17 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, struct mbuf *m,
 		ieee80211_setup_htop(ni, htop + 2, htop[1], 0);
 	ieee80211_ht_negotiate(ic, ni);
 
-	/* Hop into 11n mode after associating to an HT AP in a non-11n mode. */
-	if (ni->ni_flags & IEEE80211_NODE_HT)
+	if (htcaps && vhtcaps && IEEE80211_IS_CHAN_5GHZ(ni->ni_chan)) {
+		ieee80211_setup_vhtcaps(ni, vhtcaps + 2, vhtcaps[1]);
+		if (vhtop && !ieee80211_setup_vhtop(ni, vhtop + 2, vhtop[1], 1))
+			vhtop = NULL; /* invalid VHTOP */
+	}
+	ieee80211_vht_negotiate(ic, ni);
+
+	/* Hop into 11n/11ac modes after associating to a HT/VHT AP. */
+	if (ni->ni_flags & IEEE80211_NODE_VHT)
+		ieee80211_setmode(ic, IEEE80211_MODE_11AC);
+	else if (ni->ni_flags & IEEE80211_NODE_HT)
 		ieee80211_setmode(ic, IEEE80211_MODE_11N);
 	else
 		ieee80211_setmode(ic, ieee80211_chan2mode(ic, ni->ni_chan));
@@ -2800,6 +2857,10 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, struct mbuf *m,
 	ba = &ni->ni_rx_ba[tid];
 	/* The driver is still processing an ADDBA request for this tid. */
 	if (ba->ba_state == IEEE80211_BA_REQUESTED)
+		return;
+	/* If we are in the process of roaming between APs, ignore. */
+	if ((ic->ic_flags & IEEE80211_F_BGSCAN) &&
+	    (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY))
 		return;
 	/* check if we already have a Block Ack agreement for this RA/TID */
 	if (ba->ba_state == IEEE80211_BA_AGREED) {

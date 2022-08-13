@@ -1,4 +1,4 @@
-/*	$OpenBSD: cs4280.c,v 1.53 2020/01/24 03:29:55 tedu Exp $	*/
+/*	$OpenBSD: cs4280.c,v 1.57 2022/03/21 19:22:41 miod Exp $	*/
 /*	$NetBSD: cs4280.c,v 1.5 2000/06/26 04:56:23 simonb Exp $	*/
 
 /*
@@ -185,7 +185,7 @@ struct	cfdriver clcs_cd = {
 	NULL, "clcs", DV_DULL
 };
 
-struct cfattach clcs_ca = {
+const struct cfattach clcs_ca = {
 	sizeof(struct cs4280_softc), cs4280_match, cs4280_attach, NULL,
 	cs4280_activate
 };
@@ -233,7 +233,7 @@ int	cs4280_midi_open(void *, int, void (*)(void *, int),
 int	cs4280_midi_output(void *, int);
 #endif
 
-struct audio_hw_if cs4280_hw_if = {
+const struct audio_hw_if cs4280_hw_if = {
 	cs4280_open,
 	cs4280_close,
 	cs4280_set_params,
@@ -259,7 +259,7 @@ struct audio_hw_if cs4280_hw_if = {
 };
 
 #if NMIDI > 0
-struct midi_hw_if cs4280_midi_hw_if = {
+const struct midi_hw_if cs4280_midi_hw_if = {
 	cs4280_midi_open,
 	cs4280_midi_close,
 	cs4280_midi_output,
@@ -291,7 +291,7 @@ cs4280_read_codec(void *sc_, u_int8_t add, u_int16_t *data)
 	
 	DPRINTFN(5,("read_codec: add=0x%02x ", add));
 	/* 
-	 * Make sure that there is not data sitting around from a preivous
+	 * Make sure that there is not data sitting around from a previous
 	 * uncompleted access.
 	 */
 	BA0READ4(sc, CS4280_ACSDA);
@@ -548,7 +548,7 @@ cs4280_attachhook(struct device *self)
 					     AudioNcd, AudioNmute);
 	cs4280_mixer_set_port(sc, &ctl);
 
-	audio_attach_mi(&cs4280_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&cs4280_hw_if, sc, NULL, &sc->sc_dev);
 
 #if NMIDI > 0
 	midi_attach_mi(&cs4280_midi_hw_if, sc, &sc->sc_dev);
@@ -616,7 +616,7 @@ cs4280_attach(struct device *parent, struct device *self, void *aux)
 
 	config_mountroot(self, cs4280_attachhook);
 
-	/* AC 97 attachement */
+	/* AC 97 attachment */
 	sc->host_if.arg = sc;
 	sc->host_if.attach = cs4280_attach_codec;
 	sc->host_if.read   = cs4280_read_codec;
@@ -797,7 +797,7 @@ cs4280_intr(void *p)
 }
 
 
-/* Download Proceessor Code and Data image */
+/* Download Processor Code and Data image */
 
 int
 cs4280_download(struct cs4280_softc *sc, const u_int32_t *src, u_int32_t offset,
@@ -972,7 +972,7 @@ cs4280_reset(void *sc_)
 	delay(100);
 	/* Clear RSTSP bit in SPCR */
 	BA1WRITE4(sc, CS4280_SPCR, 0);
-	/* enable DMA reqest */
+	/* enable DMA request */
 	BA1WRITE4(sc, CS4280_SPCR, SPCR_DRQEN);
 }
 

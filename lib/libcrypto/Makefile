@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.46 2021/09/03 23:30:42 job Exp $
+# $OpenBSD: Makefile,v 1.78 2022/08/03 20:16:06 tb Exp $
 
 LIB=	crypto
 LIBREBUILD=y
@@ -18,7 +18,7 @@ CFLAGS+= -Wall -Wundef
 .if ${COMPILER_VERSION:L} == "clang"
 CFLAGS+= -Werror
 .endif
-CFLAGS+= -DLIBRESSL_INTERNAL
+CFLAGS+= -DLIBRESSL_INTERNAL -DLIBRESSL_CRYPTO_INTERNAL
 
 .if !defined(NOPIC)
 CFLAGS+= -DDSO_DLFCN -DHAVE_DLFCN_H -DHAVE_FUNOPEN
@@ -28,20 +28,31 @@ CFLAGS+= -DDSO_DLFCN -DHAVE_DLFCN_H -DHAVE_FUNOPEN
 CFLAGS+= -DOPENSSL_NO_HW_PADLOCK # XXX enable this?
 
 CFLAGS+= -I${LCRYPTO_SRC}
-CFLAGS+= -I${LCRYPTO_SRC}/asn1 -I${LCRYPTO_SRC}/bn -I${LCRYPTO_SRC}/evp
-CFLAGS+= -I${LCRYPTO_SRC}/modes
-
-# XXX FIXME ecdsa and ec should be merged
-CFLAGS+= -I${LCRYPTO_SRC}/ecdsa
+CFLAGS+= -I${LCRYPTO_SRC}/arch/${MACHINE_CPU}
+CFLAGS+= -I${LCRYPTO_SRC}/asn1
+CFLAGS+= -I${LCRYPTO_SRC}/bio
+CFLAGS+= -I${LCRYPTO_SRC}/bn
+CFLAGS+= -I${LCRYPTO_SRC}/bytestring
+CFLAGS+= -I${LCRYPTO_SRC}/dh
+CFLAGS+= -I${LCRYPTO_SRC}/dsa
 CFLAGS+= -I${LCRYPTO_SRC}/ec
 CFLAGS+= -I${LCRYPTO_SRC}/ecdh
+CFLAGS+= -I${LCRYPTO_SRC}/ecdsa
+CFLAGS+= -I${LCRYPTO_SRC}/evp
+CFLAGS+= -I${LCRYPTO_SRC}/hmac
+CFLAGS+= -I${LCRYPTO_SRC}/kdf
+CFLAGS+= -I${LCRYPTO_SRC}/modes
+CFLAGS+= -I${LCRYPTO_SRC}/ocsp
+CFLAGS+= -I${LCRYPTO_SRC}/rsa
+CFLAGS+= -I${LCRYPTO_SRC}/ts
+CFLAGS+= -I${LCRYPTO_SRC}/x509
 
 VERSION_SCRIPT=	Symbols.map
 SYMBOL_LIST=	${.CURDIR}/Symbols.list
 
 # crypto/
 SRCS+= cryptlib.c malloc-wrapper.c mem_dbg.c cversion.c ex_data.c cpt_err.c
-SRCS+= o_time.c o_str.c o_init.c
+SRCS+= o_time.c o_str.c o_init.c o_fips.c
 SRCS+= mem_clr.c crypto_init.c crypto_lock.c
 
 # aes/
@@ -49,20 +60,18 @@ SRCS+= aes_misc.c aes_ecb.c aes_cfb.c aes_ofb.c
 SRCS+= aes_ctr.c aes_ige.c aes_wrap.c
 
 # asn1/
-SRCS+= a_object.c a_bitstr.c a_time.c a_int.c a_octet.c
-SRCS+= a_print.c a_type.c a_dup.c a_d2i_fp.c a_i2d_fp.c
-SRCS+= a_enum.c a_utf8.c a_sign.c a_digest.c a_verify.c a_mbstr.c a_strex.c
+SRCS+= a_object.c a_bitstr.c a_time.c a_int.c a_octet.c a_pkey.c a_pubkey.c
+SRCS+= a_print.c a_type.c a_string.c
+SRCS+= a_enum.c a_utf8.c a_mbstr.c a_strex.c
 SRCS+= x_algor.c x_val.c x_pubkey.c x_sig.c x_req.c x_attrib.c x_bignum.c
 SRCS+= x_long.c x_name.c x_x509.c x_x509a.c x_crl.c x_info.c x_spki.c nsseq.c
-SRCS+= x_nx509.c d2i_pu.c d2i_pr.c i2d_pu.c i2d_pr.c
-SRCS+= t_req.c t_x509.c t_x509a.c t_crl.c t_pkey.c t_spki.c t_bitst.c
+SRCS+= t_req.c t_x509.c t_x509a.c t_crl.c t_pkey.c t_spki.c
 SRCS+= tasn_new.c tasn_fre.c tasn_enc.c tasn_dec.c tasn_utl.c tasn_typ.c
 SRCS+= tasn_prn.c ameth_lib.c
-SRCS+= f_int.c f_string.c n_pkey.c
-SRCS+= f_enum.c x_pkey.c a_bool.c x_exten.c bio_asn1.c bio_ndef.c asn_mime.c
-SRCS+= asn1_gen.c asn1_par.c asn1_lib.c asn1_err.c a_strnid.c
-SRCS+= evp_asn1.c asn_pack.c p5_pbe.c p5_pbev2.c p8_pkey.c asn_moid.c
-SRCS+= a_time_tm.c
+SRCS+= x_pkey.c x_exten.c bio_asn1.c bio_ndef.c asn_mime.c
+SRCS+= asn1_gen.c asn1_par.c asn1_old_lib.c asn1_err.c a_strnid.c
+SRCS+= p5_pbe.c p5_pbev2.c p8_pkey.c asn_moid.c
+SRCS+= a_time_tm.c asn1_item.c asn1_old.c asn1_types.c asn1_lib.c
 
 # bf/
 SRCS+= bf_skey.c bf_ecb.c bf_cfb64.c bf_ofb64.c
@@ -81,9 +90,13 @@ SRCS+= bn_print.c bn_rand.c bn_shift.c bn_word.c bn_blind.c
 SRCS+= bn_kron.c bn_sqrt.c bn_gcd.c bn_prime.c bn_err.c bn_sqr.c
 SRCS+= bn_recp.c bn_mont.c bn_mpi.c bn_exp2.c bn_gf2m.c bn_nist.c
 SRCS+= bn_depr.c bn_const.c bn_x931p.c
+SRCS+= bn_bpsw.c bn_isqrt.c
 
 # buffer/
 SRCS+= buffer.c buf_err.c buf_str.c
+
+# bytestring/
+SRCS+= bs_ber.c bs_cbb.c bs_cbs.c
 
 # camellia/
 SRCS+= cmll_cfb.c cmll_ctr.c cmll_ecb.c cmll_ofb.c
@@ -108,6 +121,10 @@ SRCS+= comp_lib.c comp_err.c c_rle.c c_zlib.c
 # conf/
 SRCS+= conf_err.c conf_lib.c conf_api.c conf_def.c conf_mod.c
 SRCS+= conf_mall.c conf_sap.c
+
+# ct/
+SRCS += ct_b64.c ct_err.c ct_log.c ct_oct.c ct_policy.c
+SRCS += ct_prn.c ct_sct.c ct_sct_ctx.c ct_vfy.c ct_x509v3.c
 
 # curve25519/
 SRCS+= curve25519.c curve25519-generic.c
@@ -162,8 +179,7 @@ SRCS+= encode.c digest.c evp_enc.c evp_key.c
 SRCS+= e_des.c e_bf.c e_idea.c e_des3.c e_camellia.c
 SRCS+= e_rc4.c e_aes.c names.c
 SRCS+= e_xcbc_d.c e_rc2.c e_cast.c
-SRCS+= m_null.c m_md4.c m_md5.c m_sha1.c m_sm3.c m_wp.c
-SRCS+= m_dss.c m_dss1.c m_ripemd.c m_ecdsa.c
+SRCS+= m_null.c m_md4.c m_md5.c m_ripemd.c m_sha1.c m_sm3.c m_wp.c
 SRCS+= p_open.c p_seal.c p_sign.c p_verify.c p_lib.c p_enc.c p_dec.c
 SRCS+= bio_md.c bio_b64.c bio_enc.c evp_err.c e_null.c
 SRCS+= c_all.c evp_lib.c
@@ -190,6 +206,9 @@ SRCS+= hmac.c hm_ameth.c hm_pmeth.c
 # idea/
 SRCS+= i_cbc.c i_cfb64.c i_ofb64.c i_ecb.c i_skey.c
 
+# kdf/
+SRCS+= hkdf_evp.c kdf_err.c
+
 # lhash/
 SRCS+= lhash.c lh_stats.c
 
@@ -210,12 +229,12 @@ SRCS+= ocsp_asn.c ocsp_ext.c ocsp_ht.c ocsp_lib.c ocsp_cl.c
 SRCS+= ocsp_srv.c ocsp_prn.c ocsp_vfy.c ocsp_err.c
 
 # pem/
-SRCS+= pem_sign.c pem_seal.c pem_info.c pem_lib.c pem_all.c pem_err.c
+SRCS+= pem_sign.c pem_info.c pem_lib.c pem_all.c pem_err.c
 SRCS+= pem_x509.c pem_xaux.c pem_oth.c pem_pk8.c pem_pkey.c pvkfmt.c
 
 # pkcs12/
 SRCS+= p12_add.c p12_asn.c p12_attr.c p12_crpt.c p12_crt.c p12_decr.c
-SRCS+= p12_init.c p12_key.c p12_kiss.c p12_mutl.c
+SRCS+= p12_init.c p12_key.c p12_kiss.c p12_mutl.c p12_sbag.c
 SRCS+= p12_utl.c p12_npas.c pk12err.c p12_p8d.c p12_p8e.c
 
 # pkcs7/
@@ -290,6 +309,7 @@ SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 	${LCRYPTO_SRC}/bn \
 	${LCRYPTO_SRC}/bn/asm \
 	${LCRYPTO_SRC}/buffer \
+	${LCRYPTO_SRC}/bytestring \
 	${LCRYPTO_SRC}/camellia \
 	${LCRYPTO_SRC}/cast \
 	${LCRYPTO_SRC}/chacha \
@@ -297,6 +317,7 @@ SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 	${LCRYPTO_SRC}/cms \
 	${LCRYPTO_SRC}/comp \
 	${LCRYPTO_SRC}/conf \
+	${LCRYPTO_SRC}/ct \
 	${LCRYPTO_SRC}/curve25519 \
 	${LCRYPTO_SRC}/des \
 	${LCRYPTO_SRC}/dh \
@@ -312,6 +333,7 @@ SRCS+= pcy_cache.c pcy_node.c pcy_data.c pcy_map.c pcy_tree.c pcy_lib.c
 	${LCRYPTO_SRC}/hkdf \
 	${LCRYPTO_SRC}/hmac \
 	${LCRYPTO_SRC}/idea \
+	${LCRYPTO_SRC}/kdf \
 	${LCRYPTO_SRC}/lhash \
 	${LCRYPTO_SRC}/md4 \
 	${LCRYPTO_SRC}/md5 \
@@ -356,6 +378,7 @@ HDRS=\
 	${LCRYPTO_SRC}/conf/conf.h \
 	${LCRYPTO_SRC}/conf/conf_api.h \
 	${LCRYPTO_SRC}/crypto.h \
+	${LCRYPTO_SRC}/ct/ct.h \
 	${LCRYPTO_SRC}/curve25519/curve25519.h \
 	${LCRYPTO_SRC}/des/des.h \
 	${LCRYPTO_SRC}/dh/dh.h \
@@ -371,6 +394,7 @@ HDRS=\
 	${LCRYPTO_SRC}/hkdf/hkdf.h \
 	${LCRYPTO_SRC}/hmac/hmac.h \
 	${LCRYPTO_SRC}/idea/idea.h \
+	${LCRYPTO_SRC}/kdf/kdf.h \
 	${LCRYPTO_SRC}/lhash/lhash.h \
 	${LCRYPTO_SRC}/md4/md4.h \
 	${LCRYPTO_SRC}/md5/md5.h \

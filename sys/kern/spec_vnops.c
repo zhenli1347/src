@@ -1,4 +1,4 @@
-/*	$OpenBSD: spec_vnops.c,v 1.104 2021/04/28 09:53:53 claudio Exp $	*/
+/*	$OpenBSD: spec_vnops.c,v 1.108 2022/06/26 05:20:42 visa Exp $	*/
 /*	$NetBSD: spec_vnops.c,v 1.29 1996/04/22 01:42:38 christos Exp $	*/
 
 /*
@@ -48,7 +48,6 @@
 #include <sys/fcntl.h>
 #include <sys/disklabel.h>
 #include <sys/lockf.h>
-#include <sys/poll.h>
 #include <sys/dkio.h>
 #include <sys/malloc.h>
 #include <sys/specdev.h>
@@ -64,8 +63,8 @@ struct vnodechain speclisth[SPECHSZ];
 
 const struct vops spec_vops = {
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= spec_badop,
-	.vop_mknod	= spec_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= spec_open,
 	.vop_close	= spec_close,
 	.vop_access	= spec_access,
@@ -74,24 +73,23 @@ const struct vops spec_vops = {
 	.vop_read	= spec_read,
 	.vop_write	= spec_write,
 	.vop_ioctl	= spec_ioctl,
-	.vop_poll	= spec_poll,
 	.vop_kqfilter	= spec_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= spec_fsync,
-	.vop_remove	= spec_badop,
-	.vop_link	= spec_badop,
-	.vop_rename	= spec_badop,
-	.vop_mkdir	= spec_badop,
-	.vop_rmdir	= spec_badop,
-	.vop_symlink	= spec_badop,
-	.vop_readdir	= spec_badop,
-	.vop_readlink	= spec_badop,
-	.vop_abortop	= spec_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
+	.vop_readdir	= vop_generic_badop,
+	.vop_readlink	= vop_generic_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_inactive	= spec_inactive,
 	.vop_reclaim	= nullop,
-	.vop_lock	= vop_generic_lock,
-	.vop_unlock	= vop_generic_unlock,
-	.vop_islocked	= vop_generic_islocked,
+	.vop_lock	= nullop,
+	.vop_unlock	= nullop,
+	.vop_islocked	= nullop,
 	.vop_bmap	= vop_generic_bmap,
 	.vop_strategy	= spec_strategy,
 	.vop_print	= spec_print,
@@ -380,21 +378,6 @@ spec_ioctl(void *v)
 }
 
 int
-spec_poll(void *v)
-{
-	struct vop_poll_args *ap = v;
-	dev_t dev;
-
-	switch (ap->a_vp->v_type) {
-	default:
-		return (ap->a_events &
-		    (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM));
-	case VCHR:
-		dev = ap->a_vp->v_rdev;
-		return (*cdevsw[major(dev)].d_poll)(dev, ap->a_events, ap->a_p);
-	}
-}
-int
 spec_kqfilter(void *v)
 {
 	struct vop_kqfilter_args *ap = v;
@@ -404,7 +387,7 @@ spec_kqfilter(void *v)
 
 	switch (ap->a_vp->v_type) {
 	default:
-		if (ap->a_kn->kn_flags & __EV_POLL)
+		if (ap->a_kn->kn_flags & (__EV_POLL | __EV_SELECT))
 			return seltrue_kqfilter(dev, ap->a_kn);
 		break;
 	case VCHR:
@@ -696,17 +679,6 @@ spec_advlock(void *v)
 
 	return (lf_advlock(&vp->v_speclockf, (off_t)0, ap->a_id,
 		ap->a_op, ap->a_fl, ap->a_flags));
-}
-
-/*
- * Special device bad operation
- */
-int
-spec_badop(void *v)
-{
-
-	panic("spec_badop called");
-	/* NOTREACHED */
 }
 
 /*

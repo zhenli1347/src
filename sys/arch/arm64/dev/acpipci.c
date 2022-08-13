@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpipci.c,v 1.30 2021/06/25 17:41:22 patrick Exp $	*/
+/*	$OpenBSD: acpipci.c,v 1.35 2022/06/28 19:50:40 kettenis Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -77,6 +77,8 @@ struct acpipci_softc {
 	char		sc_memex_name[32];
 	int		sc_bus;
 	uint32_t	sc_seg;
+
+	struct interrupt_controller *sc_msi_ic;
 };
 
 struct acpipci_intr_handle {
@@ -88,7 +90,7 @@ struct acpipci_intr_handle {
 int	acpipci_match(struct device *, void *, void *);
 void	acpipci_attach(struct device *, struct device *, void *);
 
-struct cfattach acpipci_ca = {
+const struct cfattach acpipci_ca = {
 	sizeof(struct acpipci_softc), acpipci_match, acpipci_attach
 };
 
@@ -138,6 +140,7 @@ acpipci_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct acpi_attach_args *aaa = aux;
 	struct acpipci_softc *sc = (struct acpipci_softc *)self;
+	struct interrupt_controller *ic;
 	struct pcibus_attach_args pba;
 	struct aml_value res;
 	uint64_t bbn = 0;
@@ -187,6 +190,13 @@ acpipci_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_bus_memt._space_map = acpipci_bs_map;
 	sc->sc_bus_memt._space_mmap = acpipci_bs_mmap;
 
+	extern LIST_HEAD(, interrupt_controller) interrupt_controllers;
+	LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
+		if (ic->ic_establish_msi)
+			break;
+	}
+	sc->sc_msi_ic = ic;
+
 	sc->sc_pc = pci_lookup_segment(seg);
 	KASSERT(sc->sc_pc->pc_intr_v == NULL);
 
@@ -212,7 +222,8 @@ acpipci_attach(struct device *parent, struct device *self, void *aux)
 	pba.pba_pmemex = sc->sc_memex;
 	pba.pba_domain = pci_ndomains++;
 	pba.pba_bus = sc->sc_bus;
-	pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
+	if (sc->sc_msi_ic)
+		pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
 
 	config_found(self, &pba, NULL);
 }
@@ -247,6 +258,13 @@ acpipci_parse_resources(int crsidx, union acpi_resource *crs, void *arg)
 		min = crs->lr_qword._min;
 		len = crs->lr_qword._len;
 		tra = crs->lr_qword._tra;
+		break;
+	case LR_MEM32FIXED:
+		restype = LR_TYPE_MEMORY;
+		tflags = 0;
+		min = crs->lr_m32fixed._bas;
+		len = crs->lr_m32fixed._len;
+		tra = 0;
 		break;
 	}
 
@@ -451,6 +469,49 @@ acpipci_intr_swizzle(struct pci_attach_args *pa, pci_intr_handle_t *ihp)
 }
 
 int
+acpipci_getirq(int crsidx, union acpi_resource *crs, void *arg)
+{
+	int *irq = arg;
+
+	switch (AML_CRSTYPE(crs)) {
+	case SR_IRQ:
+		*irq = ffs(letoh16(crs->sr_irq.irq_mask)) - 1;
+		break;
+	case LR_EXTIRQ:
+		*irq = letoh32(crs->lr_extirq.irq[0]);
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+int
+acpipci_intr_link(struct acpipci_softc *sc, struct aml_value *val)
+{
+	struct aml_value res;
+	int64_t sta;
+	int irq = -1;
+
+	if (val->type == AML_OBJTYPE_OBJREF)
+		val = val->v_objref.ref;
+	if (val->type != AML_OBJTYPE_DEVICE)
+		return -1;
+
+	sta = acpi_getsta(sc->sc_acpi, val->node);
+	if ((sta & STA_PRESENT) == 0)
+		return -1;
+
+	if (aml_evalname(sc->sc_acpi, val->node, "_CRS", 0, NULL, &res))
+		return -1;
+	aml_parse_resource(&res, acpipci_getirq, &irq);
+	aml_freevalue(&res);
+
+	return irq;
+}
+
+int
 acpipci_intr_map(struct pci_attach_args *pa, pci_intr_handle_t *ihp)
 {
 	struct acpipci_softc *sc = pa->pa_pc->pc_intr_v;
@@ -486,19 +547,26 @@ acpipci_intr_map(struct pci_attach_args *pa, pci_intr_handle_t *ihp)
 			continue;
 		if (val->v_package[0]->type != AML_OBJTYPE_INTEGER ||
 		    val->v_package[1]->type != AML_OBJTYPE_INTEGER ||
-		    val->v_package[2]->type != AML_OBJTYPE_INTEGER ||
 		    val->v_package[3]->type != AML_OBJTYPE_INTEGER)
 			continue;
-		    
+
 		addr = val->v_package[0]->v_integer;
 		pin = val->v_package[1]->v_integer;
-		source = val->v_package[2]->v_integer;
-		index = val->v_package[3]->v_integer;
 		if (ACPI_ADR_PCIDEV(addr) != pa->pa_device ||
 		    ACPI_ADR_PCIFUN(addr) != 0xffff ||
-		    pin != pa->pa_intrpin - 1 || source != 0)
+		    pin != pa->pa_intrpin - 1)
 			continue;
-		
+
+		if (val->v_package[2]->type == AML_OBJTYPE_INTEGER) {
+			source = val->v_package[2]->v_integer;
+			index = val->v_package[3]->v_integer;
+		} else {
+			source = 0;
+			index = acpipci_intr_link(sc, val->v_package[2]);
+		}
+		if (source != 0 || index == -1)
+			continue;
+
 		ihp->ih_pc = pa->pa_pc;
 		ihp->ih_tag = pa->pa_tag;
 		ihp->ih_intrpin = index;
@@ -531,23 +599,17 @@ acpipci_intr_establish(void *v, pci_intr_handle_t ih, int level,
     struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
 {
 	struct acpipci_softc *sc = v;
-	struct interrupt_controller *ic;
 	struct acpipci_intr_handle *aih;
-	bus_dma_segment_t seg;
 	void *cookie;
-
-	extern LIST_HEAD(, interrupt_controller) interrupt_controllers;
-	LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
-		if (ic->ic_establish_msi)
-			break;
-	}
-	if (ic == NULL)
-		return NULL;
 
 	KASSERT(ih.ih_type != PCI_NONE);
 
 	if (ih.ih_type != PCI_INTX) {
+		struct interrupt_controller *ic = sc->sc_msi_ic;
+		bus_dma_segment_t seg;
 		uint64_t addr, data;
+
+		KASSERT(ic);
 
 		/* Map Requester ID through IORT to get sideband data. */
 		data = acpipci_iort_map_msi(ih.ih_pc, ih.ih_tag);

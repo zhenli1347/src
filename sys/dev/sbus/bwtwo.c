@@ -1,4 +1,4 @@
-/*	$OpenBSD: bwtwo.c,v 1.19 2013/10/20 20:07:30 miod Exp $	*/
+/*	$OpenBSD: bwtwo.c,v 1.21 2022/07/15 17:57:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2002 Jason L. Wright (jason@thought.net)
@@ -117,7 +117,7 @@ struct wsdisplay_accessops bwtwo_accessops = {
 int	bwtwomatch(struct device *, void *, void *);
 void	bwtwoattach(struct device *, struct device *, void *);
 
-struct cfattach bwtwo_ca = {
+const struct cfattach bwtwo_ca = {
 	sizeof (struct bwtwo_softc), bwtwomatch, bwtwoattach
 };
 
@@ -225,6 +225,8 @@ bwtwo_ioctl(v, cmd, data, flags, p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 0;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

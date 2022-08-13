@@ -1,4 +1,4 @@
-/*	$OpenBSD: vdsk.c,v 1.71 2021/03/11 11:17:00 jsg Exp $	*/
+/*	$OpenBSD: vdsk.c,v 1.73 2022/04/16 19:19:58 naddy Exp $	*/
 /*
  * Copyright (c) 2009, 2011 Mark Kettenis
  *
@@ -169,7 +169,7 @@ struct vdsk_softc {
 int	vdsk_match(struct device *, void *, void *);
 void	vdsk_attach(struct device *, struct device *, void *);
 
-struct cfattach vdsk_ca = {
+const struct cfattach vdsk_ca = {
 	sizeof(struct vdsk_softc), vdsk_match, vdsk_attach
 };
 
@@ -179,7 +179,7 @@ struct cfdriver vdsk_cd = {
 
 void	vdsk_scsi_cmd(struct scsi_xfer *);
 
-struct scsi_adapter vdsk_switch = {
+const struct scsi_adapter vdsk_switch = {
 	vdsk_scsi_cmd, NULL, NULL, NULL, NULL
 };
 

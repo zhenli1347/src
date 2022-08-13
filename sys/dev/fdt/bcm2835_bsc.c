@@ -1,4 +1,4 @@
-/*	$OpenBSD: bcm2835_bsc.c,v 1.2 2021/03/11 09:15:25 patrick Exp $	*/
+/*	$OpenBSD: bcm2835_bsc.c,v 1.4 2022/04/06 18:59:28 naddy Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -28,6 +28,7 @@
 
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_clock.h>
+#include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/ofw_pinctrl.h>
 #include <dev/ofw/fdt.h>
 
@@ -72,12 +73,13 @@ struct bcmbsc_softc {
 
 	int			sc_node;
 	struct i2c_controller	sc_ic;
+	struct i2c_bus		sc_ib;
 };
 
 int	bcmbsc_match(struct device *, void *, void *);
 void	bcmbsc_attach(struct device *, struct device *, void *);
 
-struct cfattach	bcmbsc_ca = {
+const struct cfattach bcmbsc_ca = {
 	sizeof (struct bcmbsc_softc), bcmbsc_match, bcmbsc_attach
 };
 
@@ -154,6 +156,10 @@ bcmbsc_attach(struct device *parent, struct device *self, void *aux)
 	iba.iba_bus_scan_arg = &sc->sc_node;
 
 	config_found(&sc->sc_dev, &iba, iicbus_print);
+
+	sc->sc_ib.ib_node = sc->sc_node;
+	sc->sc_ib.ib_ic = &sc->sc_ic;
+	i2c_register(&sc->sc_ib);
 }
 
 int

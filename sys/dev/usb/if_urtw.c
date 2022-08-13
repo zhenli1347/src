@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_urtw.c,v 1.70 2021/02/25 02:48:20 dlg Exp $	*/
+/*	$OpenBSD: if_urtw.c,v 1.72 2022/04/21 21:03:03 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2009 Martynas Venckus <martynas@openbsd.org>
@@ -664,7 +664,7 @@ urtw_attach(struct device *parent, struct device *self, void *aux)
 	error = urtw_get_txpwr(sc);
 	if (error != 0)
 		goto fail;
-	error = urtw_led_init(sc);		/* XXX incompleted */
+	error = urtw_led_init(sc);		/* XXX incomplete */
 	if (error != 0)
 		goto fail;
 
@@ -3157,9 +3157,8 @@ urtw_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 	nf = quality;
 
 	/* send the frame to the 802.11 layer */
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = rssi;
-	rxi.rxi_tstamp = 0;
 	ieee80211_input(ifp, m, ni, &rxi);
 
 	/* node is no longer needed */

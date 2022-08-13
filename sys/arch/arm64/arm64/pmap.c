@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.80 2021/09/02 12:09:26 patrick Exp $ */
+/* $OpenBSD: pmap.c,v 1.84 2022/01/10 09:20:27 kettenis Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -16,19 +16,15 @@
  */
 
 #include <sys/param.h>
-#include <sys/malloc.h>
-#include <sys/proc.h>
-#include <sys/user.h>
 #include <sys/systm.h>
-#include <sys/pool.h>
 #include <sys/atomic.h>
+#include <sys/pool.h>
+#include <sys/proc.h>
 
 #include <uvm/uvm.h>
 
-#include "arm64/vmparam.h"
-#include "arm64/pmap.h"
-#include "machine/cpufunc.h"
-#include "machine/pcb.h"
+#include <machine/cpufunc.h>
+#include <machine/pmap.h>
 
 #include <machine/db_machdep.h>
 #include <ddb/db_extern.h>
@@ -69,20 +65,6 @@ struct pte_desc {
 	vaddr_t pted_va;
 };
 
-/* VP routines */
-int pmap_vp_enter(pmap_t pm, vaddr_t va, struct pte_desc *pted, int flags);
-struct pte_desc *pmap_vp_remove(pmap_t pm, vaddr_t va);
-void pmap_vp_destroy(pmap_t pm);
-void pmap_vp_destroy_l2_l3(pmap_t pm, struct pmapvp1 *vp1);
-struct pte_desc *pmap_vp_lookup(pmap_t pm, vaddr_t va, uint64_t **);
-
-/* PV routines */
-void pmap_enter_pv(struct pte_desc *pted, struct vm_page *);
-void pmap_remove_pv(struct pte_desc *pted);
-
-void _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags,
-    int cache);
-
 struct pmapvp0 {
 	uint64_t l0[VP_IDX0_CNT];
 	struct pmapvp1 *vp[VP_IDX0_CNT];
@@ -106,47 +88,42 @@ CTASSERT(sizeof(struct pmapvp0) == sizeof(struct pmapvp1));
 CTASSERT(sizeof(struct pmapvp0) == sizeof(struct pmapvp2));
 CTASSERT(sizeof(struct pmapvp0) == sizeof(struct pmapvp3));
 
+void	pmap_vp_destroy(pmap_t pm);
+
 /* Allocator for VP pool. */
-void *pmap_vp_page_alloc(struct pool *, int, int *);
-void pmap_vp_page_free(struct pool *, void *);
+void	*pmap_vp_page_alloc(struct pool *, int, int *);
+void	pmap_vp_page_free(struct pool *, void *);
 
 struct pool_allocator pmap_vp_allocator = {
 	pmap_vp_page_alloc, pmap_vp_page_free, sizeof(struct pmapvp0)
 };
 
-void pmap_remove_pted(pmap_t pm, struct pte_desc *pted);
-void pmap_kremove_pg(vaddr_t va);
-void pmap_set_l1(struct pmap *, uint64_t, struct pmapvp1 *);
-void pmap_set_l2(struct pmap *, uint64_t, struct pmapvp1 *, struct pmapvp2 *);
-void pmap_set_l3(struct pmap *, uint64_t, struct pmapvp2 *, struct pmapvp3 *);
+void	pmap_remove_pted(pmap_t, struct pte_desc *);
+void	pmap_kremove_pg(vaddr_t);
+void	pmap_set_l1(struct pmap *, uint64_t, struct pmapvp1 *);
+void	pmap_set_l2(struct pmap *, uint64_t, struct pmapvp1 *,
+	    struct pmapvp2 *);
+void	pmap_set_l3(struct pmap *, uint64_t, struct pmapvp2 *,
+	    struct pmapvp3 *);
 
-/* XXX */
-void
-pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
-    vm_prot_t prot, int flags, int cache);
-void pmap_pte_insert(struct pte_desc *pted);
-void pmap_pte_remove(struct pte_desc *pted, int);
-void pmap_pte_update(struct pte_desc *pted, uint64_t *pl3);
-void pmap_kenter_cache(vaddr_t va, paddr_t pa, vm_prot_t prot, int cacheable);
-void pmap_pinit(pmap_t pm);
-void pmap_release(pmap_t pm);
-paddr_t pmap_steal_avail(size_t size, int align, void **kva);
-void pmap_remove_avail(paddr_t base, paddr_t end);
-vaddr_t pmap_map_stolen(vaddr_t);
-void pmap_physload_avail(void);
-extern caddr_t msgbufaddr;
+void	pmap_fill_pte(pmap_t, vaddr_t, paddr_t, struct pte_desc *,
+	    vm_prot_t, int, int);
+void	pmap_pte_insert(struct pte_desc *);
+void	pmap_pte_remove(struct pte_desc *, int);
+void	pmap_pte_update(struct pte_desc *, uint64_t *);
+void	pmap_release(pmap_t);
+paddr_t	pmap_steal_avail(size_t, int, void **);
+void	pmap_remove_avail(paddr_t, paddr_t);
+vaddr_t	pmap_map_stolen(vaddr_t);
 
 vaddr_t vmmap;
 vaddr_t zero_page;
 vaddr_t copy_src_page;
 vaddr_t copy_dst_page;
 
-/* XXX - panic on pool get failures? */
 struct pool pmap_pmap_pool;
 struct pool pmap_pted_pool;
 struct pool pmap_vp_pool;
-
-/* list of L1 tables */
 
 int pmap_initialized = 0;
 
@@ -175,6 +152,10 @@ pmap_unlock(struct pmap *pmap)
 	if (pmap != pmap_kernel())
 		mtx_leave(&pmap->pm_mtx);
 }
+
+#define PMAP_ASSERT_LOCKED(pmap) 			\
+	if ((pmap) != pmap_kernel()) 			\
+		MUTEX_ASSERT_LOCKED(&(pmap)->pm_mtx);
 
 /* virtual to physical helpers */
 static inline int
@@ -404,6 +385,8 @@ pmap_vp_remove(pmap_t pm, vaddr_t va)
 	struct pmapvp3 *vp3;
 	struct pte_desc *pted;
 
+	PMAP_ASSERT_LOCKED(pm);
+	
 	if (pm->have_4_level_pt) {
 		vp1 = pm->pm_vp.l0->vp[VP_IDX0(va)];
 		if (vp1 == NULL) {
@@ -449,6 +432,8 @@ pmap_vp_enter(pmap_t pm, vaddr_t va, struct pte_desc *pted, int flags)
 	struct pmapvp2 *vp2;
 	struct pmapvp3 *vp3;
 
+	PMAP_ASSERT_LOCKED(pm);
+	
 	if (pm->have_4_level_pt) {
 		vp1 = pm->pm_vp.l0->vp[VP_IDX0(va)];
 		if (vp1 == NULL) {
@@ -654,9 +639,8 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	 */
 	if (flags & (PROT_READ|PROT_WRITE|PROT_EXEC|PMAP_WIRED)) {
 		pmap_pte_insert(pted);
+		ttlb_flush(pm, va & ~PAGE_MASK);
 	}
-
-	ttlb_flush(pm, va & ~PAGE_MASK);
 
 	if (pg != NULL && (flags & PROT_EXEC)) {
 		need_sync = ((pg->pg_flags & PG_PMAP_EXE) == 0);
@@ -715,7 +699,6 @@ pmap_remove_pted(pmap_t pm, struct pte_desc *pted)
 	}
 
 	pmap_pte_remove(pted, pm != pmap_kernel());
-
 	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
 
 	if (pted->pted_va & PTED_VA_EXEC_M) {
@@ -747,6 +730,7 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 {
 	pmap_t pm = pmap_kernel();
 	struct pte_desc *pted;
+	struct vm_page *pg;
 
 	pted = pmap_vp_lookup(pm, va, NULL);
 
@@ -767,9 +751,10 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 
 	/* Insert into table */
 	pmap_pte_insert(pted);
-
 	ttlb_flush(pm, va & ~PAGE_MASK);
-	if (cache == PMAP_CACHE_CI || cache == PMAP_CACHE_DEV_NGNRNE)
+
+	pg = PHYS_TO_VM_PAGE(pted->pted_pte & PTE_RPGN);
+	if (pg && (cache == PMAP_CACHE_CI || cache == PMAP_CACHE_DEV_NGNRNE))
 		cpu_idcache_wbinv_range(va & ~PAGE_MASK, PAGE_SIZE);
 }
 
@@ -807,13 +792,7 @@ pmap_kremove_pg(vaddr_t va)
 
 	pm->pm_stats.resident_count--;
 
-	/*
-	 * Table needs to be locked here as well as pmap, and pv list.
-	 * so that we know the mapping information is either valid,
-	 * or that the mapping is not present in the hash table.
-	 */
 	pmap_pte_remove(pted, 0);
-
 	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
 
 	if (pted->pted_va & PTED_VA_EXEC_M)
@@ -1540,20 +1519,19 @@ pmap_deactivate(struct proc *p)
  * Get the physical page address for the given pmap/virtual address.
  */
 int
-pmap_extract(pmap_t pm, vaddr_t va, paddr_t *pa)
+pmap_extract(pmap_t pm, vaddr_t va, paddr_t *pap)
 {
 	struct pte_desc *pted;
 
+	pmap_lock(pm);
 	pted = pmap_vp_lookup(pm, va, NULL);
-
-	if (pted == NULL)
+	if (!pted || !PTED_VALID(pted)) {
+		pmap_unlock(pm);
 		return 0;
-
-	if (pted->pted_pte == 0)
-		return 0;
-
-	if (pa != NULL)
-		*pa = (pted->pted_pte & PTE_RPGN) | (va & PAGE_MASK);
+	}
+	if (pap != NULL)
+		*pap = (pted->pted_pte & PTE_RPGN) | (va & PAGE_MASK);
+	pmap_unlock(pm);
 
 	return 1;
 }
@@ -1577,10 +1555,7 @@ pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 		pted->pted_pte &= ~PROT_EXEC;
 	}
 	pmap_pte_update(pted, pl3);
-
 	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
-
-	return;
 }
 
 /*
@@ -1903,8 +1878,6 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 
 	/* We actually made a change, so flush it and sync. */
 	pmap_pte_update(pted, pl3);
-
-	/* Flush tlb. */
 	ttlb_flush(pm, va & ~PAGE_MASK);
 
 	/*
@@ -2030,11 +2003,13 @@ pmap_unwire(pmap_t pm, vaddr_t va)
 {
 	struct pte_desc *pted;
 
+	pmap_lock(pm);
 	pted = pmap_vp_lookup(pm, va, NULL);
 	if ((pted != NULL) && (pted->pted_va & PTED_VA_WIRED_M)) {
 		pm->pm_stats.wired_count--;
 		pted->pted_va &= ~PTED_VA_WIRED_M;
 	}
+	pmap_unlock(pm);
 }
 
 void

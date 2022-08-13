@@ -1,7 +1,7 @@
-/* $OpenBSD: term.c,v 1.143 2021/08/10 12:36:42 schwarze Exp $ */
+/* $OpenBSD: term.c,v 1.146 2022/04/27 13:30:19 schwarze Exp $ */
 /*
+ * Copyright (c) 2010-2022 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008, 2009, 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2010-2020 Ingo Schwarze <schwarze@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -56,6 +56,7 @@ term_setcol(struct termp *p, size_t maxtcol)
 void
 term_free(struct termp *p)
 {
+	term_tab_free();
 	for (p->tcol = p->tcols; p->tcol < p->tcols + p->maxtcol; p->tcol++)
 		free(p->tcol->buf);
 	free(p->tcols);
@@ -625,6 +626,10 @@ term_word(struct termp *p, const char *word)
 				encode(p, "utf8", 4);
 			continue;
 		case ESCAPE_HORIZ:
+			if (p->flags & TERMP_BACKAFTER) {
+				p->flags &= ~TERMP_BACKAFTER;
+				continue;
+			}
 			if (*seq == '|') {
 				seq++;
 				uc = -p->col;
@@ -633,12 +638,24 @@ term_word(struct termp *p, const char *word)
 			if (a2roffsu(seq, &su, SCALE_EM) == NULL)
 				continue;
 			uc += term_hen(p, &su);
-			if (uc > 0)
-				while (uc-- > 0)
-					bufferc(p, ASCII_NBRSP);
-			else if (p->col > (size_t)(-uc))
+			if (uc >= 0) {
+				while (uc > 0) {
+					uc -= term_len(p, 1);
+					if (p->flags & TERMP_BACKBEFORE)
+						p->flags &= ~TERMP_BACKBEFORE;
+					else
+						bufferc(p, ASCII_NBRSP);
+				}
+				continue;
+			}
+			if (p->flags & TERMP_BACKBEFORE) {
+				p->flags &= ~TERMP_BACKBEFORE;
+				assert(p->col > 0);
+				p->col--;
+			}
+			if (p->col >= (size_t)(-uc)) {
 				p->col += uc;
-			else {
+			} else {
 				uc += p->col;
 				p->col = 0;
 				if (p->tcol->offset > (size_t)(-uc)) {

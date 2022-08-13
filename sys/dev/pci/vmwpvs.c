@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmwpvs.c,v 1.24 2020/09/22 19:32:53 krw Exp $ */
+/*	$OpenBSD: vmwpvs.c,v 1.27 2022/04/16 19:19:59 naddy Exp $ */
 
 /*
  * Copyright (c) 2013 David Gwynne <dlg@openbsd.org>
@@ -339,7 +339,7 @@ int	vmwpvs_intr(void *);
 #define vmwpvs_barrier(_s, _r, _l, _d) \
 	bus_space_barrier((_s)->sc_iot, (_s)->sc_ioh, (_r), (_l), (_d))
 
-struct cfattach vmwpvs_ca = {
+const struct cfattach vmwpvs_ca = {
 	sizeof(struct vmwpvs_softc),
 	vmwpvs_match,
 	vmwpvs_attach,
@@ -354,7 +354,7 @@ struct cfdriver vmwpvs_cd = {
 
 void		vmwpvs_scsi_cmd(struct scsi_xfer *);
 
-struct scsi_adapter vmwpvs_switch = {
+const struct scsi_adapter vmwpvs_switch = {
 	vmwpvs_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -809,7 +809,7 @@ vmwpvs_msg_task(void *xsc)
 		case VMWPVS_MSG_T_REMOVED:
 			dvmsg = (struct vmwpvs_ring_msg_dev *)msg;
 			if (letoh32(dvmsg->bus) != 0) {
-				printf("%s: ignorint request to remove device"
+				printf("%s: ignoring request to remove device"
 				    " on bus %d\n", DEVNAME(sc),
 				    letoh32(msg->type));
 				break;

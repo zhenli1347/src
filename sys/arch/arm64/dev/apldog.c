@@ -1,4 +1,4 @@
-/*	$OpenBSD: apldog.c,v 1.1 2021/02/22 21:30:54 kettenis Exp $	*/
+/*	$OpenBSD: apldog.c,v 1.4 2022/04/06 18:59:26 naddy Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -57,7 +57,7 @@ struct apldog_softc *apldog_sc;
 int	apldog_match(struct device *, void *, void *);
 void	apldog_attach(struct device *, struct device *, void *);
 
-struct cfattach	apldog_ca = {
+const struct cfattach	apldog_ca = {
 	sizeof (struct apldog_softc), apldog_match, apldog_attach
 };
 
@@ -72,7 +72,7 @@ apldog_match(struct device *parent, void *match, void *aux)
 {
 	struct fdt_attach_args *faa = aux;
 
-	return OF_is_compatible(faa->fa_node, "apple,reboot-v0");
+	return OF_is_compatible(faa->fa_node, "apple,wdt");
 }
 
 void
@@ -100,7 +100,8 @@ apldog_attach(struct device *parent, struct device *self, void *aux)
 	HWRITE4(sc, WDT_SYS_CTL, 0);
 
 	apldog_sc = sc;
-	cpuresetfn = apldog_reset;
+	if (cpuresetfn == NULL)
+		cpuresetfn = apldog_reset;
 }
 
 void

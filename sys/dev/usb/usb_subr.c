@@ -1,4 +1,4 @@
-/*	$OpenBSD: usb_subr.c,v 1.155 2021/02/24 04:06:45 jsg Exp $ */
+/*	$OpenBSD: usb_subr.c,v 1.158 2022/02/16 06:23:42 anton Exp $ */
 /*	$NetBSD: usb_subr.c,v 1.103 2003/01/10 11:19:13 augustss Exp $	*/
 /*	$FreeBSD: src/sys/dev/usb/usb_subr.c,v 1.18 1999/11/17 22:33:47 n_hibma Exp $	*/
 
@@ -393,7 +393,7 @@ usbd_reset_port(struct usbd_device *dev, int port)
 			return (0);
 	} while ((UGETW(ps.wPortChange) & UPS_C_PORT_RESET) == 0 && --n > 0);
 
-	/* Clear port reset even if a timeout occured. */
+	/* Clear port reset even if a timeout occurred. */
 	if (usbd_clear_port_feature(dev, port, UHF_C_PORT_RESET)) {
 		DPRINTF(("%s: clear port feature failed\n", __func__));
 		return (EIO);
@@ -839,6 +839,11 @@ usbd_status
 usbd_probe_and_attach(struct device *parent, struct usbd_device *dev, int port,
     int addr)
 {
+	/*
+	 * Used to correlate audio and wskbd devices as this is the common point
+	 * of attachment between the two.
+	 */
+	static char *cookie = 0;
 	struct usb_attach_arg uaa;
 	usb_device_descriptor_t *dd = &dev->ddesc;
 	int i, confi, nifaces;
@@ -860,6 +865,7 @@ usbd_probe_and_attach(struct device *parent, struct usbd_device *dev, int port,
 	uaa.vendor = UGETW(dd->idVendor);
 	uaa.product = UGETW(dd->idProduct);
 	uaa.release = UGETW(dd->bcdDevice);
+	uaa.cookie = ++cookie;
 
 	/* First try with device specific drivers. */
 	DPRINTF(("usbd_probe_and_attach trying device specific drivers\n"));
@@ -1086,18 +1092,15 @@ usbd_new_device(struct device *parent, struct usbd_bus *bus, int depth,
 	/* Establish the default pipe. */
 	err = usbd_setup_pipe(dev, 0, &dev->def_ep, USBD_DEFAULT_INTERVAL,
 	    &dev->default_pipe);
-	if (err) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (err);
-	}
+	if (err)
+		goto fail;
 
 	dd = &dev->ddesc;
 
 	/* Try to get device descriptor */
 	/* 
 	 * some device will need small size query at first (XXX: out of spec)
-	 * we will get full size descriptor later, just determin the maximum
+	 * we will get full size descriptor later, just determine the maximum
 	 * packet size of the control pipe at this moment.
 	 */
 	for (i = 0; i < 3; i++) {
@@ -1137,12 +1140,8 @@ usbd_new_device(struct device *parent, struct usbd_bus *bus, int depth,
 			USB_MAX_IPACKET, dd);
 	}
 
-	if (err) {
-fail:
-		usb_free_device(dev);
-		up->device = NULL;
-		return (err);
-	}
+	if (err)
+		goto fail;
 
 	DPRINTF(("%s: adding unit addr=%d, rev=%02x, class=%d, subclass=%d, "
 		 "protocol=%d, maxpacket=%d, len=%d, speed=%d\n", __func__,
@@ -1152,9 +1151,8 @@ fail:
 
 	if ((dd->bDescriptorType != UDESC_DEVICE) ||
 	    (dd->bLength < USB_DEVICE_DESCRIPTOR_SIZE)) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (USBD_INVAL);
+		err = USBD_INVAL;
+		goto fail;
 	}
 
 	mps = dd->bMaxPacketSize;
@@ -1168,9 +1166,8 @@ fail:
 	if (mps != mps0) {
 		if ((speed == USB_SPEED_LOW) ||
 		    (mps != 8 && mps != 16 && mps != 32 && mps != 64)) {
-			usb_free_device(dev);
-			up->device = NULL;
-			return (USBD_INVAL);
+			err = USBD_INVAL;
+			goto fail;
 		}
 		USETW(dev->def_ep_desc.wMaxPacketSize, mps);
 	}
@@ -1179,9 +1176,8 @@ fail:
 	/* Set the address if the HC didn't do it already. */
 	if (bus->methods->dev_setaddr != NULL &&
 	    bus->methods->dev_setaddr(dev, addr)) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (USBD_SET_ADDR_FAILED);
+		err = USBD_SET_ADDR_FAILED;
+		goto fail;
  	}
 
 	/* Wait for device to settle before reloading the descriptor. */
@@ -1194,11 +1190,8 @@ fail:
 	dev->address = addr;
 
 	err = usbd_reload_device_desc(dev);
-	if (err) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (err);
-	}
+	if (err)
+		goto fail;
 
 	/* send disown request to handover 2.0 to 1.1. */
 	if (dev->quirks->uq_flags & UQ_EHCI_NEEDTO_DISOWN) {
@@ -1222,22 +1215,21 @@ fail:
 
 	/* Get device info and cache it */
 	err = usbd_cache_devinfo(dev);
-	if (err) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (err);
-  	}
+	if (err)
+		goto fail;
 
 	bus->devices[addr] = dev;
 
 	err = usbd_probe_and_attach(parent, dev, port, addr);
-	if (err) {
-		usb_free_device(dev);
-		up->device = NULL;
-		return (err);
-  	}
+	if (err)
+		goto fail;
 
   	return (USBD_NORMAL_COMPLETION);
+
+fail:
+	usb_free_device(dev);
+	up->device = NULL;
+	return (err);
 }
 
 usbd_status

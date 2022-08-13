@@ -1,4 +1,4 @@
-/*	$OpenBSD: gcu.c,v 1.4 2015/03/19 00:18:11 deraadt Exp $	*/
+/*	$OpenBSD: gcu.c,v 1.6 2022/03/11 18:00:45 mpi Exp $	*/
 
 /*
  * Copyright (c) 2009 Dariusz Swiderski <sfires@sfires.net>
@@ -17,7 +17,7 @@
  */
 
 /*                                                         
- * Driver for a GCU device that apears on embeded intel systems, like 80579
+ * Driver for a GCU device that appears on embedded intel systems, like 80579
  */                                                                     
 
 #include <sys/param.h>
@@ -42,7 +42,7 @@ struct cfdriver gcu_cd = {
 	NULL, "gcu", DV_IFNET
 };
 
-struct cfattach gcu_ca = {
+const struct cfattach gcu_ca = {
 	sizeof(struct gcu_softc), gcu_probe, gcu_attach
 };
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: omdisplay.c,v 1.8 2020/05/25 09:55:48 jsg Exp $ */
+/* $OpenBSD: omdisplay.c,v 1.10 2022/07/15 17:57:25 kettenis Exp $ */
 /*
  * Copyright (c) 2007 Dale Rahn <drahn@openbsd.org>
  *
@@ -455,7 +455,7 @@ void omdisplay_stop(struct omdisplay_softc *sc);
 int omdisplay_intr(void *v);
 void omdisplay_dumpreg(struct omdisplay_softc *sc);
 
-struct cfattach	omdisplay_ca = {
+const struct cfattach	omdisplay_ca = {
 	sizeof (struct omdisplay_softc), omdisplay_match, omdisplay_attach,
 	NULL, omdisplay_activate
 };
@@ -596,6 +596,11 @@ omdisplay_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		wsdisp_info->height = sc->sc_geometry->height;
 		wsdisp_info->width = sc->sc_geometry->width;
 		wsdisp_info->depth = 16; /* XXX */
+		if (scr != NULL)
+			wsdisp_info->stride = scr->rinfo.r_stride;
+		else
+			wsdisp_info->stride = 0;
+		wsdisp_info->offset = 0;
 		wsdisp_info->cmsize = 0;
 		break;
 		

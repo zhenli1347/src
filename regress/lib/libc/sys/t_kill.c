@@ -1,4 +1,4 @@
-/*	$OpenBSD: t_kill.c,v 1.2 2021/07/29 15:33:17 anton Exp $	*/
+/*	$OpenBSD: t_kill.c,v 1.4 2021/12/13 16:56:48 deraadt Exp $	*/
 /* $NetBSD: t_kill.c,v 1.1 2011/07/07 06:57:53 jruoho Exp $ */
 
 /*-
@@ -32,9 +32,6 @@
 
 #include "macros.h"
 
-#include <sys/cdefs.h>
-__RCSID("$NetBSD: t_kill.c,v 1.1 2011/07/07 06:57:53 jruoho Exp $");
-
 #include <sys/wait.h>
 
 #include <errno.h>
@@ -60,17 +57,6 @@ ATF_TC_BODY(kill_basic, tc)
 	int sta;
 
 	for (i = 0; i < __arraycount(sig); i++) {
-		struct sigaction act, oact;
-
-		/* Ensure the signal is not ignored. */
-		if (sig[i] != SIGKILL) {
-			memset(&act, 0, sizeof(act));
-			act.sa_handler = SIG_DFL;
-			ATF_REQUIRE(sigaction(sig[i], &act, &oact) == 0);
-		} else {
-			ATF_REQUIRE(sigaction(sig[i], &act, &oact) != 0);
-			ATF_REQUIRE(errno == EINVAL);
-		}
 
 		pid = fork();
 		ATF_REQUIRE(pid >= 0);
@@ -89,9 +75,6 @@ ATF_TC_BODY(kill_basic, tc)
 
 		if (WIFSIGNALED(sta) == 0 || WTERMSIG(sta) != sig[i])
 			atf_tc_fail("kill(2) failed to kill child");
-
-		if (sig[i] != SIGKILL)
-			ATF_REQUIRE(sigaction(sig[i], &oact, NULL) == 0);
 	}
 }
 

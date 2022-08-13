@@ -1,4 +1,4 @@
-/*	$OpenBSD: dmtimer.c,v 1.13 2021/05/16 15:10:19 deraadt Exp $	*/
+/*	$OpenBSD: dmtimer.c,v 1.15 2022/02/21 10:57:58 jsg Exp $	*/
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2013 Raphael Graf <r@undefined.ch>
@@ -17,7 +17,7 @@
  */
 
 /*
- *	WARNING - this timer initializion has not been checked
+ *	WARNING - this timer initialization has not been checked
  *	to see if it will do _ANYTHING_ sane if the omap enters
  *	low power mode.
  */
@@ -135,7 +135,7 @@ struct dmtimer_softc {
 	u_int32_t		sc_nextstatevent;
 };
 
-struct cfattach	dmtimer_ca = {
+const struct cfattach	dmtimer_ca = {
 	sizeof (struct dmtimer_softc), NULL, dmtimer_attach
 };
 

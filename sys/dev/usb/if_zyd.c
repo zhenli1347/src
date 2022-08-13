@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_zyd.c,v 1.125 2020/07/31 10:49:33 mglocker Exp $	*/
+/*	$OpenBSD: if_zyd.c,v 1.128 2022/04/21 21:03:03 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2006 by Damien Bergamini <damien.bergamini@free.fr>
@@ -633,7 +633,7 @@ zyd_free_rx_list(struct zyd_softc *sc)
 struct ieee80211_node *
 zyd_node_alloc(struct ieee80211com *ic)
 {
-	return malloc(sizeof (struct zyd_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+	return malloc(sizeof (struct zyd_node), M_USBDEV, M_NOWAIT | M_ZERO);
 }
 
 int
@@ -746,7 +746,7 @@ zyd_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 }
 
 /*
- * Issue a read command for the specificed register (of size regsize)
+ * Issue a read command for the specified register (of size regsize)
  * and await a reply of olen bytes in sc->odata.
  */
 int
@@ -1979,9 +1979,8 @@ zyd_rx_data(struct zyd_softc *sc, const uint8_t *buf, uint16_t len,
 	s = splnet();
 	wh = mtod(m, struct ieee80211_frame *);
 	ni = ieee80211_find_rxnode(ic, wh);
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = stat->rssi;
-	rxi.rxi_tstamp = 0;	/* unused */
 	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* node is no longer needed */

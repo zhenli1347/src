@@ -1,4 +1,4 @@
-/*	$OpenBSD: local_passwd.c,v 1.61 2021/08/29 15:22:24 robert Exp $	*/
+/*	$OpenBSD: local_passwd.c,v 1.63 2022/02/10 13:06:46 robert Exp $	*/
 
 /*-
  * Copyright (c) 1990 The Regents of the University of California.
@@ -80,6 +80,8 @@ local_passwd(char *uname, int authenticated)
 		err(1, "unveil %s", _PATH_LOGIN_CONF);
 	if (unveil(_PATH_LOGIN_CONF ".db", "r") == -1)
 		err(1, "unveil %s.db", _PATH_LOGIN_CONF);
+	if (unveil(_PATH_LOGIN_CONF_D, "r") == -1)
+		err(1, "unveil %s", _PATH_LOGIN_CONF_D);
 	if (unveil(_PATH_BSHELL, "x") == -1)
 		err(1, "unveil %s", _PATH_BSHELL);
 	if (unveil(_PATH_SHELLS, "r") == -1)
@@ -150,7 +152,7 @@ local_passwd(char *uname, int authenticated)
 	}
 	if (i >= 4)
 		fputc('\n', stderr);
-	pfd = open(_PATH_MASTERPASSWD, O_RDONLY | O_CLOEXEC, 0);
+	pfd = open(_PATH_MASTERPASSWD, O_RDONLY | O_CLOEXEC);
 	if (pfd == -1)
 		pw_error(_PATH_MASTERPASSWD, 1, 1);
 

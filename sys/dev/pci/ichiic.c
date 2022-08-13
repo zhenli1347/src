@@ -1,4 +1,4 @@
-/*	$OpenBSD: ichiic.c,v 1.45 2021/05/19 05:28:09 jsg Exp $	*/
+/*	$OpenBSD: ichiic.c,v 1.49 2022/06/21 04:17:21 jsg Exp $	*/
 
 /*
  * Copyright (c) 2005, 2006 Alexander Yurchenko <grange@openbsd.org>
@@ -74,7 +74,7 @@ int	ichiic_i2c_exec(void *, i2c_op_t, i2c_addr_t, const void *, size_t,
 
 int	ichiic_intr(void *);
 
-struct cfattach ichiic_ca = {
+const struct cfattach ichiic_ca = {
 	sizeof(struct ichiic_softc),
 	ichiic_match,
 	ichiic_attach
@@ -134,6 +134,9 @@ const struct pci_matchid ichiic_ids[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_495SERIES_LP_SMB },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_500SERIES_SMB },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_500SERIES_LP_SMB },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_600SERIES_SMB },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_600SERIES_LP_SMB },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_JSL_SMB },
 };
 
 int

@@ -1,4 +1,4 @@
-/* $OpenBSD: gptimer.c,v 1.14 2021/05/16 03:39:28 jsg Exp $ */
+/* $OpenBSD: gptimer.c,v 1.16 2022/02/21 10:57:58 jsg Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  *
@@ -16,7 +16,7 @@
  */
 
 /*
- *	WARNING - this timer initializion has not been checked
+ *	WARNING - this timer initialization has not been checked
  *	to see if it will do _ANYTHING_ sane if the omap enters
  *	low power mode.
  */
@@ -128,7 +128,7 @@ u_int32_t	ticks_err_cnt;
 u_int32_t	ticks_err_sum;
 u_int32_t	statvar, statmin;
 
-struct cfattach	gptimer_ca = {
+const struct cfattach	gptimer_ca = {
 	sizeof (struct device), NULL, gptimer_attach
 };
 

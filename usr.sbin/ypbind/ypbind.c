@@ -1,4 +1,4 @@
-/*	$OpenBSD: ypbind.c,v 1.74 2020/12/29 19:48:49 benno Exp $ */
+/*	$OpenBSD: ypbind.c,v 1.76 2022/07/17 03:12:20 deraadt Exp $ */
 
 /*
  * Copyright (c) 1992, 1993, 1996, 1997, 1998 Theo de Raadt <deraadt@openbsd.org>
@@ -58,7 +58,6 @@
 
 #define SERVERSDIR	"/etc/yp"
 #define BINDINGDIR	"/var/yp/binding"
-#define YPBINDLOCK	"/var/run/ypbind.lock"
 
 struct _dom_binding {
 	struct _dom_binding *dom_pnext;
@@ -339,7 +338,7 @@ main(int argc, char *argv[])
 	char path[PATH_MAX];
 	struct sockaddr_in sin;
 	struct pollfd *pfd = NULL;
-	int width = 0, nready, lockfd, lsock;
+	int width = 0, nready, lsock;
 	socklen_t len;
 	int evil = 0, one = 1;
 	DIR *dirp;
@@ -376,23 +375,6 @@ main(int argc, char *argv[])
 	} else {
 		(void)mkdir(BINDINGDIR, 0755);
 	}
-
-#ifdef O_SHLOCK
-	if ((lockfd = open(YPBINDLOCK, O_CREAT|O_SHLOCK|O_RDWR|O_TRUNC,
-	    0644)) == -1) {
-		fprintf(stderr, "ypbind: cannot create %s\n", YPBINDLOCK);
-		exit(1);
-	}
-#else
-	if ((lockfd = open(YPBINDLOCK, O_CREAT|O_RDWR|O_TRUNC, 0644)) == -1) {
-		fprintf(stderr, "ypbind: cannot create %s.\n", YPBINDLOCK);
-		exit(1);
-	}
-	flock(lockfd, LOCK_SH);
-#endif
-
-	if (fchmod(lockfd, 0644) == -1)
-		err(1, "fchmod");
 
 	(void)pmap_unset(YPBINDPROG, YPBINDVERS);
 
@@ -955,9 +937,10 @@ void
 rpc_received(char *dom, struct sockaddr_in *raddrp, int force)
 {
 	struct _dom_binding *ypdb;
-	struct iovec iov[2];
+	struct iovec iov[3];
 	struct ypbind_resp ybr;
 	char path[PATH_MAX];
+	u_short ypserv_tcp, ypserv_udp;
 	int fd;
 
 	if (strchr(dom, '/'))
@@ -1012,6 +995,18 @@ rpc_received(char *dom, struct sockaddr_in *raddrp, int force)
 		return;
 	}
 
+	/* syncronously ask for the matching ypserv TCP port number */
+	ypserv_udp = raddrp->sin_port;
+	ypserv_tcp = pmap_getport(raddrp, YPPROG,
+	    YPVERS, IPPROTO_TCP);
+	if (ypserv_tcp == 0) {
+		clnt_pcreateerror("pmap_getport");
+		return;
+	}
+	if (ypserv_tcp >= IPPORT_RESERVED || ypserv_tcp == 20)
+		return;
+	ypserv_tcp = htons(ypserv_tcp);
+
 	memcpy(&ypdb->dom_server_addr, raddrp, sizeof ypdb->dom_server_addr);
 	/* recheck binding in 60 seconds */
 	ypdb->dom_check_t = time(NULL) + 60;
@@ -1023,24 +1018,12 @@ rpc_received(char *dom, struct sockaddr_in *raddrp, int force)
 
 	snprintf(path, sizeof path, "%s/%s.%d", BINDINGDIR,
 	    ypdb->dom_domain, (int)ypdb->dom_vers);
-#ifdef O_SHLOCK
 	if ((fd = open(path, O_CREAT|O_SHLOCK|O_RDWR|O_TRUNC, 0644)) == -1) {
 		(void)mkdir(BINDINGDIR, 0755);
 		if ((fd = open(path, O_CREAT|O_SHLOCK|O_RDWR|O_TRUNC,
 		    0644)) == -1)
 			return;
 	}
-#else
-	if ((fd = open(path, O_CREAT|O_RDWR|O_TRUNC, 0644)) == -1) {
-		(void)mkdir(BINDINGDIR, 0755);
-		if ((fd = open(path, O_CREAT|O_RDWR|O_TRUNC, 0644)) == -1)
-			return;
-	}
-	flock(fd, LOCK_SH);
-#endif
-
-	if (fchmod(fd, 0644) == -1)
-		err(1, "fchmod");
 
 	/*
 	 * ok, if BINDINGDIR exists, and we can create the binding file,
@@ -1052,6 +1035,8 @@ rpc_received(char *dom, struct sockaddr_in *raddrp, int force)
 	iov[0].iov_len = sizeof udptransp->xp_port;
 	iov[1].iov_base = (caddr_t)&ybr;
 	iov[1].iov_len = sizeof ybr;
+	iov[2].iov_base = (caddr_t)&ypserv_tcp;
+	iov[2].iov_len = sizeof ypserv_tcp;
 
 	memset(&ybr, 0, sizeof ybr);
 	ybr.ypbind_status = YPBIND_SUCC_VAL;
@@ -1059,10 +1044,11 @@ rpc_received(char *dom, struct sockaddr_in *raddrp, int force)
 	    &raddrp->sin_addr,
 	    sizeof(ybr.ypbind_resp_u.ypbind_bindinfo.ypbind_binding_addr));
 	memmove(&ybr.ypbind_resp_u.ypbind_bindinfo.ypbind_binding_port,
-	    &raddrp->sin_port,
+	    &ypserv_udp,
 	    sizeof(ybr.ypbind_resp_u.ypbind_bindinfo.ypbind_binding_port));
 
-	if (writev(ypdb->dom_lockfd, iov, 2) != iov[0].iov_len + iov[1].iov_len) {
+	if (writev(ypdb->dom_lockfd, iov, sizeof(iov)/sizeof(iov[0])) !=
+	    iov[0].iov_len + iov[1].iov_len + iov[2].iov_len) {
 		perror("write");
 		close(ypdb->dom_lockfd);
 		unlink(path);

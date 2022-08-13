@@ -1,13 +1,8 @@
-# $OpenBSD: Makefile,v 1.10 2021/04/28 12:55:42 patrick Exp $
+# $OpenBSD: Makefile,v 1.14 2022/07/26 15:34:33 jca Exp $
 
 .include <bsd.own.mk>
 
-.if (${MACHINE} == "arm64") || (${MACHINE} == "amd64")
 PROG=	lldb
-.else
-NOPROG=	lldb
-.endif
-
 BINDIR=	/usr/bin
 LIBEXECDIR=/usr/libexec
 
@@ -80,6 +75,11 @@ Options.inc: Options.td
 	${.OBJDIR}/../llvm-tblgen/llvm-tblgen -gen-opt-parser-defs \
 		-I ${LLVM_SRCS}/include \
 		-o ${.TARGET} ${.ALLSRC}
+
+BUILDFIRST=	VCSVersion.inc
+
+VCSVersion.inc:
+	touch $@
 
 LDADD+= -L ${.OBJDIR}/../libLLVM -lLLVM
 

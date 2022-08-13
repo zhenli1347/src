@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.68 2021/09/02 05:41:02 martijn Exp $	*/
+/*	$OpenBSD: parse.y,v 1.76 2022/06/30 11:53:07 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -33,7 +33,6 @@
 #include <net/if.h>
 
 #include <arpa/inet.h>
-#include <arpa/nameser.h>
 
 #include <openssl/sha.h>
 
@@ -131,7 +130,7 @@ typedef struct {
 %token	SYSTEM CONTACT DESCR LOCATION NAME OBJECTID SERVICES RTFILTER
 %token	READONLY READWRITE OCTETSTRING INTEGER COMMUNITY TRAP RECEIVER
 %token	SECLEVEL NONE AUTH ENC USER AUTHKEY ENCKEY ERROR
-%token	HANDLE DEFAULT SRCADDR TCP UDP PFADDRFILTER PORT
+%token	HANDLE DEFAULT SRCADDR TCP UDP PFADDRFILTER BLOCKLIST PORT
 %token	<v.string>	STRING
 %token	<v.number>	NUMBER
 %type	<v.string>	usmuser community optcommunity
@@ -256,6 +255,20 @@ main		: LISTEN ON listen_udptcp
 			}
 			conf->sc_traphandler = 1;
 		}
+		| BLOCKLIST oid {
+			struct ber_oid *blocklist;
+
+			blocklist = recallocarray(conf->sc_blocklist,
+			    conf->sc_nblocklist, conf->sc_nblocklist + 1,
+			    sizeof(*blocklist));
+			if (blocklist == NULL) {
+				yyerror("malloc");
+				YYERROR;
+			}
+			conf->sc_blocklist = blocklist;
+			blocklist[conf->sc_nblocklist++] = *$2;
+			free($2);
+		}
 		| RTFILTER yesno		{
 			if ($2 == 1)
 				conf->sc_rtfilter = ROUTE_FILTER(RTM_NEWADDR) |
@@ -265,8 +278,25 @@ main		: LISTEN ON listen_udptcp
 			else
 				conf->sc_rtfilter = 0;
 		}
+		/* XXX Remove after 7.4 */
 		| PFADDRFILTER yesno		{
-			conf->sc_pfaddrfilter = $2;
+			struct ber_oid *blocklist;
+
+			log_warnx("filter-pf-addresses is deprecated. "
+			    "Please use blocklist pfTblAddrTable instead.");
+			if ($2) {
+				blocklist = recallocarray(conf->sc_blocklist,
+				    conf->sc_nblocklist,
+				    conf->sc_nblocklist + 1,
+				    sizeof(*blocklist));
+				if (blocklist == NULL) {
+					yyerror("malloc");
+					YYERROR;
+				}
+				conf->sc_blocklist = blocklist;
+				smi_string2oid("pfTblAddrTable",
+				    &(blocklist[conf->sc_nblocklist++]));
+			}
 		}
 		| seclevel {
 			conf->sc_min_seclevel = $1;
@@ -351,6 +381,7 @@ listen_udptcp	: listenproto STRING port listenflags	{
 			free($2);
 			free($3);
 		}
+		;
 
 port		: /* empty */			{
 			$$ = NULL;
@@ -666,21 +697,20 @@ optwrite	: READONLY				{ $$ = 0; }
 		;
 
 oid		: STRING				{
-			struct ber_oid	*sysoid;
-			if ((sysoid =
-			    calloc(1, sizeof(*sysoid))) == NULL) {
+			struct ber_oid	*oid;
+			if ((oid = calloc(1, sizeof(*oid))) == NULL) {
 				yyerror("calloc");
 				free($1);
 				YYERROR;
 			}
-			if (ober_string2oid($1, sysoid) == -1) {
+			if (smi_string2oid($1, oid) == -1) {
 				yyerror("invalid OID: %s", $1);
-				free(sysoid);
+				free(oid);
 				free($1);
 				YYERROR;
 			}
 			free($1);
-			$$ = sysoid;
+			$$ = oid;
 		}
 		;
 
@@ -821,7 +851,7 @@ hostdef		: STRING hostoid hostauth srcaddr	{
 			}
 			tr->ta_oid = $2;
 			tr->ta_version = $3.type;
-			if ($3.type == ADDRESS_FLAG_SNMPV2) {
+			if ($3.type == SNMP_V2) {
 				(void)strlcpy(tr->ta_community, $3.data,
 				    sizeof(tr->ta_community));
 				free($3.data);
@@ -996,6 +1026,7 @@ lookup(char *s)
 		{ "agentid",			AGENTID },
 		{ "auth",			AUTH },
 		{ "authkey",			AUTHKEY },
+		{ "blocklist",			BLOCKLIST },
 		{ "community",			COMMUNITY },
 		{ "contact",			CONTACT },
 		{ "default",			DEFAULT },
@@ -1167,8 +1198,8 @@ findeol(void)
 int
 yylex(void)
 {
-	u_char	 buf[8096];
-	u_char	*p, *val;
+	char	 buf[8096];
+	char	*p, *val;
 	int	 quotec, next, c;
 	int	 token;
 
@@ -1206,7 +1237,7 @@ top:
 		p = val + strlen(val) - 1;
 		lungetc(DONE_EXPAND);
 		while (p >= val) {
-			lungetc(*p);
+			lungetc((unsigned char)*p);
 			p--;
 		}
 		lungetc(START_EXPAND);
@@ -1282,8 +1313,8 @@ top:
 		} else {
 nodigits:
 			while (p > buf + 1)
-				lungetc(*--p);
-			c = *--p;
+				lungetc((unsigned char)*--p);
+			c = (unsigned char)*--p;
 			if (c == '-')
 				return (c);
 		}
@@ -1600,7 +1631,16 @@ host(const char *s, const char *port, int type, struct sockaddr_storage *ss,
 	bzero(&hints, sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_socktype = type;
+	/*
+	 * Without AI_NUMERICHOST getaddrinfo might not resolve ip addresses
+	 * for families not specified in the "family" statement in resolv.conf.
+	 */
+	hints.ai_flags = AI_NUMERICHOST;
 	error = getaddrinfo(s, port, &hints, &res0);
+	if (error == EAI_NONAME) {
+		hints.ai_flags = 0;
+		error = getaddrinfo(s, port, &hints, &res0);
+	}
 	if (error == EAI_AGAIN || error == EAI_NODATA || error == EAI_NONAME)
 		return 0;
 	if (error) {

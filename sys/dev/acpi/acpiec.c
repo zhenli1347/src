@@ -1,4 +1,4 @@
-/* $OpenBSD: acpiec.c,v 1.63 2021/02/23 00:03:01 jsg Exp $ */
+/* $OpenBSD: acpiec.c,v 1.65 2022/08/10 16:58:16 patrick Exp $ */
 /*
  * Copyright (c) 2006 Can Erkin Acar <canacar@openbsd.org>
  *
@@ -74,7 +74,7 @@ int		acpiec_gpehandler(struct acpi_softc *, int, void *);
 
 int	acpiec_reg(struct acpiec_softc *);
 
-struct cfattach acpiec_ca = {
+const struct cfattach acpiec_ca = {
 	sizeof(struct acpiec_softc), acpiec_match, acpiec_attach
 };
 
@@ -425,7 +425,6 @@ acpiec_getcrs(struct acpiec_softc *sc, struct acpi_attach_args *aa)
 	struct aml_value	res;
 	int64_t			gpe;
 	struct acpi_ecdt	*ecdt = aa->aaa_table;
-	extern struct aml_node	aml_root;
 	int			rc;
 
 	/* Check if this is ECDT initialization */
@@ -446,7 +445,8 @@ acpiec_getcrs(struct acpiec_softc *sc, struct acpi_attach_args *aa)
 		sc->sc_ec_data = ecdt->ec_data.address;
 
 		/* Get devnode from header */
-		sc->sc_devnode = aml_searchname(&aml_root, ecdt->ec_id);
+		sc->sc_devnode = aml_searchname(sc->sc_acpi->sc_root,
+		    ecdt->ec_id);
 
 		goto ecdtdone;
 	}

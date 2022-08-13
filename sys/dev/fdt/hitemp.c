@@ -1,4 +1,4 @@
-/*	$OpenBSD: hitemp.c,v 1.1 2018/08/27 21:09:47 kettenis Exp $	*/
+/*	$OpenBSD: hitemp.c,v 1.3 2022/06/28 23:43:12 naddy Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -54,7 +54,7 @@ struct hitemp_softc {
 int	hitemp_match(struct device *, void *, void *);
 void	hitemp_attach(struct device *, struct device *, void *);
 
-struct cfattach	hitemp_ca = {
+const struct cfattach	hitemp_ca = {
 	sizeof (struct hitemp_softc), hitemp_match, hitemp_attach
 };
 
@@ -71,7 +71,7 @@ struct hitemp_compat {
 uint64_t hi3660_calc_temp(uint64_t);
 uint64_t hi3670_calc_temp(uint64_t);
 
-struct hitemp_compat hitemp_compat[] = {
+const struct hitemp_compat hitemp_compat[] = {
 	{
 		"hsilicon,hi3660-tsensor",
 		HI3660_OFFSET, hi3660_calc_temp

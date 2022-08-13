@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioblk.c,v 1.32 2020/10/15 13:22:13 krw Exp $	*/
+/*	$OpenBSD: vioblk.c,v 1.35 2022/04/16 19:19:59 naddy Exp $	*/
 
 /*
  * Copyright (c) 2012 Stefan Fritsch.
@@ -138,7 +138,7 @@ void	vioblk_scsi_capacity(struct scsi_xfer *);
 void	vioblk_scsi_capacity16(struct scsi_xfer *);
 void	vioblk_scsi_done(struct scsi_xfer *, int);
 
-struct cfattach vioblk_ca = {
+const struct cfattach vioblk_ca = {
 	sizeof(struct vioblk_softc),
 	vioblk_match,
 	vioblk_attach,
@@ -149,7 +149,7 @@ struct cfdriver vioblk_cd = {
 	NULL, "vioblk", DV_DULL
 };
 
-struct scsi_adapter vioblk_switch = {
+const struct scsi_adapter vioblk_switch = {
 	vioblk_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -264,7 +264,7 @@ err:
  * resources necessary to start an I/O on the device.
  *
  * Since the size of the I/O is unknown at this time the
- * resouces allocated (a.k.a. reserved) must be sufficient
+ * resources allocated (a.k.a. reserved) must be sufficient
  * to allow the maximum possible I/O size.
  *
  * When the I/O is actually attempted via vioblk_scsi_cmd()

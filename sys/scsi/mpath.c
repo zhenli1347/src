@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath.c,v 1.54 2020/09/22 19:32:53 krw Exp $ */
+/*	$OpenBSD: mpath.c,v 1.57 2022/07/02 08:50:42 visa Exp $ */
 
 /*
  * Copyright (c) 2009 David Gwynne <dlg@openbsd.org>
@@ -25,8 +25,6 @@
 #include <sys/queue.h>
 #include <sys/rwlock.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 
 #include <scsi/scsi_all.h>
 #include <scsi/scsiconf.h>
@@ -73,7 +71,7 @@ struct mpath_softc {
 
 struct mpath_softc	*mpath;
 
-struct cfattach mpath_ca = {
+const struct cfattach mpath_ca = {
 	sizeof(struct mpath_softc),
 	mpath_match,
 	mpath_attach
@@ -96,7 +94,7 @@ void		mpath_failover(struct mpath_dev *);
 void		mpath_failover_start(void *);
 void		mpath_failover_check(struct mpath_dev *);
 
-struct scsi_adapter mpath_switch = {
+const struct scsi_adapter mpath_switch = {
 	mpath_cmd, NULL, mpath_probe, NULL, NULL
 };
 

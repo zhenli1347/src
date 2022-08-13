@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.500 2021/09/02 10:11:21 mlarkin Exp $
+#	$OpenBSD: GENERIC,v 1.512 2022/03/08 15:08:01 hastings Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -19,7 +19,8 @@ option		APERTURE	# in-kernel aperture driver for XFree86
 option		MTRR		# CPU memory range attributes control
 
 option		NTFS		# NTFS support
-option		HIBERNATE	# Hibernate support
+option		SUSPEND
+option		HIBERNATE
 
 config		bsd	swap generic
 
@@ -65,6 +66,11 @@ amdgpio*	at acpi?
 aplgpio*	at acpi?
 bytgpio*	at acpi?
 chvgpio*	at acpi?
+com0		at acpi? addr 0x3f8
+com1		at acpi? addr 0x2f8
+com2		at acpi? addr 0x3e8
+com3		at acpi? addr 0x2e8
+com*		at acpi?
 glkgpio*	at acpi?
 pchgpio*	at acpi?
 sdhc*		at acpi?
@@ -110,7 +116,7 @@ kate*	at pci?			# AMD K8 temperature sensor
 km*	at pci?			# AMD K10 temperature sensor
 ksmn*	at pci?			# AMD K17 temperature sensor
 amas*	at pci? disable		# AMD memory configuration
-pchtemp* at pci?		# Intel C610 termperature sensor
+pchtemp* at pci?		# Intel C610 temperature sensor
 ccp*	at pci?			# AMD Cryptographic Co-processor
 
 # National Semiconductor LM7[89] and compatible hardware monitors
@@ -308,6 +314,7 @@ mos*	at uhub?		# MOSCHIP MCS7730/7830 10/100 Ethernet
 mue*	at uhub?		# Microchip LAN75xx/LAN78xx Ethernet
 url*	at uhub?		# Realtek RTL8150L based adapters
 ure*	at uhub?		# Realtek RTL8152 based adapters
+uaq*	at uhub?		# Aquantia AQC111U/AQC112U based adapters
 wi*	at uhub?		# WaveLAN IEEE 802.11DS
 udsbr*	at uhub?		# D-Link DSB-R100 radio
 radio*	at udsbr?		# USB radio
@@ -317,6 +324,7 @@ uath*	at uhub?		# Atheros AR5005UG/AR5005UX
 ural*	at uhub?		# Ralink RT2500USB
 rum*	at uhub?		# Ralink RT2501USB/RT2601USB
 run*	at uhub?		# Ralink RT2700U/RT2800U/RT3000U
+mtw*	at uhub?		# MediaTek MT7601U
 otus*	at uhub?		# Atheros AR9001U
 athn*	at uhub?		# Atheros AR9002U
 zyd*	at uhub?		# Zydas ZD1211
@@ -403,7 +411,7 @@ com*	at pcmcia?			# PCMCIA modems/serial ports
 com*	at puc?
 
 # options CY_HW_RTS
-#cy*	at pci?				# PCI cyclom serial card
+cy*	at pci?				# PCI cyclom serial card
 #cz*	at pci?				# Cyclades-Z multi-port serial boards
 
 lpt0	at isa? port 0x378 irq 7	# standard PC parallel ports
@@ -544,6 +552,7 @@ ixl*	at pci?				# Intel Ethernet 700 Series
 mcx*	at pci?				# Mellanox ConnectX-4
 iavf*	at pci?				# Intel Ethernet Adaptive VF
 aq*	at pci?				# Aquantia aQtion Ethernet
+igc*	at pci?				# Intel I225 Ethernet
 
 # Wireless network cards
 acx*	at pci?				# TI ACX100/ACX111 (802.11b/g)
@@ -570,8 +579,8 @@ ral*	at cardbus?			# Ralink RT2500/RT2501/RT2600
 rtw*	at pci?				# Realtek 8180
 rtw*	at cardbus?			# Realtek 8180
 rtwn*	at pci?				# Realtek 8188CE/8192CE
-pgt*	at pci?				# Prism54 (only full-mac varients)
-pgt*	at cardbus?			# Prism54 (only full-mac varients)
+pgt*	at pci?				# Prism54 Full-MAC
+pgt*	at cardbus?			# Prism54 Full-MAC
 malo*	at pci?				# Marvell Libertas
 malo*	at cardbus?			# Marvell Libertas
 malo*	at pcmcia?			# Marvell 88W8385
@@ -662,19 +671,10 @@ audio*	at emu?
 
 bktr0	at pci?
 
-# FM-Radio devices
-#gtp*	at pci?			# Gemtek/Guillemot Radio PCI Radio Card
-
 # FM-Radio support
-#radio*	at gtp?
 radio*	at bktr?
 
 #wdt0	at pci?			# Ind Computer Source PCI-WDT50x driver
-
-# crypto support
-hifn*	at pci?			# Hi/fn 7751 crypto card
-ubsec*	at pci?			# Bluesteel Networks 5xxx crypto card
-safe*	at pci?			# SafeNet SafeXcel 1141/1741
 
 xspd0	at pci?			# XenSource Platform Device
 

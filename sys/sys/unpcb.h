@@ -1,4 +1,4 @@
-/*	$OpenBSD: unpcb.h,v 1.18 2021/02/10 08:20:09 mvs Exp $	*/
+/*	$OpenBSD: unpcb.h,v 1.26 2022/07/01 09:56:17 mvs Exp $	*/
 /*	$NetBSD: unpcb.h,v 1.6 1994/06/29 06:46:08 cgd Exp $	*/
 
 /*
@@ -32,6 +32,8 @@
  *	@(#)unpcb.h	8.1 (Berkeley) 6/2/93
  */
 
+#include <sys/refcnt.h>
+
 /*
  * Protocol control block for an active
  * instance of a UNIX internal protocol.
@@ -59,24 +61,29 @@
  *
  * Locks used to protect struct members:
  *      I       immutable after creation
- *      U       unp_lock
+ *      G       unp_gc_lock
+ *      s       socket lock
  */
 
 
 struct	unpcb {
+	struct  refcnt unp_refcnt;      /* references to this pcb */
 	struct	socket *unp_socket;	/* [I] pointer back to socket */
-	struct	vnode *unp_vnode;	/* [U] if associated with file */
-	struct	file *unp_file;		/* [U] backpointer for unp_gc() */
-	struct	unpcb *unp_conn;	/* [U] control block of connected socket */
-	ino_t	unp_ino;		/* [U] fake inode number */
-	SLIST_HEAD(,unpcb) unp_refs;	/* [U] referencing socket linked list */
-	SLIST_ENTRY(unpcb) unp_nextref;	/* [U] link in unp_refs list */
-	struct	mbuf *unp_addr;		/* [U] bound address of socket */
-	long	unp_msgcount;		/* [U] references from socket rcv buf */
-	int	unp_flags;		/* [U] this unpcb contains peer eids */
-	struct	sockpeercred unp_connid;/* [U] id of peer process */
+	struct	vnode *unp_vnode;	/* [s] if associated with file */
+	struct	file *unp_file;		/* [G] backpointer for unp_gc() */
+	struct	unpcb *unp_conn;	/* [s] control block of connected
+						socket */
+	ino_t	unp_ino;		/* [s] fake inode number */
+	SLIST_HEAD(,unpcb) unp_refs;	/* [s] referencing socket linked list */
+	SLIST_ENTRY(unpcb) unp_nextref;	/* [s] link in unp_refs list */
+	struct	mbuf *unp_addr;		/* [s] bound address of socket */
+	long	unp_msgcount;		/* [G] references from socket rcv buf */
+	long	unp_gcrefs;		/* [G] references from gc */
+	int	unp_flags;		/* [s] this unpcb contains peer eids */
+	int	unp_gcflags;		/* [G] garbage collector flags */
+	struct	sockpeercred unp_connid;/* [s] id of peer process */
 	struct	timespec unp_ctime;	/* [I] holds creation time */
-	LIST_ENTRY(unpcb) unp_link;	/* [U] link in per-AF list of sockets */
+	LIST_ENTRY(unpcb) unp_link;	/* [G] link in per-AF list of sockets */
 };
 
 /*
@@ -84,11 +91,13 @@ struct	unpcb {
  */
 #define UNP_FEIDS	0x01		/* unp_connid contains information */
 #define UNP_FEIDSBIND	0x02		/* unp_connid was set by a bind */
-#define UNP_GCMARK	0x04		/* mark during unp_gc() */
-#define UNP_GCDEFER	0x08		/* ref'd, but not marked in this pass */
-#define UNP_GCDEAD	0x10		/* unref'd in this pass */
-#define UNP_BINDING	0x20		/* unp is binding now */
-#define UNP_CONNECTING	0x40		/* unp is connecting now */
+#define UNP_BINDING	0x04		/* unp is binding now */
+#define UNP_CONNECTING	0x08		/* unp is connecting now */
+
+/*
+ * flag bits in unp_gcflags
+ */
+#define UNP_GCDEAD	0x01		/* unp could be dead */
 
 #define	sotounpcb(so)	((struct unpcb *)((so)->so_pcb))
 
@@ -109,7 +118,6 @@ int	unp_connect(struct socket *, struct mbuf *, struct proc *);
 int	unp_connect2(struct socket *, struct socket *);
 void	unp_detach(struct unpcb *);
 void	unp_disconnect(struct unpcb *);
-void	unp_drop(struct unpcb *, int);
 void	unp_gc(void *);
 void	unp_shutdown(struct unpcb *);
 int 	unp_externalize(struct mbuf *, socklen_t, int);

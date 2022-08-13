@@ -1,4 +1,4 @@
-/*	$OpenBSD: aoa.c,v 1.11 2020/08/26 03:29:06 visa Exp $	*/
+/*	$OpenBSD: aoa.c,v 1.14 2022/03/21 19:22:39 miod Exp $	*/
 
 /*-
  * Copyright (c) 2005 Tsubai Masanari.  All rights reserved.
@@ -57,7 +57,7 @@ void aoa_attach(struct device *, struct device *, void *);
 void aoa_defer(struct device *);
 void aoa_set_volume(struct aoa_softc *, int, int);
 
-struct cfattach aoa_ca = {
+const struct cfattach aoa_ca = {
 	sizeof(struct aoa_softc), aoa_match, aoa_attach
 };
 
@@ -65,7 +65,7 @@ struct cfdriver aoa_cd = {
 	NULL, "aoa", DV_DULL
 };
 
-struct audio_hw_if aoa_hw_if = {
+const struct audio_hw_if aoa_hw_if = {
 	i2s_open,
 	i2s_close,
 	i2s_set_params,
@@ -134,7 +134,7 @@ aoa_defer(struct device *dev)
 {
 	struct aoa_softc *sc = (struct aoa_softc *)dev;
 
-	audio_attach_mi(&aoa_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&aoa_hw_if, sc, NULL, &sc->sc_dev);
 	deq_reset(sc);
 }
 

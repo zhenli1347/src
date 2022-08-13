@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.94 2021/03/15 22:44:57 patrick Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.104 2022/08/07 23:56:06 guenther Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -17,8 +17,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/device.h>
-#include <sys/malloc.h>
 #include <sys/memrange.h>
 #include <sys/proc.h>
 #include <sys/user.h>
@@ -32,12 +30,12 @@
 
 #include <machine/cpuvar.h>
 
-#include <dev/acpi/acpireg.h>
 #include <dev/acpi/acpivar.h>
 #include <dev/acpi/acpidev.h>
 #include <dev/acpi/dsdt.h>
 #include <dev/isa/isareg.h>
-#include <dev/pci/pcivar.h>
+
+#include <machine/apmvar.h>
 
 #include "isa.h"
 #include "ioapic.h"
@@ -68,7 +66,7 @@ u_int8_t	*acpi_scan(struct acpi_mem_map *, paddr_t, size_t);
 int	acpi_match(struct device *, void *, void *);
 void	acpi_attach(struct device *, struct device *, void *);
 
-struct cfattach acpi_ca = {
+const struct cfattach acpi_ca = {
 	sizeof(struct acpi_softc), acpi_match, acpi_attach
 };
 
@@ -370,17 +368,6 @@ acpi_attach_machdep(struct acpi_softc *sc)
 }
 
 #ifndef SMALL_KERNEL
-
-void
-acpi_sleep_clocks(struct acpi_softc *sc, int state)
-{
-	rtcstop();
-
-#if NLAPIC > 0
-	lapic_disable();
-#endif
-}
-
 /*
  * This function may not have local variables due to a bug between
  * acpi_savecpu() and the resume path.
@@ -388,6 +375,11 @@ acpi_sleep_clocks(struct acpi_softc *sc, int state)
 int
 acpi_sleep_cpu(struct acpi_softc *sc, int state)
 {
+	rtcstop();
+#if NLAPIC > 0
+	lapic_disable();
+#endif
+
 	/*
 	 * ACPI defines two wakeup vectors. One is used for ACPI 1.0
 	 * implementations - it's in the FACS table as wakeup_vector and
@@ -414,27 +406,27 @@ acpi_sleep_cpu(struct acpi_softc *sc, int state)
 	 */
 	if (acpi_savecpu()) {
 		/* Suspend path */
-		KASSERT((curcpu()->ci_flags & CPUF_USERXSTATE) == 0);
+		KASSERT((curcpu()->ci_pflags & CPUPF_USERXSTATE) == 0);
 		wbinvd();
 
 #ifdef HIBERNATE
-		if (state == ACPI_STATE_S4) {
+		if (state == ACPI_STATE_S4 || state == ACPI_STATE_S5) {
 			if (hibernate_suspend()) {
 				printf("%s: hibernate_suspend failed\n",
 				    DEVNAME(sc));
 				return (ECANCELED);
 			}
+
+			/*
+			 * XXX
+			 * Flag to disk drivers that they should "power down" the disk
+			 * when we get to DVACT_POWERDOWN.
+			 */
+			boothowto |= RB_POWERDOWN;
+			config_suspend_all(DVACT_POWERDOWN);
+			boothowto &= ~RB_POWERDOWN;
 		}
 #endif
-
-		/*
-		 * XXX
-		 * Flag to disk drivers that they should "power down" the disk
-		 * when we get to DVACT_POWERDOWN.
-		 */
-		boothowto |= RB_POWERDOWN;
-		config_suspend_all(DVACT_POWERDOWN);
-		boothowto &= ~RB_POWERDOWN;
 
 		acpi_sleep_pm(sc, state);
 		printf("%s: acpi_sleep_pm failed", DEVNAME(sc));
@@ -499,12 +491,9 @@ acpi_resume_cpu(struct acpi_softc *sc, int state)
 
 #ifdef MULTIPROCESSOR
 void
-acpi_sleep_mp(void)
+sleep_mp(void)
 {
 	int i;
-
-	sched_stop_secondary_cpus();
-	KASSERT(CPU_IS_PRIMARY(curcpu()));
 
 	/* 
 	 * Wait for cpus to halt so we know their FPU state has been
@@ -522,7 +511,7 @@ acpi_sleep_mp(void)
 }
 
 void
-acpi_resume_mp(void)
+resume_mp(void)
 {
 	void	cpu_start_secondary(struct cpu_info *ci);
 	struct cpu_info *ci;
@@ -558,12 +547,10 @@ acpi_resume_mp(void)
 		ci->ci_idepth = 0;
 		ci->ci_handled_intr_level = IPL_NONE;
 
-		ci->ci_flags &= ~CPUF_PRESENT;
+		atomic_clearbits_int(&ci->ci_flags, CPUF_PRESENT);
 		cpu_start_secondary(ci);
 	}
-
 	cpu_boot_secondary_processors();
-	sched_start_secondary_cpus();
 }
 #endif /* MULTIPROCESSOR */
 

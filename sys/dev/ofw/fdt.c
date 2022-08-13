@@ -1,4 +1,4 @@
-/*	$OpenBSD: fdt.c,v 1.27 2021/05/06 19:45:16 kettenis Exp $	*/
+/*	$OpenBSD: fdt.c,v 1.29 2022/08/06 08:59:28 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Dariusz Swiderski <sfires@sfires.net>
@@ -749,7 +749,7 @@ fdt_is_compatible(void *node, const char *name)
 
 #ifdef DEBUG
 /*
- * Debug methods for printing whole tree, particular odes and properies
+ * Debug methods for printing whole tree, particular nodes and properties
  */
 void *
 fdt_print_property(void *node, int level)
@@ -994,7 +994,7 @@ OF_getpropintarray(int handle, char *prop, uint32_t *buf, int buflen)
 	if (len < 0 || (len % sizeof(uint32_t)))
 		return -1;
 
-	for (i = 0; i < len / sizeof(uint32_t); i++)
+	for (i = 0; i < min(len, buflen) / sizeof(uint32_t); i++)
 		buf[i] = betoh32(buf[i]);
 
 	return len;

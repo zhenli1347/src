@@ -1,4 +1,4 @@
-/* $OpenBSD: pf_key_v2.c,v 1.201 2019/11/29 22:06:19 tobhe Exp $  */
+/* $OpenBSD: pf_key_v2.c,v 1.204 2022/01/31 23:51:15 sthen Exp $  */
 /* $EOM: pf_key_v2.c,v 1.79 2000/12/12 00:33:19 niklas Exp $	 */
 
 /*
@@ -1032,10 +1032,6 @@ pf_key_v2_set_spi(struct sa *sa, struct proto *proto, int incoming,
 			ssa.sadb_sa_encrypt = SADB_X_CALG_DEFLATE;
 			break;
 
-		case IPSEC_IPCOMP_LZS:
-			ssa.sadb_sa_encrypt = SADB_X_CALG_LZS;
-			break;
-
 		default:
 			break;
 		}
@@ -1806,6 +1802,11 @@ pf_key_v2_enable_sa(struct sa *sa, struct sa *isakmp_sa)
 	size_t		sidlen = 0, didlen = 0;
 	u_int8_t       *sid = 0, *did = 0;
 
+	if (proto == NULL) {
+		log_print("pf_key_v2_enable_sa: no proto");
+		return EINVAL;
+	}
+
 	sa->transport->vtbl->get_dst(sa->transport, &dst);
 	sa->transport->vtbl->get_src(sa->transport, &src);
 
@@ -2314,8 +2315,6 @@ pf_key_v2_acquire(struct pf_key_v2_msg *pmsg)
 	struct sadb_x_policy policy;
 	struct sadb_address *dst = 0, *src = 0;
 	struct sockaddr *dstaddr, *srcaddr = 0;
-	struct sadb_comb *scmb = 0;
-	struct sadb_prop *sprp = 0;
 	struct sadb_ident *srcident = 0, *dstident = 0;
 	char		dstbuf[ADDRESS_MAX], srcbuf[ADDRESS_MAX], *peer = 0;
 	char		confname[120], *conn = 0;
@@ -2358,11 +2357,6 @@ pf_key_v2_acquire(struct pf_key_v2_msg *pmsg)
 	if (ext)
 		src = ext->seg;
 
-	ext = pf_key_v2_find_ext(pmsg, SADB_EXT_PROPOSAL);
-	if (ext) {
-		sprp = ext->seg;
-		scmb = (struct sadb_comb *) (sprp + 1);
-	}
 	ext = pf_key_v2_find_ext(pmsg, SADB_EXT_IDENTITY_SRC);
 	if (ext)
 		srcident = ext->seg;

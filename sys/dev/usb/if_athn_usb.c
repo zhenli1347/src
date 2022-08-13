@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_athn_usb.c,v 1.61 2021/04/15 18:25:44 stsp Exp $	*/
+/*	$OpenBSD: if_athn_usb.c,v 1.65 2022/07/10 21:13:41 bluhm Exp $	*/
 
 /*-
  * Copyright (c) 2011 Damien Bergamini <damien.bergamini@free.fr>
@@ -90,6 +90,8 @@ static const struct athn_usb_type {
 	{{ USB_VENDOR_NETGEAR, USB_PRODUCT_NETGEAR_WNDA3200 },
 	   ATHN_USB_FLAG_AR7010 },
 	{{ USB_VENDOR_PANASONIC, USB_PRODUCT_PANASONIC_N5HBZ0000055 },
+	   ATHN_USB_FLAG_AR7010 },
+	{{ USB_VENDOR_MELCO, USB_PRODUCT_MELCO_UWABR100 },
 	   ATHN_USB_FLAG_AR7010 },
 	{{ USB_VENDOR_VIA, USB_PRODUCT_VIA_AR9271 }}
 };
@@ -352,7 +354,7 @@ athn_usb_attachhook(struct device *self)
 	ic->ic_ampdu_tx_stop = athn_usb_ampdu_tx_stop;
 #endif
 	ic->ic_newstate = athn_usb_newstate;
-	ic->ic_media.ifm_change = athn_usb_media_change;
+	ic->ic_media.ifm_change_cb = athn_usb_media_change;
 	timeout_set(&sc->scan_to, athn_usb_next_scan, usc);
 
 	ops->rx_enable = athn_usb_rx_enable;
@@ -1176,7 +1178,7 @@ athn_usb_node_alloc(struct ieee80211com *ic)
 {
 	struct athn_node *an;
 
-	an = malloc(sizeof(struct athn_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+	an = malloc(sizeof(struct athn_node), M_USBDEV, M_NOWAIT | M_ZERO);
 	return (struct ieee80211_node *)an;
 }
 
@@ -2085,7 +2087,7 @@ athn_usb_rx_frame(struct athn_usb_softc *usc, struct mbuf *m,
 	m_adj(m, -IEEE80211_CRC_LEN);
 
 	/* Send the frame to the 802.11 layer. */
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = rs->rs_rssi + AR_USB_DEFAULT_NF;
 	rxi.rxi_tstamp = betoh64(rs->rs_tstamp);
 	if (!(wh->i_fc[0] & IEEE80211_FC0_TYPE_CTL) &&

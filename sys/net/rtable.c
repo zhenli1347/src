@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtable.c,v 1.75 2021/05/25 22:45:09 bluhm Exp $ */
+/*	$OpenBSD: rtable.c,v 1.80 2022/06/29 22:20:47 bluhm Exp $ */
 
 /*
  * Copyright (c) 2014-2016 Martin Pieuchot
@@ -62,7 +62,7 @@ struct rtmap {
 /*
  * Array of rtableid -> rdomain mapping.
  *
- * Only used for the first index as describbed above.
+ * Only used for the first index as described above.
  */
 struct dommp {
 	unsigned int	   limit;
@@ -184,6 +184,8 @@ rtable_init(void)
 
 	if (rtable_add(0) != 0)
 		panic("unable to create default routing table");
+
+	rt_timer_init();
 }
 
 int
@@ -484,6 +486,10 @@ rtable_match(unsigned int rtableid, struct sockaddr *dst, uint32_t *src)
 		goto out;
 
 	rt = SRPL_FIRST(&sr, &an->an_rtlist);
+	if (rt == NULL) {
+		SRPL_LEAVE(&sr);
+		goto out;
+	}
 	rtref(rt);
 	SRPL_LEAVE(&sr);
 
@@ -572,7 +578,8 @@ rtable_insert(unsigned int rtableid, struct sockaddr *dst,
 
 			if (!mpathok ||
 			    (mrt->rt_gateway->sa_len == gateway->sa_len &&
-			    !memcmp(mrt->rt_gateway, gateway, gateway->sa_len))){
+			    memcmp(mrt->rt_gateway, gateway,
+			    gateway->sa_len) == 0)) {
 				error = EEXIST;
 				goto leave;
 			}
@@ -678,7 +685,7 @@ rtable_delete(unsigned int rtableid, struct sockaddr *dst,
 		npaths++;
 
 	if (npaths > 1) {
-		KASSERT(rt->rt_refcnt >= 1);
+		KASSERT(refcnt_read(&rt->rt_refcnt) >= 1);
 		SRPL_REMOVE_LOCKED(&rt_rc, &an->an_rtlist, rt, rtentry,
 		    rt_next);
 
@@ -692,7 +699,7 @@ rtable_delete(unsigned int rtableid, struct sockaddr *dst,
 	if (art_delete(ar, an, addr, plen) == NULL)
 		panic("art_delete failed to find node %p", an);
 
-	KASSERT(rt->rt_refcnt >= 1);
+	KASSERT(refcnt_read(&rt->rt_refcnt) >= 1);
 	SRPL_REMOVE_LOCKED(&rt_rc, &an->an_rtlist, rt, rtentry, rt_next);
 	art_put(an);
 

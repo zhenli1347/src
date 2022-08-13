@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-show-options.c,v 1.67 2021/08/21 10:22:39 nicm Exp $ */
+/* $OpenBSD: cmd-show-options.c,v 1.69 2022/02/14 09:10:48 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -103,7 +103,7 @@ cmd_show_options_exec(struct cmd *self, struct cmdq_item *item)
 	name = options_match(argument, &idx, &ambiguous);
 	if (name == NULL) {
 		if (args_has(args, 'q'))
-			goto fail;
+			goto out;
 		if (ambiguous)
 			cmdq_error(item, "ambiguous option: %s", argument);
 		else
@@ -114,7 +114,7 @@ cmd_show_options_exec(struct cmd *self, struct cmdq_item *item)
 	    &cause);
 	if (scope == OPTIONS_TABLE_NONE) {
 		if (args_has(args, 'q'))
-			goto fail;
+			goto out;
 		cmdq_error(item, "%s", cause);
 		free(cause);
 		goto fail;
@@ -127,7 +127,14 @@ cmd_show_options_exec(struct cmd *self, struct cmdq_item *item)
 		parent = 0;
 	if (o != NULL)
 		cmd_show_options_print(self, item, o, idx, parent);
+	else if (*name == '@') {
+		if (args_has(args, 'q'))
+			goto out;
+		cmdq_error(item, "invalid option: %s", argument);
+		goto fail;
+	}
 
+out:
 	free(name);
 	free(argument);
 	return (CMD_RETURN_NORMAL);

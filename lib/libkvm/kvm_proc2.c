@@ -1,4 +1,4 @@
-/*	$OpenBSD: kvm_proc2.c,v 1.33 2021/02/08 10:51:01 mpi Exp $	*/
+/*	$OpenBSD: kvm_proc2.c,v 1.38 2022/02/22 17:35:01 deraadt Exp $	*/
 /*	$NetBSD: kvm_proc.c,v 1.30 1999/03/24 05:50:50 mrg Exp $	*/
 /*-
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
@@ -70,7 +70,9 @@
  */
 
 #define __need_process
-#include <sys/param.h>
+#include <sys/param.h>	/* NODEV */
+#include <sys/types.h>
+#include <sys/signal.h>
 #include <sys/proc.h>
 #include <sys/exec.h>
 #include <sys/stat.h>

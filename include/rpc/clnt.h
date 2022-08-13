@@ -1,4 +1,4 @@
-/*	$OpenBSD: clnt.h,v 1.11 2010/09/01 14:43:34 millert Exp $	*/
+/*	$OpenBSD: clnt.h,v 1.13 2022/07/15 17:33:28 deraadt Exp $	*/
 /*	$NetBSD: clnt.h,v 1.6 1995/04/29 05:27:58 cgd Exp $	*/
 
 /*
@@ -118,7 +118,7 @@ struct rpc_err {
  */
 typedef struct __rpc_client {
 	AUTH	*cl_auth;			/* authenticator */
-	struct clnt_ops {
+	const struct clnt_ops {
 		/* call remote procedure */
 		enum clnt_stat	(*cl_call)(struct __rpc_client *,
 				    unsigned long, xdrproc_t, caddr_t, 
@@ -214,6 +214,7 @@ typedef struct __rpc_client {
  */
 #define CLSET_RETRY_TIMEOUT 4   /* set retry timeout (timeval) */
 #define CLGET_RETRY_TIMEOUT 5   /* get retry timeout (timeval) */
+#define CLSET_CONNECTED	    6	/* socket is connected, so use send() */
 
 /*
  * void

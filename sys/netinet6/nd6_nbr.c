@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6_nbr.c,v 1.129 2019/11/29 16:41:02 nayden Exp $	*/
+/*	$OpenBSD: nd6_nbr.c,v 1.132 2022/08/08 17:47:59 kn Exp $	*/
 /*	$KAME: nd6_nbr.c,v 1.61 2001/02/10 16:06:14 jinmei Exp $	*/
 
 /*
@@ -357,8 +357,8 @@ nd6_ns_input(struct mbuf *m, int off, int icmp6len)
  * dad - duplicated address detection
  */
 void
-nd6_ns_output(struct ifnet *ifp, struct in6_addr *daddr6, 
-    struct in6_addr *taddr6, struct llinfo_nd6 *ln, int dad)
+nd6_ns_output(struct ifnet *ifp, const struct in6_addr *daddr6,
+    const struct in6_addr *taddr6, const struct llinfo_nd6 *ln, int dad)
 {
 	struct mbuf *m;
 	struct ip6_hdr *ip6;
@@ -568,6 +568,7 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 	char *lladdr = NULL;
 	int lladdrlen = 0;
 	struct ifaddr *ifa;
+	struct in6_ifaddr *ifa6;
 	struct llinfo_nd6 *ln;
 	struct rtentry *rt = NULL;
 	struct sockaddr_dl *sdl;
@@ -637,7 +638,8 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 		lladdrlen = ndopts.nd_opts_tgt_lladdr->nd_opt_len << 3;
 	}
 
-	ifa = &in6ifa_ifpwithaddr(ifp, &taddr6)->ia_ifa;
+	ifa6 = in6ifa_ifpwithaddr(ifp, &taddr6);
+	ifa = ifa6 ? &ifa6->ia_ifa : NULL;
 
 	/*
 	 * Target address matches one of my interface address.
@@ -869,8 +871,8 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
  * sdl0 - sockaddr_dl (= proxy NA) or NULL
  */
 void
-nd6_na_output(struct ifnet *ifp, struct in6_addr *daddr6, 
-    struct in6_addr *taddr6, u_long flags, int tlladdr, 
+nd6_na_output(struct ifnet *ifp, const struct in6_addr *daddr6,
+    const struct in6_addr *taddr6, u_long flags, int tlladdr,
     struct sockaddr *sdl0)
 {
 	struct mbuf *m;
@@ -1327,12 +1329,16 @@ nd6_dad_ns_input(struct ifaddr *ifa)
 
 	duplicate = 0;
 	dp = nd6_dad_find(ifa);
+	if (dp == NULL) {
+		log(LOG_ERR, "%s: DAD structure not found\n", __func__);
+		return;
+	}
 
 	/*
 	 * if I'm yet to start DAD, someone else started using this address
 	 * first.  I have a duplicate and you win.
 	 */
-	if (!dp || dp->dad_ns_ocount == 0)
+	if (dp->dad_ns_ocount == 0)
 		duplicate++;
 
 	/* XXX more checks for loopback situation - see nd6_dad_timer too */
@@ -1345,8 +1351,7 @@ nd6_dad_ns_input(struct ifaddr *ifa)
 		 * not sure if I got a duplicate.
 		 * increment ns count and see what happens.
 		 */
-		if (dp)
-			dp->dad_ns_icount++;
+		dp->dad_ns_icount++;
 	}
 }
 

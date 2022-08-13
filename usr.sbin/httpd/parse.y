@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.125 2021/04/10 10:10:07 claudio Exp $	*/
+/*	$OpenBSD: parse.y,v 1.128 2022/02/27 20:30:30 bluhm Exp $	*/
 
 /*
  * Copyright (c) 2020 Matthias Pressfreund <mpfr@fn.de>
@@ -141,6 +141,7 @@ typedef struct {
 %token	TIMEOUT TLS TYPE TYPES HSTS MAXAGE SUBDOMAINS DEFAULT PRELOAD REQUEST
 %token	ERROR INCLUDE AUTHENTICATE WITH BLOCK DROP RETURN PASS REWRITE
 %token	CA CLIENT CRL OPTIONAL PARAM FORWARDED FOUND NOT
+%token	ERRDOCS GZIPSTATIC
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
 %type	<v.port>	port
@@ -211,6 +212,17 @@ main		: PREFORK NUMBER	{
 		}
 		| CHROOT STRING		{
 			conf->sc_chroot = $2;
+		}
+		| ERRDOCS STRING	{
+			if ($2 != NULL && strlcpy(conf->sc_errdocroot, $2,
+			    sizeof(conf->sc_errdocroot)) >=
+			    sizeof(conf->sc_errdocroot)) {
+				yyerror("errdoc root path too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			conf->sc_custom_errdocs = 1;
 		}
 		| LOGDIR STRING		{
 			conf->sc_logdir = $2;
@@ -287,6 +299,12 @@ server		: SERVER optmatch STRING	{
 			sun->sun_len = sizeof(struct sockaddr_un);
 
 			s->srv_conf.hsts_max_age = SERVER_HSTS_DEFAULT_AGE;
+
+			(void)strlcpy(s->srv_conf.errdocroot,
+			    conf->sc_errdocroot,
+			    sizeof(s->srv_conf.errdocroot));
+			if (conf->sc_custom_errdocs)
+				s->srv_conf.flags |= SRVFLAG_ERRDOCS;
 
 			if (last_server_id == INT_MAX) {
 				yyerror("too many servers defined");
@@ -477,6 +495,28 @@ serveroptsl	: LISTEN ON STRING opttls port	{
 
 			TAILQ_INSERT_TAIL(&srv->srv_hosts, alias, entry);
 		}
+		| ERRDOCS STRING	{
+			if (parentsrv != NULL) {
+				yyerror("errdocs inside location");
+				YYERROR;
+			}
+			if ($2 != NULL && strlcpy(srv->srv_conf.errdocroot, $2,
+			    sizeof(srv->srv_conf.errdocroot)) >=
+			    sizeof(srv->srv_conf.errdocroot)) {
+				yyerror("errdoc root path too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+			srv->srv_conf.flags |= SRVFLAG_ERRDOCS;
+		}
+		| NO ERRDOCS		{
+			if (parentsrv != NULL) {
+				yyerror("errdocs inside location");
+				YYERROR;
+			}
+			srv->srv_conf.flags &= ~SRVFLAG_ERRDOCS;
+		}
 		| tcpip			{
 			if (parentsrv != NULL) {
 				yyerror("tcp flags inside location");
@@ -513,6 +553,7 @@ serveroptsl	: LISTEN ON STRING opttls port	{
 		| logformat
 		| fastcgi
 		| authenticate
+		| gzip_static
 		| filter
 		| LOCATION optfound optmatch STRING	{
 			struct server		*s;
@@ -1177,6 +1218,14 @@ fcgiport	: NUMBER		{
 		}
 		;
 
+gzip_static	: NO GZIPSTATIC		{
+			srv->srv_conf.flags &= ~SRVFLAG_GZIP_STATIC;
+		}
+		| GZIPSTATIC		{
+			srv->srv_conf.flags |= SRVFLAG_GZIP_STATIC;
+		}
+		;
+
 tcpip		: TCP '{' optnl tcpflags_l '}'
 		| TCP tcpflags
 		;
@@ -1396,10 +1445,12 @@ lookup(char *s)
 		{ "directory",		DIRECTORY },
 		{ "drop",		DROP },
 		{ "ecdhe",		ECDHE },
+		{ "errdocs",		ERRDOCS },
 		{ "error",		ERR },
 		{ "fastcgi",		FCGI },
 		{ "forwarded",		FORWARDED },
 		{ "found",		FOUND },
+		{ "gzip-static",	GZIPSTATIC },
 		{ "hsts",		HSTS },
 		{ "include",		INCLUDE },
 		{ "index",		INDEX },
@@ -1564,10 +1615,10 @@ findeol(void)
 int
 yylex(void)
 {
-	unsigned char	 buf[8096];
-	unsigned char	*p, *val;
-	int		 quotec, next, c;
-	int		 token;
+	char	 buf[8096];
+	char	*p, *val;
+	int	 quotec, next, c;
+	int	 token;
 
 top:
 	p = buf;
@@ -1603,7 +1654,7 @@ top:
 		p = val + strlen(val) - 1;
 		lungetc(DONE_EXPAND);
 		while (p >= val) {
-			lungetc(*p);
+			lungetc((unsigned char)*p);
 			p--;
 		}
 		lungetc(START_EXPAND);
@@ -1679,8 +1730,8 @@ top:
 		} else {
 nodigits:
 			while (p > buf + 1)
-				lungetc(*--p);
-			c = *--p;
+				lungetc((unsigned char)*--p);
+			c = (unsigned char)*--p;
 			if (c == '-')
 				return (c);
 		}

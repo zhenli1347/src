@@ -14,11 +14,10 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* $Id: lex.c,v 1.13 2020/10/19 14:53:11 florian Exp $ */
+/* $Id: lex.c,v 1.15 2022/06/25 12:14:18 jsg Exp $ */
 
 /*! \file */
 
-#include <ctype.h>
 #include <stdlib.h>
 
 #include <isc/buffer.h>
@@ -239,8 +238,6 @@ typedef enum {
 	lexstate_qstring
 } lexstate;
 
-#define IWSEOL (ISC_LEXOPT_INITIALWS | ISC_LEXOPT_EOL)
-
 static void
 pushback(inputsource *source, int c) {
 	REQUIRE(source->pushback->current > 0);
@@ -289,7 +286,6 @@ isc_lex_gettoken(isc_lex_t *lex, unsigned int options, isc_token_t *tokenp) {
 	FILE *stream;
 	char *curr, *prev;
 	size_t remaining;
-	unsigned int saved_options;
 	isc_result_t result;
 
 	/*
@@ -324,8 +320,6 @@ isc_lex_gettoken(isc_lex_t *lex, unsigned int options, isc_token_t *tokenp) {
 	}
 
 	isc_buffer_compact(source->pushback);
-
-	saved_options = options;
 
 	curr = lex->data;
 	*curr = '\0';

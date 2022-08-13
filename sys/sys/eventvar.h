@@ -1,4 +1,4 @@
-/*	$OpenBSD: eventvar.h,v 1.12 2021/06/10 15:10:56 visa Exp $	*/
+/*	$OpenBSD: eventvar.h,v 1.17 2022/07/09 12:48:21 visa Exp $	*/
 
 /*-
  * Copyright (c) 1999,2000 Jonathan Lemon <jlemon@FreeBSD.org>
@@ -32,6 +32,7 @@
 #define _SYS_EVENTVAR_H_
 
 #include <sys/mutex.h>
+#include <sys/refcnt.h>
 #include <sys/task.h>
 
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
@@ -40,6 +41,7 @@
 /*
  * Locking:
  *	I	immutable after creation
+ *	L	kqueue_klist_lock
  *	a	atomic operations
  *	q	kq_lock
  */
@@ -47,11 +49,13 @@ struct kqueue {
 	struct		mutex kq_lock;		/* lock for queue access */
 	TAILQ_HEAD(, knote) kq_head;		/* [q] list of pending event */
 	int		kq_count;		/* [q] # of pending events */
-	u_int		kq_refs;		/* [a] # of references */
-	struct		selinfo kq_sel;
+	struct		refcnt kq_refcnt;	/* [a] # of references */
+	struct		klist kq_klist;		/* [L] knotes of other kqs */
 	struct		filedesc *kq_fdp;	/* [I] fd table of this kq */
 
 	LIST_ENTRY(kqueue) kq_next;
+
+	u_int		kq_nknotes;		/* [q] # of registered knotes */
 
 	int		kq_knlistsize;		/* [q] size of kq_knlist */
 	struct		knlist *kq_knlist;	/* [q] list of
@@ -62,9 +66,9 @@ struct kqueue {
 	struct		task kq_task;		/* deferring of activation */
 
 	int		kq_state;		/* [q] */
-#define KQ_SEL		0x01
 #define KQ_SLEEP	0x02
 #define KQ_DYING	0x04
+#define KQ_TASK		0x08
 };
 
 #endif /* !_SYS_EVENTVAR_H_ */

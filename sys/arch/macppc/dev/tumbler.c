@@ -1,4 +1,4 @@
-/*	$OpenBSD: tumbler.c,v 1.9 2016/09/19 06:46:43 ratchov Exp $	*/
+/*	$OpenBSD: tumbler.c,v 1.12 2022/03/21 19:22:39 miod Exp $	*/
 
 /*-
  * Copyright (c) 2001,2003 Tsubai Masanari.  All rights reserved.
@@ -68,14 +68,14 @@ void tumbler_set_treble(struct tumbler_softc *, int);
 int tas3001_write(struct tumbler_softc *, u_int, const void *);
 int tas3001_init(struct tumbler_softc *);
 
-struct cfattach tumbler_ca = {
+const struct cfattach tumbler_ca = {
 	sizeof(struct tumbler_softc), tumbler_match, tumbler_attach
 };
 struct cfdriver tumbler_cd = {
 	NULL, "tumbler", DV_DULL
 };
 
-struct audio_hw_if tumbler_hw_if = {
+const struct audio_hw_if tumbler_hw_if = {
 	i2s_open,
 	i2s_close,
 	i2s_set_params,
@@ -299,7 +299,7 @@ tumbler_defer(struct device *dev)
 
 	/* XXX If i2c has failed to attach, what should we do? */
 
-	audio_attach_mi(&tumbler_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&tumbler_hw_if, sc, NULL, &sc->sc_dev);
 
 	tumbler_init(sc);
 }

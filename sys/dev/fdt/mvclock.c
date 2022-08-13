@@ -1,4 +1,4 @@
-/*	$OpenBSD: mvclock.c,v 1.8 2020/11/06 13:29:45 patrick Exp $	*/
+/*	$OpenBSD: mvclock.c,v 1.13 2022/06/05 02:43:44 dlg Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -48,7 +48,7 @@ struct mvclock_softc {
 int mvclock_match(struct device *, void *, void *);
 void mvclock_attach(struct device *, struct device *, void *);
 
-struct cfattach	mvclock_ca = {
+const struct cfattach	mvclock_ca = {
 	sizeof (struct mvclock_softc), mvclock_match, mvclock_attach
 };
 
@@ -72,12 +72,16 @@ mvclock_match(struct device *parent, void *match, void *aux)
 	struct fdt_attach_args *faa = aux;
 	int node = faa->fa_node;
 
-	return (OF_is_compatible(node, "marvell,ap806-clock") ||
+	if (OF_is_compatible(node, "marvell,ap806-clock") ||
+	    OF_is_compatible(node, "marvell,ap807-clock") ||
 	    OF_is_compatible(node, "marvell,cp110-clock") ||
 	    OF_is_compatible(node, "marvell,armada-3700-periph-clock-nb") ||
 	    OF_is_compatible(node, "marvell,armada-3700-periph-clock-sb") ||
 	    OF_is_compatible(node, "marvell,armada-3700-tbg-clock") ||
-	    OF_is_compatible(node, "marvell,armada-3700-xtal-clock"));
+	    OF_is_compatible(node, "marvell,armada-3700-xtal-clock"))
+		return 10;	/* Must beat syscon(4). */
+
+	return 0;
 }
 
 void
@@ -100,7 +104,8 @@ mvclock_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_cd.cd_node = node;
 	sc->sc_cd.cd_cookie = sc;
-	if (OF_is_compatible(node, "marvell,ap806-clock")) {
+	if (OF_is_compatible(node, "marvell,ap806-clock") ||
+	    OF_is_compatible(node, "marvell,ap807-clock")) {
 		sc->sc_cd.cd_get_frequency = ap806_get_frequency;
 	} else if (OF_is_compatible(node, "marvell,cp110-clock")) {
 		sc->sc_cd.cd_get_frequency = cp110_get_frequency;
@@ -191,7 +196,7 @@ cp110_get_frequency(void *cookie, uint32_t *cells)
 		}
 	}
 
-	/* Gatable clocks */
+	/* Gateable clocks */
 	if (mod == 1) {
 		switch (idx) {
 		case CP110_GATE_PPV2:
@@ -222,7 +227,7 @@ cp110_enable(void *cookie, uint32_t *cells, int on)
 	uint32_t mod = cells[0];
 	uint32_t idx = cells[1];
 
-	/* Gatable clocks */
+	/* Gateable clocks */
 	if (mod == 1 && idx < 32) {
 		struct regmap *rm;
 		uint32_t reg;
@@ -247,15 +252,39 @@ cp110_enable(void *cookie, uint32_t *cells, int on)
 
 /* Armada 3700 Periph block */
 
-#define PERIPH_NB_MMC			0x0
-#define PERIPH_NB_SQF			0x7
-#define PERIPH_NB_I2C2			0x9
-#define PERIPH_NB_I2C1			0xa
+/* North Bridge clocks */
+#define PERIPH_NB_MMC			0x00
+#define PERIPH_NB_SATA			0x01 /* SATA Host */
+#define PERIPH_NB_SEC_AT		0x02 /* Security AT */
+#define PERIPH_NB_SEC_DAP		0x03 /* Security DAP */
+#define PERIPH_NB_TSECM			0x04 /* Security Engine */
+#define PERIPH_NB_SETM_TMX		0x05 /* Serial Embedded Trace Module */
+#define PERIPH_NB_AVS			0x06 /* Adaptive Voltage Scaling */
+#define PERIPH_NB_SQF			0x07 /* SPI */
+#define PERIPH_NB_I2C2			0x09
+#define PERIPH_NB_I2C1			0x0a
+#define PERIPH_NB_DDR_PHY		0x0b
+#define PERIPH_NB_DDR_FCLK		0x0c
+#define PERIPH_NB_TRACE			0x0d
+#define PERIPH_NB_COUNTER		0x0e
+#define PERIPH_NB_EIO97			0x0f
 #define PERIPH_NB_CPU			0x10
-#define PERIPH_SB_GBE1_CORE		0x7
-#define PERIPH_SB_GBE0_CORE		0x8
-#define PERIPH_SB_USB32_USB2_SYS	0xb
-#define PERIPH_SB_USB32_SS_SYS		0xc
+
+/* South Bridge clocks */
+#define PERIPH_SB_GBE_50		0x00 /* 50MHz parent for gbe */
+#define PERIPH_SB_GBE_CORE		0x01 /* parent for gbe core */
+#define PERIPH_SB_GBE_125		0x02 /* 125MHz parent for gbe */
+#define PERIPH_SB_GBE1_50		0x03 /* 50MHz parent for gbe port 1 */
+#define PERIPH_SB_GBE0_50		0x04 /* 50MHz parent for gbe port 0 */
+#define PERIPH_SB_GBE1_125		0x05 /* 125MHz parent for gbe port 1 */
+#define PERIPH_SB_GBE0_125		0x06 /* 125MHz parent for gbe port 0 */
+#define PERIPH_SB_GBE1_CORE		0x07 /* gbe core port 1 */
+#define PERIPH_SB_GBE0_CORE		0x08 /* gbe core port 0 */
+#define PERIPH_SB_GBE_BM		0x09 /* gbe buffer manager */
+#define PERIPH_SB_SDIO			0x0a
+#define PERIPH_SB_USB32_USB2_SYS	0x0b /* USB 2 clock */
+#define PERIPH_SB_USB32_SS_SYS		0x0c /* USB 3 clock */
+#define PERIPH_SB_PCIE			0x0d
 
 #define PERIPH_TBG_SEL			0x0
 #define  PERIPH_TBG_SEL_MASK			0x3
@@ -349,7 +378,29 @@ a3700_periph_sb_enable(void *cookie, uint32_t *cells, int on)
 uint32_t
 a3700_periph_sb_get_frequency(void *cookie, uint32_t *cells)
 {
+	struct mvclock_softc *sc = cookie;
 	uint32_t idx = cells[0];
+	uint32_t freq;
+
+	switch (idx) {
+	case PERIPH_SB_GBE_CORE:
+		freq = a3700_periph_tbg_get_frequency(sc, 8);
+		freq /= a3700_periph_get_double_div(sc,
+		    PERIPH_DIV_SEL1, 18, 21);
+		return freq;
+	case PERIPH_SB_GBE1_CORE:
+		idx = PERIPH_SB_GBE_CORE;
+		freq = a3700_periph_sb_get_frequency(sc, &idx);
+		freq /= a3700_periph_get_div(sc, PERIPH_DIV_SEL1, 13) + 1;
+		return freq;
+	case PERIPH_SB_GBE0_CORE:
+		idx = PERIPH_SB_GBE_CORE;
+		freq = a3700_periph_sb_get_frequency(sc, &idx);
+		freq /= a3700_periph_get_div(sc, PERIPH_DIV_SEL1, 14) + 1;
+		return freq;
+	default:
+		break;
+	}
 
 	printf("%s: 0x%08x\n", __func__, idx);
 	return 0;

@@ -1,4 +1,4 @@
-#	$OpenBSD: files.i386,v 1.246 2019/12/08 12:25:30 mpi Exp $
+#	$OpenBSD: files.i386,v 1.248 2022/02/09 23:54:34 deraadt Exp $
 #
 # new style config file for i386 architecture
 #
@@ -314,7 +314,7 @@ file	arch/i386/i386/rbus_machdep.c	cardbus
 # needs to be before its isa and pci attachments.  This answer is
 # non-optimal, but I don't have a better answer right now.
 
-# PCIC pcmcia contoller
+# PCIC pcmcia controller
 # XXX this needs to be done very late, so it's done here.  This feels
 # like a kludge, but it might be for the best.
 
@@ -381,6 +381,7 @@ include "dev/acpi/files.acpi"
 attach	acpi at bios
 file	arch/i386/i386/acpi_machdep.c		acpi
 file	arch/i386/i386/acpi_wakecode.S		acpi & !small_kernel
+file	dev/acpi/acpi_x86.c			acpi & suspend & !small_kernel
 
 #
 # IPMI

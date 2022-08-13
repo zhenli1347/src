@@ -1,4 +1,4 @@
-/*	$OpenBSD: pipex.h,v 1.30 2021/01/04 12:21:38 mvs Exp $	*/
+/*	$OpenBSD: pipex.h,v 1.33 2022/07/12 08:58:53 mvs Exp $	*/
 
 /*
  * Copyright (c) 2009 Internet Initiative Japan Inc.
@@ -51,7 +51,7 @@ struct pipex_mppe_req {
 	int16_t	stateless;			/* mppe key mode.
 						   1 for stateless */
 	int16_t	keylenbits;			/* mppe key length(in bits)*/
-	u_char	master_key[PIPEX_MPPE_KEYLEN];	/* mppe mastter key */
+	u_char	master_key[PIPEX_MPPE_KEYLEN];	/* mppe master key */
 };
 
 /* pipex statistics */
@@ -145,12 +145,6 @@ struct pipex_session_list_req {
 	int	plr_ppp_id[PIPEX_MAX_LISTREQ];	/* PPP id */
 };
 
-struct pipex_session_config_req {
-	int		pcr_protocol;		/* tunnel protocol  */
-	uint16_t	pcr_session_id;		/* session-id */
-	int		pcr_ip_forward;		/* ip_forwarding on/off */
-};
-
 /* for pppx(4) */
 struct pppx_hdr {
 	u_int32_t	pppx_proto;	/* write: protocol in PIPEX_PROTO_ */
@@ -167,7 +161,6 @@ struct pipex_session_descr_req {
 /* PIPEX ioctls */
 #define PIPEXASESSION	_IOW ('p',  3, struct pipex_session_req)
 #define PIPEXDSESSION	_IOWR('p',  4, struct pipex_session_close_req)
-#define PIPEXCSESSION	_IOW ('p',  5, struct pipex_session_config_req)
 #define PIPEXGSTAT	_IOWR('p',  6, struct pipex_session_stat_req)
 #define PIPEXGCLOSED	_IOR ('p',  7, struct pipex_session_list_req)
 #define PIPEXSIFDESCR	_IOW ('p',  8, struct pipex_session_descr_req)
@@ -193,6 +186,7 @@ struct mbuf           *pipex_l2tp_input (struct mbuf *, int off, struct pipex_se
 struct pipex_session  *pipex_l2tp_userland_lookup_session_ipv4 (struct mbuf *, struct in_addr);
 struct pipex_session  *pipex_l2tp_userland_lookup_session_ipv6 (struct mbuf *, struct in6_addr);
 struct mbuf           *pipex_l2tp_userland_output (struct mbuf *, struct pipex_session *);
+void                  pipex_rele_session(struct pipex_session *);
 int                   pipex_ioctl (void *, u_long, caddr_t);
 void                  pipex_session_init_mppe_recv(struct pipex_session *, int,
 int, u_char *);

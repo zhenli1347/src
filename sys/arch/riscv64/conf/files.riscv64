@@ -1,13 +1,13 @@
-#	$OpenBSD: files.riscv64,v 1.16 2021/06/29 17:49:49 matthieu Exp $
+#	$OpenBSD: files.riscv64,v 1.24 2022/06/12 10:51:55 kettenis Exp $
 
 # Standard stanzas config(8) can't run without
 maxpartitions 16
 maxusers 2 8 128
 
 # Major number for block devices, for ``root on'' lines
-major	{ sd = 0 }
-#major	{ cd = 3 }
-#major	{ wd = 4 }
+major	{ wd = 0 }
+major	{ sd = 4 }
+major	{ cd = 6 }
 major	{ rd = 8 }
 
 file	arch/riscv64/riscv64/autoconf.c
@@ -84,6 +84,21 @@ device	plic
 attach	plic at fdt
 file	arch/riscv64/dev/plic.c			plic
 
+# PolarFire SoC MSS clock controller
+device	mpfclock
+attach	mpfclock at fdt
+file	arch/riscv64/dev/mpfclock.c		mpfclock
+
+# PolarFire SoC MSS GPIO controller
+device	mpfgpio: gpiobus
+attach	mpfgpio at fdt
+file	arch/riscv64/dev/mpfgpio.c		mpfgpio
+
+# PolarFire SoC MSS I2C controller
+device	mpfiic: i2cbus
+attach	mpfiic at fdt
+file	arch/riscv64/dev/mpfiic.c		mpfiic
+
 # L2 cache controller
 device	sfcc
 attach	sfcc at fdt
@@ -94,10 +109,30 @@ device	sfclock
 attach	sfclock at fdt
 file	arch/riscv64/dev/sfclock.c		sfclock
 
+# SiFive GPIO
+device	sfgpio
+attach	sfgpio at fdt
+file	arch/riscv64/dev/sfgpio.c		sfgpio
+
 # SiFive uart
 device	sfuart
 attach	sfuart at fdt
 file	arch/riscv64/dev/sfuart.c		sfuart
+
+# StarFive clock controller
+device	stfclock
+attach	stfclock at fdt
+file	arch/riscv64/dev/stfclock.c		stfclock
+
+# StarFive pinctrl
+device	stfpinctrl
+attach	stfpinctrl at fdt
+file	arch/riscv64/dev/stfpinctrl.c		stfpinctrl
+
+# StarFive temperature sensor
+device	stftemp
+attach	stftemp at fdt
+file	arch/riscv64/dev/stftemp.c		stftemp
 
 # Paravirtual device bus and virtio
 include "dev/pv/files.pv"
@@ -123,6 +158,9 @@ include "dev/ofw/files.ofw"
 
 # Machine-independent FDT drivers
 include "dev/fdt/files.fdt"
+
+# Machine-independent GPIO drivers
+include "dev/gpio/files.gpio"
 
 # Machine-independent SCSI drivers
 include "scsi/files.scsi"

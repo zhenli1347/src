@@ -1,4 +1,4 @@
-/*	$OpenBSD: ubsa.c,v 1.67 2020/07/31 10:49:33 mglocker Exp $ 	*/
+/*	$OpenBSD: ubsa.c,v 1.69 2022/07/02 08:50:42 visa Exp $ 	*/
 /*	$NetBSD: ubsa.c,v 1.5 2002/11/25 00:51:33 fvdl Exp $	*/
 /*-
  * Copyright (c) 2002, Alexander Kabaev <kan.FreeBSD.org>.
@@ -63,8 +63,6 @@
 #include <sys/fcntl.h>
 #include <sys/conf.h>
 #include <sys/tty.h>
-#include <sys/selinfo.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbcdc.h>
@@ -178,7 +176,7 @@ void ubsa_databits(struct ubsa_softc *, tcflag_t);
 void ubsa_stopbits(struct ubsa_softc *, tcflag_t);
 void ubsa_flow(struct ubsa_softc *, tcflag_t, tcflag_t);
 
-struct	ucom_methods ubsa_methods = {
+const struct ucom_methods ubsa_methods = {
 	ubsa_get_status,
 	ubsa_set,
 	ubsa_param,

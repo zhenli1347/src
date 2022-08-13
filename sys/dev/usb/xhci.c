@@ -1,4 +1,4 @@
-/* $OpenBSD: xhci.c,v 1.121 2021/02/24 03:08:47 jsg Exp $ */
+/* $OpenBSD: xhci.c,v 1.126 2022/07/15 07:52:06 kettenis Exp $ */
 
 /*
  * Copyright (c) 2014-2015 Martin Pieuchot
@@ -38,7 +38,7 @@
 #include <dev/usb/xhcivar.h>
 
 struct cfdriver xhci_cd = {
-	NULL, "xhci", DV_DULL
+	NULL, "xhci", DV_DULL, CD_SKIPHIBERNATE
 };
 
 #ifdef XHCI_DEBUG
@@ -157,7 +157,7 @@ usbd_status	  xhci_device_isoc_start(struct usbd_xfer *);
 
 #define XHCI_INTR_ENDPT 1
 
-struct usbd_bus_methods xhci_bus_methods = {
+const struct usbd_bus_methods xhci_bus_methods = {
 	.open_pipe = xhci_pipe_open,
 	.dev_setaddr = xhci_setaddr,
 	.soft_intr = xhci_softintr,
@@ -166,7 +166,7 @@ struct usbd_bus_methods xhci_bus_methods = {
 	.freex = xhci_freex,
 };
 
-struct usbd_pipe_methods xhci_root_ctrl_methods = {
+const struct usbd_pipe_methods xhci_root_ctrl_methods = {
 	.transfer = xhci_root_ctrl_transfer,
 	.start = xhci_root_ctrl_start,
 	.abort = xhci_noop,
@@ -174,7 +174,7 @@ struct usbd_pipe_methods xhci_root_ctrl_methods = {
 	.done = xhci_noop,
 };
 
-struct usbd_pipe_methods xhci_root_intr_methods = {
+const struct usbd_pipe_methods xhci_root_intr_methods = {
 	.transfer = xhci_root_intr_transfer,
 	.start = xhci_root_intr_start,
 	.abort = xhci_root_intr_abort,
@@ -182,7 +182,7 @@ struct usbd_pipe_methods xhci_root_intr_methods = {
 	.done = xhci_root_intr_done,
 };
 
-struct usbd_pipe_methods xhci_device_ctrl_methods = {
+const struct usbd_pipe_methods xhci_device_ctrl_methods = {
 	.transfer = xhci_device_ctrl_transfer,
 	.start = xhci_device_ctrl_start,
 	.abort = xhci_device_ctrl_abort,
@@ -190,7 +190,7 @@ struct usbd_pipe_methods xhci_device_ctrl_methods = {
 	.done = xhci_noop,
 };
 
-struct usbd_pipe_methods xhci_device_intr_methods = {
+const struct usbd_pipe_methods xhci_device_intr_methods = {
 	.transfer = xhci_device_generic_transfer,
 	.start = xhci_device_generic_start,
 	.abort = xhci_device_generic_abort,
@@ -198,7 +198,7 @@ struct usbd_pipe_methods xhci_device_intr_methods = {
 	.done = xhci_device_generic_done,
 };
 
-struct usbd_pipe_methods xhci_device_bulk_methods = {
+const struct usbd_pipe_methods xhci_device_bulk_methods = {
 	.transfer = xhci_device_generic_transfer,
 	.start = xhci_device_generic_start,
 	.abort = xhci_device_generic_abort,
@@ -206,7 +206,7 @@ struct usbd_pipe_methods xhci_device_bulk_methods = {
 	.done = xhci_device_generic_done,
 };
 
-struct usbd_pipe_methods xhci_device_isoc_methods = {
+const struct usbd_pipe_methods xhci_device_isoc_methods = {
 	.transfer = xhci_device_isoc_transfer,
 	.start = xhci_device_isoc_start,
 	.abort = xhci_device_generic_abort,
@@ -317,7 +317,7 @@ xhci_init(struct xhci_softc *sc)
 		return (error);
 
 	if (xhcixfer == NULL) {
-		xhcixfer = malloc(sizeof(struct pool), M_DEVBUF, M_NOWAIT);
+		xhcixfer = malloc(sizeof(struct pool), M_USBHC, M_NOWAIT);
 		if (xhcixfer == NULL) {
 			printf("%s: unable to allocate pool descriptor\n",
 			    DEVNAME(sc));
@@ -593,7 +593,7 @@ xhci_intr(void *v)
 {
 	struct xhci_softc *sc = v;
 
-	if (sc == NULL || sc->sc_bus.dying)
+	if (sc->sc_dead)
 		return (0);
 
 	/* If we get an interrupt while polling, then just ignore it. */
@@ -613,6 +613,7 @@ xhci_intr1(struct xhci_softc *sc)
 	intrs = XOREAD4(sc, XHCI_USBSTS);
 	if (intrs == 0xffffffff) {
 		sc->sc_bus.dying = 1;
+		sc->sc_dead = 1;
 		return (0);
 	}
 
@@ -1206,7 +1207,7 @@ xhci_pipe_open(struct usbd_pipe *pipe)
 		/*
 		 * Get a slot and init the device's contexts.
 		 *
-		 * Since the control enpoint, represented as the default
+		 * Since the control endpoint, represented as the default
 		 * pipe, is always opened first we are dealing with a
 		 * new device.  Put a new slot in the ENABLED state.
 		 *
@@ -1443,7 +1444,7 @@ xhci_context_setup(struct xhci_softc *sc, struct usbd_pipe *pipe)
 	    DEQPTR(xp->ring) | xp->ring.toggle
 	);
 
-	/* Unmask the new endoint */
+	/* Unmask the new endpoint */
 	sdev->input_ctx->drop_flags = 0;
 	sdev->input_ctx->add_flags = htole32(XHCI_INCTX_MASK_DCI(xp->dci));
 
@@ -2165,7 +2166,7 @@ xhci_softdev_free(struct xhci_softc *sc, uint8_t slot)
 }
 
 /* Root hub descriptors. */
-usb_device_descriptor_t xhci_devd = {
+const usb_device_descriptor_t xhci_devd = {
 	USB_DEVICE_DESCRIPTOR_SIZE,
 	UDESC_DEVICE,		/* type */
 	{0x00, 0x03},		/* USB version */
@@ -2348,6 +2349,7 @@ xhci_root_ctrl_start(struct usbd_xfer *xfer)
 	usb_port_status_t ps;
 	usb_device_request_t *req;
 	void *buf = NULL;
+	usb_device_descriptor_t devd;
 	usb_hub_descriptor_t hubd;
 	usbd_status err;
 	int s, len, value, index;
@@ -2396,9 +2398,10 @@ xhci_root_ctrl_start(struct usbd_xfer *xfer)
 				err = USBD_IOERROR;
 				goto ret;
 			}
+			devd = xhci_devd;
+			USETW(devd.idVendor, sc->sc_id_vendor);
 			totlen = l = min(len, USB_DEVICE_DESCRIPTOR_SIZE);
-			USETW(xhci_devd.idVendor, sc->sc_id_vendor);
-			memcpy(buf, &xhci_devd, l);
+			memcpy(buf, &devd, l);
 			break;
 		/*
 		 * We can't really operate at another speed, but the spec says

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cd.c,v 1.263 2021/03/12 10:22:46 jsg Exp $	*/
+/*	$OpenBSD: cd.c,v 1.265 2022/01/11 23:10:11 jsg Exp $	*/
 /*	$NetBSD: cd.c,v 1.100 1997/04/02 02:29:30 mycroft Exp $	*/
 
 /*
@@ -146,7 +146,7 @@ int	dvd_read_struct(struct cd_softc *, union dvd_struct *);
 int	cd_eject(void);
 #endif /* __macppc__ */
 
-struct cfattach cd_ca = {
+const struct cfattach cd_ca = {
 	sizeof(struct cd_softc), cdmatch, cdattach,
 	cddetach, cdactivate
 };
@@ -527,7 +527,7 @@ cd_cmd_rw12(struct scsi_generic *generic, int read, u_int64_t secno,
 /*
  * cdstart looks to see if there is a buf waiting for the device
  * and that the device is not already busy. If both are true,
- * It deques the buf and creates a scsi command to perform the
+ * It dequeues the buf and creates a scsi command to perform the
  * transfer in the buf. The transfer request will call scsi_done
  * on completion, which will in turn call this routine again
  * so that the next queued transfer is performed.

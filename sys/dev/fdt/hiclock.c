@@ -1,4 +1,4 @@
-/*	$OpenBSD: hiclock.c,v 1.2 2019/04/22 12:43:13 kettenis Exp $	*/
+/*	$OpenBSD: hiclock.c,v 1.4 2022/06/28 23:43:12 naddy Exp $	*/
 /*
  * Copyright (c) 2018, 2019 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -52,7 +52,7 @@ struct hiclock_softc {
 int hiclock_match(struct device *, void *, void *);
 void hiclock_attach(struct device *, struct device *, void *);
 
-struct cfattach	hiclock_ca = {
+const struct cfattach	hiclock_ca = {
 	sizeof (struct hiclock_softc), hiclock_match, hiclock_attach
 };
 
@@ -75,7 +75,7 @@ void	hi3670_crgctrl_enable(void *, uint32_t *, int);
 uint32_t hi3670_stub_get_frequency(void *, uint32_t *);
 int	hi3670_stub_set_frequency(void *, uint32_t *, uint32_t);
 
-struct hiclock_compat hiclock_compat[] = {
+const struct hiclock_compat hiclock_compat[] = {
 	/* Official Linux device tree bindings. */
 	{
 		.compat = "hisilicon,hi3670-crgctrl",

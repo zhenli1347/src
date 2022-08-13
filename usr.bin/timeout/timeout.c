@@ -1,4 +1,4 @@
-/* $OpenBSD: timeout.c,v 1.19 2021/09/04 11:49:11 schwarze Exp $ */
+/* $OpenBSD: timeout.c,v 1.21 2022/07/02 19:00:35 kn Exp $ */
 
 /*
  * Copyright (c) 2021 Job Snijders <job@openbsd.org>
@@ -32,6 +32,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 
+#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <getopt.h>
@@ -64,8 +65,8 @@ usage(void)
 static double
 parse_duration(const char *duration)
 {
-	double 	 ret;
-	char 	*suffix;
+	double	 ret;
+	char	*suffix;
 
 	ret = strtod(duration, &suffix);
 	if (ret == 0 && suffix == duration)
@@ -104,10 +105,11 @@ parse_signal(const char *str)
 	long long	 sig;
 	const char	*errstr;
 
-	if (strncasecmp(str, "SIG", 3) == 0) {
+	if (isalpha((unsigned char)*str)) {
 		int i;
 
-		str += 3;
+		if (strncasecmp(str, "SIG", 3) == 0)
+			str += 3;
 		for (i = 1; i < NSIG; i++) {
 			if (strcasecmp(str, sys_signame[i]) == 0)
 				return (i);
@@ -164,17 +166,17 @@ int
 main(int argc, char **argv)
 {
 	int		ch;
-	unsigned long 	i;
-	int 		foreground = 0, preserve = 0;
-	int 		pstat, status;
-	int 		killsig = SIGTERM;
-	pid_t 		pgid = 0, pid, cpid = 0;
-	double 		first_kill;
-	double 		second_kill = 0;
-	bool 		timedout = false;
-	bool 		do_second_kill = false;
-	struct 		sigaction signals;
-	int 		signums[] = {-1, SIGTERM, SIGINT, SIGHUP, SIGCHLD,
+	unsigned long	i;
+	int		foreground = 0, preserve = 0;
+	int		pstat, status;
+	int		killsig = SIGTERM;
+	pid_t		pgid = 0, pid, cpid = 0;
+	double		first_kill;
+	double		second_kill = 0;
+	bool		timedout = false;
+	bool		do_second_kill = false;
+	struct		sigaction signals;
+	int		signums[] = {-1, SIGTERM, SIGINT, SIGHUP, SIGCHLD,
 			    SIGALRM, SIGQUIT};
 
 	const struct option longopts[] = {

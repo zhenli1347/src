@@ -1,4 +1,4 @@
-/*	$OpenBSD: vscsi.c,v 1.58 2020/12/25 12:59:52 visa Exp $ */
+/*	$OpenBSD: vscsi.c,v 1.61 2022/07/02 08:50:41 visa Exp $ */
 
 /*
  * Copyright (c) 2008 David Gwynne <dlg@openbsd.org>
@@ -27,7 +27,6 @@
 #include <sys/pool.h>
 #include <sys/task.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
 #include <sys/selinfo.h>
 
 #include <scsi/scsi_all.h>
@@ -78,7 +77,7 @@ struct vscsi_softc {
 #define DEVNAME(_s) ((_s)->sc_dev.dv_xname)
 #define DEV2SC(_d) ((struct vscsi_softc *)device_lookup(&vscsi_cd, minor(_d)))
 
-struct cfattach vscsi_ca = {
+const struct cfattach vscsi_ca = {
 	sizeof(struct vscsi_softc),
 	vscsi_match,
 	vscsi_attach
@@ -94,7 +93,7 @@ void		vscsi_cmd(struct scsi_xfer *);
 int		vscsi_probe(struct scsi_link *);
 void		vscsi_free(struct scsi_link *);
 
-struct scsi_adapter vscsi_switch = {
+const struct scsi_adapter vscsi_switch = {
 	vscsi_cmd, NULL, vscsi_probe, vscsi_free, NULL
 };
 
@@ -525,31 +524,6 @@ gone:
 	device_unref(&sc->sc_dev);
 
 	free(dt, M_TEMP, sizeof(*dt));
-}
-
-int
-vscsipoll(dev_t dev, int events, struct proc *p)
-{
-	struct vscsi_softc		*sc = DEV2SC(dev);
-	int				revents = 0;
-
-	if (sc == NULL)
-		return (POLLERR);
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		mtx_enter(&sc->sc_state_mtx);
-		if (!TAILQ_EMPTY(&sc->sc_ccb_i2t))
-			revents |= events & (POLLIN | POLLRDNORM);
-		mtx_leave(&sc->sc_state_mtx);
-	}
-
-	if (revents == 0) {
-		if (events & (POLLIN | POLLRDNORM))
-			selrecord(p, &sc->sc_sel);
-	}
-
-	device_unref(&sc->sc_dev);
-	return (revents);
 }
 
 int

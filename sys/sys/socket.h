@@ -1,4 +1,4 @@
-/*	$OpenBSD: socket.h,v 1.100 2021/05/17 17:54:31 claudio Exp $	*/
+/*	$OpenBSD: socket.h,v 1.102 2022/02/22 01:01:02 guenther Exp $	*/
 /*	$NetBSD: socket.h,v 1.14 1996/02/09 18:25:36 christos Exp $	*/
 
 /*
@@ -322,7 +322,7 @@ struct sockpeercred {
 	{ "chaos", CTLTYPE_NODE }, \
 	{ "xerox_ns", CTLTYPE_NODE }, \
 	{ "iso", CTLTYPE_NODE }, \
-	{ "emca", CTLTYPE_NODE }, \
+	{ "ecma", CTLTYPE_NODE }, \
 	{ "datakit", CTLTYPE_NODE }, \
 	{ "ccitt", CTLTYPE_NODE }, \
 	{ "ibm_sna", CTLTYPE_NODE }, \
@@ -588,8 +588,6 @@ int	setrtable(int);
 __END_DECLS
 
 #else
-
-void	pfctlinput(int, struct sockaddr *);
 
 static inline struct sockaddr *
 sstosa(struct sockaddr_storage *ss)

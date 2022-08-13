@@ -1,4 +1,4 @@
-/*	$OpenBSD: atw.c,v 1.98 2020/07/10 13:22:19 patrick Exp $	*/
+/*	$OpenBSD: atw.c,v 1.100 2022/04/21 21:03:02 stsp Exp $	*/
 /*	$NetBSD: atw.c,v 1.69 2004/07/23 07:07:55 dyoung Exp $	*/
 
 /*-
@@ -3175,7 +3175,7 @@ atw_rxintr(struct atw_softc *sc)
 
 		wh = mtod(m, struct ieee80211_frame *);
 		ni = ieee80211_find_rxnode(ic, wh);
-		rxi.rxi_flags = 0;
+		memset(&rxi, 0, sizeof(rxi));
 #if 0
 		if (atw_hw_decrypted(sc, wh)) {
 			wh->i_fc[1] &= ~IEEE80211_FC1_WEP;
@@ -3183,7 +3183,6 @@ atw_rxintr(struct atw_softc *sc)
 		}
 #endif
 		rxi.rxi_rssi = (int)rssi;
-		rxi.rxi_tstamp = 0;
 		ieee80211_inputm(ifp, m, ni, &rxi, &ml);
 		/*
 		 * The frame may have caused the node to be marked for
@@ -3785,7 +3784,7 @@ atw_start(struct ifnet *ifp)
 
 		/*
 		 * Load the DMA map.  Copy and try (once) again if the packet
-		 * didn't fit in the alloted number of segments.
+		 * didn't fit in the allotted number of segments.
 		 */
 		for (first = 1;
 		     (error = bus_dmamap_load_mbuf(sc->sc_dmat, dmamap, m0,

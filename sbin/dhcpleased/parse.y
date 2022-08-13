@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.3 2021/08/12 12:41:08 florian Exp $	*/
+/*	$OpenBSD: parse.y,v 1.7 2022/03/21 04:35:41 dlg Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -108,7 +108,8 @@ typedef struct {
 
 %}
 
-%token	DHCP_IFACE ERROR SEND VENDOR CLASS ID CLIENT IGNORE DNS ROUTES
+%token	DHCP_IFACE ERROR SEND VENDOR CLASS ID CLIENT IGNORE DNS ROUTES HOST NAME
+%token	NO
 
 %token	<v.string>	STRING
 %token	<v.number>	NUMBER
@@ -252,15 +253,14 @@ ifaceoptsl	: SEND VENDOR CLASS ID STRING {
 					yyerror("client-id too long");
 					YYERROR;
 				}
-				iface_conf->c_id_len = 3 + strlen(buf);
+				iface_conf->c_id_len = 2 + len;
 				iface_conf->c_id = malloc(iface_conf->c_id_len);
 				if (iface_conf->c_id == NULL) {
 					yyerror("malloc");
 					YYERROR;
 				}
-				iface_conf->c_id[2] = HTYPE_NONE;
-				memcpy(&iface_conf->c_id[3], buf,
-				    iface_conf->c_id_len - 3);
+				memcpy(&iface_conf->c_id[2], buf,
+				    iface_conf->c_id_len - 2);
 			} else {
 				free($4);
 				iface_conf->c_id_len = 2 + i;
@@ -274,6 +274,30 @@ ifaceoptsl	: SEND VENDOR CLASS ID STRING {
 			}
 			iface_conf->c_id[0] = DHO_DHCP_CLIENT_IDENTIFIER;
 			iface_conf->c_id[1] = iface_conf->c_id_len - 2;
+		}
+		| SEND HOST NAME STRING {
+			if (iface_conf->h_name != NULL) {
+				free($4);
+				yyerror("host name already set");
+				YYERROR;
+			}
+			if (strlen($4) > 255) {
+				free($4);
+				yyerror("host name too long");
+				YYERROR;
+			}
+			iface_conf->h_name = $4;
+		}
+		| SEND NO HOST NAME {
+			if (iface_conf->h_name != NULL) {
+				yyerror("host name already set");
+				YYERROR;
+			}
+
+			if ((iface_conf->h_name = strdup("")) == NULL) {
+				yyerror("malloc");
+				YYERROR;
+			}
 		}
 		| IGNORE ROUTES {
 			iface_conf->ignore |= IGN_ROUTES;
@@ -338,9 +362,12 @@ lookup(char *s)
 		{"class",		CLASS},
 		{"client",		CLIENT},
 		{"dns",			DNS},
+		{"host",		HOST},
 		{"id",			ID},
 		{"ignore",		IGNORE},
 		{"interface",		DHCP_IFACE},
+		{"name",		NAME},
+		{"no",			NO},
 		{"routes",		ROUTES},
 		{"send",		SEND},
 		{"vendor",		VENDOR},
@@ -464,10 +491,10 @@ findeol(void)
 int
 yylex(void)
 {
-	unsigned char	 buf[8096];
-	unsigned char	*p, *val;
-	int		 quotec, next, c;
-	int		 token;
+	char	 buf[8096];
+	char	*p, *val;
+	int	 quotec, next, c;
+	int	 token;
 
 top:
 	p = buf;
@@ -503,7 +530,7 @@ top:
 		p = val + strlen(val) - 1;
 		lungetc(DONE_EXPAND);
 		while (p >= val) {
-			lungetc(*p);
+			lungetc((unsigned char)*p);
 			p--;
 		}
 		lungetc(START_EXPAND);
@@ -579,8 +606,8 @@ top:
 		} else {
 nodigits:
 			while (p > buf + 1)
-				lungetc(*--p);
-			c = *--p;
+				lungetc((unsigned char)*--p);
+			c = (unsigned char)*--p;
 			if (c == '-')
 				return (c);
 		}
@@ -693,16 +720,17 @@ popfile(void)
 }
 
 struct dhcpleased_conf *
-parse_config(char *filename)
+parse_config(const char *filename)
 {
+	extern const char	 default_conffile[];
 	struct sym		*sym, *next;
 
 	conf = config_new_empty();
 
-	file = pushfile(filename != NULL ? filename : _PATH_CONF_FILE, 0);
+	file = pushfile(filename, 0);
 	if (file == NULL) {
 		/* no default config file is fine */
-		if (errno == ENOENT && filename == NULL)
+		if (errno == ENOENT && filename == default_conffile)
 			return (conf);
 		log_warn("%s", filename);
 		free(conf);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.11 2021/01/23 05:08:36 thfr Exp $	*/
+/*	$OpenBSD: conf.c,v 1.13 2021/11/11 10:03:09 claudio Exp $	*/
 
 /*-
  * Copyright (c) 1991 The Regents of the University of California.
@@ -39,6 +39,8 @@
 
 #include <machine/conf.h>
 
+#include "wd.h"
+bdev_decl(wd);
 #include "cd.h"
 #include "rd.h"
 #include "sd.h"
@@ -51,11 +53,13 @@ struct bdevsw bdevsw[] =
 	bdev_disk_init(NRD,rd),		/* 2: ram disk driver */
 	bdev_disk_init(NSD,sd),		/* 3: SCSI disk */
 	bdev_disk_init(NCD,cd),		/* 4: SCSI CD-ROM */
+	bdev_disk_init(NWD,wd),		/* 5: ST506/ESDI/IDE disk */
 	bdev_notdef(),
 };
 int	nblkdev = nitems(bdevsw);
 
 #include "audio.h"
+cdev_decl(wd);
 #include "bio.h"
 #include "bpfilter.h"
 #include "ch.h"
@@ -82,7 +86,6 @@ cdev_decl(lpt);
 #include "pty.h"
 #include "radio.h"
 #include "st.h"
-#include "switch.h"
 #include "tun.h"
 #include "ucom.h"
 #include "ugen.h"
@@ -121,7 +124,7 @@ struct cdevsw cdevsw[] =
 	cdev_kcov_init(NKCOV,kcov),	/* 14: kcov */
 	cdev_kstat_init(NKSTAT,kstat),	/* 15: kernel statistics */
 	cdev_kexec_init(NKEXEC,kexec),	/* 16: kexec */
-	cdev_notdef(),			/* 17 */
+	cdev_disk_init(NWD,wd),         /* 17: ST506/ESDI/IDE disk */
 	cdev_notdef(),			/* 18 */
 	cdev_notdef(),			/* 19 */
 	cdev_notdef(),			/* 20 */
@@ -180,7 +183,7 @@ struct cdevsw cdevsw[] =
 	cdev_notdef(),			/* 71 */
 	cdev_pppx_init(NPPPX,pppx),     /* 72: pppx */
 	cdev_pppx_init(NPPPX,pppac),	/* 73: PPP Access Concentrator */
-	cdev_switch_init(NSWITCH,switch), /* 74: switch(4) control interface */
+	cdev_notdef(),			/* 74: was switch(4) */
 	cdev_tun_init(NTUN,tap),	/* 75: Ethernet network tunnel */
 	cdev_tun_init(NTUN,tun),	/* 76: network tunnel */
 	cdev_notdef(),			/* 77 */
@@ -249,7 +252,7 @@ int chrtoblktbl[] = {
 	/* 14 */	NODEV,
 	/* 15 */	NODEV,
 	/* 16 */	NODEV,
-	/* 17 */	NODEV,
+	/* 17 */	5,		/* wd */
 	/* 18 */	NODEV,
 	/* 19 */	NODEV,
 	/* 20 */	NODEV,

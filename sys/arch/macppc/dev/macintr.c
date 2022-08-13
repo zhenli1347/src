@@ -1,4 +1,4 @@
-/*	$OpenBSD: macintr.c,v 1.55 2019/09/03 17:51:52 deraadt Exp $	*/
+/*	$OpenBSD: macintr.c,v 1.57 2022/07/24 00:28:09 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 2008 Dale Rahn <drahn@openbsd.org>
@@ -86,7 +86,7 @@ void	mac_ext_intr(void);
 void	macintr_collect_preconf_intr(void);
 void	macintr_setipl(int ipl);
 
-struct cfattach macintr_ca = {
+const struct cfattach macintr_ca = {
 	sizeof(struct macintr_softc),
 	macintr_match,
 	macintr_attach
@@ -170,6 +170,10 @@ macintr_splx(int newcpl)
 
 	intr = ppc_intr_disable();
 	macintr_setipl(newcpl);
+	if (ci->ci_dec_deferred && newcpl < IPL_CLOCK) {
+		ppc_mtdec(0);
+		ppc_mtdec(UINT32_MAX);	/* raise DEC exception */
+	}
 	if ((newcpl < IPL_SOFTTTY && ci->ci_ipending & ppc_smask[newcpl])) {
 		s = splsofttty();
 		dosoftint(newcpl);

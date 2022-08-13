@@ -1,4 +1,4 @@
-/*	$OpenBSD: cgtwelve.c,v 1.9 2018/10/22 17:31:25 krw Exp $	*/
+/*	$OpenBSD: cgtwelve.c,v 1.12 2022/07/15 17:57:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2002, 2003 Miodrag Vallat.  All rights reserved.
@@ -106,7 +106,7 @@ int	cgtwelvematch(struct device *, void *, void *);
 void	cgtwelveattach(struct device *, struct device *, void *);
 int	cgtwelveactivate(struct device *, int);
 
-struct cfattach cgtwelve_ca = {
+const struct cfattach cgtwelve_ca = {
 	sizeof(struct cgtwelve_softc), cgtwelvematch, cgtwelveattach,
 	NULL, cgtwelveactivate
 };
@@ -267,7 +267,7 @@ cgtwelve_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 
 	/*
 	 * Note that, although the emulation (text) mode is running in the
-	 * overlay plane, we advertize the frame buffer as the full-blown
+	 * overlay plane, we advertise the frame buffer as the full-blown
 	 * 32-bit beast it is.
 	 */
 	switch (cmd) {
@@ -279,6 +279,8 @@ cgtwelve_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width = sc->sc_sunfb.sf_width;
 		wdf->depth = 32;
+		wdf->stride = sc->sc_sunfb.sf_linebytes * 32;
+		wdf->offset = 0;
 		wdf->cmsize = 0;
 		break;
 	case WSDISPLAYIO_GETSUPPORTEDDEPTH:

@@ -1,5 +1,5 @@
 dnl
-dnl	$OpenBSD: m4.common,v 1.130 2020/07/05 22:27:46 tj Exp $
+dnl	$OpenBSD: m4.common,v 1.133 2022/03/24 20:46:56 krw Exp $
 dnl
 dnl Copyright (c) 2004 Todd T. Fries <todd@OpenBSD.org>
 dnl
@@ -113,11 +113,10 @@ dnl Describes compXX.tgz.
 dnl
 define({:-OpenBSDcomp-:},
 {:-	comp{:--:}OSrev	 The OpenBSD/MACHINE Compiler tools.  All of the tools relating
-		 to C, C++ and Objective-C are supported.  This set includes
-		 the system {:-include-:} files (/usr/{:-include-:}), the linker, the
-		 compiler tool chain, and the various system libraries{:--:}ifelse(MDSO,,.,{:-
-		 (except the shared libraries, which are included as part of
-		 the base set).-:})
+		 to C and C++ are supported.  This set includes the system
+		 {:-include-:} files (/usr/{:-include-:}), the linker, the compiler
+		 toolchain, and the various system libraries{:--:}ifelse(MDSO,,.,{:- (except the
+		 shared libraries, which are included as part of the base set).-:})
 		 This set also includes the manual pages for all of the
 		 utilities it contains, as well as the system call and library
 		 manual pages.showsize($1,$2)-:})dnl
@@ -746,7 +745,7 @@ installation system detects that it booted from the network, and
 isn't interrupted within 5 seconds, it attempts a fully-automatic
 installation.
 
-The installer runs dhclient(8) on the network interface the system
+The installer autoconfigures a DHCP ipv4 address on the network interface the system
 booted from, or in case of multiple interfaces it will ask which one
 to use. Upon success, it retrieves a response file via HTTP. If that
 fails, the installer asks for the response file location, which can be
@@ -875,7 +874,7 @@ define({:-OpenBSDXferCDROM-:},
 	the sets needed for installation, and a smaller cd{:--:}OSrev.iso
 	which contains just the installer, for a network install.
 
-	Windows 7 users should be able to do this by right clicking on the
+	Windows users should be able to do this by right clicking on the
 	install{:--:}OSrev.iso file and clicking burn to CD.
 
 	OpenBSD users should be able to do this with the cdio command.

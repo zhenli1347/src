@@ -1,4 +1,4 @@
-/*	$OpenBSD: uoakrh.c,v 1.16 2021/03/08 14:35:57 jcs Exp $   */
+/*	$OpenBSD: uoakrh.c,v 1.19 2022/04/09 20:09:03 naddy Exp $   */
 
 /*
  * Copyright (c) 2012 Yojiro UO <yuo@nui.org>
@@ -16,7 +16,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* TORADEX OAK seriese sensors: Temperature/Humidity sensor driver */
+/* TORADEX OAK series sensors: Temperature/Humidity sensor driver */
 /* http://developer.toradex.com/files/toradex-dev/uploads/media/Oak/Oak_ProgrammingGuide.pdf */
 
 #include <sys/param.h>
@@ -99,7 +99,7 @@ const struct cfattach uoakrh_ca = {
 	uoakrh_detach,
 };
 
-struct uoak_methods uoakrh_methods = {
+const struct uoak_methods uoakrh_methods = {
 	uoakrh_dev_print,
 	uoakrh_dev_setting
 };
@@ -110,7 +110,7 @@ uoakrh_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	if (uoakrh_lookup(uha->uaa->vendor, uha->uaa->product) == NULL)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: aac.c,v 1.91 2020/10/15 00:01:24 krw Exp $	*/
+/*	$OpenBSD: aac.c,v 1.94 2022/04/16 19:19:58 naddy Exp $	*/
 
 /*-
  * Copyright (c) 2000 Michael Smith
@@ -129,7 +129,7 @@ struct cfdriver aac_cd = {
 	NULL, "aac", DV_DULL
 };
 
-struct scsi_adapter aac_switch = {
+const struct scsi_adapter aac_switch = {
 	aac_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -1279,8 +1279,10 @@ aac_init(struct aac_softc *sc)
 		if (aac_alloc_commands(sc) != 0)
 			break;
 	}
-	if (sc->total_fibs == 0)
-		goto out;
+	if (sc->total_fibs == 0) {
+		error = ENOMEM;
+		goto bail_out;
+	}
 
 	scsi_iopool_init(&sc->aac_iopool, sc,
 	    aac_alloc_command, aac_release_command);
@@ -1430,7 +1432,6 @@ aac_init(struct aac_softc *sc)
 	if (state > 0)
 		bus_dmamem_free(sc->aac_dmat, &seg, 1);
 
- out:
 	return (error);
 }
 
@@ -2546,7 +2547,7 @@ aac_print_aif(struct aac_softc *sc, struct aac_aif_command *aif)
 			       aif->data.EN.data.ECLE.eventType);
 			break;
 		case AifEnDiskSetEvent:
-			/* A disk set event occured. */
+			/* A disk set event occurred. */
 			printf("(DiskSetEvent) event %d "
 			       "diskset %lld creator %lld\n",
 			       aif->data.EN.data.EDS.eventType,

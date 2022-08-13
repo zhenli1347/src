@@ -1,15 +1,14 @@
-#	$OpenBSD: Makefile.inc,v 1.27 2020/05/18 06:20:43 otto Exp $
+#	$OpenBSD: Makefile.inc,v 1.29 2022/02/07 20:24:30 krw Exp $
 
 FS=		miniroot-${BOARD}-${OSrev}.img
-FSSIZE=		67584	# ffs+msdos, actually
+FSSIZE=		71424	# ffs+msdos, actually
 MOUNT_POINT=	/mnt
 
 MKUBOOT?=	mkuboot
 
 DISKTYPE=	miniroot
 MSDOSSTART=	32768
-MSDOSSIZE=	4096
-FFSSTART!=	expr ${MSDOSSTART} + ${MSDOSSIZE}
+MSDOSSIZE=	8192
 
 PDTB=		/usr/local/share/dtb/arm
 PUBOOT=		/usr/local/share/u-boot
@@ -19,8 +18,7 @@ all: ${FS}
 ${FS}: bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v -t ${DISKTYPE} ${FS} > vnd
-	echo 'u\ne 0\nC\nn\n${MSDOSSTART}\n${MSDOSSIZE}\ne 3\nA6\nn\n${FFSSTART}\n*\nf 0\nw\nq\n' \
-	    | fdisk -e `cat vnd` >/dev/null
+	fdisk -iy -b "${MSDOSSIZE}@${MSDOSSTART}:c" `cat vnd` >/dev/null
 	echo 'a a\n\n\n\nw\nq\n' | disklabel -E `cat vnd` >/dev/null
 	newfs -O 1 -t msdos -L boot /dev/r`cat vnd`i
 	mount -o-l /dev/`cat vnd`i ${MOUNT_POINT}
@@ -47,6 +45,7 @@ ${FS}: bsd.rd
 
 	mkdir -p ${MOUNT_POINT}/efi/boot
 	cp /usr/mdec/BOOTARM.EFI ${MOUNT_POINT}/efi/boot/bootarm.efi
+	df ${MOUNT_POINT}
 	umount ${MOUNT_POINT}
 
 	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a

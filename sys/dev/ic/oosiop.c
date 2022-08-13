@@ -1,4 +1,4 @@
-/*	$OpenBSD: oosiop.c,v 1.34 2020/09/22 19:32:52 krw Exp $	*/
+/*	$OpenBSD: oosiop.c,v 1.36 2022/04/16 19:19:59 naddy Exp $	*/
 /*	$NetBSD: oosiop.c,v 1.4 2003/10/29 17:45:55 tsutsui Exp $	*/
 
 /*
@@ -94,7 +94,7 @@ void	oosiop_cb_free(void *, void *);
 #define	DATAIN_TRAP	0xdead0001
 #define	DATAOUT_TRAP	0xdead0002
 
-/* Possible TP and SCF conbination */
+/* Possible TP and SCF combination */
 static const struct {
 	u_int8_t	tp;
 	u_int8_t	scf;
@@ -128,7 +128,7 @@ struct cfdriver oosiop_cd = {
 	NULL, "oosiop", DV_DULL
 };
 
-struct scsi_adapter oosiop_switch = {
+const struct scsi_adapter oosiop_switch = {
 	oosiop_scsicmd, NULL, NULL, NULL, NULL
 };
 

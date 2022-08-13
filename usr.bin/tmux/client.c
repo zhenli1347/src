@@ -1,4 +1,4 @@
-/* $OpenBSD: client.c,v 1.156 2021/08/27 17:25:55 nicm Exp $ */
+/* $OpenBSD: client.c,v 1.158 2022/05/30 12:48:57 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -360,6 +360,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	/* Send identify messages. */
 	client_send_identify(ttynam, termname, caps, ncaps, cwd, feat);
 	tty_term_free_list(caps, ncaps);
+	proc_flush_peer(client_peer);
 
 	/* Send first command. */
 	if (msg == MSG_COMMAND) {
@@ -530,7 +531,7 @@ client_signal(int sig)
 	if (sig == SIGCHLD)
 		waitpid(WAIT_ANY, &status, WNOHANG);
 	else if (!client_attached) {
-		if (sig == SIGTERM)
+		if (sig == SIGTERM || sig == SIGHUP)
 			proc_exit(client_proc);
 	} else {
 		switch (sig) {

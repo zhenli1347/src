@@ -1,4 +1,4 @@
-.\" $OpenBSD: bwi.4,v 1.44 2020/07/02 13:59:32 mglocker Exp $
+.\" $OpenBSD: bwi.4,v 1.47 2022/01/05 17:39:24 jmc Exp $
 .\"
 .\" Copyright (c) 2007 Marcus Glocker <mglocker@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 2 2020 $
+.Dd $Mdocdate: January 5 2022 $
 .Dt BWI 4
 .Os
 .Sh NAME
@@ -94,7 +94,7 @@ brought up:
 .\"users have to download these files on their own.
 .Pp
 A prepackaged version of the firmware can be installed using
-.Xr fw_update 1 .
+.Xr fw_update 8 .
 .Sh HARDWARE
 The following cards are among those supported by the
 .Nm
@@ -125,8 +125,8 @@ using WPA key
 .Dq mywpakey ,
 obtaining an IP address using DHCP:
 .Bd -literal -offset indent
-nwid mynwid wpakey mywpakey
-dhcp
+join mynwid wpakey mywpakey
+inet autoconf
 .Ed
 .Sh SEE ALSO
 .Xr arp 4 ,

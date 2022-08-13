@@ -1,4 +1,4 @@
-/*	$OpenBSD: ciss.c,v 1.89 2020/09/22 19:32:52 krw Exp $	*/
+/*	$OpenBSD: ciss.c,v 1.91 2022/04/16 19:19:59 naddy Exp $	*/
 
 /*
  * Copyright (c) 2005,2006 Michael Shalayeff
@@ -69,7 +69,7 @@ struct cfdriver ciss_cd = {
 void	ciss_scsi_cmd(struct scsi_xfer *xs);
 int	ciss_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
 
-struct scsi_adapter ciss_switch = {
+const struct scsi_adapter ciss_switch = {
 	ciss_scsi_cmd, NULL, NULL, NULL, ciss_scsi_ioctl
 };
 
@@ -423,7 +423,7 @@ ciss_shutdown(void *v)
 }
 
 /*
- * submit a command and optionally wait for completition.
+ * submit a command and optionally wait for completion.
  * wait arg abuses SCSI_POLL|SCSI_NOSLEEP flags to request
  * to wait (SCSI_POLL) and to allow tsleep() (!SCSI_NOSLEEP)
  * instead of busy loop waiting

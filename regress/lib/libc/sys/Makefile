@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.13 2021/09/04 07:06:58 mbuhl Exp $
+#	$OpenBSD: Makefile,v 1.15 2022/01/06 03:30:15 guenther Exp $
 
 # Copyright (c) 2019 Moritz Buhl <openbsd@moritzbuhl.de>
 # Copyright (c) 2019 Alexander Bluhm <bluhm@openbsd.org>
@@ -63,7 +63,7 @@ PROGS +=	t_sigaction
 PROGS +=	t_sigaltstack
 PROGS +=	t_socketpair
 PROGS +=	t_stat
-PROGS +=	t_syscall
+#PROGS +=	t_syscall	Deleted: test of gcc1.x syscall pad
 PROGS +=	t_truncate
 PROGS +=	t_umask t_unlink
 PROGS +=	t_vfork
@@ -112,6 +112,7 @@ CLEANFILES =	access dummy mmap truncate_test.root_owned
 
 .for p in ${PROGS}
 run-$p: $p
+	ulimit -c unlimited && \
 	ntests="`./$p -n`" && \
 	echo "1..$$ntests" && \
 	tnumbers="`jot -ns' ' - 1 $$ntests`" && \

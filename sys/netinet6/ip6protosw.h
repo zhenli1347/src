@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6protosw.h,v 1.14 2021/03/10 10:21:49 jsg Exp $	*/
+/*	$OpenBSD: ip6protosw.h,v 1.16 2022/02/22 01:02:57 guenther Exp $	*/
 /*	$KAME: ip6protosw.h,v 1.22 2001/02/08 18:02:08 itojun Exp $	*/
 
 /*
@@ -83,7 +83,7 @@ struct in6_addr;
  * argument type for the last arg of pr_ctlinput().
  * should be consulted only with AF_INET6 family.
  *
- * IPv6 ICMP IPv6 [exthdrs] finalhdr paylaod
+ * IPv6 ICMP IPv6 [exthdrs] finalhdr payload
  * ^    ^    ^              ^
  * |    |    ip6c_ip6       ip6c_off
  * |    ip6c_icmp6
@@ -108,10 +108,5 @@ struct ip6ctlparam {
 	void *ip6c_cmdarg;		/* control command dependent data */
 	u_int8_t ip6c_nxt;		/* final next header field */
 };
-
-#ifdef _KERNEL
-extern u_char ip6_protox[];
-extern const struct protosw inet6sw[];
-#endif
 
 #endif /* !_NETINET6_IP6PROTOSW_H_ */

@@ -1,4 +1,4 @@
-/* $OpenBSD: colour.c,v 1.22 2021/08/14 14:00:07 nicm Exp $ */
+/* $OpenBSD: colour.c,v 1.25 2022/03/24 12:07:25 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -105,6 +105,21 @@ colour_split_rgb(int c, u_char *r, u_char *g, u_char *b)
 	*b = c & 0xff;
 }
 
+/* Force colour to RGB if not already. */
+int
+colour_force_rgb(int c)
+{
+	if (c & COLOUR_FLAG_RGB)
+		return (c);
+	if (c & COLOUR_FLAG_256)
+		return (colour_256toRGB(c));
+	if (c >= 0 && c <= 7)
+		return (colour_256toRGB(c));
+	if (c >= 90 && c <= 97)
+		return (colour_256toRGB(8 + c - 90));
+	return (-1);
+}
+
 /* Convert colour to a string. */
 const char *
 colour_tostring(int c)
@@ -113,7 +128,7 @@ colour_tostring(int c)
 	u_char		r, g, b;
 
 	if (c == -1)
-		return ("invalid");
+		return ("none");
 
 	if (c & COLOUR_FLAG_RGB) {
 		colour_split_rgb(c, &r, &g, &b);

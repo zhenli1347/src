@@ -1,4 +1,4 @@
-/* $OpenBSD: imxccm.c,v 1.26 2020/12/19 01:18:11 patrick Exp $ */
+/* $OpenBSD: imxccm.c,v 1.29 2022/06/28 23:43:12 naddy Exp $ */
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -213,13 +213,13 @@ struct imxccm_softc {
 
 	struct regmap		*sc_anatop;
 
-	struct imxccm_gate	*sc_gates;
+	const struct imxccm_gate *sc_gates;
 	int			sc_ngates;
-	struct imxccm_divider	*sc_divs;
+	const struct imxccm_divider *sc_divs;
 	int			sc_ndivs;
-	struct imxccm_mux	*sc_muxs;
+	const struct imxccm_mux	*sc_muxs;
 	int			sc_nmuxs;
-	struct imxccm_divider	*sc_predivs;
+	const struct imxccm_divider *sc_predivs;
 	int			sc_npredivs;
 	struct clock_device	sc_cd;
 };
@@ -227,7 +227,7 @@ struct imxccm_softc {
 int	imxccm_match(struct device *, void *, void *);
 void	imxccm_attach(struct device *parent, struct device *self, void *args);
 
-struct cfattach	imxccm_ca = {
+const struct cfattach	imxccm_ca = {
 	sizeof (struct imxccm_softc), imxccm_match, imxccm_attach
 };
 
@@ -1430,13 +1430,13 @@ imxccm_enable(void *cookie, uint32_t *cells, int on)
 			    CCM_ANALOG_PLL_USB2_ENABLE);
 			return;
 		case IMX6_CLK_USBPHY1:
-			/* PLL outputs should alwas be on. */
+			/* PLL outputs should always be on. */
 			regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB1_SET,
 			    CCM_ANALOG_PLL_USB1_EN_USB_CLKS);
 			imxccm_enable_parent(sc, IMX6_CLK_PLL3_USB_OTG, on);
 			return;
 		case IMX6_CLK_USBPHY2:
-			/* PLL outputs should alwas be on. */
+			/* PLL outputs should always be on. */
 			regmap_write_4(sc->sc_anatop, CCM_ANALOG_PLL_USB2_SET,
 			    CCM_ANALOG_PLL_USB2_EN_USB_CLKS);
 			imxccm_enable_parent(sc, IMX6_CLK_PLL7_USB_HOST, on);

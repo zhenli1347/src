@@ -1,4 +1,4 @@
-/*	$OpenBSD: ehci.c,v 1.214 2021/01/11 14:41:12 mglocker Exp $ */
+/*	$OpenBSD: ehci.c,v 1.219 2022/04/12 19:41:11 naddy Exp $ */
 /*	$NetBSD: ehci.c,v 1.66 2004/06/30 03:11:56 mycroft Exp $	*/
 
 /*
@@ -78,7 +78,7 @@
 #include <dev/usb/ehcivar.h>
 
 struct cfdriver ehci_cd = {
-	NULL, "ehci", DV_DULL
+	NULL, "ehci", DV_DULL, CD_SKIPHIBERNATE
 };
 
 #ifdef EHCI_DEBUG
@@ -218,7 +218,7 @@ void		ehci_dump_exfer(struct ehci_xfer *);
 
 #define EHCI_INTR_ENDPT 1
 
-struct usbd_bus_methods ehci_bus_methods = {
+const struct usbd_bus_methods ehci_bus_methods = {
 	.open_pipe = ehci_open,
 	.dev_setaddr = ehci_setaddr,
 	.soft_intr = ehci_softintr,
@@ -227,7 +227,7 @@ struct usbd_bus_methods ehci_bus_methods = {
 	.freex = ehci_freex,
 };
 
-struct usbd_pipe_methods ehci_root_ctrl_methods = {
+const struct usbd_pipe_methods ehci_root_ctrl_methods = {
 	.transfer = ehci_root_ctrl_transfer,
 	.start = ehci_root_ctrl_start,
 	.abort = ehci_root_ctrl_abort,
@@ -235,7 +235,7 @@ struct usbd_pipe_methods ehci_root_ctrl_methods = {
 	.done = ehci_root_ctrl_done,
 };
 
-struct usbd_pipe_methods ehci_root_intr_methods = {
+const struct usbd_pipe_methods ehci_root_intr_methods = {
 	.transfer = ehci_root_intr_transfer,
 	.start = ehci_root_intr_start,
 	.abort = ehci_root_intr_abort,
@@ -243,7 +243,7 @@ struct usbd_pipe_methods ehci_root_intr_methods = {
 	.done = ehci_root_intr_done,
 };
 
-struct usbd_pipe_methods ehci_device_ctrl_methods = {
+const struct usbd_pipe_methods ehci_device_ctrl_methods = {
 	.transfer = ehci_device_ctrl_transfer,
 	.start = ehci_device_ctrl_start,
 	.abort = ehci_device_ctrl_abort,
@@ -251,7 +251,7 @@ struct usbd_pipe_methods ehci_device_ctrl_methods = {
 	.done = ehci_device_ctrl_done,
 };
 
-struct usbd_pipe_methods ehci_device_intr_methods = {
+const struct usbd_pipe_methods ehci_device_intr_methods = {
 	.transfer = ehci_device_intr_transfer,
 	.start = ehci_device_intr_start,
 	.abort = ehci_device_intr_abort,
@@ -260,7 +260,7 @@ struct usbd_pipe_methods ehci_device_intr_methods = {
 	.done = ehci_device_intr_done,
 };
 
-struct usbd_pipe_methods ehci_device_bulk_methods = {
+const struct usbd_pipe_methods ehci_device_bulk_methods = {
 	.transfer = ehci_device_bulk_transfer,
 	.start = ehci_device_bulk_start,
 	.abort = ehci_device_bulk_abort,
@@ -269,7 +269,7 @@ struct usbd_pipe_methods ehci_device_bulk_methods = {
 	.done = ehci_device_bulk_done,
 };
 
-struct usbd_pipe_methods ehci_device_isoc_methods = {
+const struct usbd_pipe_methods ehci_device_isoc_methods = {
 	.transfer = ehci_device_isoc_transfer,
 	.start = ehci_device_isoc_start,
 	.abort = ehci_device_isoc_abort,
@@ -331,7 +331,7 @@ ehci_init(struct ehci_softc *sc)
 		return (err);
 
 	if (ehcixfer == NULL) {
-		ehcixfer = malloc(sizeof(struct pool), M_DEVBUF, M_NOWAIT);
+		ehcixfer = malloc(sizeof(struct pool), M_USBHC, M_NOWAIT);
 		if (ehcixfer == NULL) {
 			printf("%s: unable to allocate pool descriptor\n",
 			    sc->sc_bus.bdev.dv_xname);
@@ -368,7 +368,7 @@ ehci_init(struct ehci_softc *sc)
 	EOWRITE4(sc, EHCI_PERIODICLISTBASE, DMAADDR(&sc->sc_fldma, 0));
 
 	sc->sc_softitds = mallocarray(sc->sc_flsize,
-	    sizeof(struct ehci_soft_itd *), M_USB, M_NOWAIT | M_ZERO);
+	    sizeof(struct ehci_soft_itd *), M_USBHC, M_NOWAIT | M_ZERO);
 	if (sc->sc_softitds == NULL) {
 		usb_freemem(&sc->sc_bus, &sc->sc_fldma);
 		return (ENOMEM);
@@ -487,7 +487,7 @@ ehci_init(struct ehci_softc *sc)
 	ehci_free_sqh(sc, sc->sc_async_head);
 #endif
  bad1:
-	free(sc->sc_softitds, M_USB,
+	free(sc->sc_softitds, M_USBHC,
 	    sc->sc_flsize * sizeof(struct ehci_soft_itd *));
 	usb_freemem(&sc->sc_bus, &sc->sc_fldma);
 	return (err);
@@ -948,7 +948,7 @@ ehci_detach(struct device *self, int flags)
 
 	usb_delay_ms(&sc->sc_bus, 300); /* XXX let stray task complete */
 
-	free(sc->sc_softitds, M_USB,
+	free(sc->sc_softitds, M_USBHC,
 	    sc->sc_flsize * sizeof(struct ehci_soft_itd *));
 	usb_freemem(&sc->sc_bus, &sc->sc_fldma);
 	/* XXX free other data structures XXX */
@@ -1705,7 +1705,7 @@ ehci_free_itd_chain(struct ehci_softc *sc, struct ehci_xfer *ex)
 /*
  * Data structures and routines to emulate the root hub.
  */
-usb_device_descriptor_t ehci_devd = {
+const usb_device_descriptor_t ehci_devd = {
 	USB_DEVICE_DESCRIPTOR_SIZE,
 	UDESC_DEVICE,		/* type */
 	{0x00, 0x02},		/* USB version */
@@ -1714,11 +1714,11 @@ usb_device_descriptor_t ehci_devd = {
 	UDPROTO_HSHUBSTT,	/* protocol */
 	64,			/* max packet */
 	{0},{0},{0x00,0x01},	/* device id */
-	1,2,0,			/* string indicies */
+	1,2,0,			/* string indices */
 	1			/* # of configurations */
 };
 
-usb_device_qualifier_t ehci_odevd = {
+const usb_device_qualifier_t ehci_odevd = {
 	USB_DEVICE_DESCRIPTOR_SIZE,
 	UDESC_DEVICE_QUALIFIER,	/* type */
 	{0x00, 0x02},		/* USB version */
@@ -1730,7 +1730,7 @@ usb_device_qualifier_t ehci_odevd = {
 	0
 };
 
-usb_config_descriptor_t ehci_confd = {
+const usb_config_descriptor_t ehci_confd = {
 	USB_CONFIG_DESCRIPTOR_SIZE,
 	UDESC_CONFIG,
 	{USB_CONFIG_DESCRIPTOR_SIZE +
@@ -1743,7 +1743,7 @@ usb_config_descriptor_t ehci_confd = {
 	0			/* max power */
 };
 
-usb_interface_descriptor_t ehci_ifcd = {
+const usb_interface_descriptor_t ehci_ifcd = {
 	USB_INTERFACE_DESCRIPTOR_SIZE,
 	UDESC_INTERFACE,
 	0,
@@ -1755,7 +1755,7 @@ usb_interface_descriptor_t ehci_ifcd = {
 	0
 };
 
-usb_endpoint_descriptor_t ehci_endpd = {
+const usb_endpoint_descriptor_t ehci_endpd = {
 	USB_ENDPOINT_DESCRIPTOR_SIZE,
 	UDESC_ENDPOINT,
 	UE_DIR_IN | EHCI_INTR_ENDPT,
@@ -1764,7 +1764,7 @@ usb_endpoint_descriptor_t ehci_endpd = {
 	12
 };
 
-usb_hub_descriptor_t ehci_hubd = {
+const usb_hub_descriptor_t ehci_hubd = {
 	USB_HUB_DESCRIPTOR_SIZE,
 	UDESC_HUB,
 	0,
@@ -1800,6 +1800,7 @@ ehci_root_ctrl_start(struct usbd_xfer *xfer)
 	int port, i;
 	int s, len, value, index, l, totlen = 0;
 	usb_port_status_t ps;
+	usb_device_descriptor_t devd;
 	usb_hub_descriptor_t hubd;
 	usbd_status err;
 	u_int32_t v;
@@ -1848,9 +1849,10 @@ ehci_root_ctrl_start(struct usbd_xfer *xfer)
 				err = USBD_IOERROR;
 				goto ret;
 			}
+			devd = ehci_devd;
+			USETW(devd.idVendor, sc->sc_id_vendor);
 			totlen = l = min(len, USB_DEVICE_DESCRIPTOR_SIZE);
-			USETW(ehci_devd.idVendor, sc->sc_id_vendor);
-			memcpy(buf, &ehci_devd, l);
+			memcpy(buf, &devd, l);
 			break;
 		case UDESC_DEVICE_QUALIFIER:
 			if ((value & 0xff) != 0) {
@@ -2573,7 +2575,7 @@ ehci_free_itd(struct ehci_softc *sc, struct ehci_soft_itd *itd)
 }
 
 /*
- * Close a reqular pipe.
+ * Close a regular pipe.
  * Assumes that there are no pending transactions.
  */
 void
@@ -3179,7 +3181,7 @@ ehci_device_intr_abort(struct usbd_xfer *xfer)
 
 	/*
 	 * XXX - abort_xfer uses ehci_sync_hc, which syncs via the advance
-	 *       async doorbell. That's dependant on the async list, wheras
+	 *       async doorbell. That's dependant on the async list, whereas
 	 *       intr xfers are periodic, should not use this?
 	 */
 	ehci_abort_xfer(xfer, USBD_CANCELLED);

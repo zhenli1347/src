@@ -72,6 +72,9 @@
 /* If we have be64toh */
 #undef HAVE_BE64TOH
 
+/* Define to 1 if you have the `BIO_set_callback_ex' function. */
+#undef HAVE_BIO_SET_CALLBACK_EX
+
 /* Define to 1 if you have the <bsd/stdlib.h> header file. */
 #undef HAVE_BSD_STDLIB_H
 
@@ -315,6 +318,12 @@
 /* Define to 1 if you have the <ifaddrs.h> header file. */
 #undef HAVE_IFADDRS_H
 
+/* Define to 1 if you have the `if_nametoindex' function. */
+#undef HAVE_IF_NAMETOINDEX
+
+/* Define to 1 if you have the `if_nametoindex' function. */
+#undef HAVE_IF_NAMETOINDEX
+
 /* Define to 1 if you have the `inet_aton' function. */
 #undef HAVE_INET_ATON
 
@@ -374,6 +383,9 @@
 
 /* Define to 1 if you have the <netinet/tcp.h> header file. */
 #undef HAVE_NETINET_TCP_H
+
+/* Define to 1 if you have the <netioapi.h> header file. */
+#undef HAVE_NETIOAPI_H
 
 /* Use libnettle for crypto */
 #undef HAVE_NETTLE
@@ -962,6 +974,10 @@
 /* Define to 1 if you need to in order for `stat' and other things to work. */
 #undef _POSIX_SOURCE
 
+/* defined to use gcc ansi snprintf and sscanf that understands %lld when
+   compiled for windows. */
+#undef __USE_MINGW_ANSI_STDIO
+
 /* Define to empty if `const' does not conform to ANSI C. */
 #undef const
 
@@ -1141,7 +1157,7 @@
 #include <ws2tcpip.h>
 #endif
 
-#ifndef USE_WINSOCK
+#if !defined(USE_WINSOCK) || !defined(HAVE_SNPRINTF) || defined(SNPRINTF_RET_BROKEN) || defined(__USE_MINGW_ANSI_STDIO)
 #define ARG_LL "%ll"
 #else
 #define ARG_LL "%I64"

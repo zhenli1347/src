@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: Signature.pm,v 1.25 2021/03/15 09:32:04 espie Exp $
+# $OpenBSD: Signature.pm,v 1.27 2022/05/29 10:48:41 espie Exp $
 #
 # Copyright (c) 2010 Marc Espie <espie@openbsd.org>
 #
@@ -14,6 +14,9 @@
 # WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+# this is the code that handles "update signatures", which has nothing
+# to do with cryptography
 
 use strict;
 use warnings;
@@ -233,11 +236,11 @@ sub new
 {
 	my ($class, $pkgname, $extra, $plist) = @_;
 	my $o = $class->SUPER::new($pkgname, $extra);
-	my $hash;
-	open my $fh, '>', \$hash;
-	$plist->write_without_variation($fh);
-	close $fh;
-	$o->{hash} = $hash;
+	my $a = $plist->get('always-update');
+	if (!defined $a->{hash}) {
+		$a->hash_plist($plist);
+	}
+	$o->{hash} = $a->{hash};
 	return $o;
 }
 

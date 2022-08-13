@@ -1,4 +1,4 @@
-/*	$OpenBSD: device.h,v 1.55 2018/09/10 16:18:34 sashan Exp $	*/
+/*	$OpenBSD: device.h,v 1.63 2022/04/07 09:37:32 tb Exp $	*/
 /*	$NetBSD: device.h,v 1.15 1996/04/09 20:55:24 cgd Exp $	*/
 
 /*
@@ -89,7 +89,7 @@ TAILQ_HEAD(devicelist, device);
  * Configuration data (i.e., data placed in ioconf.c).
  */
 struct cfdata {
-	struct	cfattach *cf_attach;	/* config attachment */
+	const struct	cfattach *cf_attach;	/* config attachment */
 	struct	cfdriver *cf_driver;	/* config driver */
 	short	cf_unit;		/* unit number */
 	short	cf_fstate;		/* finding state (below) */
@@ -136,11 +136,15 @@ struct cfattach {
 #define	DETACH_FORCE	0x01		/* force detachment; hardware gone */
 #define	DETACH_QUIET	0x02		/* don't print a notice */
 
+/* For cd_mode, below */
+#define CD_INDIRECT		1
+#define CD_SKIPHIBERNATE	2
+
 struct cfdriver {
 	void	**cd_devs;		/* devices found */
 	char	*cd_name;		/* device name */
 	enum	devclass cd_class;	/* device classification */
-	int	cd_indirect;		/* indirectly configure subdevices */
+	int	cd_mode;		/* device type subclassification */
 	int	cd_ndevs;		/* size of cd_devs array */
 };
 
@@ -194,6 +198,18 @@ void config_pending_incr(void);
 void config_pending_decr(void);
 void config_mountroot(struct device *, void (*)(struct device *));
 void config_process_deferred_mountroot(void);
+
+int	sleep_state(void *, int);
+#define SLEEP_SUSPEND	0x01
+#define SLEEP_HIBERNATE	0x02
+void	sleep_mp(void);
+void	resume_mp(void);
+int	sleep_showstate(void *v, int sleepmode);
+int	sleep_setstate(void *v);
+int	sleep_resume(void *v);
+void	sleep_abort(void *v);
+int	gosleep(void *v);
+int	suspend_finish(void *v);
 
 struct device *device_mainbus(void);
 struct device *device_mpath(void);

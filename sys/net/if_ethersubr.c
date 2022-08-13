@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ethersubr.c,v 1.276 2021/08/19 10:22:00 dlg Exp $	*/
+/*	$OpenBSD: if_ethersubr.c,v 1.284 2022/06/29 09:08:07 mvs Exp $	*/
 /*	$NetBSD: if_ethersubr.c,v 1.19 1996/05/07 02:40:30 thorpej Exp $	*/
 
 /*
@@ -80,7 +80,6 @@ didn't get a copy, you may request one from <license@ipv6.nrl.navy.mil>.
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
@@ -245,7 +244,10 @@ ether_resolve(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 		break;
 #ifdef INET6
 	case AF_INET6:
+		KERNEL_LOCK();
+		/* XXXSMP there is a MP race in nd6_resolve() */
 		error = nd6_resolve(ifp, rt, m, dst, eh->ether_dhost);
+		KERNEL_UNLOCK();
 		if (error)
 			return (error);
 		eh->ether_type = htons(ETHERTYPE_IPV6);
@@ -271,7 +273,10 @@ ether_resolve(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 			break;
 #ifdef INET6
 		case AF_INET6:
+			KERNEL_LOCK();
+			/* XXXSMP there is a MP race in nd6_resolve() */
 			error = nd6_resolve(ifp, rt, m, dst, eh->ether_dhost);
+			KERNEL_UNLOCK();
 			if (error)
 				return (error);
 			break;
@@ -416,7 +421,7 @@ ether_input(struct ifnet *ifp, struct mbuf *m)
 	 * Third phase: bridge processing.
 	 *
 	 * Give the packet to a bridge interface, ie, bridge(4),
-	 * switch(4), or tpmr(4), if it is configured. A bridge
+	 * veb(4), or tpmr(4), if it is configured. A bridge
 	 * may take the packet and forward it to another port, or it
 	 * may return it here to ether_input() to support local
 	 * delivery to this port.
@@ -535,14 +540,18 @@ ether_input(struct ifnet *ifp, struct mbuf *m)
 
 			if ((session = pipex_pppoe_lookup_session(m)) != NULL) {
 				pipex_pppoe_input(m, session);
+				pipex_rele_session(session);
 				return;
 			}
 		}
 #endif
-		if (etype == ETHERTYPE_PPPOEDISC)
-			pppoe_disc_input(m);
-		else
-			pppoe_data_input(m);
+		if (etype == ETHERTYPE_PPPOEDISC) {
+			if (mq_enqueue(&pppoediscinq, m) == 0)
+				schednetisr(NETISR_PPPOE);
+		} else {
+			if (mq_enqueue(&pppoeinq, m) == 0)
+				schednetisr(NETISR_PPPOE);
+		}
 		return;
 #endif
 #ifdef MPLS

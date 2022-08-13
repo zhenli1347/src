@@ -1,4 +1,4 @@
-/*	$OpenBSD: utpms.c,v 1.11 2020/10/23 21:23:58 tobhe Exp $	*/
+/*	$OpenBSD: utpms.c,v 1.13 2022/01/09 05:43:02 jsg Exp $	*/
 
 /*
  * Copyright (c) 2005, Johan Wallén
@@ -269,6 +269,9 @@ utpms_match(struct device *parent, void *match, void *aux)
 	usb_interface_descriptor_t *id;
 	int i;
 
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
+		return (UMATCH_NONE);
+
 	id = usbd_get_interface_descriptor(uha->uaa->iface);
 	if (id == NULL ||
 	    id->bInterfaceSubClass != UISUBCLASS_BOOT ||
@@ -507,7 +510,7 @@ reorder_sample(struct utpms_softc *sc, unsigned char *to, unsigned char *from)
 			to[i + 16] = from[5 * i + 42];
 #if 0
 			/*
-			 * XXX This seems to introduce random ventical jumps,
+			 * XXX This seems to introduce random vertical jumps,
 			 * so we ignore these sensors until we figure out
 			 * their meaning.
 			 */

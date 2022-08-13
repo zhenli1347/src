@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_rge.c,v 1.15 2021/08/16 01:30:27 kevlo Exp $	*/
+/*	$OpenBSD: if_rge.c,v 1.19 2022/04/21 05:08:39 kevlo Exp $	*/
 
 /*
  * Copyright (c) 2019, 2020 Kevin Lo <kevlo@openbsd.org>
@@ -130,7 +130,7 @@ static const struct {
 	RTL8125_MAC_CFG5_MCU
 };
 
-struct cfattach rge_ca = {
+const struct cfattach rge_ca = {
 	sizeof(struct rge_softc), rge_match, rge_attach, NULL, rge_activate
 };
 
@@ -452,7 +452,7 @@ rge_encap(struct rge_queues *q, struct mbuf *m, int idx)
 	/* Set up hardware VLAN tagging. */
 #if NVLAN > 0
 	if (m->m_flags & M_VLANTAG)
-		cflags |= swap16(m->m_pkthdr.ether_vtag | RGE_TDEXTSTS_VTAG);
+		cflags |= swap16(m->m_pkthdr.ether_vtag) | RGE_TDEXTSTS_VTAG;
 #endif
 
 	cur = idx;
@@ -1223,6 +1223,8 @@ rge_rxeof(struct rge_queues *q)
 
 		if ((rxstat & (RGE_RDCMDSTS_SOF | RGE_RDCMDSTS_EOF)) !=
 		    (RGE_RDCMDSTS_SOF | RGE_RDCMDSTS_EOF)) {
+			ifp->if_ierrors++;
+			m_freem(m);
 			rge_discard_rxbuf(q, i);
 			continue;
 		}
@@ -1237,6 +1239,7 @@ rge_rxeof(struct rge_queues *q)
 				m_freem(q->q_rx.rge_head);
 				q->q_rx.rge_head = q->q_rx.rge_tail = NULL;
 			}
+			m_freem(m);
 			rge_discard_rxbuf(q, i);
 			continue;
 		}

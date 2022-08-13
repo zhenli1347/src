@@ -1,4 +1,4 @@
-/*	$OpenBSD: awacs.c,v 1.34 2016/09/19 06:46:43 ratchov Exp $	*/
+/*	$OpenBSD: awacs.c,v 1.37 2022/03/21 19:22:39 miod Exp $	*/
 /*	$NetBSD: awacs.c,v 1.4 2001/02/26 21:07:51 wiz Exp $	*/
 
 /*-
@@ -118,7 +118,7 @@ void awacs_set_speaker_volume(struct awacs_softc *, int, int);
 void awacs_set_ext_volume(struct awacs_softc *, int, int);
 void awacs_set_rate(struct awacs_softc *, struct audio_params *);
 
-struct cfattach awacs_ca = {
+const struct cfattach awacs_ca = {
 	sizeof(struct awacs_softc), awacs_match, awacs_attach
 };
 
@@ -126,7 +126,7 @@ struct cfdriver awacs_cd = {
 	NULL, "awacs", DV_DULL
 };
 
-struct audio_hw_if awacs_hw_if = {
+const struct audio_hw_if awacs_hw_if = {
 	awacs_open,
 	awacs_close,
 	awacs_set_params,
@@ -340,7 +340,7 @@ awacs_attach(struct device *parent, struct device *self, void *aux)
 	awacs_halt_input(sc);
 	printf("\n");
 
-	audio_attach_mi(&awacs_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&awacs_hw_if, sc, NULL, &sc->sc_dev);
 }
 
 u_int

@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.h,v 1.185 2021/03/17 09:05:42 claudio Exp $	*/
+/*	$OpenBSD: route.h,v 1.196 2022/06/28 10:01:13 bluhm Exp $	*/
 /*	$NetBSD: route.h,v 1.9 1996/02/13 22:00:49 christos Exp $	*/
 
 /*
@@ -34,6 +34,12 @@
 
 #ifndef _NET_ROUTE_H_
 #define _NET_ROUTE_H_
+
+/*
+ * Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	T	rttimer_mtx		route timer lists
+ */
 
 /*
  * Kernel resident routing tables.
@@ -86,6 +92,8 @@ struct rt_metrics {
 #include <sys/queue.h>
 #include <net/rtable.h>
 
+struct rttimer;
+
 /*
  * We distinguish between routes to hosts and routes to networks,
  * preferring the former if available.  For each route we infer
@@ -113,7 +121,7 @@ struct rtentry {
 	struct rt_kmetrics rt_rmx;	/* metrics used by rx'ing protocols */
 	unsigned int	 rt_ifidx;	/* the answer: interface to use */
 	unsigned int	 rt_flags;	/* up/down?, host/net */
-	int		 rt_refcnt;	/* # held references */
+	struct refcnt	 rt_refcnt;	/* # held references */
 	int		 rt_plen;	/* prefix length */
 	uint16_t	 rt_labelid;	/* route label ID */
 	uint8_t		 rt_priority;	/* routing priority to use */
@@ -171,7 +179,8 @@ struct rtentry {
 #define RTP_PROPOSAL_DHCLIENT	58
 #define RTP_PROPOSAL_SLAAC	59
 #define RTP_PROPOSAL_UMB	60
-#define RTP_PROPOSAL_SOLICIT	61	/* request reply of all RTM_PROPOSAL */
+#define RTP_PROPOSAL_PPP	61
+#define RTP_PROPOSAL_SOLICIT	62	/* request reply of all RTM_PROPOSAL */
 #define RTP_MAX		63	/* maximum priority */
 #define RTP_ANY		64	/* any of the above */
 #define RTP_MASK	0x7f
@@ -240,7 +249,7 @@ struct rt_msghdr {
 #define RTM_DESYNC	0x10	/* route socket buffer overflow */
 #define RTM_INVALIDATE	0x11	/* Invalidate cache of L2 route */
 #define RTM_BFD		0x12	/* bidirectional forwarding detection */
-#define RTM_PROPOSAL	0x13	/* proposal for netconfigd */
+#define RTM_PROPOSAL	0x13	/* proposal for resolvd(8) */
 #define RTM_CHGADDRATTR	0x14	/* address attribute change */
 #define RTM_80211INFO	0x15	/* 80211 iface change */
 #define RTM_SOURCE	0x16	/* set source address */
@@ -398,22 +407,13 @@ rtstat_inc(enum rtstat_counters c)
  * add,timer} functions all used with the kind permission of BSDI.
  * These allow functions to be called for routes at specific times.
  */
-struct rttimer {
-	TAILQ_ENTRY(rttimer)	rtt_next;  /* entry on timer queue */
-	LIST_ENTRY(rttimer)	rtt_link;  /* multiple timers per rtentry */
-	struct rttimer_queue	*rtt_queue;/* back pointer to queue */
-	struct rtentry		*rtt_rt;   /* Back pointer to the route */
-	void			(*rtt_func)(struct rtentry *,
-						 struct rttimer *);
-	time_t			rtt_time; /* When this timer was registered */
-	u_int			rtt_tableid;	/* routing table id of rtt_rt */
-};
-
 struct rttimer_queue {
-	long				rtq_timeout;
-	unsigned long			rtq_count;
-	TAILQ_HEAD(, rttimer)		rtq_head;
-	LIST_ENTRY(rttimer_queue)	rtq_link;
+	TAILQ_HEAD(, rttimer)		rtq_head;	/* [T] */
+	LIST_ENTRY(rttimer_queue)	rtq_link;	/* [T] */
+	void				(*rtq_func)	/* [I] callback */
+					    (struct rtentry *, u_int);
+	unsigned long			rtq_count;	/* [T] */
+	int				rtq_timeout;	/* [T] */
 };
 
 const char	*rtlabel_id2name(u_int16_t);
@@ -450,15 +450,17 @@ void	 rtm_proposal(struct ifnet *, struct rt_addrinfo *, int, uint8_t);
 int	 rt_setgate(struct rtentry *, struct sockaddr *, u_int);
 struct rtentry *rt_getll(struct rtentry *);
 
-int			 rt_timer_add(struct rtentry *,
-		             void(*)(struct rtentry *, struct rttimer *),
-			     struct rttimer_queue *, u_int);
-void			 rt_timer_remove_all(struct rtentry *);
-struct rttimer_queue	*rt_timer_queue_create(u_int);
-void			 rt_timer_queue_change(struct rttimer_queue *, long);
-void			 rt_timer_queue_destroy(struct rttimer_queue *);
-unsigned long		 rt_timer_queue_count(struct rttimer_queue *);
-void			 rt_timer_timer(void *);
+void		rt_timer_init(void);
+int		rt_timer_add(struct rtentry *,
+		    struct rttimer_queue *, u_int);
+void		rt_timer_remove_all(struct rtentry *);
+time_t		rt_timer_get_expire(const struct rtentry *);
+void		rt_timer_queue_init(struct rttimer_queue *, int,
+		    void(*)(struct rtentry *, u_int));
+void		rt_timer_queue_change(struct rttimer_queue *, int);
+void		rt_timer_queue_flush(struct rttimer_queue *);
+unsigned long	rt_timer_queue_count(struct rttimer_queue *);
+void		rt_timer_timer(void *);
 
 int	 rt_mpls_set(struct rtentry *, struct sockaddr *, uint8_t);
 void	 rt_mpls_clear(struct rtentry *);
@@ -475,11 +477,12 @@ int	 rt_ifa_del(struct ifaddr *, int, struct sockaddr *, unsigned int);
 void	 rt_ifa_purge(struct ifaddr *);
 int	 rt_ifa_addlocal(struct ifaddr *);
 int	 rt_ifa_dellocal(struct ifaddr *);
-void	 rtredirect(struct sockaddr *, struct sockaddr *, struct sockaddr *, struct rtentry **, unsigned int);
+void	 rtredirect(struct sockaddr *, struct sockaddr *, struct sockaddr *,
+	    struct rtentry **, unsigned int);
 int	 rtrequest(int, struct rt_addrinfo *, u_int8_t, struct rtentry **,
-	     u_int);
+	    u_int);
 int	 rtrequest_delete(struct rt_addrinfo *, u_int8_t, struct ifnet *,
-	     struct rtentry **, u_int);
+	    struct rtentry **, u_int);
 int	 rt_if_track(struct ifnet *);
 int	 rt_if_linkstate_change(struct rtentry *, void *, u_int);
 int	 rtdeletemsg(struct rtentry *, struct ifnet *, u_int);

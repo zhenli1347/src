@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.29 2020/12/09 15:45:58 deraadt Exp $
+#	$OpenBSD: install.md,v 1.31 2022/08/10 17:37:48 miod Exp $
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -32,21 +32,27 @@
 #
 
 md_installboot() {
-	if ! installboot -r /mnt ${1}; then
-		echo "\nFailed to install bootblocks."
-		echo "You will not be able to boot OpenBSD from ${1}."
-		exit
-	fi
-	if [[ $(sysctl -n hw.product) = Gdium ]]; then
+	local _disk=$1
+	case $(sysctl -n hw.product) in
+	Gdium)
 		mount -t ext2fs /dev/${_disk}i /mnt2
 		mkdir -p /mnt2/boot
+		cp /mnt/usr/mdec/boot /mnt2/boot/boot
 		cp /mnt/bsd /mnt2/boot/bsd
 		umount /mnt2
-	fi
+		;;
+	*)
+		if ! installboot -r /mnt ${_disk}; then
+			echo "\nFailed to install bootblocks."
+			echo "You will not be able to boot OpenBSD from ${_disk}."
+			exit
+		fi
+		;;
+	esac
 }
 
 md_prep_fdisk() {
-	local _disk=$1 _q _d _s _o
+	local _disk=$1 _q _d _o
 
 	while :; do
 		_d=whole
@@ -64,37 +70,21 @@ md_prep_fdisk() {
 		[wW]*)
 			case $(sysctl -n hw.product) in
 			Gdium)
-				_s=32
+				echo -n "Creating a 32MB ext2 partition and an OpenBSD partition for rest of $_disk..."
+				fdisk -iy -b "65536@1:83" $_disk >/dev/null
 				_o="-O 1 -b 4096"
 				;;
 			EBT700)
-				_s=1
+				echo -n "Creating a 1MB ext2 partition and an OpenBSD partition for rest of $_disk..."
+				fdisk -iy -b "2048@1:83" $_disk >/dev/null
 				_o="-O 1"
 				;;
 			*)
-				_s=1
+				echo -n "Creating a 1MB ext2 partition and an OpenBSD partition for rest of $_disk..."
+				fdisk -iy -b "2048@1:83" $_disk >/dev/null
 				_o=""
 				;;
 			esac
-			echo -n "Creating a ${_s}MB ext2 partition and an OpenBSD partition for rest of $_disk..."
-			fdisk -e $_disk <<__EOT >/dev/null
-re
-e 0
-83
-
-1
-$((_s * 2048))
-e 3
-0
-e 3
-A6
-
-$((_s * 2048 + 1))
-*
-update
-write
-quit
-__EOT
 			echo "done."
 			disklabel $_disk 2>/dev/null | grep -q "^  i:" || disklabel -w -d $_disk
 			newfs -qt ext2fs $_o ${_disk}i

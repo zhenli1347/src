@@ -1,4 +1,4 @@
-.\"	$OpenBSD: make.1,v 1.133 2021/03/08 06:20:50 jsg Exp $
+.\"	$OpenBSD: make.1,v 1.136 2022/08/03 07:54:47 jsg Exp $
 .\"	$NetBSD: make.1,v 1.18 1997/03/10 21:19:53 christos Exp $
 .\"
 .\" Copyright (c) 1990, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"	from: @(#)make.1	8.4 (Berkeley) 3/19/94
 .\"
-.Dd $Mdocdate: March 8 2021 $
+.Dd $Mdocdate: August 3 2022 $
 .Dt MAKE 1
 .Os
 .Sh NAME
@@ -1082,7 +1082,7 @@ Test the value of a variable.
 Test the target being built.
 .It Xo
 .Ic .ifnmake
-.Oo \&! Oc Ar target
+.Oo \&! Oc Ns Ar target
 .Op Ar operator target ...
 .Xc
 Test the target being built.
@@ -1090,7 +1090,7 @@ Test the target being built.
 Reverse the sense of the last conditional.
 .It Xo
 .Ic .elif
-.Oo \&! Oc Ar expression
+.Oo \&! Oc Ns Ar expression
 .Op Ar operator expression ...
 .Xc
 A combination of
@@ -1232,7 +1232,7 @@ the
 .Dq make
 expression is applied.
 .Pp
-If the conditional evaluates to true the parsing of the makefile continues
+If the conditional evaluates to true, the parsing of the makefile continues
 as before.
 If it evaluates to false, the following lines are skipped.
 In both cases this continues until a
@@ -1598,12 +1598,17 @@ should probably be avoided for greater compatibility.
 .Sh HISTORY
 A
 .Nm
-command appeared in
-.At v7 .
+command first appeared outside of Bell Labs in PWB/UNIX 1.0.
+It was replaced in
+.Bx 4.3 Reno .
+.Sh AUTHORS
+.An Stuart Feldman
+wrote the original implementation at the
+Bell Labs Computing Sciences Research Center.
 .Pp
 This implementation is a distant derivative of
 .Nm pmake ,
-originally written by Adam de Boor.
+originally written by Adam de Boor for the Sprite operating system.
 .Sh BUGS
 If the same target is specified several times in complete target rules,
 .Nm

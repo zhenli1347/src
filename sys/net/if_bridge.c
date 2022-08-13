@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bridge.c,v 1.356 2021/07/07 20:19:01 sashan Exp $	*/
+/*	$OpenBSD: if_bridge.c,v 1.364 2022/08/07 00:57:43 bluhm Exp $	*/
 
 /*
  * Copyright (c) 1999, 2000 Jason L. Wright (jason@thought.net)
@@ -262,8 +262,13 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	/*
 	 * bridge(4) data structure aren't protected by the NET_LOCK().
 	 * Idealy it shouldn't be taken before calling `ifp->if_ioctl'
-	 * but we aren't there yet.
+	 * but we aren't there yet.  Media ioctl run without netlock.
 	 */
+	switch (cmd) {
+	case SIOCSIFMEDIA:
+	case SIOCGIFMEDIA:
+		return (ENOTTY);
+	}
 	NET_UNLOCK();
 
 	switch (cmd) {
@@ -1487,7 +1492,7 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 	struct tdb *tdb;
 	u_int32_t spi;
 	u_int16_t cpi;
-	int error, off;
+	int error, off, prot;
 	u_int8_t proto = 0;
 	struct ip *ip;
 #ifdef INET6
@@ -1567,25 +1572,36 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 		    tdb->tdb_xform != NULL) {
 			if (tdb->tdb_first_use == 0) {
 				tdb->tdb_first_use = gettime();
-				if (tdb->tdb_flags & TDBF_FIRSTUSE)
-					timeout_add_sec(&tdb->tdb_first_tmo,
-					    tdb->tdb_exp_first_use);
-				if (tdb->tdb_flags & TDBF_SOFT_FIRSTUSE)
-					timeout_add_sec(&tdb->tdb_sfirst_tmo,
-					    tdb->tdb_soft_first_use);
+				if (tdb->tdb_flags & TDBF_FIRSTUSE) {
+					if (timeout_add_sec(
+					    &tdb->tdb_first_tmo,
+					    tdb->tdb_exp_first_use))
+						tdb_ref(tdb);
+				}
+				if (tdb->tdb_flags & TDBF_SOFT_FIRSTUSE) {
+					if (timeout_add_sec(
+					    &tdb->tdb_sfirst_tmo,
+					    tdb->tdb_soft_first_use))
+						tdb_ref(tdb);
+				}
 			}
 
-			(*(tdb->tdb_xform->xf_input))(m, tdb, hlen, off);
+			prot = (*(tdb->tdb_xform->xf_input))(&m, tdb, hlen,
+			    off);
+			tdb_unref(tdb);
+			if (prot != IPPROTO_DONE)
+				ip_deliver(&m, &hlen, prot, af);
 			return (1);
 		} else {
+			tdb_unref(tdb);
  skiplookup:
 			/* XXX do an input policy lookup */
 			return (0);
 		}
 	} else { /* Outgoing from the bridge. */
-		tdb = ipsp_spd_lookup(m, af, hlen, &error,
-		    IPSP_DIRECTION_OUT, NULL, NULL, 0);
-		if (tdb != NULL) {
+		error = ipsp_spd_lookup(m, af, hlen, IPSP_DIRECTION_OUT,
+		    NULL, NULL, &tdb, NULL);
+		if (error == 0 && tdb != NULL) {
 			/*
 			 * We don't need to do loop detection, the
 			 * bridge will do that for us.
@@ -1595,11 +1611,14 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			    tdb->tdb_tap)) == NULL ||
 			    pf_test(af, dir, encif, &m) != PF_PASS) {
 				m_freem(m);
+				tdb_unref(tdb);
 				return (1);
 			}
-			if (m == NULL)
+			if (m == NULL) {
+				tdb_unref(tdb);
 				return (1);
-			else if (af == AF_INET)
+			}
+			if (af == AF_INET)
 				in_proto_cksum_out(m, encif);
 #ifdef INET6
 			else if (af == AF_INET6)
@@ -1611,12 +1630,16 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			if ((af == AF_INET) &&
 			    ip_mtudisc && (ip->ip_off & htons(IP_DF)) &&
 			    tdb->tdb_mtu && ntohs(ip->ip_len) > tdb->tdb_mtu &&
-			    tdb->tdb_mtutimeout > gettime())
+			    tdb->tdb_mtutimeout > gettime()) {
 				bridge_send_icmp_err(ifp, eh, m,
 				    hassnap, llc, tdb->tdb_mtu,
 				    ICMP_UNREACH, ICMP_UNREACH_NEEDFRAG);
-			else
+			} else {
+				KERNEL_LOCK();
 				error = ipsp_process_packet(m, tdb, af, 0);
+				KERNEL_UNLOCK();
+			}
+			tdb_unref(tdb);
 			return (1);
 		} else
 			return (0);

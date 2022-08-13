@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.24 2021/03/26 23:34:50 kn Exp $	*/
+/*	$OpenBSD: apm.c,v 1.33 2022/03/13 12:33:01 mpi Exp $	*/
 
 /*-
  * Copyright (c) 2001 Alexander Guy.  All rights reserved.
@@ -68,7 +68,7 @@ struct apm_softc {
 int apmmatch(struct device *, void *, void *);
 void apmattach(struct device *, struct device *, void *);
 
-struct cfattach apm_ca = {
+const struct cfattach apm_ca = {
 	sizeof(struct apm_softc), apmmatch, apmattach
 };
 
@@ -211,17 +211,16 @@ apmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		return ENXIO;
 
 	switch (cmd) {
-		/* some ioctl names from linux */
+#ifdef SUSPEND
 	case APM_IOC_STANDBY:
-	case APM_IOC_STANDBY_REQ:
 	case APM_IOC_SUSPEND:
-	case APM_IOC_SUSPEND_REQ:
-	case APM_IOC_DEV_CTL:
-		if ((flag & FWRITE) == 0)
+		if ((flag & FWRITE) == 0) {
 			error = EBADF;
-		else
-			error = EOPNOTSUPP;
+			break;
+		}
+		sleep_state(sc, SLEEP_SUSPEND);
 		break;
+#endif
 	case APM_IOC_PRN_CTL:
 		if ((flag & FWRITE) == 0)
 			error = EBADF;
@@ -331,3 +330,63 @@ apmkqfilter(dev_t dev, struct knote *kn)
 
 	return (0);
 }
+
+#ifdef SUSPEND
+
+#ifdef MULTIPROCESSOR
+
+void
+sleep_mp(void)
+{
+}
+
+void
+resume_mp(void)
+{
+}
+
+#endif /* MULTIPROCESSOR */
+
+int
+sleep_showstate(void *v, int sleepmode)
+{
+	switch (sleepmode) {
+	case SLEEP_SUSPEND:
+		/* TODO blink the light */
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
+}
+
+int
+sleep_setstate(void *v)
+{
+	printf("TODO sleep_setstate\n");
+	return 0;
+}
+
+void
+sleep_abort(void *v)
+{
+}
+
+int
+sleep_resume(void *v)
+{
+	return 0;
+}
+
+int
+gosleep(void *v)
+{
+	return EOPNOTSUPP;
+}
+
+int
+suspend_finish(void *v)
+{
+	return 0;
+}
+
+#endif /* SUSPEND */

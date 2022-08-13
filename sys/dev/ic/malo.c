@@ -1,4 +1,4 @@
-/*	$OpenBSD: malo.c,v 1.121 2020/07/10 13:26:37 patrick Exp $ */
+/*	$OpenBSD: malo.c,v 1.123 2022/04/21 21:03:02 stsp Exp $ */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -1709,9 +1709,8 @@ malo_rx_intr(struct malo_softc *sc)
 		ni = ieee80211_find_rxnode(ic, wh);
 
 		/* send the frame to the 802.11 layer */
-		rxi.rxi_flags = 0;
+		memset(&rxi, 0, sizeof(rxi));
 		rxi.rxi_rssi = desc->rssi;
-		rxi.rxi_tstamp = 0;	/* unused */
 		ieee80211_inputm(ifp, m, ni, &rxi, &ml);
 
 		/* node is no longer needed */
@@ -1764,7 +1763,7 @@ malo_load_bootimg(struct malo_softc *sc)
 	/*
 	 * we loaded the firmware into card memory now tell the CPU
 	 * to fetch the code and execute it. The memory mapped via the
-	 * first bar is internaly mapped to 0xc0000000.
+	 * first bar is internally mapped to 0xc0000000.
 	 */
 	malo_send_cmd(sc, 0xc000bef8);
 

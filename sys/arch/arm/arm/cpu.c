@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.55 2021/03/25 04:12:00 jsg Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.57 2022/03/12 14:40:41 mpi Exp $	*/
 /*	$NetBSD: cpu.c,v 1.56 2004/04/14 04:01:49 bsh Exp $	*/
 
 
@@ -145,7 +145,7 @@ int cpu_node;
 int	cpu_match(struct device *, void *, void *);
 void	cpu_attach(struct device *, struct device *, void *);
 
-struct cfattach cpu_ca = {
+const struct cfattach cpu_ca = {
 	sizeof(struct device), cpu_match, cpu_attach
 };
 
@@ -349,14 +349,11 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 	__asm volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
 	KASSERT(faa->fa_nreg > 0);
 
+#ifdef MULTIPROCESSOR
 	if (faa->fa_reg[0].addr == (mpidr & MPIDR_AFF)) {
 		ci = &cpu_info_primary;
-#ifdef MULTIPROCESSOR
 		ci->ci_flags |= CPUF_RUNNING | CPUF_PRESENT | CPUF_PRIMARY;
-#endif
-	}
-#ifdef MULTIPROCESSOR
-	else {
+	} else {
 		ci = malloc(sizeof(*ci), M_DEVBUF, M_WAITOK | M_ZERO);
 		cpu_info[dev->dv_unit] = ci;
 		ci->ci_next = cpu_info_list->ci_next;
@@ -364,6 +361,8 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		ci->ci_flags |= CPUF_AP;
 		ncpus++;
 	}
+#else
+	ci = &cpu_info_primary;
 #endif
 
 	ci->ci_dev = dev;

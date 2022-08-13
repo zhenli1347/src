@@ -1,4 +1,4 @@
-/*	$OpenBSD: ami.c,v 1.260 2020/10/15 00:01:24 krw Exp $	*/
+/*	$OpenBSD: ami.c,v 1.262 2022/04/16 19:19:58 naddy Exp $	*/
 
 /*
  * Copyright (c) 2001 Michael Shalayeff
@@ -42,7 +42,7 @@
  * - 467 and 475 model cards, docs
  *	American Megatrends Inc.;
  *
- * - uninterruptable electric power for cvs
+ * - uninterruptible electric power for cvs
  *	Theo de Raadt.
  */
 
@@ -96,13 +96,13 @@ struct cfdriver ami_cd = {
 void	ami_scsi_cmd(struct scsi_xfer *);
 int	ami_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
 
-struct scsi_adapter ami_switch = {
+const struct scsi_adapter ami_switch = {
 	ami_scsi_cmd, NULL, NULL, NULL, ami_scsi_ioctl
 };
 
 void	ami_scsi_raw_cmd(struct scsi_xfer *);
 
-struct scsi_adapter ami_raw_switch = {
+const struct scsi_adapter ami_raw_switch = {
 	ami_scsi_raw_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -1898,7 +1898,7 @@ ami_ioctl_inq(struct ami_softc *sc, struct bioc_inq *bi)
 				}
 			}
 
-	/* count unsued disks */
+	/* count unused disks */
 	for(i = 0; i < sc->sc_channels * 16; i++) {
 	    	if (sc->sc_plist[i])
 			continue; /* skip claimed drives */

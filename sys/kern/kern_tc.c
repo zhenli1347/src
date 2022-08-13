@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_tc.c,v 1.74 2021/06/19 13:49:39 cheloha Exp $ */
+/*	$OpenBSD: kern_tc.c,v 1.77 2022/08/12 02:20:36 cheloha Exp $ */
 
 /*
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>
@@ -56,7 +56,7 @@ dummy_get_timecount(struct timecounter *tc)
 
 static struct timecounter dummy_timecounter = {
 	.tc_get_timecount = dummy_get_timecount,
-	.tc_poll_pps = 0,
+	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 1000000,
 	.tc_name = "dummy",
@@ -189,8 +189,8 @@ binuptime(struct bintime *bt)
 		th = timehands;
 		gen = th->th_generation;
 		membar_consumer();
-		*bt = th->th_offset;
-		bintimeaddfrac(bt, th->th_scale * tc_delta(th), bt);
+		TIMECOUNT_TO_BINTIME(tc_delta(th), th->th_scale, bt);
+		bintimeadd(bt, &th->th_offset, bt);
 		membar_consumer();
 	} while (gen == 0 || gen != th->th_generation);
 }
@@ -278,7 +278,8 @@ binruntime(struct bintime *bt)
 		th = timehands;
 		gen = th->th_generation;
 		membar_consumer();
-		bintimeaddfrac(&th->th_offset, th->th_scale * tc_delta(th), bt);
+		TIMECOUNT_TO_BINTIME(tc_delta(th), th->th_scale, bt);
+		bintimeadd(bt, &th->th_offset, bt);
 		bintimesub(bt, &th->th_naptime, bt);
 		membar_consumer();
 	} while (gen == 0 || gen != th->th_generation);
@@ -303,8 +304,8 @@ bintime(struct bintime *bt)
 		th = timehands;
 		gen = th->th_generation;
 		membar_consumer();
-		*bt = th->th_offset;
-		bintimeaddfrac(bt, th->th_scale * tc_delta(th), bt);
+		TIMECOUNT_TO_BINTIME(tc_delta(th), th->th_scale, bt);
+		bintimeadd(bt, &th->th_offset, bt);
 		bintimeadd(bt, &th->th_boottime, bt);
 		membar_consumer();
 	} while (gen == 0 || gen != th->th_generation);
@@ -455,6 +456,38 @@ tc_init(struct timecounter *tc)
 	enqueue_randomness(tc->tc_get_timecount(tc));
 
 	timecounter = tc;
+}
+
+/*
+ * Change the given timecounter's quality.  If it is the active
+ * counter and it is no longer the best counter, activate the
+ * best counter.
+ */
+void
+tc_reset_quality(struct timecounter *tc, int quality)
+{
+	struct timecounter *best = &dummy_timecounter, *tmp;
+
+	if (tc == &dummy_timecounter)
+		panic("%s: cannot change dummy counter quality", __func__);
+
+	tc->tc_quality = quality;
+	if (timecounter == tc) {
+		SLIST_FOREACH(tmp, &tc_list, tc_next) {
+			if (tmp->tc_quality < 0)
+				continue;
+			if (tmp->tc_quality < best->tc_quality)
+				continue;
+			if (tmp->tc_quality == best->tc_quality &&
+			    tmp->tc_frequency < best->tc_frequency)
+				continue;
+			best = tmp;
+		}
+		if (best != tc) {
+			enqueue_randomness(best->tc_get_timecount(best));
+			timecounter = best;
+		}
+	}
 }
 
 /* Report the frequency of the current timecounter. */
@@ -641,7 +674,8 @@ tc_windup(struct bintime *new_boottime, struct bintime *new_offset,
 		ncount = 0;
 	th->th_offset_count += delta;
 	th->th_offset_count &= th->th_counter->tc_counter_mask;
-	bintimeaddfrac(&th->th_offset, th->th_scale * delta, &th->th_offset);
+	TIMECOUNT_TO_BINTIME(delta, th->th_scale, &bt);
+	bintimeadd(&th->th_offset, &bt, &th->th_offset);
 
 	/*
 	 * Ignore new offsets that predate the current offset.

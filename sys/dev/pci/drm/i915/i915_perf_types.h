@@ -15,6 +15,7 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/wait.h>
+#include <uapi/drm/i915_drm.h>
 
 #include "gt/intel_sseu.h"
 #include "i915_reg.h"
@@ -54,7 +55,7 @@ struct i915_oa_config {
 
 	struct attribute_group sysfs_metric;
 	struct attribute *attrs[2];
-	struct device_attribute sysfs_metric_id;
+	struct kobj_attribute sysfs_metric_id;
 
 	struct kref ref;
 	struct rcu_head rcu;
@@ -421,9 +422,7 @@ struct i915_perf {
 	 * For rate limiting any notifications of spurious
 	 * invalid OA reports
 	 */
-#ifdef notyet
 	struct ratelimit_state spurious_report_rs;
-#endif
 
 	/**
 	 * For rate limiting any notifications of tail pointer
@@ -444,6 +443,13 @@ struct i915_perf {
 
 	struct i915_oa_ops ops;
 	const struct i915_oa_format *oa_formats;
+
+	/**
+	 * Use a format mask to store the supported formats
+	 * for a platform.
+	 */
+#define FORMAT_MASK_SIZE DIV_ROUND_UP(I915_OA_FORMAT_MAX - 1, BITS_PER_LONG)
+	unsigned long format_mask[FORMAT_MASK_SIZE];
 
 	atomic64_t noa_programming_delay;
 };

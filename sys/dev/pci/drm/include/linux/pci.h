@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci.h,v 1.7 2021/07/07 02:38:36 jsg Exp $	*/
+/*	$OpenBSD: pci.h,v 1.11 2022/04/11 03:02:40 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -58,6 +58,7 @@ struct pci_dev {
 	uint16_t	subsystem_vendor;
 	uint16_t	subsystem_device;
 	uint8_t		revision;
+	uint32_t	class;		/* class:subclass:interface */
 
 	pci_chipset_tag_t pc;
 	pcitag_t	tag;
@@ -231,6 +232,8 @@ pci_pcie_cap(struct pci_dev *pdev)
 	return pos;
 }
 
+bool pcie_aspm_enabled(struct pci_dev *);
+
 static inline bool
 pci_is_pcie(struct pci_dev *pdev)
 {
@@ -241,6 +244,21 @@ static inline bool
 pci_is_root_bus(struct pci_bus *pbus)
 {
 	return (pbus->bridgetag == NULL);
+}
+
+static inline struct pci_dev *
+pci_upstream_bridge(struct pci_dev *pdev)
+{
+	if (pci_is_root_bus(pdev->bus))
+		return NULL;
+	return pdev->bus->self;
+}
+
+/* XXX check for ACPI _PR3 */
+static inline bool
+pci_pr3_present(struct pci_dev *pdev)
+{
+	return false;
 }
 
 static inline int
@@ -301,14 +319,36 @@ pcie_set_readrq(struct pci_dev *pdev, int rrq)
 	return pcie_capability_write_word(pdev, PCI_PCIE_DCSR, val);
 }
 
-#define pci_set_master(x)
-#define pci_clear_master(x)
+static inline void
+pci_set_master(struct pci_dev *pdev)
+{
+}
 
-#define pci_save_state(x)
-#define pci_restore_state(x)
+static inline void
+pci_clear_master(struct pci_dev *pdev)
+{
+}
 
-#define pci_enable_msi(x)	0
-#define pci_disable_msi(x)
+static inline void
+pci_save_state(struct pci_dev *pdev)
+{
+}
+
+static inline void
+pci_restore_state(struct pci_dev *pdev)
+{
+}
+
+static inline int
+pci_enable_msi(struct pci_dev *pdev)
+{
+	return 0;
+}
+
+static inline void
+pci_disable_msi(struct pci_dev *pdev)
+{
+}
 
 typedef enum {
 	PCI_D0,
@@ -323,6 +363,8 @@ enum pci_bus_speed {
 	PCIE_SPEED_5_0GT,
 	PCIE_SPEED_8_0GT,
 	PCIE_SPEED_16_0GT,
+	PCIE_SPEED_32_0GT,
+	PCIE_SPEED_64_0GT,
 	PCI_SPEED_UNKNOWN
 };
 
@@ -361,11 +403,27 @@ pcie_bandwidth_available(struct pci_dev *pdev, struct pci_dev **ldev,
 		*width = pcie_get_width_cap(bdev);
 }
 
-#define pci_save_state(x)
-#define pci_enable_device(x)		0
-#define pci_disable_device(x)
-#define pci_is_thunderbolt_attached(x) false
-#define pci_set_drvdata(x, y)
+static inline int
+pci_enable_device(struct pci_dev *pdev)
+{
+	return 0;
+}
+
+static inline void
+pci_disable_device(struct pci_dev *pdev)
+{
+}
+
+static inline bool
+pci_is_thunderbolt_attached(struct pci_dev *pdev)
+{
+	return false;
+}
+
+static inline void
+pci_set_drvdata(struct pci_dev *pdev, void *data)
+{
+}
 
 static inline int
 pci_domain_nr(struct pci_bus *pbus)
@@ -390,42 +448,14 @@ pci_set_power_state(struct pci_dev *dev, int state)
 	return 0;
 }
 
-static inline struct pci_dev *
-pci_get_class(pcireg_t class, struct pci_dev *pdev)
+static inline void
+pci_unregister_driver(void *d)
 {
-	return NULL;
 }
 
 #define PCI_CLASS_DISPLAY_VGA \
-    (PCI_CLASS_DISPLAY | PCI_SUBCLASS_DISPLAY_VGA)
+    ((PCI_CLASS_DISPLAY << 8) | PCI_SUBCLASS_DISPLAY_VGA)
 #define PCI_CLASS_DISPLAY_OTHER \
-    (PCI_CLASS_DISPLAY | PCI_SUBCLASS_DISPLAY_MISC)
-
-#if defined(__amd64__) || defined(__arm64__) || \
-    defined(__i386__) || defined(__riscv64__)
-
-#define PCI_DMA_BIDIRECTIONAL	0
-
-static inline dma_addr_t
-pci_map_page(struct pci_dev *pdev, struct vm_page *page, unsigned long offset, size_t size, int direction)
-{
-	return VM_PAGE_TO_PHYS(page);
-}
-
-static inline void
-pci_unmap_page(struct pci_dev *pdev, dma_addr_t dma_address, size_t size, int direction)
-{
-}
-
-static inline int
-pci_dma_mapping_error(struct pci_dev *pdev, dma_addr_t dma_addr)
-{
-	return 0;
-}
-
-#define pci_set_dma_mask(x, y)			0
-#define pci_set_consistent_dma_mask(x, y)	0
-
-#endif
+    ((PCI_CLASS_DISPLAY << 8) | PCI_SUBCLASS_DISPLAY_MISC)
 
 #endif /* _LINUX_PCI_H_ */

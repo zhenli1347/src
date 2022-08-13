@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_fork.c,v 1.236 2021/06/19 02:05:33 cheloha Exp $	*/
+/*	$OpenBSD: kern_fork.c,v 1.241 2022/07/23 22:10:58 cheloha Exp $	*/
 /*	$NetBSD: kern_fork.c,v 1.29 1996/02/09 18:59:34 christos Exp $	*/
 
 /*
@@ -67,7 +67,6 @@
 
 int	nprocesses = 1;		/* process 0 */
 int	nthreads = 1;		/* proc 0 */
-int	randompid;		/* when set to 1, pid's go random */
 struct	forkstat forkstat;
 
 void fork_return(void *);
@@ -190,7 +189,8 @@ process_initialize(struct process *pr, struct proc *p)
 	/* give the process the same creds as the initial thread */
 	pr->ps_ucred = p->p_ucred;
 	crhold(pr->ps_ucred);
-	KASSERT(p->p_ucred->cr_ref >= 2);	/* new thread and new process */
+	/* new thread and new process */
+	KASSERT(p->p_ucred->cr_refcnt.r_refs >= 2);
 
 	LIST_INIT(&pr->ps_children);
 	LIST_INIT(&pr->ps_orphans);
@@ -199,7 +199,7 @@ process_initialize(struct process *pr, struct proc *p)
 	TAILQ_INIT(&pr->ps_tslpqueue);
 
 	rw_init(&pr->ps_lock, "pslock");
-	mtx_init(&pr->ps_mtx, IPL_MPFLOOR);
+	mtx_init(&pr->ps_mtx, IPL_HIGH);
 
 	timeout_set_kclock(&pr->ps_realit_to, realitexpire, pr,
 	    KCLOCK_UPTIME, 0);
@@ -637,20 +637,22 @@ ispidtaken(pid_t pid)
 pid_t
 allocpid(void)
 {
-	static pid_t lastpid;
+	static int first = 1;
 	pid_t pid;
 
-	if (!randompid) {
-		/* only used early on for system processes */
-		pid = ++lastpid;
-	} else {
-		/* Find an unused pid satisfying lastpid < pid <= PID_MAX */
-		do {
-			pid = arc4random_uniform(PID_MAX - lastpid) + 1 +
-			    lastpid;
-		} while (ispidtaken(pid));
+	/* The first PID allocated is always 1. */
+	if (first) {
+		first = 0;
+		return 1;
 	}
 
+	/*
+	 * All subsequent PIDs are chosen randomly.  We need to
+	 * find an unused PID in the range [2, PID_MAX].
+	 */
+	do {
+		pid = 2 + arc4random_uniform(PID_MAX - 1);
+	} while (ispidtaken(pid));
 	return pid;
 }
 

@@ -1,7 +1,8 @@
-/*	$OpenBSD: tbl_html.c,v 1.31 2021/08/10 12:36:42 schwarze Exp $ */
+/* $OpenBSD: tbl_html.c,v 1.35 2022/04/23 13:58:09 schwarze Exp $ */
 /*
+ * Copyright (c) 2014, 2015, 2017, 2018, 2021, 2022
+ *               Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2011 Kristaps Dzonsons <kristaps@bsd.lv>
- * Copyright (c) 2014,2015,2017,2018,2021 Ingo Schwarze <schwarze@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -113,10 +114,13 @@ print_tbl(struct html *h, const struct tbl_span *sp)
 	const struct tbl_dat	*dp;
 	const struct tbl_cell	*cp;
 	const struct tbl_span	*psp;
+	const struct roffcol	*col;
 	struct tag		*tt;
 	const char		*hspans, *vspans, *halign, *valign;
 	const char		*bborder, *lborder, *rborder;
+	const char		*ccp;
 	char			 hbuf[4], vbuf[4];
+	size_t			 sz;
 	enum mandoc_esc		 save_font;
 	int			 i;
 
@@ -129,7 +133,7 @@ print_tbl(struct html *h, const struct tbl_span *sp)
 	 */
 
 	if (sp->pos != TBL_SPAN_DATA)
-		return;
+		goto out;
 
 	/* Inhibit printing of spaces: we do padding ourselves. */
 
@@ -239,12 +243,40 @@ print_tbl(struct html *h, const struct tbl_span *sp)
 		    "vertical-align", valign,
 		    "text-align", halign,
 		    "border-right-style", rborder);
-		if (dp->string != NULL) {
+		if (dp->layout->pos == TBL_CELL_HORIZ ||
+		    dp->layout->pos == TBL_CELL_DHORIZ ||
+		    dp->pos == TBL_DATA_HORIZ ||
+		    dp->pos == TBL_DATA_NHORIZ ||
+		    dp->pos == TBL_DATA_DHORIZ ||
+		    dp->pos == TBL_DATA_NDHORIZ)
+			print_otag(h, TAG_HR, "");
+		else if (dp->string != NULL) {
 			save_font = h->metac;
 			html_setfont(h, dp->layout->font);
 			if (dp->layout->pos == TBL_CELL_LONG)
 				print_text(h, "\\[u2003]");  /* em space */
 			print_text(h, dp->string);
+			if (dp->layout->pos == TBL_CELL_NUMBER) {
+				col = h->tbl.cols + dp->layout->col;
+				if (col->decimal < col->nwidth) {
+					if ((ccp = strrchr(dp->string,
+					    sp->opts->decimal)) == NULL) {
+						/* Punctuation space. */
+						print_text(h, "\\[u2008]");
+						ccp = strchr(dp->string, '\0');
+					} else
+						ccp++;
+					sz = col->nwidth - col->decimal;
+					while (--sz > 0) {
+						if (*ccp == '\0')
+							/* Figure space. */
+							print_text(h,
+							    "\\[u2007]");
+						else
+							ccp++;
+					}
+				}
+			}
 			html_setfont(h, save_font);
 		}
 	}
@@ -253,6 +285,7 @@ print_tbl(struct html *h, const struct tbl_span *sp)
 
 	h->flags &= ~HTML_NONOSPACE;
 
+out:
 	if (sp->next == NULL) {
 		assert(h->tbl.cols);
 		free(h->tbl.cols);

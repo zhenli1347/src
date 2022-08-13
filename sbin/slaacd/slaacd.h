@@ -1,4 +1,4 @@
-/*	$OpenBSD: slaacd.h,v 1.35 2021/07/22 15:32:51 kn Exp $	*/
+/*	$OpenBSD: slaacd.h,v 1.38 2022/07/12 16:55:00 florian Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -25,9 +25,6 @@
 
 #define SLAACD_SOIIKEY_LEN	16
 
-/* MAXDNAME from arpa/namesr.h */
-#define SLAACD_MAX_DNSSL	1025
-
 #define	MAX_RDNS_COUNT		8 /* max nameserver in a RTM_PROPOSAL */
 
 #define	IMSG_DATA_SIZE(imsg)	((imsg).hdr.len - IMSG_HEADER_SIZE)
@@ -47,7 +44,6 @@ enum imsg_type {
 	IMSG_CTL_SHOW_INTERFACE_INFO_RA,
 	IMSG_CTL_SHOW_INTERFACE_INFO_RA_PREFIX,
 	IMSG_CTL_SHOW_INTERFACE_INFO_RA_RDNS,
-	IMSG_CTL_SHOW_INTERFACE_INFO_RA_DNSSL,
 	IMSG_CTL_SHOW_INTERFACE_INFO_ADDR_PROPOSALS,
 	IMSG_CTL_SHOW_INTERFACE_INFO_ADDR_PROPOSAL,
 	IMSG_CTL_SHOW_INTERFACE_INFO_DFR_PROPOSALS,
@@ -55,7 +51,6 @@ enum imsg_type {
 	IMSG_CTL_SHOW_INTERFACE_INFO_RDNS_PROPOSALS,
 	IMSG_CTL_SHOW_INTERFACE_INFO_RDNS_PROPOSAL,
 	IMSG_CTL_END,
-	IMSG_UPDATE_ADDRESS,
 #endif	/* SMALL */
 	IMSG_PROPOSE_RDNS,
 	IMSG_REPROPOSE_RDNS,
@@ -123,16 +118,10 @@ struct ctl_engine_info_ra_rdns {
 	struct in6_addr		rdns;
 };
 
-struct ctl_engine_info_ra_dnssl {
-	uint32_t		lifetime;
-	char			dnssl[SLAACD_MAX_DNSSL];
-};
-
 struct ctl_engine_info_address_proposal {
 	int64_t			 id;
 	char			 state[sizeof("PROPOSAL_NEARLY_EXPIRED")];
 	time_t			 next_timeout;
-	int			 timeout_count;
 	struct timespec		 when;
 	struct timespec		 uptime;
 	struct sockaddr_in6	 addr;
@@ -147,7 +136,6 @@ struct ctl_engine_info_dfr_proposal {
 	int64_t			 id;
 	char			 state[sizeof("PROPOSAL_NEARLY_EXPIRED")];
 	time_t			 next_timeout;
-	int			 timeout_count;
 	struct timespec		 when;
 	struct timespec		 uptime;
 	struct sockaddr_in6	 addr;
@@ -159,7 +147,6 @@ struct ctl_engine_info_rdns_proposal {
 	int64_t			 id;
 	char			 state[sizeof("PROPOSAL_NEARLY_EXPIRED")];
 	time_t			 next_timeout;
-	int			 timeout_count;
 	struct timespec		 when;
 	struct timespec		 uptime;
 	struct sockaddr_in6	 from;
@@ -169,15 +156,6 @@ struct ctl_engine_info_rdns_proposal {
 };
 
 #endif	/* SMALL */
-
-struct imsg_addrinfo {
-	uint32_t		if_index;
-	struct sockaddr_in6	addr;
-	struct in6_addr		mask;
-	int			temporary;
-	uint32_t		vltime;
-	uint32_t		pltime;
-};
 
 struct imsg_propose_rdns {
 	uint32_t		if_index;

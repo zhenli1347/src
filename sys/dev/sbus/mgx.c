@@ -1,4 +1,4 @@
-/*	$OpenBSD: mgx.c,v 1.14 2020/05/25 09:55:49 jsg Exp $	*/
+/*	$OpenBSD: mgx.c,v 1.16 2022/07/15 17:57:27 kettenis Exp $	*/
 /*
  * Copyright (c) 2003, Miodrag Vallat.
  * All rights reserved.
@@ -165,7 +165,7 @@ int	mgx_wait_fifo(struct mgx_softc *, uint);
 int mgxmatch(struct device *, void *, void *);
 void mgxattach(struct device *, struct device *, void *);
 
-struct cfattach mgx_ca = {
+const struct cfattach mgx_ca = {
 	sizeof(struct mgx_softc), mgxmatch, mgxattach
 };
 
@@ -359,6 +359,8 @@ mgx_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width = sc->sc_sunfb.sf_width;
 		wdf->depth = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 256;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

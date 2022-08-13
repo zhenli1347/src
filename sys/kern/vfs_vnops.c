@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_vnops.c,v 1.116 2021/05/06 12:55:20 anton Exp $	*/
+/*	$OpenBSD: vfs_vnops.c,v 1.120 2022/06/20 01:39:44 visa Exp $	*/
 /*	$NetBSD: vfs_vnops.c,v 1.20 1996/02/04 02:18:41 christos Exp $	*/
 
 /*
@@ -54,14 +54,12 @@
 #include <sys/ioctl.h>
 #include <sys/tty.h>
 #include <sys/cdio.h>
-#include <sys/poll.h>
 #include <sys/filedesc.h>
 #include <sys/specdev.h>
 #include <sys/unistd.h>
 
 int vn_read(struct file *, struct uio *, int);
 int vn_write(struct file *, struct uio *, int);
-int vn_poll(struct file *, int, struct proc *);
 int vn_kqfilter(struct file *, struct knote *);
 int vn_closefile(struct file *, struct proc *);
 int vn_seek(struct file *, off_t *, int, struct proc *);
@@ -70,7 +68,6 @@ const struct fileops vnops = {
 	.fo_read	= vn_read,
 	.fo_write	= vn_write,
 	.fo_ioctl	= vn_ioctl,
-	.fo_poll	= vn_poll,
 	.fo_kqfilter	= vn_kqfilter,
 	.fo_stat	= vn_statfile,
 	.fo_close	= vn_closefile,
@@ -548,15 +545,6 @@ vn_ioctl(struct file *fp, u_long com, caddr_t data, struct proc *p)
 }
 
 /*
- * File table vnode poll routine.
- */
-int
-vn_poll(struct file *fp, int events, struct proc *p)
-{
-	return (VOP_POLL(fp->f_data, fp->f_flag, events, p));
-}
-
-/*
  * Check that the vnode is still valid, and if so
  * acquire requested lock.
  */
@@ -629,7 +617,12 @@ vn_closefile(struct file *fp, struct proc *p)
 int
 vn_kqfilter(struct file *fp, struct knote *kn)
 {
-	return (VOP_KQFILTER(fp->f_data, fp->f_flag, kn));
+	int error;
+
+	KERNEL_LOCK();
+	error = VOP_KQFILTER(fp->f_data, fp->f_flag, kn);
+	KERNEL_UNLOCK();
+	return (error);
 }
 
 int

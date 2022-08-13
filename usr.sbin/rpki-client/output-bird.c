@@ -1,4 +1,4 @@
-/*	$OpenBSD: output-bird.c,v 1.11 2021/04/19 17:04:35 deraadt Exp $ */
+/*	$OpenBSD: output-bird.c,v 1.14 2022/05/15 16:43:34 tb Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2020 Robert Scheck <robert@fedoraproject.org>
@@ -21,7 +21,8 @@
 #include "extern.h"
 
 int
-output_bird1v4(FILE *out, struct vrp_tree *vrps, struct stats *st)
+output_bird1v4(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
+    struct stats *st)
 {
 	extern		const char *bird_tablename;
 	struct vrp	*v;
@@ -49,7 +50,8 @@ output_bird1v4(FILE *out, struct vrp_tree *vrps, struct stats *st)
 }
 
 int
-output_bird1v6(FILE *out, struct vrp_tree *vrps, struct stats *st)
+output_bird1v6(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
+    struct stats *st)
 {
 	extern		const char *bird_tablename;
 	struct vrp	*v;
@@ -62,7 +64,7 @@ output_bird1v6(FILE *out, struct vrp_tree *vrps, struct stats *st)
 
 	RB_FOREACH(v, vrp_tree, vrps) {
 		char buf[64];
-	
+
 		if (v->afi == AFI_IPV6) {
 			ip_addr_print(&v->addr, v->afi, buf, sizeof(buf));
 			if (fprintf(out, "\troa %s max %u as %u;\n", buf,
@@ -77,7 +79,8 @@ output_bird1v6(FILE *out, struct vrp_tree *vrps, struct stats *st)
 }
 
 int
-output_bird2(FILE *out, struct vrp_tree *vrps, struct stats *st)
+output_bird2(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
+    struct stats *st)
 {
 	extern		const char *bird_tablename;
 	struct vrp	*v;
@@ -89,7 +92,7 @@ output_bird2(FILE *out, struct vrp_tree *vrps, struct stats *st)
 	if (fprintf(out, "\ndefine force_roa_table_update = %lld;\n\n"
 	    "roa4 table %s4;\nroa6 table %s6;\n\n"
 	    "protocol static {\n\troa4 { table %s4; };\n\n",
-	    (long long) now, bird_tablename, bird_tablename,
+	    (long long)now, bird_tablename, bird_tablename,
 	    bird_tablename) < 0)
 		return -1;
 

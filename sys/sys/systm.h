@@ -1,4 +1,4 @@
-/*	$OpenBSD: systm.h,v 1.154 2021/06/02 00:39:25 cheloha Exp $	*/
+/*	$OpenBSD: systm.h,v 1.158 2022/08/06 15:57:59 bluhm Exp $	*/
 /*	$NetBSD: systm.h,v 1.50 1996/06/09 04:55:09 briggs Exp $	*/
 
 /*-
@@ -91,7 +91,6 @@ extern int ncpusfound;		/* number of CPUs found */
 extern int nblkdev;		/* number of entries in bdevsw */
 extern int nchrdev;		/* number of entries in cdevsw */
 
-extern int selwait;		/* select timeout address */
 extern int maxmem;		/* max memory per process */
 extern int physmem;		/* physical memory */
 
@@ -114,7 +113,7 @@ struct process;
 
 typedef int	sy_call_t(struct proc *, void *, register_t *);
 
-extern struct sysent {		/* system call table */
+extern const struct sysent {	/* system call table */
 	short	sy_narg;	/* number of args */
 	short	sy_argsize;	/* total size of arguments */
 	int	sy_flags;
@@ -151,8 +150,6 @@ int	enoioctl(void);
 int	enxio(void);
 int	eopnotsupp(void *);
 
-int	seltrue(dev_t dev, int which, struct proc *);
-int	selfalse(dev_t dev, int which, struct proc *);
 void	*hashinit(int, int, int, u_long *);
 void	 hashfree(void *, int, int);
 int	sys_nosys(struct proc *, void *, register_t *);
@@ -326,23 +323,17 @@ extern struct rwlock netlock;
 #define	NET_UNLOCK()	do { rw_exit_write(&netlock); } while (0)
 
 /*
- * Reader version of NET_LOCK() to be used in "softnet" thread only.
-
+ * Reader version of NET_LOCK().
  * The "softnet" thread should be the only thread processing packets
  * without holding an exclusive lock.  This is done to allow read-only
  * ioctl(2) to not block.
- */
-#define	NET_RLOCK_IN_SOFTNET()	do { rw_enter_read(&netlock); } while (0)
-#define	NET_RUNLOCK_IN_SOFTNET()do { rw_exit_read(&netlock); } while (0)
-
-/*
- * Reader version of NET_LOCK() to be used in ioctl/sysctl path only.
- *
- * Can be grabbed instead of the exclusive version when no field
+ * Shared lock can be grabbed instead of the exclusive version if no field
  * protected by the NET_LOCK() is modified by the ioctl/sysctl.
+ * Socket system call can use shared netlock if it has additional locks
+ * to protect socket and pcb data structures.
  */
-#define	NET_RLOCK_IN_IOCTL()	do { rw_enter_read(&netlock); } while (0)
-#define	NET_RUNLOCK_IN_IOCTL()	do { rw_exit_read(&netlock); } while (0)
+#define	NET_LOCK_SHARED()	do { rw_enter_read(&netlock); } while (0)
+#define	NET_UNLOCK_SHARED()	do { rw_exit_read(&netlock); } while (0)
 
 #ifdef DIAGNOSTIC
 
@@ -360,7 +351,7 @@ do {									\
 		splassert_fail(RW_READ, _s, __func__);			\
 } while (0)
 
-#define	NET_ASSERT_WLOCKED()						\
+#define	NET_ASSERT_LOCKED_EXCLUSIVE()					\
 do {									\
 	int _s = rw_status(&netlock);					\
 	if ((splassert_ctl > 0) && (_s != RW_WRITE))			\
@@ -368,9 +359,9 @@ do {									\
 } while (0)
 
 #else /* DIAGNOSTIC */
-#define	NET_ASSERT_UNLOCKED()	do {} while (0)
-#define	NET_ASSERT_LOCKED()	do {} while (0)
-#define	NET_ASSERT_WLOCKED()	do {} while (0)
+#define	NET_ASSERT_UNLOCKED()		do {} while (0)
+#define	NET_ASSERT_LOCKED()		do {} while (0)
+#define	NET_ASSERT_LOCKED_EXCLUSIVE()	do {} while (0)
 #endif /* !DIAGNOSTIC */
 
 __returns_twice int	setjmp(label_t *);
@@ -404,6 +395,7 @@ extern int (*mountroot)(void);
 #if defined(DDB)
 /* debugger entry points */
 void	db_enter(void);	/* in DDB only */
+int	db_rint(int);
 #endif
 
 #ifdef BOOT_CONFIG

@@ -1,4 +1,4 @@
-/*	$OpenBSD: umidi.c,v 1.54 2020/07/31 10:49:33 mglocker Exp $	*/
+/*	$OpenBSD: umidi.c,v 1.56 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: umidi.c,v 1.16 2002/07/11 21:14:32 augustss Exp $	*/
 /*
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
@@ -37,8 +37,6 @@
 #include <sys/ioctl.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
-#include <sys/selinfo.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -116,7 +114,7 @@ static void out_intr(struct usbd_xfer *, void *, usbd_status);
 static int out_build_packet(int, struct umidi_packet *, uByte, u_char *);
 
 
-struct midi_hw_if umidi_hw_if = {
+const struct midi_hw_if umidi_hw_if = {
 	umidi_open,
 	umidi_close,
 	umidi_output,

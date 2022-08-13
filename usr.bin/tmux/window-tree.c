@@ -1,4 +1,4 @@
-/* $OpenBSD: window-tree.c,v 1.56 2021/08/20 19:50:17 nicm Exp $ */
+/* $OpenBSD: window-tree.c,v 1.62 2022/07/04 08:39:45 nicm Exp $ */
 
 /*
  * Copyright (c) 2017 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -272,9 +272,10 @@ window_tree_cmp_window(const void *a0, const void *b0)
 static int
 window_tree_cmp_pane(const void *a0, const void *b0)
 {
-	const struct window_pane *const	*a = a0;
-	const struct window_pane *const	*b = b0;
-	int				 result;
+	struct window_pane	**a = (struct window_pane **)a0;
+	struct window_pane	**b = (struct window_pane **)b0;
+	int			  result;
+	u_int			  ai, bi;
 
 	if (window_tree_sort->field == WINDOW_TREE_BY_TIME)
 		result = (*a)->active_point - (*b)->active_point;
@@ -283,7 +284,9 @@ window_tree_cmp_pane(const void *a0, const void *b0)
 		 * Panes don't have names, so use number order for any other
 		 * sort field.
 		 */
-		result = (*a)->id - (*b)->id;
+		window_pane_index(*a, &ai);
+		window_pane_index(*b, &bi);
+		result = ai - bi;
 	}
 	if (window_tree_sort->reversed)
 		result = -result;
@@ -519,7 +522,8 @@ window_tree_draw_label(struct screen_write_ctx *ctx, u_int px, u_int py,
 
 	if (ox > 1 && ox + len < sx - 1 && sy >= 3) {
 		screen_write_cursormove(ctx, px + ox - 1, py + oy - 1, 0);
-		screen_write_box(ctx, len + 2, 3);
+		screen_write_box(ctx, len + 2, 3, BOX_LINES_DEFAULT, NULL,
+		    NULL);
 	}
 	screen_write_cursormove(ctx, px + ox, py + oy, 0);
 	screen_write_puts(ctx, gc, "%s", label);
@@ -894,7 +898,7 @@ window_tree_get_key(void *modedata, void *itemdata, u_int line)
 	key = key_string_lookup_string(expanded);
 	free(expanded);
 	format_free(ft);
-	return key;
+	return (key);
 }
 
 static struct screen *
@@ -1242,12 +1246,17 @@ window_tree_key(struct window_mode_entry *wme, struct client *c,
 
 	item = mode_tree_get_current(data->data);
 	finished = mode_tree_key(data->data, c, &key, m, &x, &y);
+
+again:
 	if (item != (new_item = mode_tree_get_current(data->data))) {
 		item = new_item;
 		data->offset = 0;
 	}
-	if (KEYC_IS_MOUSE(key) && m != NULL)
+	if (KEYC_IS_MOUSE(key) && m != NULL) {
 		key = window_tree_mouse(data, key, x, item);
+		goto again;
+	}
+
 	switch (key) {
 	case '<':
 		data->offset--;

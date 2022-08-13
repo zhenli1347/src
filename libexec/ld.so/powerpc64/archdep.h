@@ -1,4 +1,4 @@
-/*	$OpenBSD: archdep.h,v 1.2 2020/07/18 16:41:43 kettenis Exp $ */
+/*	$OpenBSD: archdep.h,v 1.4 2022/01/16 02:16:40 guenther Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -30,19 +30,12 @@
 #define _POWERPC_ARCHDEP_H_
 
 #define	RELOC_TAG	DT_RELA
+#define	MACHID		EM_PPC64	/* ELF e_machine ID value checked */
 
-#define	MACHID	EM_PPC64	/* ELF e_machine ID value checked */
 
-#include <elf.h>
-#include <machine/reloc.h>
-#include "syscall.h"
-#include "util.h"
+#ifdef RCRT0
 
-/*
- *	The following functions are declared inline so they can
- *	be used before bootstrap linking has been finished.
- */
-
+/* currently only used by RELOC_DYN() below */
 static inline void
 _dl_dcbf(Elf_Addr *addr)
 {
@@ -54,8 +47,9 @@ _dl_dcbf(Elf_Addr *addr)
 	    : : "r" (addr) : "0");
 }
 
+/* Only used in lib/csu/boot.h */
 static inline void
-RELOC_DYN(Elf_RelA *r, const Elf_Sym *s, Elf_Addr *p, unsigned long v)
+RELOC_DYN(const Elf_RelA *r, const Elf_Sym *s, Elf_Addr *p, unsigned long v)
 {
 	if (ELF_R_TYPE(r->r_info) == R_PPC64_RELATIVE) {
 		*p = v + r->r_addend;
@@ -78,6 +72,5 @@ RELOC_DYN(Elf_RelA *r, const Elf_Sym *s, Elf_Addr *p, unsigned long v)
 	}
 }
 
-#define RELOC_GOT(obj, offs)
-
+#endif /* RCRT0 */
 #endif /* _POWERPC_ARCHDEP_H_ */

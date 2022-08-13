@@ -1,4 +1,4 @@
-/*	$OpenBSD: cfxga.c,v 1.31 2020/05/25 09:55:49 jsg Exp $	*/
+/*	$OpenBSD: cfxga.c,v 1.33 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2005, 2006, Matthieu Herrb and Miodrag Vallat
@@ -99,7 +99,7 @@ void	cfxga_attach(struct device *, struct device *, void *);
 int	cfxga_detach(struct device *, int);
 int	cfxga_activate(struct device *, int);
 
-struct cfattach cfxga_ca = {
+const struct cfattach cfxga_ca = {
 	sizeof(struct cfxga_softc), cfxga_match, cfxga_attach,
 	cfxga_detach, cfxga_activate
 };
@@ -595,11 +595,14 @@ cfxga_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		scr = sc->sc_active;
 		if (scr == NULL) {
 			/* try later...after running wsconscfg to add screens */
-			wdf->height = wdf->width = wdf->depth = wdf->cmsize = 0;
+			wdf->height = wdf->width = wdf->depth = 0;
+			wdf->stride = wdf->offset = wdf->cmsize = 0;
 		} else {
 			wdf->height = scr->scr_ri.ri_height;
 			wdf->width = scr->scr_ri.ri_width;
 			wdf->depth = scr->scr_ri.ri_depth;
+			wdf->stride = scr->scr_ri.ri_stride;
+			wdf->offset = 0;
 			wdf->cmsize = scr->scr_ri.ri_depth <= 8 ?
 			    (1 << scr->scr_ri.ri_depth) : 0;
 		}

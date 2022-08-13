@@ -1,4 +1,4 @@
-/*	$OpenBSD: scif.c,v 1.20 2021/01/01 10:21:26 jan Exp $	*/
+/*	$OpenBSD: scif.c,v 1.22 2022/07/02 08:50:41 visa Exp $	*/
 /*	$NetBSD: scif.c,v 1.47 2006/07/23 22:06:06 ad Exp $ */
 
 /*-
@@ -225,7 +225,7 @@ unsigned int scifcn_speed = 9600;
 
 u_int scif_rbuf_size = SCIF_RING_SIZE;
 
-struct cfattach scif_ca = {
+const struct cfattach scif_ca = {
 	sizeof(struct scif_softc), scif_match, scif_attach
 };
 
@@ -800,17 +800,6 @@ scifwrite(dev_t dev, struct uio *uio, int flag)
 
 	return ((*linesw[tp->t_line].l_write)(tp, uio, flag));
 }
-
-#if 0
-int
-scifpoll(dev_t dev, int events, struct proc *p)
-{
-	struct scif_softc *sc = scif_cd.cd_devs[SCIFUNIT(dev)];
-	struct tty *tp = sc->sc_tty;
-
-	return ((*linesw[tp->t_line].l_poll)(tp, events, p));
-}
-#endif
 
 struct tty *
 sciftty(dev_t dev)

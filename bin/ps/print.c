@@ -1,4 +1,4 @@
-/*	$OpenBSD: print.c,v 1.77 2021/08/28 20:54:54 chrisz Exp $	*/
+/*	$OpenBSD: print.c,v 1.82 2022/02/15 23:16:00 rob Exp $	*/
 /*	$NetBSD: print.c,v 1.27 1995/09/29 21:58:12 cgd Exp $	*/
 
 /*-
@@ -30,8 +30,9 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>	/* MAXCOMLEN PZERO NODEV */
+#include <sys/param.h>	/* PZERO NODEV */
 #include <sys/types.h>
+#include <sys/signal.h>
 #include <sys/proc.h>
 #include <sys/stat.h>
 
@@ -288,6 +289,8 @@ printstate(const struct kinfo_proc *kp, VARENT *ve)
 		else
 			*cp++ = 'u';
 	}
+	if (kp->p_psflags & PS_CHROOT)
+		*cp++ = 'c';
 	*cp = '\0';
 
 	if (state == 'R' && kp->p_cpuid != KI_NOCPU) {
@@ -784,14 +787,4 @@ pvar(const struct kinfo_proc *kp, VARENT *ve)
 		(void)printf("%*s", v->width, "-");
 	else
 		printval((char *)kp + v->off, v);
-}
-
-void
-emulname(const struct kinfo_proc *kp, VARENT *ve)
-{
-	VAR *v;
-
-	v = ve->var;
-
-	(void)printf("%-*s", (int)v->width, kp->p_emul);
 }

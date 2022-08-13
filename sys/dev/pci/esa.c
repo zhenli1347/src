@@ -1,4 +1,4 @@
-/*	$OpenBSD: esa.c,v 1.35 2018/09/14 08:37:34 miko Exp $	*/
+/*	$OpenBSD: esa.c,v 1.38 2022/03/21 19:22:41 miod Exp $	*/
 /* $NetBSD: esa.c,v 1.12 2002/03/24 14:17:35 jmcneill Exp $ */
 
 /*
@@ -151,7 +151,7 @@ void		esa_remove_list(struct esa_voice *, struct esa_list *, int);
 void		esa_suspend(struct esa_softc *);
 void		esa_resume(struct esa_softc *);
 
-struct audio_hw_if esa_hw_if = {
+const struct audio_hw_if esa_hw_if = {
 	esa_open,
 	esa_close,
 	esa_set_params,
@@ -180,7 +180,7 @@ struct cfdriver esa_cd = {
 	NULL, "esa", DV_DULL
 };
 
-struct cfattach esa_ca = {
+const struct cfattach esa_ca = {
 	sizeof(struct esa_softc), esa_match, esa_attach,
 	esa_detach, esa_activate
 };
@@ -1048,7 +1048,7 @@ esa_attach(struct device *parent, struct device *self, void *aux)
 		sc->voice[i].parent = (struct device *)sc;
 		sc->voice[i].index = i;
 		sc->sc_audiodev[i] =
-		    audio_attach_mi(&esa_hw_if, &sc->voice[i], &sc->sc_dev);
+		    audio_attach_mi(&esa_hw_if, &sc->voice[i], NULL, &sc->sc_dev);
 	}
 }
 

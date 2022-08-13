@@ -1,4 +1,4 @@
-/*	$OpenBSD: machfb.c,v 1.11 2020/05/25 09:55:48 jsg Exp $	*/
+/*	$OpenBSD: machfb.c,v 1.13 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Mark Kettenis.
@@ -201,7 +201,7 @@ struct wsdisplay_accessops machfb_accessops = {
 int	machfb_match(struct device *, void *, void *);
 void	machfb_attach(struct device *, struct device *, void *);
 
-struct cfattach machfb_ca = {
+const struct cfattach machfb_ca = {
 	sizeof(struct machfb_softc), machfb_match, machfb_attach
 };
 
@@ -347,6 +347,8 @@ machfb_ioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 256;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

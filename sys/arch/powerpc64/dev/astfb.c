@@ -1,4 +1,4 @@
-/*	$OpenBSD: astfb.c,v 1.3 2020/10/30 13:36:45 kettenis Exp $	*/
+/*	$OpenBSD: astfb.c,v 1.5 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis.
@@ -70,7 +70,7 @@ struct wsdisplay_accessops astfb_accessops = {
 int	astfb_match(struct device *, void *, void *);
 void	astfb_attach(struct device *, struct device *, void *);
 
-struct cfattach astfb_ca = {
+const struct cfattach astfb_ca = {
 	sizeof(struct astfb_softc), astfb_match, astfb_attach
 };
 
@@ -201,6 +201,8 @@ astfb_wsioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->width = ri->ri_width;
 		wdf->height = ri->ri_height;
 		wdf->depth = ri->ri_depth;
+		wdf->stride = ri->ri_stride;
+		wdf->offset = 0;
 		wdf->cmsize = 0;	/* color map is unavailable */
 		break;
 	case WSDISPLAYIO_LINEBYTES:

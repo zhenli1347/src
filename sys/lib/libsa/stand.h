@@ -1,4 +1,4 @@
-/*	$OpenBSD: stand.h,v 1.70 2020/12/09 18:10:19 krw Exp $	*/
+/*	$OpenBSD: stand.h,v 1.72 2021/12/01 17:25:35 kettenis Exp $	*/
 /*	$NetBSD: stand.h,v 1.18 1996/11/30 04:35:51 gwr Exp $	*/
 
 /*-
@@ -107,10 +107,11 @@ struct open_file {
 extern struct open_file files[];
 
 /* f_flags values */
-#define	F_READ		0x0001	/* file opened for reading */
-#define	F_WRITE		0x0002	/* file opened for writing */
-#define	F_RAW		0x0004	/* raw device open - no file system */
-#define F_NODEV		0x0008	/* network open - no device */
+#define F_READ          0x0001 /* file opened for reading */
+#define F_WRITE         0x0002 /* file opened for writing */
+#define F_RAW           0x0004 /* raw device open - no file system */
+#define F_NODEV         0x0008 /* network open - no device */
+#define F_NOWRITE       0x0010 /* bootblock writing broken or unsupported */
 
 #define isupper(c)	((c) >= 'A' && (c) <= 'Z')
 #define islower(c)	((c) >= 'a' && (c) <= 'z')
@@ -159,6 +160,9 @@ long long	strtoll(const char *, char **, int);
 char	*strchr(const char *, int);
 void	*memset(void *, int, size_t);
 void	exit(void);
+#define O_RDONLY        0x0000          /* open for reading only */
+#define O_WRONLY        0x0001          /* open for writing only */
+#define O_RDWR          0x0002          /* open for reading and writing */
 int	open(const char *, int);
 int	close(int);
 void	closeall(void);

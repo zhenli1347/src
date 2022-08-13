@@ -1,4 +1,4 @@
-/*	$OpenBSD: gfb.c,v 1.2 2013/10/20 20:07:27 miod Exp $	*/
+/*	$OpenBSD: gfb.c,v 1.4 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Mark Kettenis.
@@ -50,7 +50,7 @@ struct cfdriver gfb_cd = {
 	NULL, "gfb", DV_DULL
 };
 
-struct cfattach gfb_ca = {
+const struct cfattach gfb_ca = {
 	sizeof(struct gfb_softc), gfb_match, gfb_attach
 };
 
@@ -117,6 +117,8 @@ gfb_ioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 256;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

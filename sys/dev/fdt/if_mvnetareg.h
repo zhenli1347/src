@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mvnetareg.h,v 1.2 2020/11/29 13:00:23 kettenis Exp $	*/
+/*	$OpenBSD: if_mvnetareg.h,v 1.7 2022/06/03 03:17:36 dlg Exp $	*/
 /*	$NetBSD: mvnetareg.h,v 1.8 2013/12/23 02:23:25 kiyohara Exp $	*/
 /*
  * Copyright (c) 2007, 2013 KIYOHARA Takashi
@@ -138,7 +138,7 @@
 				/* Transmit Queue Arbiter Configuration */
 
 #define MVNETA_PCP2Q(cpu)	(0x2540 + ((cpu) << 2))	/* Port CPUn to Queue */
-#define MVNETA_PRXITTH(q)	(0x2540 + ((q) << 2) /* Port RX Intr Threshold*/
+#define MVNETA_PRXITTH(q)	(0x2580 + ((q) << 2)) /* Port RX Intr Threshold*/
 #define MVNETA_PRXTXTIC		0x25a0	/*Port RX_TX Threshold Interrupt Cause*/
 #define MVNETA_PRXTXTIM		0x25a4	/*Port RX_TX Threshold Interrupt Mask */
 #define MVNETA_PRXTXIC		0x25a8	/* Port RX_TX Interrupt Cause */
@@ -525,8 +525,11 @@
 #define MVNETA_PRXS_NODC(x)		(((x) >> 16) & 0x3fff)
 
 /* Port RX queues Status Update (MVNETA_PRXSU) */
-#define MVNETA_PRXSU_NOOFPROCESSEDDESCRIPTORS(x) (((x) & 0xff) << 0)
-#define MVNETA_PRXSU_NOOFNEWDESCRIPTORS(x) (((x) & 0xff) << 16)
+#define MVNETA_PRXSU_MAX		0xff /* works as a mask too */
+					/* Number Of Processed Descriptors */
+#define MVNETA_PRXSU_NOPD(x)		(((x) & MVNETA_PRXSU_MAX) << 0)
+					/* Number Of New Descriptors */
+#define MVNETA_PRXSU_NOND(x)		(((x) & MVNETA_PRXSU_MAX) << 16)
 
 /* Port RX Flow Control (MVNETA_PRXFC) */
 #define MVNETA_PRXFC_PERPRIOFCGENCONTROL	(1 << 0)
@@ -560,10 +563,11 @@
 #define MVNETA_PTXS_TBC(x)		(((x) >> 16) & 0x3fff)
 
 /* Port TX queues Status Update (MVNETA_PTXSU) */
-					/* Number Of Written Descriptoes */
-#define MVNETA_PTXSU_NOWD(x)		(((x) & 0xff) << 0)
+#define MVNETA_PTXSU_MAX		0xff /* works as a mask too */
+					/* Number Of Written Descriptors */
+#define MVNETA_PTXSU_NOWD(x)		(((x) & MVNETA_PTXSU_MAX) << 0)
 					/* Number Of Released Buffers */
-#define MVNETA_PTXSU_NORB(x)		(((x) & 0xff) << 16)
+#define MVNETA_PTXSU_NORB(x)		(((x) & MVNETA_PTXSU_MAX) << 16)
 
 /* TX Transmitted Buffers Counter (MVNETA_TXTBC) */
 					/* Transmitted Buffers Counter */
@@ -761,7 +765,7 @@
 /*
  * DMA descriptors
  *    Despite the documentation saying these descriptors only need to be
- *    aligned to 16-byte bondaries, 32-byte alignment seems to be required
+ *    aligned to 16-byte boundaries, 32-byte alignment seems to be required
  *    by the hardware.  We'll just pad them out to that to make it easier.
  */
 struct mvneta_tx_desc {
@@ -779,7 +783,7 @@ struct mvneta_tx_desc {
 	uint32_t nextdescptr;		/* Next descriptor pointer */
 #endif
 	uint32_t _padding[4];
-} __packed;
+} __packed __aligned(32);
 
 struct mvneta_rx_desc {
 #if BYTE_ORDER == BIG_ENDIAN
@@ -796,7 +800,7 @@ struct mvneta_rx_desc {
 	uint32_t nextdescptr;		/* Next descriptor pointer */
 #endif
 	uint32_t _padding[4];
-} __packed;
+} __packed __aligned(32);
 
 #define MVNETA_ERROR_SUMMARY		(1 << 0)
 #define MVNETA_BUFFER_OWNED_MASK		(1U << 31)

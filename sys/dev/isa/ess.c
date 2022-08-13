@@ -1,4 +1,4 @@
-/*	$OpenBSD: ess.c,v 1.25 2021/03/07 06:17:03 jsg Exp $	*/
+/*	$OpenBSD: ess.c,v 1.28 2022/03/21 19:22:40 miod Exp $	*/
 /*	$NetBSD: ess.c,v 1.44.4.1 1999/06/21 01:18:00 thorpej Exp $	*/
 
 /*
@@ -197,7 +197,7 @@ static char *essmodel[] = {
  * Define our interface to the higher level audio driver.
  */
 
-struct audio_hw_if ess_1788_hw_if = {
+const struct audio_hw_if ess_1788_hw_if = {
 	ess_open,
 	ess_1788_close,
 	ess_set_params,
@@ -222,7 +222,7 @@ struct audio_hw_if ess_1788_hw_if = {
 	ess_audio1_trigger_input
 };
 
-struct audio_hw_if ess_1888_hw_if = {
+const struct audio_hw_if ess_1888_hw_if = {
 	ess_open,
 	ess_1888_close,
 	ess_set_params,
@@ -716,7 +716,7 @@ ess_identify(struct ess_softc *sc)
 			 *    register 0x69 independently of mixer register
 			 *    0x68. This determines which chip we have:
 			 *
-			 *    - can modify idependently indicates ES888
+			 *    - can modify independently indicates ES888
 			 *    - register 0x69 is an alias of 0x68 indicates ES1888
 			 */
 			reg1 = ess_read_mix_reg(sc, 0x68);
@@ -975,9 +975,9 @@ essattach(struct ess_softc *sc)
 	sc->spkr_state = SPKR_OFF;
 
 	if (ESS_USE_AUDIO1(sc->sc_model))
-		audio_attach_mi(&ess_1788_hw_if, sc, &sc->sc_dev);
+		audio_attach_mi(&ess_1788_hw_if, sc, NULL, &sc->sc_dev);
 	else
-		audio_attach_mi(&ess_1888_hw_if, sc, &sc->sc_dev);
+		audio_attach_mi(&ess_1888_hw_if, sc, NULL, &sc->sc_dev);
 
 	arg.type = AUDIODEV_TYPE_OPL;
 	arg.hwif = 0;
@@ -2309,7 +2309,7 @@ ess_srtotc(u_int rate)
 
 
 /*
- * Calculate the filter constant for the reuqested sampling rate.
+ * Calculate the filter constant for the requested sampling rate.
  */
 u_int
 ess_srtofc(u_int rate)

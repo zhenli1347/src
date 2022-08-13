@@ -1,4 +1,4 @@
-/*	$OpenBSD: ce4231.c,v 1.36 2018/12/27 11:06:38 claudio Exp $	*/
+/*	$OpenBSD: ce4231.c,v 1.39 2022/03/21 19:22:39 miod Exp $	*/
 
 /*
  * Copyright (c) 1999 Jason L. Wright (jason@thought.net)
@@ -150,7 +150,7 @@ int	ce4231_trigger_output(void *, void *, void *, int,
 int	ce4231_trigger_input(void *, void *, void *, int,
     void (*intr)(void *), void *arg, struct audio_params *);
 
-struct audio_hw_if ce4231_sa_hw_if = {
+const struct audio_hw_if ce4231_sa_hw_if = {
 	ce4231_open,
 	ce4231_close,
 	ce4231_set_params,
@@ -175,7 +175,7 @@ struct audio_hw_if ce4231_sa_hw_if = {
 	ce4231_trigger_input
 };
 
-struct cfattach audioce_ca = {
+const struct cfattach audioce_ca = {
 	sizeof (struct ce4231_softc), ce4231_match, ce4231_attach
 };
 
@@ -268,7 +268,7 @@ ce4231_attach(struct device *parent, struct device *self, void *aux)
 
 	printf(": nvaddrs %d\n", ea->ea_nvaddrs);
 
-	audio_attach_mi(&ce4231_sa_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&ce4231_sa_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* Enable mode 2. */
 	ce4231_write(sc, SP_MISC_INFO, ce4231_read(sc, SP_MISC_INFO) | MODE2);

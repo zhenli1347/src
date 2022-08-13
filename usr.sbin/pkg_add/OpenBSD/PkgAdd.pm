@@ -1,7 +1,7 @@
 #! /usr/bin/perl
 
 # ex:ts=8 sw=4:
-# $OpenBSD: PkgAdd.pm,v 1.120 2021/06/28 14:17:01 espie Exp $
+# $OpenBSD: PkgAdd.pm,v 1.138 2022/07/29 14:26:45 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -26,18 +26,26 @@ package OpenBSD::PackingList;
 
 sub uses_old_libs
 {
-	my $plist = shift;
+	my ($plist, $state) = @_;
 	require OpenBSD::RequiredBy;
 
-	return  grep {/^\.libs\d*\-/o}
-	    OpenBSD::Requiring->new($plist->pkgname)->list;
+	if (grep {/^\.libs\d*\-/o}
+	    OpenBSD::Requiring->new($plist->pkgname)->list) {
+	    	$state->say("#1 still uses old .libs",  $plist->pkgname)
+		    if $state->verbose >= 3;
+		return 1;
+	} else {
+	    	return 0;
+	}
 }
 
 sub has_different_sig
 {
 	my ($plist, $state) = @_;
 	if (!defined $plist->{different_sig}) {
-		my $n = OpenBSD::PackingList->from_installation($plist->pkgname)->signature;
+		my $n = 
+		    OpenBSD::PackingList->from_installation($plist->pkgname, 
+			\&OpenBSD::PackingList::UpdateInfoOnly)->signature;
 		my $o = $plist->signature;
 		my $r = $n->compare($o, $state);
 		$state->print("Comparing full signature for #1 \"#2\" vs. \"#3\":",
@@ -73,37 +81,61 @@ sub tie_files
 package OpenBSD::PackingElement::FileBase;
 sub hash_files
 {
-	my ($self, $sha, $state) = @_;
+	my ($self, $state, $sha) = @_;
 	return if $self->{link} or $self->{symlink} or $self->{nochecksum};
 	if (defined $self->{d}) {
-		$sha->{$self->{d}->key} = $self;
+		$sha->{$self->{d}->key}{$self->name} = $self;
 	}
 }
 
 sub tie_files
 {
-	my ($self, $sha, $state) = @_;
+	my ($self, $state, $sha) = @_;
 	return if $self->{link} or $self->{symlink} or $self->{nochecksum};
 	# XXX python doesn't like this, overreliance on timestamps
+
 	return if $self->{name} =~ m/\.py$/ && !defined $self->{ts};
-	if (defined $sha->{$self->{d}->key}) {
-		my $tied = $sha->{$self->{d}->key};
-		# don't tie if there's a problem with the file
-		my $realname = $tied->realname($state);
-		return unless -f $realname;
-		# and do a sanity check that this file wasn't altered
-		return unless (stat _)[7] == $self->{size};
-		if ($state->defines('checksum')) {
-			my $d = $self->compute_digest($realname, $self->{d});
-			# XXX we don't have to display anything here
-			# because delete will take care of that
-			return unless $d->equals($self->{d});
+
+	my $h = $sha->{$self->{d}->key};
+	return if !defined $h;
+
+	my ($tied, $realname);
+	my $c = $h->{$self->name};
+	# first we try to match with the same name
+	if (defined $c) {
+		$realname = $c->realname($state);
+		# don't tie if the file doesn't exist
+		if (-f $realname && 
+		# or was altered
+		    (stat _)[7] == $self->{size}) {
+			$tied = $c;
 		}
-		$self->{tieto} = $tied;
-		$tied->{tied} = 1;
-		$state->say("Tying #1 to #2", $self->stringize,
-		    $tied->stringize) if $state->verbose >= 3;
 	}
+	# otherwise we grab any other match under similar rules
+	if (!defined $tied) {
+		for my $c ( values %{$h} ) {
+			$realname = $c->realname($state);
+			next unless -f $realname;
+			next unless (stat _)[7] == $self->{size};
+			$tied = $c;
+			last;
+		}
+	}
+	return if !defined $tied;
+
+	if ($state->defines('checksum')) {
+		my $d = $self->compute_digest($realname, $self->{d});
+		# XXX we don't have to display anything here
+		# because delete will take care of that
+		return unless $d->equals($self->{d});
+	}
+	# so we found a match that find_extractible will use
+	$self->{tieto} = $tied;
+	# and we also need to tell size computation we won't be needing 
+	# extra diskspace for this.
+	$tied->{tied} = 1;
+	$state->say("Tying #1 to #2", $self->stringize, $realname) 
+	    if $state->verbose >= 3;
 }
 
 package OpenBSD::PkgAdd::State;
@@ -328,14 +360,12 @@ sub display_timestamp
 
 sub find_kept_handle
 {
-	my ($set, $n,  $state) = @_;
-	unless (defined $n->{location} && defined $n->{location}{update_info}) {
-		$n->complete($state);
-	}
+	my ($set, $n, $state) = @_;
 	my $plist = $n->dependency_info;
 	return if !defined $plist;
 	my $pkgname = $plist->pkgname;
 	if ($set->{quirks}) {
+		$n->{location}->decorate($plist);
 		display_timestamp($pkgname, $plist, $state);
 	}
 	# condition for no update
@@ -343,7 +373,7 @@ sub find_kept_handle
 	    (!$state->{allow_replacing} ||
 	      !$state->defines('installed') &&
 	      !$plist->has_different_sig($state) &&
-	      !$plist->uses_old_libs)) {
+	      !$plist->uses_old_libs($state))) {
 	      	$set->check_security($state, $plist, $n);
 	      	return;
 	}
@@ -358,6 +388,11 @@ sub find_kept_handle
 		}
 	}
 	$set->check_security($state, $plist, $o);
+	if ($set->{quirks}) {
+		# The installed package has inst: for a location, we want
+		# the newer one (which is identical)
+		$n->location->{repository}->setup_cache($state->{setlist});
+	}
 	$set->move_kept($o);
 	$o->{tweaked} =
 	    OpenBSD::Add::tweak_package_status($pkgname, $state);
@@ -375,6 +410,23 @@ sub figure_out_kept
 
 	for my $n ($set->newer) {
 		$set->find_kept_handle($n, $state);
+	}
+}
+
+sub precomplete_handle
+{
+	my ($set, $n, $state) = @_;
+	unless (defined $n->{location} && defined $n->{location}{update_info}) {
+		$n->complete($state);
+	}
+}
+
+sub precomplete
+{
+	my ($set, $state) = @_;
+
+	for my $n ($set->newer) {
+		$set->precomplete_handle($n, $state);
 	}
 }
 
@@ -503,8 +555,8 @@ sub install_issues
 		if (defined $s && $s ne $set) {
 			$set->merge($state->tracker, $s);
 		} else {
-			$set->add_older(OpenBSD::Handle->create_old($toreplace,
-			    $state));
+			my $h = OpenBSD::Handle->create_old($toreplace, $state);
+			$set->add_older($h);
 		}
 	}
 
@@ -655,6 +707,8 @@ sub partial_install
 	return failed_message($base_msg, $state->{received}, save_partial_set($set, $state));
 }
 
+# quick sub to build the dependency arcs for older packages
+# newer packages are handled by Dependencies.pm
 sub build_before
 {
 	my %known = map {($_->pkgname, 1)} @_;
@@ -714,7 +768,7 @@ sub delete_old_packages
 		$state->set_name_from_handle($o, '-');
 		require OpenBSD::Delete;
 		try {
-			OpenBSD::Delete::delete_handle($o, $state);
+			OpenBSD::Delete::delete_plist($o->plist, $state);
 		} catch {
 			$state->errsay($_);
 			$state->fatal(partial_install(
@@ -750,13 +804,6 @@ sub really_add
 
 	my $errors = 0;
 
-	if ($state->{not}) {
-		$state->status->what("Pretending to add");
-	} else {
-		$state->status->what("Adding");
-	}
-	$set->setup_header($state);
-
 	# XXX in `combined' updates, some dependencies may remove extra
 	# packages, so we do a double-take on the list of packages we
 	# are actually replacing.
@@ -765,9 +812,6 @@ sub really_add
 		$replacing = 1;
 	}
 	$state->{replacing} = $replacing;
-	# XXX placeholder for optimization
-	$state->{simple_update} = 0;
-	#$state->{simple_update} = $set->{simple_update};
 
 	my $handler = sub {
 		$state->{received} = shift;
@@ -854,6 +898,9 @@ sub really_add
 		add_installed($pkgname);
 		delete $handle->{partial};
 		OpenBSD::PkgCfl::register($handle, $state);
+		if ($set->{quirks}) {
+			$handle->location->{repository}->setup_cache($state->{setlist});
+		}
 	}
 	delete $state->{partial};
 	$set->{solver}->register_dependencies($state);
@@ -918,14 +965,19 @@ sub newer_is_bad_arch
 sub may_tie_files
 {
 	my ($set, $state) = @_;
-	if ($set->newer > 0 && $set->older_to_do > 0 && !$state->defines('donttie')) {
+	if ($set->newer > 0 && $set->older_to_do > 0 && 
+	    !$state->defines('donttie')) {
 		my $sha = {};
 
 		for my $o ($set->older_to_do) {
-			$o->{plist}->hash_files($sha, $state);
+			$set->setup_header($state, $o, "hashing");
+			$state->progress->visit_with_count($o->{plist}, 
+			    'hash_files', $sha);
 		}
 		for my $n ($set->newer) {
-			$n->{plist}->tie_files($sha, $state);
+			$set->setup_header($state, $n, "tieing");
+			$state->progress->visit_with_count($n->{plist}, 
+			    'tie_files', $sha);
 		}
 	}
 }
@@ -940,14 +992,15 @@ sub process_set
 		return ();
 	}
 
+	$set->setup_header($state, undef, "processing");
+	$state->progress->message("...");
+	$set->precomplete($state);
 	for my $handle ($set->newer) {
 		if ($state->tracker->is_installed($handle->pkgname)) {
 			$set->move_kept($handle);
 			$handle->{tweaked} = OpenBSD::Add::tweak_package_status($handle->pkgname, $state);
 		}
 	}
-
-	$set->figure_out_kept($state);
 
 	if (newer_has_errors($set, $state)) {
 		return ();
@@ -962,6 +1015,8 @@ sub process_set
 		$set->solver->check_for_loops($state);
 		return (@deps, $set);
 	}
+
+	$set->figure_out_kept($state);
 
 	if ($set->newer == 0 && $set->older_to_do == 0) {
 		$state->tracker->uptodate($set);
@@ -1039,13 +1094,18 @@ sub process_set
 	if ($state->verbose && !$set->{simple_update}) {
 		$state->say("Update Set #1 runs exec commands", $set->print);
 	}
-	may_tie_files($set, $state);
 	if ($set->newer > 0 || $set->older_to_do > 0) {
+		if ($state->{not}) {
+			$state->status->what("Pretending to add");
+		} else {
+			$state->status->what("Adding");
+		}
 		for my $h ($set->newer) {
 			$h->plist->set_infodir($h->location->info);
 			delete $h->location->{contents};
 		}
 
+		may_tie_files($set, $state);
 		if (!$set->validate_plists($state)) {
 			$state->{bad}++;
 			$set->cleanup(OpenBSD::Handle::CANT_INSTALL,

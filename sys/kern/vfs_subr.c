@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_subr.c,v 1.306 2021/08/31 15:31:28 claudio Exp $	*/
+/*	$OpenBSD: vfs_subr.c,v 1.316 2022/08/12 14:30:52 visa Exp $	*/
 /*	$NetBSD: vfs_subr.c,v 1.53 1996/04/22 01:39:13 christos Exp $	*/
 
 /*
@@ -98,6 +98,7 @@ int suid_clear = 1;		/* 1 => clear SUID / SGID on owner change */
 	LIST_NEXT(bp, b_vnbufs) = NOLIST;				\
 }
 
+TAILQ_HEAD(freelst, vnode);
 struct freelst vnode_hold_list;	/* list of vnodes referencing buffers */
 struct freelst vnode_free_list;	/* vnode free list */
 
@@ -271,8 +272,8 @@ vfs_rootmountalloc(char *fstypename, char *devname, struct mount **mpp)
 	mp = vfs_mount_alloc(NULLVP, vfsp);
 	mp->mnt_flag |= MNT_RDONLY;
 	mp->mnt_stat.f_mntonname[0] = '/';
-	copystr(devname, mp->mnt_stat.f_mntfromname, MNAMELEN, 0);
-	copystr(devname, mp->mnt_stat.f_mntfromspec, MNAMELEN, 0);
+	copystr(devname, mp->mnt_stat.f_mntfromname, MNAMELEN, NULL);
+	copystr(devname, mp->mnt_stat.f_mntfromspec, MNAMELEN, NULL);
 	*mpp = mp;
 	return (0);
  }
@@ -410,6 +411,7 @@ getnewvnode(enum vtagtype tag, struct mount *mp, const struct vops *vops,
 		vp = pool_get(&vnode_pool, PR_WAITOK | PR_ZERO);
 		vp->v_uvm = pool_get(&uvm_vnode_pool, PR_WAITOK | PR_ZERO);
 		vp->v_uvm->u_vnode = vp;
+		uvm_obj_init(&vp->v_uvm->u_obj, &uvm_vnodeops, 0);
 		RBT_INIT(buf_rb_bufs, &vp->v_bufs_tree);
 		cache_tree_init(&vp->v_nc_tree);
 		TAILQ_INIT(&vp->v_cache_dst);
@@ -427,7 +429,7 @@ getnewvnode(enum vtagtype tag, struct mount *mp, const struct vops *vops,
 		if (vp == NULL) {
 			splx(s);
 			tablefull("vnode");
-			*vpp = 0;
+			*vpp = NULL;
 			return (ENFILE);
 		}
 
@@ -464,7 +466,7 @@ getnewvnode(enum vtagtype tag, struct mount *mp, const struct vops *vops,
 	insmntque(vp, mp);
 	*vpp = vp;
 	vp->v_usecount = 1;
-	vp->v_data = 0;
+	vp->v_data = NULL;
 	return (0);
 }
 
@@ -530,7 +532,7 @@ getdevvp(dev_t dev, struct vnode **vpp, enum vtype type)
 	}
 	vp = nvp;
 	vp->v_type = type;
-	if ((nvp = checkalias(vp, dev, NULL)) != 0) {
+	if ((nvp = checkalias(vp, dev, NULL)) != NULL) {
 		vput(vp);
 		vp = nvp;
 	}
@@ -660,16 +662,16 @@ vget(struct vnode *vp, int flags)
 	}
 	mtx_leave(&vnode_mtx);
 
+	s = splbio();
 	onfreelist = vp->v_bioflag & VBIOONFREELIST;
 	if (vp->v_usecount == 0 && onfreelist) {
-		s = splbio();
 		if (vp->v_holdcnt > 0)
 			TAILQ_REMOVE(&vnode_hold_list, vp, v_freelist);
 		else
 			TAILQ_REMOVE(&vnode_free_list, vp, v_freelist);
 		vp->v_bioflag &= ~VBIOONFREELIST;
-		splx(s);
 	}
+	splx(s);
 
 	vp->v_usecount++;
 	if (flags & LK_TYPE_MASK) {
@@ -689,6 +691,8 @@ vget(struct vnode *vp, int flags)
 void
 vref(struct vnode *vp)
 {
+	KERNEL_ASSERT_LOCKED();
+
 #ifdef DIAGNOSTIC
 	if (vp->v_usecount == 0)
 		panic("vref used where vget required");
@@ -745,6 +749,7 @@ void
 vput(struct vnode *vp)
 {
 	struct proc *p = curproc;
+	int s;
 
 #ifdef DIAGNOSTIC
 	if (vp == NULL)
@@ -773,8 +778,10 @@ vput(struct vnode *vp)
 
 	VOP_INACTIVE(vp, p);
 
+	s = splbio();
 	if (vp->v_usecount == 0 && !(vp->v_bioflag & VBIOONFREELIST))
 		vputonfreelist(vp);
+	splx(s);
 }
 
 /*
@@ -786,6 +793,7 @@ int
 vrele(struct vnode *vp)
 {
 	struct proc *p = curproc;
+	int s;
 
 #ifdef DIAGNOSTIC
 	if (vp == NULL)
@@ -818,8 +826,10 @@ vrele(struct vnode *vp)
 
 	VOP_INACTIVE(vp, p);
 
+	s = splbio();
 	if (vp->v_usecount == 0 && !(vp->v_bioflag & VBIOONFREELIST))
 		vputonfreelist(vp);
+	splx(s);
 	return (1);
 }
 
@@ -827,6 +837,10 @@ vrele(struct vnode *vp)
 void
 vhold(struct vnode *vp)
 {
+	int s;
+
+	s = splbio();
+
 	/*
 	 * If it is on the freelist and the hold count is currently
 	 * zero, move it to the hold list.
@@ -837,12 +851,18 @@ vhold(struct vnode *vp)
 		TAILQ_INSERT_TAIL(&vnode_hold_list, vp, v_freelist);
 	}
 	vp->v_holdcnt++;
+
+	splx(s);
 }
 
 /* Lose interest in a vnode. */
 void
 vdrop(struct vnode *vp)
 {
+	int s;
+
+	s = splbio();
+
 #ifdef DIAGNOSTIC
 	if (vp->v_holdcnt == 0)
 		panic("vdrop: zero holdcnt");
@@ -859,6 +879,8 @@ vdrop(struct vnode *vp)
 		TAILQ_REMOVE(&vnode_hold_list, vp, v_freelist);
 		TAILQ_INSERT_TAIL(&vnode_free_list, vp, v_freelist);
 	}
+
+	splx(s);
 }
 
 /*
@@ -905,6 +927,7 @@ vflush_vnode(struct vnode *vp, void *arg)
 {
 	struct vflush_args *va = arg;
 	struct proc *p = curproc;
+	int empty, s;
 
 	if (vp == va->skipvp) {
 		return (0);
@@ -954,8 +977,11 @@ vflush_vnode(struct vnode *vp, void *arg)
 	 * XXX Might be nice to check per-fs "inode" flags, but
 	 * generally the filesystem is sync'd already, right?
 	 */
-	if ((va->flags & IGNORECLEAN) &&
-	    LIST_EMPTY(&vp->v_dirtyblkhd))
+	s = splbio();
+	empty = (va->flags & IGNORECLEAN) && LIST_EMPTY(&vp->v_dirtyblkhd);
+	splx(s);
+
+	if (empty)
 		return (0);
 
 #ifdef DEBUG_SYSCTL
@@ -988,6 +1014,7 @@ void
 vclean(struct vnode *vp, int flags, struct proc *p)
 {
 	int active, do_wakeup = 0;
+	int s;
 
 	/*
 	 * Check to see if the vnode is in use.
@@ -1062,9 +1089,11 @@ vclean(struct vnode *vp, int flags, struct proc *p)
 	if (active) {
 		vp->v_usecount--;
 		if (vp->v_usecount == 0) {
+			s = splbio();
 			if (vp->v_holdcnt > 0)
 				panic("vclean: not clean");
 			vputonfreelist(vp);
+			splx(s);
 		}
 	}
 	cache_purge(vp);
@@ -1121,6 +1150,7 @@ vgonel(struct vnode *vp, struct proc *p)
 {
 	struct vnode *vq;
 	struct vnode *vx;
+	int s;
 
 	KASSERT(vp->v_uvcount == 0);
 
@@ -1150,7 +1180,8 @@ vgonel(struct vnode *vp, struct proc *p)
 	 * If special device, remove it from special device alias list
 	 * if it is on one.
 	 */
-	if ((vp->v_type == VBLK || vp->v_type == VCHR) && vp->v_specinfo != 0) {
+	if ((vp->v_type == VBLK || vp->v_type == VCHR) &&
+	    vp->v_specinfo != NULL) {
 		if ((vp->v_flag & VALIASED) == 0 && vp->v_type == VCHR &&
 		    (cdevsw[major(vp->v_rdev)].d_flags & D_CLONE) &&
 		    (minor(vp->v_rdev) >> CLONE_SHIFT == 0)) {
@@ -1187,12 +1218,9 @@ vgonel(struct vnode *vp, struct proc *p)
 	 * Move onto the free list, unless we were called from
 	 * getnewvnode and we're not on any free list
 	 */
+	s = splbio();
 	if (vp->v_usecount == 0 &&
 	    (vp->v_bioflag & VBIOONFREELIST)) {
-		int s;
-
-		s = splbio();
-
 		if (vp->v_holdcnt > 0)
 			panic("vgonel: not clean");
 
@@ -1200,8 +1228,8 @@ vgonel(struct vnode *vp, struct proc *p)
 			TAILQ_REMOVE(&vnode_free_list, vp, v_freelist);
 			TAILQ_INSERT_HEAD(&vnode_free_list, vp, v_freelist);
 		}
-		splx(s);
 	}
+	splx(s);
 }
 
 /*
@@ -1430,7 +1458,7 @@ vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
 	struct radix_node_head *rnh;
 	int nplen, i;
 	struct radix_node *rn;
-	struct sockaddr *saddr, *smask = 0;
+	struct sockaddr *saddr, *smask = NULL;
 	int error;
 
 	if (argp->ex_addrlen == 0) {
@@ -1483,7 +1511,7 @@ vfs_hang_addrlist(struct mount *mp, struct netexport *nep,
 		goto out;
 	}
 	rn = rn_addroute(saddr, smask, rnh, np->netc_rnodes, 0);
-	if (rn == 0 || np != (struct netcred *)rn) { /* already exists */
+	if (rn == NULL || np != (struct netcred *)rn) { /* already exists */
 		error = EPERM;
 		goto out;
 	}
@@ -1752,7 +1780,7 @@ vfs_shutdown(struct proc *p)
 
 	printf("syncing disks...");
 
-	if (panicstr == 0) {
+	if (panicstr == NULL) {
 		/* Sync before unmount, in case we hang on something. */
 		sys_sync(p, NULL, NULL);
 		vfs_unmountall();
@@ -1841,9 +1869,8 @@ fs_posix_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 
 	switch (name[0]) {
 	case FS_POSIX_SETUID:
-		if (newp && securelevel > 0)
-			return (EPERM);
-		return(sysctl_int(oldp, oldlenp, newp, newlen, &suid_clear));
+		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
+		    &suid_clear));
 	default:
 		return (EOPNOTSUPP);
 	}

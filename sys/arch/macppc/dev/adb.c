@@ -1,4 +1,4 @@
-/*	$OpenBSD: adb.c,v 1.44 2021/06/23 14:12:59 cheloha Exp $	*/
+/*	$OpenBSD: adb.c,v 1.46 2022/07/02 08:50:41 visa Exp $	*/
 /*	$NetBSD: adb.c,v 1.6 1999/08/16 06:28:09 tsubai Exp $	*/
 /*	$NetBSD: adb_direct.c,v 1.14 2000/06/08 22:10:45 tsubai Exp $	*/
 
@@ -87,8 +87,6 @@
 #include <sys/param.h>
 #include <sys/device.h>
 #include <sys/fcntl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 #include <sys/proc.h>
 #include <sys/signalvar.h>
 #include <sys/timeout.h>
@@ -1553,7 +1551,7 @@ adb_restart(void)
 int	adbmatch(struct device *, void *, void *);
 void	adbattach(struct device *, struct device *, void *);
 
-struct cfattach adb_ca = {
+const struct cfattach adb_ca = {
 	sizeof(struct adb_softc), adbmatch, adbattach
 };
 

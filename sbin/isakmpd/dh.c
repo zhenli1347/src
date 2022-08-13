@@ -1,4 +1,4 @@
-/*	$OpenBSD: dh.c,v 1.22 2021/05/13 14:28:03 tb Exp $	*/
+/*	$OpenBSD: dh.c,v 1.25 2022/01/14 09:19:19 tb Exp $	*/
 
 /*
  * Copyright (c) 2010-2014 Reyk Floeter <reyk@openbsd.org>
@@ -16,7 +16,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* roundup */
 #include <string.h>
 
 #include <openssl/obj_mac.h>
@@ -26,6 +25,8 @@
 #include <openssl/bn.h>
 
 #include "dh.h"
+
+#define roundup(x, y)   ((((x)+((y)-1))/(y))*(y))
 
 int	dh_init(struct group *);
 
@@ -334,14 +335,24 @@ int
 modp_init(struct group *group)
 {
 	DH	*dh;
+	BIGNUM	*p = NULL, *g = NULL;
 
 	if ((dh = DH_new()) == NULL)
 		return (-1);
 	group->dh = dh;
 
-	if (!BN_hex2bn(&dh->p, group->spec->prime) ||
-	    !BN_hex2bn(&dh->g, group->spec->generator))
+	if (!BN_hex2bn(&p, group->spec->prime) ||
+	    !BN_hex2bn(&g, group->spec->generator)) {
+		BN_free(p);
+		BN_free(g);
 		return (-1);
+	}
+
+	if (!DH_set0_pqg(dh, p, NULL, g)) {
+		BN_free(p);
+		BN_free(g);
+		return (-1);
+	}
 
 	return (0);
 }
@@ -362,7 +373,7 @@ modp_create_exchange(struct group *group, u_int8_t *buf)
 
 	if (!DH_generate_key(dh))
 		return (-1);
-	ret = BN_bn2bin(dh->pub_key, buf);
+	ret = BN_bn2bin(DH_get0_pub_key(dh), buf);
 	if (!ret)
 		return (-1);
 

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.41 2020/12/26 00:48:56 bluhm Exp $
+#	$OpenBSD: Makefile,v 1.44 2022/06/28 15:46:07 bluhm Exp $
 
 SUBDIR += aead
 SUBDIR += aeswrap
@@ -12,6 +12,7 @@ SUBDIR += cast
 SUBDIR += certs
 SUBDIR += chacha
 SUBDIR += cms
+SUBDIR += ct
 SUBDIR += cts128
 SUBDIR += curve25519
 SUBDIR += des
@@ -33,6 +34,7 @@ SUBDIR += ige
 SUBDIR += init
 SUBDIR += md4
 SUBDIR += md5
+SUBDIR += objects
 SUBDIR += pbkdf2
 SUBDIR += pem
 SUBDIR += pkcs7
@@ -52,8 +54,6 @@ SUBDIR += symbols
 SUBDIR += utf8
 SUBDIR += wycheproof
 SUBDIR += x509
-# botan tests take 50 seconds, move to the end to fail early in other tests
-SUBDIR += botan
 
 install:
 

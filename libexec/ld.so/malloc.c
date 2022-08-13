@@ -1,4 +1,4 @@
-/*      $OpenBSD: malloc.c,v 1.32 2021/04/19 06:43:15 otto Exp $       */
+/*      $OpenBSD: malloc.c,v 1.35 2022/01/18 21:59:29 deraadt Exp $       */
 /*
  * Copyright (c) 2008, 2010, 2011 Otto Moerbeek <otto@drijf.net>
  * Copyright (c) 2012 Matthew Dempsky <matthew@openbsd.org>
@@ -23,22 +23,17 @@
  * can buy me a beer in return. Poul-Henning Kamp
  */
 
-#include <sys/param.h>	/* PAGE_SHIFT ALIGN */
+#include <sys/types.h>
 #include <sys/queue.h>
+#include <sys/time.h>
 #include <sys/mman.h>
-#include <sys/uio.h>
 #include <stdint.h>
-#include <unistd.h>
 
-#include  "archdep.h"
-#include  "resolve.h"
+#include "syscall.h"
+#include "util.h"
+#include "resolve.h"		/* for lock_cb */
 
-#if defined(__mips64__)
-#define MALLOC_PAGESHIFT	(14U)
-#else
-#define MALLOC_PAGESHIFT	(PAGE_SHIFT)
-#endif
-
+#define MALLOC_PAGESHIFT	_MAX_PAGE_SHIFT
 #define MALLOC_MINSHIFT		4
 #define MALLOC_MAXSHIFT		(MALLOC_PAGESHIFT - 1)
 #define MALLOC_PAGESIZE		(1UL << MALLOC_PAGESHIFT)
@@ -542,7 +537,7 @@ alloc_chunk_info(struct dir_info *d, int bits)
 		size = sizeof(struct chunk_info) + (size - 1) * sizeof(u_short);
 		if (CHUNK_CANARIES)
 			size += count * sizeof(u_short);
-		size = ALIGN(size);
+		size = _ALIGN(size);
 
 		q = MMAP(MALLOC_PAGESIZE);
 		q = MMAP_ERROR(q);

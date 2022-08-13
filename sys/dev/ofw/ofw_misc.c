@@ -1,6 +1,6 @@
-/*	$OpenBSD: ofw_misc.c,v 1.33 2021/06/25 17:41:22 patrick Exp $	*/
+/*	$OpenBSD: ofw_misc.c,v 1.36 2022/03/25 15:49:29 kettenis Exp $	*/
 /*
- * Copyright (c) 2017 Mark Kettenis
+ * Copyright (c) 2017-2021 Mark Kettenis
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -507,6 +507,8 @@ struct nvmem_cell {
 	struct nvmem_device *nc_nd;
 	bus_addr_t	nc_addr;
 	bus_size_t	nc_size;
+	uint32_t	nc_offset;
+	uint32_t	nc_bitlen;
 
 	LIST_ENTRY(nvmem_cell) nc_list;
 };
@@ -519,7 +521,7 @@ nvmem_register_child(int node, struct nvmem_device *nd)
 {
 	struct nvmem_cell *nc;
 	uint32_t phandle;
-	uint32_t reg[2];
+	uint32_t reg[2], bits[2] = {};
 
 	phandle = OF_getpropint(node, "phandle", 0);
 	if (phandle == 0)
@@ -528,11 +530,15 @@ nvmem_register_child(int node, struct nvmem_device *nd)
 	if (OF_getpropintarray(node, "reg", reg, sizeof(reg)) != sizeof(reg))
 		return;
 
+	OF_getpropintarray(node, "bits", bits, sizeof(bits));
+	
 	nc = malloc(sizeof(struct nvmem_cell), M_DEVBUF, M_WAITOK);
 	nc->nc_phandle = phandle;
 	nc->nc_nd = nd;
 	nc->nc_addr = reg[0];
 	nc->nc_size = reg[1];
+	nc->nc_offset = bits[0];
+	nc->nc_bitlen = bits[1];
 	LIST_INSERT_HEAD(&nvmem_cells, nc, nc_list);
 }
 
@@ -571,7 +577,8 @@ nvmem_read_cell(int node, const char *name, void *data, bus_size_t size)
 	struct nvmem_device *nd;
 	struct nvmem_cell *nc;
 	uint32_t phandle, *phandles;
-	int id, len;
+	uint32_t offset, bitlen;
+	int id, len, first;
 
 	id = OF_getindex(node, name, "nvmem-cell-names");
 	if (id < 0)
@@ -593,11 +600,123 @@ nvmem_read_cell(int node, const char *name, void *data, bus_size_t size)
 	if (nc == NULL)
 		return ENXIO;
 
+	nd = nc->nc_nd;
+	if (nd->nd_read == NULL)
+		return EACCES;
+
+	first = 1;
+	offset = nc->nc_offset;
+	bitlen = nc->nc_bitlen;
+	while (bitlen > 0 && size > 0) {
+		uint8_t *p = data;
+		uint8_t mask, tmp;
+		int error;
+
+		error = nd->nd_read(nd->nd_cookie, nc->nc_addr, &tmp, 1);
+		if (error)
+			return error;
+
+		if (bitlen >= 8)
+			mask = 0xff;
+		else
+			mask = (1 << bitlen) - 1;
+
+		if (!first) {
+			*p++ |= (tmp << (8 - offset)) & (mask << (8 - offset));
+			bitlen -= MIN(offset, bitlen);
+			size--;
+		}
+
+		if (bitlen > 0 && size > 0) {
+			*p = (tmp >> offset) & (mask >> offset);
+			bitlen -= MIN(8 - offset, bitlen);
+		}
+
+		first = 0;
+	}
+	if (nc->nc_bitlen > 0)
+		return 0;
+
 	if (size > nc->nc_size)
 		return EINVAL;
 
-	nd = nc->nc_nd;
 	return nd->nd_read(nd->nd_cookie, nc->nc_addr, data, size);
+}
+
+int
+nvmem_write_cell(int node, const char *name, const void *data, bus_size_t size)
+{
+	struct nvmem_device *nd;
+	struct nvmem_cell *nc;
+	uint32_t phandle, *phandles;
+	uint32_t offset, bitlen;
+	int id, len, first;
+
+	id = OF_getindex(node, name, "nvmem-cell-names");
+	if (id < 0)
+		return ENXIO;
+
+	len = OF_getproplen(node, "nvmem-cells");
+	if (len <= 0)
+		return ENXIO;
+
+	phandles = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "nvmem-cells", phandles, len);
+	phandle = phandles[id];
+	free(phandles, M_TEMP, len);
+
+	LIST_FOREACH(nc, &nvmem_cells, nc_list) {
+		if (nc->nc_phandle == phandle)
+			break;
+	}
+	if (nc == NULL)
+		return ENXIO;
+
+	nd = nc->nc_nd;
+	if (nd->nd_write == NULL)
+		return EACCES;
+
+	first = 1;
+	offset = nc->nc_offset;
+	bitlen = nc->nc_bitlen;
+	while (bitlen > 0 && size > 0) {
+		const uint8_t *p = data;
+		uint8_t mask, tmp;
+		int error;
+
+		error = nd->nd_read(nd->nd_cookie, nc->nc_addr, &tmp, 1);
+		if (error)
+			return error;
+
+		if (bitlen >= 8)
+			mask = 0xff;
+		else
+			mask = (1 << bitlen) - 1;
+
+		tmp &= ~(mask << offset);
+		tmp |= (*p++ << offset) & (mask << offset);
+		bitlen -= MIN(8 - offset, bitlen);
+		size--;
+
+		if (!first && bitlen > 0 && size > 0) {
+			tmp &= ~(mask >> (8 - offset));
+			tmp |= (*p >> (8 - offset)) & (mask >> (8 - offset));
+			bitlen -= MIN(offset, bitlen);
+		}
+
+		error = nd->nd_write(nd->nd_cookie, nc->nc_addr, &tmp, 1);
+		if (error)
+			return error;
+
+		first = 0;
+	}
+	if (nc->nc_bitlen > 0)
+		return 0;
+
+	if (size > nc->nc_size)
+		return EINVAL;
+
+	return nd->nd_write(nd->nd_cookie, nc->nc_addr, data, size);
 }
 
 /* Port/endpoint interface support */
@@ -1042,4 +1161,130 @@ iommu_reserve_region_pci(int node, uint32_t rid, bus_addr_t addr,
 		return;
 
 	return iommu_device_do_reserve(phandle, &sid, addr, size);
+}
+
+/*
+ * Mailbox support.
+ */
+
+struct mbox_channel {
+	struct mbox_device	*mc_md;
+	void			*mc_cookie;
+};
+
+LIST_HEAD(, mbox_device) mbox_devices =
+	LIST_HEAD_INITIALIZER(mbox_devices);
+
+void
+mbox_register(struct mbox_device *md)
+{
+	md->md_cells = OF_getpropint(md->md_node, "#mbox-cells", 0);
+	md->md_phandle = OF_getpropint(md->md_node, "phandle", 0);
+	if (md->md_phandle == 0)
+		return;
+
+	LIST_INSERT_HEAD(&mbox_devices, md, md_list);
+}
+
+struct mbox_channel *
+mbox_channel_cells(uint32_t *cells, struct mbox_client *client)
+{
+	struct mbox_device *md;
+	struct mbox_channel *mc;
+	uint32_t phandle = cells[0];
+	void *cookie;
+
+	LIST_FOREACH(md, &mbox_devices, md_list) {
+		if (md->md_phandle == phandle)
+			break;
+	}
+
+	if (md && md->md_channel) {
+		cookie = md->md_channel(md->md_cookie, &cells[1], client);
+		if (cookie) {
+			mc = malloc(sizeof(*mc), M_DEVBUF, M_WAITOK);
+			mc->mc_md = md;
+			mc->mc_cookie = cookie;
+			return mc;
+		}
+	}
+
+	return NULL;
+}
+
+uint32_t *
+mbox_next_mbox(uint32_t *cells)
+{
+	uint32_t phandle = cells[0];
+	int node, ncells;
+
+	node = OF_getnodebyphandle(phandle);
+	if (node == 0)
+		return NULL;
+
+	ncells = OF_getpropint(node, "#mbox-cells", 0);
+	return cells + ncells + 1;
+}
+
+struct mbox_channel *
+mbox_channel_idx(int node, int idx, struct mbox_client *client)
+{
+	struct mbox_channel *mc = NULL;
+	uint32_t *mboxes;
+	uint32_t *mbox;
+	int len;
+
+	len = OF_getproplen(node, "mboxes");
+	if (len <= 0)
+		return NULL;
+
+	mboxes = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(node, "mboxes", mboxes, len);
+
+	mbox = mboxes;
+	while (mbox && mbox < mboxes + (len / sizeof(uint32_t))) {
+		if (idx == 0) {
+			mc = mbox_channel_cells(mbox, client);
+			break;
+		}
+		mbox = mbox_next_mbox(mbox);
+		idx--;
+	}
+
+	free(mboxes, M_TEMP, len);
+	return mc;
+}
+
+struct mbox_channel *
+mbox_channel(int node, const char *name, struct mbox_client *client)
+{
+	int idx;
+
+	idx = OF_getindex(node, name, "mbox-names");
+	if (idx == -1)
+		return NULL;
+
+	return mbox_channel_idx(node, idx, client);
+}
+
+int
+mbox_send(struct mbox_channel *mc, const void *data, size_t len)
+{
+	struct mbox_device *md = mc->mc_md;
+
+	if (md->md_send)
+		return md->md_send(mc->mc_cookie, data, len);
+
+	return ENXIO;
+}
+
+int
+mbox_recv(struct mbox_channel *mc, void *data, size_t len)
+{
+	struct mbox_device *md = mc->mc_md;
+
+	if (md->md_recv)
+		return md->md_recv(mc->mc_cookie, data, len);
+
+	return ENXIO;
 }

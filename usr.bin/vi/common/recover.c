@@ -1,4 +1,4 @@
-/*	$OpenBSD: recover.c,v 1.30 2019/07/22 12:39:02 schwarze Exp $	*/
+/*	$OpenBSD: recover.c,v 1.32 2022/02/20 19:45:51 tb Exp $	*/
 
 /*-
  * Copyright (c) 1993, 1994
@@ -252,6 +252,8 @@ rcv_sync(SCR *sp, u_int flags)
 
 	/* Sync the file if it's been modified. */
 	if (F_ISSET(ep, F_MODIFIED)) {
+		/* Clear recovery sync flag. */
+		F_CLR(ep, F_RCV_SYNC);
 		if (ep->db->sync(ep->db, R_RECNOSYNC)) {
 			F_CLR(ep, F_RCV_ON | F_RCV_NORM);
 			msgq_str(sp, M_SYSERR,
@@ -750,7 +752,7 @@ rcv_copy(SCR *sp, int wfd, char *fname)
 	int nr, nw, off, rfd;
 	char buf[8 * 1024];
 
-	if ((rfd = open(fname, O_RDONLY, 0)) == -1)
+	if ((rfd = open(fname, O_RDONLY)) == -1)
 		goto err;
 	while ((nr = read(rfd, buf, sizeof(buf))) > 0)
 		for (off = 0; nr; nr -= nw, off += nw)

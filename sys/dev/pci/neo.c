@@ -1,4 +1,4 @@
-/*      $OpenBSD: neo.c,v 1.33 2018/04/11 04:48:31 ratchov Exp $       */
+/*      $OpenBSD: neo.c,v 1.37 2022/03/21 19:22:41 miod Exp $       */
 
 /*
  * Copyright (c) 1999 Cameron Grant <gandalf@vilnya.demon.co.uk>
@@ -97,7 +97,7 @@
  * are generated more often than that, so 20-40 interrupts per second
  * should not be unexpected. Increasing BUFFSIZE should help minimize
  * the glitches due to drivers that spend too much time looping at high
- * privelege levels as well as the impact of badly written audio
+ * privilege levels as well as the impact of badly written audio
  * interface clients.
  *
  * TO-DO list:
@@ -207,7 +207,7 @@ struct cfdriver neo_cd = {
 };
 
 
-struct cfattach neo_ca = {
+const struct cfattach neo_ca = {
 	sizeof(struct neo_softc), neo_match, neo_attach, NULL,
 	neo_activate
 };
@@ -237,7 +237,7 @@ static int samplerates[9] = {
 
 /* -------------------------------------------------------------------- */
 
-struct audio_hw_if neo_hw_if = {
+const struct audio_hw_if neo_hw_if = {
 	neo_open,
 	neo_close,
 	neo_set_params,
@@ -597,7 +597,7 @@ neo_attach(struct device *parent, struct device *self, void *aux)
 	if ((error = ac97_attach(&sc->host_if)) != 0)
 		return;
 
-	audio_attach_mi(&neo_hw_if, sc, &sc->dev);
+	audio_attach_mi(&neo_hw_if, sc, NULL, &sc->dev);
 
 	return;
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: intc.c,v 1.10 2020/07/14 15:34:15 patrick Exp $ */
+/* $OpenBSD: intc.c,v 1.12 2022/01/03 03:06:50 jsg Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  *
@@ -111,7 +111,7 @@ void	intc_calc_mask(void);
 void	*intc_intr_establish_fdt(void *, int *, int, struct cpu_info *,
 	    int (*)(void *), void *, char *);
 
-struct cfattach	intc_ca = {
+const struct cfattach	intc_ca = {
 	sizeof (struct device), intc_match, intc_attach
 };
 
@@ -337,7 +337,7 @@ intc_irq_handler(void *frame)
 	pri = intc_handler[irq].iq_irq;
 	s = intc_splraise(pri);
 	TAILQ_FOREACH(ih, &intc_handler[irq].iq_list, ih_list) {
-		if (ih->ih_arg != 0)
+		if (ih->ih_arg)
 			arg = ih->ih_arg;
 		else
 			arg = frame;

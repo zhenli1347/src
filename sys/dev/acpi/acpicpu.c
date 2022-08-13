@@ -1,4 +1,4 @@
-/* $OpenBSD: acpicpu.c,v 1.90 2021/08/01 19:04:37 kettenis Exp $ */
+/* $OpenBSD: acpicpu.c,v 1.92 2022/04/06 18:59:27 naddy Exp $ */
 /*
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
  * Copyright (c) 2015 Philip Guenther <guenther@openbsd.org>
@@ -151,7 +151,7 @@ struct acpicpu_softc {
 	/*
 	 * XXX: _PPC Change listener
 	 * PPC changes can occur when for example a machine is disconnected
-	 * from AC power and can no loger support the highest frequency or
+	 * from AC power and can no longer support the highest frequency or
 	 * voltage when driven from the battery.
 	 * Should probably be reimplemented as a list for now we assume only
 	 * one listener
@@ -178,7 +178,7 @@ void    acpicpu_set_throttle(struct acpicpu_softc *, int);
 struct acpi_cstate *acpicpu_find_cstate(struct acpicpu_softc *, int);
 #endif
 
-struct cfattach acpicpu_ca = {
+const struct cfattach acpicpu_ca = {
 	sizeof(struct acpicpu_softc), acpicpu_match, acpicpu_attach
 };
 

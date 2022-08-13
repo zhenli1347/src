@@ -1,4 +1,4 @@
-/* $OpenBSD: if_bce.c,v 1.53 2020/07/10 13:22:20 patrick Exp $ */
+/* $OpenBSD: if_bce.c,v 1.55 2022/03/11 18:00:45 mpi Exp $ */
 /* $NetBSD: if_bce.c,v 1.3 2003/09/29 01:53:02 mrg Exp $	 */
 
 /*
@@ -163,7 +163,7 @@ int	bcedebug = 0;
 #define DPRINTFN(n,x)
 #endif
 
-struct cfattach bce_ca = {
+const struct cfattach bce_ca = {
 	sizeof(struct bce_softc), bce_probe, bce_attach, NULL, bce_activate
 };
 struct cfdriver bce_cd = {
@@ -311,7 +311,7 @@ bce_attach(struct device *parent, struct device *self, void *aux)
 	 */
 	/*
 	 * XXX PAGE_SIZE is wasteful; we only need 1KB + 1KB, but
-	 * due to the limition above. ??
+	 * due to the limitation above. ??
 	 */
 	if ((error = bus_dmamem_alloc_range(sc->bce_dmatag, 2 * PAGE_SIZE,
 	    PAGE_SIZE, 2 * PAGE_SIZE, &seg, 1, &rseg, BUS_DMA_NOWAIT,
@@ -793,7 +793,7 @@ bce_init(struct ifnet *ifp)
 	/* Cancel any pending I/O. */
 	bce_stop(ifp);
 
-	/* enable pci inerrupts, bursts, and prefetch */
+	/* enable pci interrupts, bursts, and prefetch */
 
 	/* remap the pci registers to the Sonics config registers */
 
@@ -930,7 +930,7 @@ bce_add_mac(struct bce_softc *sc, u_int8_t *mac, unsigned long idx)
 	}
 }
 
-/* Add a receive buffer to the indiciated descriptor. */
+/* Add a receive buffer to the indicated descriptor. */
 void
 bce_add_rxbuf(struct bce_softc *sc, int idx)
 {

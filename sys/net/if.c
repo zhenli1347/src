@@ -1,4 +1,4 @@
-/*	$OpenBSD: if.c,v 1.643 2021/07/20 16:32:28 bluhm Exp $	*/
+/*	$OpenBSD: if.c,v 1.662 2022/08/06 15:57:58 bluhm Exp $	*/
 /*	$NetBSD: if.c,v 1.35 1996/05/07 05:26:04 thorpej Exp $	*/
 
 /*
@@ -68,7 +68,7 @@
 #include "pf.h"
 #include "pfsync.h"
 #include "ppp.h"
-#include "switch.h"
+#include "pppoe.h"
 #include "if_wg.h"
 
 #include <sys/param.h>
@@ -217,9 +217,12 @@ struct if_idxmap {
 	unsigned int		 serial;
 	unsigned int		 count;
 	struct srp		 map;
+	struct rwlock		 lock;
+	unsigned char		*usedidx;	/* bitmap of indices in use */
 };
 
 void	if_idxmap_init(unsigned int);
+void	if_idxmap_alloc(struct ifnet *);
 void	if_idxmap_insert(struct ifnet *);
 void	if_idxmap_remove(struct ifnet *);
 
@@ -238,7 +241,7 @@ int	ifq_congestion;
 
 int		 netisr;
 
-#define	NET_TASKQ	1
+#define	NET_TASKQ	4
 struct taskq	*nettqmp[NET_TASKQ];
 
 struct task if_input_task_locked = TASK_INITIALIZER(if_netisr, NULL);
@@ -259,7 +262,7 @@ ifinit(void)
 
 	/*
 	 * most machines boot with 4 or 5 interfaces, so size the initial map
-	 * to accomodate this
+	 * to accommodate this
 	 */
 	if_idxmap_init(8);
 
@@ -273,7 +276,9 @@ ifinit(void)
 static struct if_idxmap if_idxmap = {
 	0,
 	0,
-	SRP_INITIALIZER()
+	SRP_INITIALIZER(),
+	RWLOCK_INITIALIZER("idxmaplk"),
+	NULL,
 };
 
 struct srp_gc if_ifp_gc = SRP_GC_INITIALIZER(if_ifp_dtor, NULL);
@@ -298,12 +303,15 @@ if_idxmap_init(unsigned int limit)
 	for (i = 0; i < limit; i++)
 		srp_init(&map[i]);
 
+	if_idxmap.usedidx = malloc(howmany(limit, NBBY),
+	    M_IFADDR, M_WAITOK | M_ZERO);
+
 	/* this is called early so there's nothing to race with */
 	srp_update_locked(&if_map_gc, &if_idxmap.map, if_map);
 }
 
 void
-if_idxmap_insert(struct ifnet *ifp)
+if_idxmap_alloc(struct ifnet *ifp)
 {
 	struct if_map *if_map;
 	struct srp *map;
@@ -311,10 +319,9 @@ if_idxmap_insert(struct ifnet *ifp)
 
 	refcnt_init(&ifp->if_refcnt);
 
-	/* the kernel lock guarantees serialised modifications to if_idxmap */
-	KERNEL_ASSERT_LOCKED();
+	rw_enter_write(&if_idxmap.lock);
 
-	if (++if_idxmap.count > USHRT_MAX)
+	if (++if_idxmap.count >= USHRT_MAX)
 		panic("too many interfaces");
 
 	if_map = srp_get_locked(&if_idxmap.map);
@@ -327,6 +334,7 @@ if_idxmap_insert(struct ifnet *ifp)
 		struct srp *nmap;
 		unsigned int nlimit;
 		struct ifnet *nifp;
+		unsigned char *nusedidx;
 
 		nlimit = if_map->limit * 2;
 		nif_map = malloc(sizeof(*nif_map) + nlimit * sizeof(*nmap),
@@ -348,6 +356,14 @@ if_idxmap_insert(struct ifnet *ifp)
 			i++;
 		}
 
+		nusedidx = malloc(howmany(nlimit, NBBY),
+		    M_IFADDR, M_WAITOK | M_ZERO);
+		memcpy(nusedidx, if_idxmap.usedidx,
+		    howmany(if_map->limit, NBBY));
+		free(if_idxmap.usedidx, M_IFADDR,
+		    howmany(if_map->limit, NBBY));
+		if_idxmap.usedidx = nusedidx;
+
 		srp_update_locked(&if_map_gc, &if_idxmap.map, nif_map);
 		if_map = nif_map;
 		map = nmap;
@@ -355,15 +371,39 @@ if_idxmap_insert(struct ifnet *ifp)
 
 	/* pick the next free index */
 	for (i = 0; i < USHRT_MAX; i++) {
-		if (index != 0 && srp_get_locked(&map[index]) == NULL)
+		if (index != 0 && isclr(if_idxmap.usedidx, index))
 			break;
 
 		index = if_idxmap.serial++ & USHRT_MAX;
 	}
+	KASSERT(index != 0 && index < if_map->limit);
+	KASSERT(isclr(if_idxmap.usedidx, index));
+
+	setbit(if_idxmap.usedidx, index);
+	ifp->if_index = index;
+
+	rw_exit_write(&if_idxmap.lock);
+}
+
+void
+if_idxmap_insert(struct ifnet *ifp)
+{
+	struct if_map *if_map;
+	struct srp *map;
+	unsigned int index = ifp->if_index;
+
+	rw_enter_write(&if_idxmap.lock);
+
+	if_map = srp_get_locked(&if_idxmap.map);
+	map = (struct srp *)(if_map + 1);
+
+	KASSERT(index != 0 && index < if_map->limit);
+	KASSERT(isset(if_idxmap.usedidx, index));
 
 	/* commit */
-	ifp->if_index = index;
 	srp_update_locked(&if_ifp_gc, &map[index], if_ref(ifp));
+
+	rw_exit_write(&if_idxmap.lock);
 }
 
 void
@@ -375,8 +415,7 @@ if_idxmap_remove(struct ifnet *ifp)
 
 	index = ifp->if_index;
 
-	/* the kernel lock guarantees serialised modifications to if_idxmap */
-	KERNEL_ASSERT_LOCKED();
+	rw_enter_write(&if_idxmap.lock);
 
 	if_map = srp_get_locked(&if_idxmap.map);
 	KASSERT(index < if_map->limit);
@@ -386,7 +425,12 @@ if_idxmap_remove(struct ifnet *ifp)
 
 	srp_update_locked(&if_ifp_gc, &map[index], NULL);
 	if_idxmap.count--;
+
+	KASSERT(isset(if_idxmap.usedidx, index));
+	clrbit(if_idxmap.usedidx, index);
 	/* end of if_idxmap modifications */
+
+	rw_exit_write(&if_idxmap.lock);
 }
 
 void
@@ -607,6 +651,8 @@ if_attach_common(struct ifnet *ifp)
 		    "%s: if_qstart not set with MPSAFE set", ifp->if_xname);
 	}
 
+	if_idxmap_alloc(ifp);
+
 	ifq_init(&ifp->if_snd, ifp, 0);
 
 	ifp->if_snd.ifq_ifqs[0] = &ifp->if_snd;
@@ -745,7 +791,7 @@ if_input_local(struct ifnet *ifp, struct mbuf *m, sa_family_t af)
 
 #if NBPFILTER > 0
 	/*
-	 * Only send packets to bpf if they are destinated to local
+	 * Only send packets to bpf if they are destined to local
 	 * addresses.
 	 *
 	 * if_input_local() is also called for SIMPLEX interfaces to
@@ -823,27 +869,16 @@ if_input_process(struct ifnet *ifp, struct mbuf_list *ml)
 		enqueue_randomness(ml_len(ml) ^ (uintptr_t)MBUF_LIST_FIRST(ml));
 
 	/*
-	 * We grab the NET_LOCK() before processing any packet to
-	 * ensure there's no contention on the routing table lock.
-	 *
-	 * Without it we could race with a userland thread to insert
-	 * a L2 entry in ip{6,}_output().  Such race would result in
-	 * one of the threads sleeping *inside* the IP output path.
-	 *
-	 * Since we have a NET_LOCK() we also use it to serialize access
-	 * to PF globals, pipex globals, unicast and multicast addresses
-	 * lists and the socket layer.
+	 * We grab the shared netlock for packet processing in the softnet
+	 * threads.  Packets can regrab the exclusive lock via queues.
+	 * ioctl, sysctl, and socket syscall may use shared lock if access is
+	 * read only or MP safe.  Usually they hold the exclusive net lock.
 	 */
 
-	/*
-	 * XXXSMP IPsec data structures are not ready to be accessed
-	 * by multiple network threads in parallel.  In this case
-	 * use an exclusive lock.
-	 */
-	NET_LOCK();
+	NET_LOCK_SHARED();
 	while ((m = ml_dequeue(ml)) != NULL)
 		(*ifp->if_input)(ifp, m);
-	NET_UNLOCK();
+	NET_UNLOCK_SHARED();
 }
 
 void
@@ -875,6 +910,8 @@ if_vinput(struct ifnet *ifp, struct mbuf *m)
 
 	if (__predict_true(!ISSET(ifp->if_xflags, IFXF_MONITOR)))
 		(*ifp->if_input)(ifp, m);
+	else
+		m_freem(m);
 }
 
 void
@@ -901,6 +938,12 @@ if_netisr(void *unused)
 			KERNEL_UNLOCK();
 		}
 #endif
+		if (n & (1 << NETISR_IP))
+			ipintr();
+#ifdef INET6
+		if (n & (1 << NETISR_IPV6))
+			ip6intr();
+#endif
 #if NPPP > 0
 		if (n & (1 << NETISR_PPP)) {
 			KERNEL_LOCK();
@@ -912,10 +955,14 @@ if_netisr(void *unused)
 		if (n & (1 << NETISR_BRIDGE))
 			bridgeintr();
 #endif
-#if NSWITCH > 0
-		if (n & (1 << NETISR_SWITCH)) {
+#ifdef PIPEX
+		if (n & (1 << NETISR_PIPEX))
+			pipexintr();
+#endif
+#if NPPPOE > 0
+		if (n & (1 << NETISR_PPPOE)) {
 			KERNEL_LOCK();
-			switchintr();
+			pppoeintr();
 			KERNEL_UNLOCK();
 		}
 #endif
@@ -1025,6 +1072,10 @@ if_detach(struct ifnet *ifp)
 	/* Other CPUs must not have a reference before we start destroying. */
 	if_remove(ifp);
 
+	ifp->if_qstart = if_detached_qstart;
+
+	/* Wait until the start routines finished. */
+	ifq_barrier(&ifp->if_snd);
 	ifq_clr_oactive(&ifp->if_snd);
 
 #if NBPFILTER > 0
@@ -1033,7 +1084,6 @@ if_detach(struct ifnet *ifp)
 
 	NET_LOCK();
 	s = splnet();
-	ifp->if_qstart = if_detached_qstart;
 	ifp->if_ioctl = if_detached_ioctl;
 	ifp->if_watchdog = NULL;
 
@@ -2024,6 +2074,42 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 			ifr->ifr_flags &= ~IFXF_WOL;
 			error = ENOTSUP;
 		}
+
+		if (ISSET(ifp->if_capabilities, IFCAP_TSO) &&
+		    ISSET(ifr->ifr_flags, IFXF_TSO) !=
+		    ISSET(ifp->if_xflags, IFXF_TSO)) {
+			struct ifreq ifrq;
+
+			s = splnet();
+
+			if (ISSET(ifr->ifr_flags, IFXF_TSO))
+				ifp->if_xflags |= IFXF_TSO;
+			else
+				ifp->if_xflags &= ~IFXF_TSO;
+
+			NET_ASSERT_LOCKED();	/* for ioctl */
+			KERNEL_ASSERT_LOCKED();	/* for if_flags */
+
+			if (ISSET(ifp->if_flags, IFF_UP)) {
+				/* go down for a moment... */
+				ifp->if_flags &= ~IFF_UP;
+				ifrq.ifr_flags = ifp->if_flags;
+				(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS,
+				    (caddr_t)&ifrq);
+
+				/* ... and up again */
+				ifp->if_flags |= IFF_UP;
+				ifrq.ifr_flags = ifp->if_flags;
+				(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS,
+				    (caddr_t)&ifrq);
+			}
+
+			splx(s);
+		} else if (!ISSET(ifp->if_capabilities, IFCAP_TSO) &&
+		    ISSET(ifr->ifr_flags, IFXF_TSO)) {
+			ifr->ifr_flags &= ~IFXF_TSO;
+			error = ENOTSUP;
+		}
 #endif
 
 		if (error == 0)
@@ -2038,7 +2124,6 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 		    (!ISSET(oif_xflags, IFXF_AUTOCONF6TEMP) &&
 		    ISSET(ifp->if_xflags, IFXF_AUTOCONF6TEMP)))) {
 			ifr->ifr_flags = ifp->if_flags | IFF_UP;
-			cmd = SIOCSIFFLAGS;
 			goto forceup;
 		}
 
@@ -2053,9 +2138,11 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 forceup:
 		ifp->if_flags = (ifp->if_flags & IFF_CANTCHANGE) |
 			(ifr->ifr_flags & ~IFF_CANTCHANGE);
-		error = (*ifp->if_ioctl)(ifp, cmd, data);
+		error = (*ifp->if_ioctl)(ifp, SIOCSIFFLAGS, data);
 		if (error != 0) {
 			ifp->if_flags = oif_flags;
+			if (cmd == SIOCSIFXFLAGS)
+				ifp->if_xflags = oif_xflags;
 		} else if (ISSET(oif_flags ^ ifp->if_flags, IFF_UP)) {
 			s = splnet();
 			if (ISSET(ifp->if_flags, IFF_UP))
@@ -2212,6 +2299,15 @@ forceup:
 		error = ((*ifp->if_ioctl)(ifp, cmd, data));
 		break;
 
+	case SIOCSIFMEDIA:
+		if ((error = suser(p)) != 0)
+			break;
+		/* FALLTHROUGH */
+	case SIOCGIFMEDIA:
+		/* net lock is not needed */
+		error = ((*ifp->if_ioctl)(ifp, cmd, data));
+		break;
+
 	case SIOCSETKALIVE:
 	case SIOCDIFPHYADDR:
 	case SIOCSLIFPHYADDR:
@@ -2221,7 +2317,6 @@ forceup:
 	case SIOCSLIFPHYECN:
 	case SIOCADDMULTI:
 	case SIOCDELMULTI:
-	case SIOCSIFMEDIA:
 	case SIOCSVNETID:
 	case SIOCDVNETID:
 	case SIOCSVNETFLOWID:
@@ -2260,7 +2355,6 @@ forceup:
 	case SIOCBRDGSIFCOST:
 	case SIOCBRDGSTXHC:
 	case SIOCBRDGSPROTO:
-	case SIOCSWSPORTNO:
 #endif
 		if ((error = suser(p)) != 0)
 			break;
@@ -2323,27 +2417,27 @@ ifioctl_get(u_long cmd, caddr_t data)
 
 	switch(cmd) {
 	case SIOCGIFCONF:
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		error = ifconf(data);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (error);
 	case SIOCIFGCLONERS:
 		error = if_clone_list((struct if_clonereq *)data);
 		return (error);
 	case SIOCGIFGMEMB:
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		error = if_getgroupmembers(data);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (error);
 	case SIOCGIFGATTR:
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		error = if_getgroupattribs(data);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (error);
 	case SIOCGIFGLIST:
-		NET_RLOCK_IN_IOCTL();
+		NET_LOCK_SHARED();
 		error = if_getgrouplist(data);
-		NET_RUNLOCK_IN_IOCTL();
+		NET_UNLOCK_SHARED();
 		return (error);
 	}
 
@@ -2351,7 +2445,7 @@ ifioctl_get(u_long cmd, caddr_t data)
 	if (ifp == NULL)
 		return (ENXIO);
 
-	NET_RLOCK_IN_IOCTL();
+	NET_LOCK_SHARED();
 
 	switch(cmd) {
 	case SIOCGIFFLAGS:
@@ -2419,7 +2513,7 @@ ifioctl_get(u_long cmd, caddr_t data)
 		panic("invalid ioctl %lu", cmd);
 	}
 
-	NET_RUNLOCK_IN_IOCTL();
+	NET_UNLOCK_SHARED();
 
 	if_put(ifp);
 
@@ -2733,7 +2827,7 @@ if_addgroup(struct ifnet *ifp, const char *groupname)
 	TAILQ_INSERT_TAIL(&ifp->if_groups, ifgl, ifgl_next);
 
 #if NPF > 0
-	pfi_group_addmember(groupname, ifp);
+	pfi_group_addmember(groupname);
 #endif
 
 	return (0);
@@ -2766,7 +2860,7 @@ if_delgroup(struct ifnet *ifp, const char *groupname)
 	}
 
 #if NPF > 0
-	pfi_group_change(groupname);
+	pfi_group_delmember(groupname);
 #endif
 
 	KASSERT(ifgl->ifgl_group->ifg_refcnt != 0);

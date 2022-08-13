@@ -1,4 +1,4 @@
-.\"	$OpenBSD: dpb.1,v 1.24 2021/05/03 07:48:16 espie Exp $
+.\"	$OpenBSD: dpb.1,v 1.28 2022/03/26 12:43:11 tb Exp $
 .\"
 .\" Copyright (c) 2010-2013 Marc Espie <espie@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: May 3 2021 $
+.Dd $Mdocdate: March 26 2022 $
 .Dt DPB 1
 .Os
 .Sh NAME
@@ -446,7 +446,7 @@ Only makes sense for
 or
 .Ar localhost .
 .It jobs=n
-Number of jobs to run on that host, defaults to hw.ncpu.
+Number of jobs to run on that host, defaults to hw.ncpuonline.
 .It junk=n
 Junk unused packages each n steps.
 See
@@ -601,7 +601,7 @@ Note that the
 property is still active for ports in error, in the belief that trivial fixes
 can be made that will allow the port build to finish.
 .It Fl j Ar n
-Number of jobs to run on a single host (defaults to hw.ncpu).
+Number of jobs to run on a single host (defaults to hw.ncpuonline).
 .It Fl L Ar logdir
 Choose a log directory.
 .Po
@@ -869,6 +869,12 @@ Prevents
 .Nm
 from scheduling anything else on the same host after it starts building.
 .\".It Ar memoryhog
+.It Ar noconfigurejunk
+Port that looks for unneeded dependencies during its configure phase
+(typically, optional tools like doxygen to rebuild documentation).
+Similar to
+.Ar nojunk
+but less expensive, since the configure phase is most often limited in scope.
 .It Ar nojunk
 Port that hardcodes includes in its Makefile mechanisms.
 Prevents
@@ -1103,7 +1109,7 @@ that can accept a few commands, e.g.,
 usable as
 .Li nc -U path
 .Pp
-Currents commands are as follows:
+Current commands are as follows:
 .Bl -tag -offset aaaa -width addhost
 .It Cm addhost Ar hostline
 Add a new host
@@ -1408,7 +1414,7 @@ affinity mismatch, but job will start on the wrong host anyways, as the queue
 contains no other buildable path.
 .El
 .Pp
-Please note that the engine is no longer run after each package build event
+The engine is no longer run after each package build event
 because of performance considerations, so the
 .Sq Q
 and

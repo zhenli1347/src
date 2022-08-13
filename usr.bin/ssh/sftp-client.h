@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp-client.h,v 1.34 2021/08/09 23:47:44 djm Exp $ */
+/* $OpenBSD: sftp-client.h,v 1.37 2022/05/13 06:31:50 djm Exp $ */
 
 /*
  * Copyright (c) 2001-2004 Damien Miller <djm@openbsd.org>
@@ -119,6 +119,9 @@ int do_statvfs(struct sftp_conn *, const char *, struct sftp_statvfs *, int);
 /* Rename 'oldpath' to 'newpath' */
 int do_rename(struct sftp_conn *, const char *, const char *, int);
 
+/* Copy 'oldpath' to 'newpath' */
+int do_copy(struct sftp_conn *, const char *, const char *);
+
 /* Link 'oldpath' to 'newpath' */
 int do_hardlink(struct sftp_conn *, const char *, const char *);
 
@@ -132,28 +135,29 @@ int do_fsync(struct sftp_conn *conn, u_char *, u_int);
  * Download 'remote_path' to 'local_path'. Preserve permissions and times
  * if 'pflag' is set
  */
-int do_download(struct sftp_conn *, const char *, const char *,
-    Attrib *, int, int, int);
+int do_download(struct sftp_conn *, const char *, const char *, Attrib *,
+    int, int, int, int);
 
 /*
  * Recursively download 'remote_directory' to 'local_directory'. Preserve
  * times if 'pflag' is set
  */
-int download_dir(struct sftp_conn *, const char *, const char *,
-    Attrib *, int, int, int, int, int);
+int download_dir(struct sftp_conn *, const char *, const char *, Attrib *,
+    int, int, int, int, int, int);
 
 /*
  * Upload 'local_path' to 'remote_path'. Preserve permissions and times
  * if 'pflag' is set
  */
-int do_upload(struct sftp_conn *, const char *, const char *, int, int, int);
+int do_upload(struct sftp_conn *, const char *, const char *,
+    int, int, int, int);
 
 /*
  * Recursively upload 'local_directory' to 'remote_directory'. Preserve
  * times if 'pflag' is set
  */
-int upload_dir(struct sftp_conn *, const char *, const char *, int, int, int,
-    int, int);
+int upload_dir(struct sftp_conn *, const char *, const char *,
+    int, int, int, int, int, int);
 
 /*
  * Download a 'from_path' from the 'from' connection and upload it to
@@ -177,7 +181,7 @@ int crossload_dir(struct sftp_conn *from, struct sftp_conn *to,
 char *path_append(const char *, const char *);
 
 /* Make absolute path if relative path and CWD is given. Does not modify
- * original if the the path is already absolute. */
+ * original if the path is already absolute. */
 char *make_absolute(char *, const char *);
 
 /* Check if remote path is directory */

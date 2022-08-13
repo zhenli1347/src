@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtld_machine.c,v 1.29 2019/12/07 22:57:48 guenther Exp $	*/
+/*	$OpenBSD: rtld_machine.c,v 1.31 2022/01/08 06:49:42 guenther Exp $	*/
 
 /*
  * Copyright (c) 2013 Miodrag Vallat.
@@ -44,17 +44,16 @@
 #define _DYN_LOADER
 
 #include <sys/types.h>
-#include <sys/mman.h>
+#include <sys/exec_elf.h>
 #include <sys/syscall.h>
 #include <sys/unistd.h>
 
-#include <nlist.h>
-#include <link.h>
+#include <machine/reloc.h>
 
-#include "syscall.h"
-#include "archdep.h"
+#include "util.h"
 #include "resolve.h"
 
+int	_dl_cacheflush(unsigned long, size_t);
 Elf_Addr _dl_bind(elf_object_t *object, int reloff);
 void	_dl_md_reloc_gotp_ent(Elf_Addr, Elf_Addr, Elf_Addr);
 

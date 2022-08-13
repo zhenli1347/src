@@ -1,4 +1,4 @@
-/* $OpenBSD: if_pppoe.c,v 1.78 2021/07/19 19:00:58 stsp Exp $ */
+/* $OpenBSD: if_pppoe.c,v 1.83 2022/07/14 11:03:15 mvs Exp $ */
 /* $NetBSD: if_pppoe.c,v 1.51 2003/11/28 08:56:48 keihan Exp $ */
 
 /*
@@ -117,33 +117,35 @@ struct pppoetag {
 /*
  * Locks used to protect struct members and global data
  *       I       immutable after creation
- *       N       net lock
+ *       K       kernel lock
  */
 
 struct pppoe_softc {
 	struct sppp sc_sppp;		/* contains a struct ifnet as first element */
-	LIST_ENTRY(pppoe_softc) sc_list;/* [N] */
-	unsigned int sc_eth_ifidx;	/* [N] */
+	LIST_ENTRY(pppoe_softc) sc_list;/* [K] */
+	unsigned int sc_eth_ifidx;	/* [K] */
 
-	int sc_state;			/* [N] discovery phase or session connected */
-	struct ether_addr sc_dest;	/* [N] hardware address of concentrator */
-	u_int16_t sc_session;		/* [N] PPPoE session id */
+	int sc_state;			/* [K] discovery phase or session connected */
+	struct ether_addr sc_dest;	/* [K] hardware address of concentrator */
+	u_int16_t sc_session;		/* [K] PPPoE session id */
 
-	char *sc_service_name;		/* [N] if != NULL: requested name of service */
-	char *sc_concentrator_name;	/* [N] if != NULL: requested concentrator id */
-	u_int8_t *sc_ac_cookie;		/* [N] content of AC cookie we must echo back */
-	size_t sc_ac_cookie_len;	/* [N] length of cookie data */
-	u_int8_t *sc_relay_sid;		/* [N] content of relay SID we must echo back */
-	size_t sc_relay_sid_len;	/* [N] length of relay SID data */
+	char *sc_service_name;		/* [K] if != NULL: requested name of service */
+	char *sc_concentrator_name;	/* [K] if != NULL: requested concentrator id */
+	u_int8_t *sc_ac_cookie;		/* [K] content of AC cookie we must echo back */
+	size_t sc_ac_cookie_len;	/* [K] length of cookie data */
+	u_int8_t *sc_relay_sid;		/* [K] content of relay SID we must echo back */
+	size_t sc_relay_sid_len;	/* [K] length of relay SID data */
 	u_int32_t sc_unique;		/* [I] our unique id */
-	struct timeout sc_timeout;	/* [N] timeout while not in session state */
-	int sc_padi_retried;		/* [N] number of PADI retries already done */
-	int sc_padr_retried;		/* [N] number of PADR retries already done */
+	struct timeout sc_timeout;	/* [K] timeout while not in session state */
+	int sc_padi_retried;		/* [K] number of PADI retries already done */
+	int sc_padr_retried;		/* [K] number of PADR retries already done */
 
-	struct timeval sc_session_time;	/* [N] time the session was established */
+	struct timeval sc_session_time;	/* [K] time the session was established */
 };
 
 /* input routines */
+void pppoe_disc_input(struct mbuf *);
+void pppoe_data_input(struct mbuf *);
 static void pppoe_dispatch_disc_pkt(struct mbuf *);
 
 /* management routines */
@@ -181,6 +183,26 @@ int pppoe_clone_destroy(struct ifnet *);
 struct if_clone pppoe_cloner =
     IF_CLONE_INITIALIZER("pppoe", pppoe_clone_create, pppoe_clone_destroy);
 
+struct mbuf_queue pppoediscinq = MBUF_QUEUE_INITIALIZER(
+	IFQ_MAXLEN, IPL_SOFTNET);
+struct mbuf_queue pppoeinq = MBUF_QUEUE_INITIALIZER(
+	IFQ_MAXLEN, IPL_SOFTNET);
+
+void pppoeintr(void)
+{
+	struct mbuf_list ml;
+	struct mbuf *m;
+
+	NET_ASSERT_LOCKED();
+
+	mq_delist(&pppoediscinq, &ml);
+	while ((m = ml_dequeue(&ml)) != NULL)
+		pppoe_disc_input(m);
+
+	mq_delist(&pppoeinq, &ml);
+	while ((m = ml_dequeue(&ml)) != NULL)
+		pppoe_data_input(m);
+}
 
 void
 pppoeattach(int count)
@@ -542,10 +564,16 @@ breakbreak:
 				    sc->sc_ac_cookie_len);
 			sc->sc_ac_cookie = malloc(ac_cookie_len, M_DEVBUF,
 			    M_DONTWAIT);
-			if (sc->sc_ac_cookie == NULL)
+			if (sc->sc_ac_cookie == NULL) {
+				sc->sc_ac_cookie_len = 0;
 				goto done;
+			}
 			sc->sc_ac_cookie_len = ac_cookie_len;
 			memcpy(sc->sc_ac_cookie, ac_cookie, ac_cookie_len);
+		} else if (sc->sc_ac_cookie) {
+			free(sc->sc_ac_cookie, M_DEVBUF, sc->sc_ac_cookie_len);
+			sc->sc_ac_cookie = NULL;
+			sc->sc_ac_cookie_len = 0;
 		}
 		if (relay_sid) {
 			if (sc->sc_relay_sid)
@@ -553,10 +581,16 @@ breakbreak:
 				    sc->sc_relay_sid_len);
 			sc->sc_relay_sid = malloc(relay_sid_len, M_DEVBUF,
 			    M_DONTWAIT);
-			if (sc->sc_relay_sid == NULL)
+			if (sc->sc_relay_sid == NULL) {
+				sc->sc_relay_sid_len = 0;
 				goto done;
+			}
 			sc->sc_relay_sid_len = relay_sid_len;
 			memcpy(sc->sc_relay_sid, relay_sid, relay_sid_len);
+		} else if (sc->sc_relay_sid) {
+			free(sc->sc_relay_sid, M_DEVBUF, sc->sc_relay_sid_len);
+			sc->sc_relay_sid = NULL;
+			sc->sc_relay_sid_len = 0;
 		}
 		if (sc->sc_sppp.pp_if.if_mtu > PPPOE_MTU &&
 		    (!max_payloadtag ||
@@ -586,7 +620,7 @@ breakbreak:
 		PPPOEDEBUG(("%s: session 0x%x connected\n",
 		    sc->sc_sppp.pp_if.if_xname, session));
 		sc->sc_state = PPPOE_STATE_SESSION;
-		microtime(&sc->sc_session_time);
+		getmicrouptime(&sc->sc_session_time);
 		sc->sc_sppp.pp_up(&sc->sc_sppp);	/* notify upper layers */
 
 		break;
@@ -915,6 +949,9 @@ pppoe_ioctl(struct ifnet *ifp, unsigned long cmd, caddr_t data)
 
 		if_put(eth_if);
 
+		if (error != 0)
+			return (error);
+
 		return (sppp_ioctl(ifp, cmd, data));
 	}
 	default:
@@ -955,6 +992,9 @@ static struct mbuf *
 pppoe_get_mbuf(size_t len)
 {
 	struct mbuf *m;
+
+	if (len + sizeof(struct ether_header) > MCLBYTES)
+		return NULL;
 
 	MGETHDR(m, M_DONTWAIT, MT_DATA);
 	if (m == NULL)

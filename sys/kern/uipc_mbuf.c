@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_mbuf.c,v 1.279 2021/03/06 09:20:49 jsg Exp $	*/
+/*	$OpenBSD: uipc_mbuf.c,v 1.283 2022/02/22 01:15:01 guenther Exp $	*/
 /*	$NetBSD: uipc_mbuf.c,v 1.15.4.1 1996/06/13 17:11:44 cgd Exp $	*/
 
 /*
@@ -81,8 +81,6 @@
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
-#include <sys/domain.h>
-#include <sys/protosw.h>
 #include <sys/pool.h>
 #include <sys/percpu.h>
 #include <sys/sysctl.h>
@@ -939,25 +937,24 @@ m_pullup(struct mbuf *m0, int len)
 
 	head = M_DATABUF(m0);
 	if (m0->m_len == 0) {
-		m0->m_data = head;
-
 		while (m->m_len == 0) {
 			m = m_free(m);
 			if (m == NULL)
 				goto freem0;
 		}
 
-		adj = mtod(m, unsigned long) & ALIGNBYTES;
+		adj = mtod(m, unsigned long) & (sizeof(long) - 1);
 	} else
-		adj = mtod(m0, unsigned long) & ALIGNBYTES;
+		adj = mtod(m0, unsigned long) & (sizeof(long) - 1);
 
 	tail = head + M_SIZE(m0);
 	head += adj;
 
-	if (len <= tail - head) {
-		/* there's enough space in the first mbuf */
-
-		if (len > tail - mtod(m0, caddr_t)) {
+	if (!M_READONLY(m0) && len <= tail - head) {
+		/* we can copy everything into the first mbuf */
+		if (m0->m_len == 0) {
+			m0->m_data = head;
+		} else if (len > tail - mtod(m0, caddr_t)) {
 			/* need to memmove to make space at the end */
 			memmove(head, mtod(m0, caddr_t), m0->m_len);
 			m0->m_data = head;
@@ -965,7 +962,7 @@ m_pullup(struct mbuf *m0, int len)
 
 		len -= m0->m_len;
 	} else {
-		/* the first mbuf is too small so make a new one */
+		/* the first mbuf is too small or read-only, make a new one */
 		space = adj + len;
 
 		if (space > MAXMCLBYTES)
@@ -1501,6 +1498,12 @@ m_pool_init(struct pool *pp, u_int size, u_int align, const char *wmesg)
 {
 	pool_init(pp, size, align, IPL_NET, 0, wmesg, &m_pool_allocator);
 	pool_set_constraints(pp, &kp_dma_contig);
+}
+
+u_int
+m_pool_used(void)
+{
+	return ((mbuf_mem_alloc * 100) / mbuf_mem_limit);
 }
 
 #ifdef DDB

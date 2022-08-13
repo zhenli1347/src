@@ -1,4 +1,4 @@
-/* $OpenBSD: imxiic_acpi.c,v 1.2 2021/07/24 10:52:07 patrick Exp $ */
+/* $OpenBSD: imxiic_acpi.c,v 1.4 2022/04/06 18:59:27 naddy Exp $ */
 /*
  * Copyright (c) 2015, 2016 joshua stein <jcs@openbsd.org>
  * Copyright (c) 2020 Patrick Wildt <patrick@blueri.se>
@@ -48,7 +48,7 @@ void	imxiic_acpi_bus_scan(struct device *, struct i2cbus_attach_args *,
 	    void *);
 int	imxiic_acpi_found_hid(struct aml_node *, void *);
 
-struct cfattach imxiic_acpi_ca = {
+const struct cfattach imxiic_acpi_ca = {
 	sizeof(struct imxiic_acpi_softc),
 	imxiic_acpi_match,
 	imxiic_acpi_attach,
@@ -67,6 +67,8 @@ imxiic_acpi_match(struct device *parent, void *match, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct cfdata *cf = match;
 
+	if (aaa->aaa_naddr < 1)
+		return 0;
 	return acpi_matchhids(aaa, imxiic_hids, cf->cf_driver->cd_name);
 }
 
@@ -82,11 +84,6 @@ imxiic_acpi_attach(struct device *parent, struct device *self, void *aux)
 	ac->ac_devnode = aaa->aaa_node;
 
 	printf(" %s", ac->ac_devnode->name);
-
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
 
 	printf(" addr 0x%llx/0x%llx", aaa->aaa_addr[0], aaa->aaa_size[0]);
 

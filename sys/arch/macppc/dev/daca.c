@@ -1,4 +1,4 @@
-/*	$OpenBSD: daca.c,v 1.10 2016/09/19 06:46:43 ratchov Exp $	*/
+/*	$OpenBSD: daca.c,v 1.13 2022/03/21 19:22:39 miod Exp $	*/
 
 /*-
  * Copyright (c) 2002,2003 Tsubai Masanari.  All rights reserved.
@@ -63,7 +63,7 @@ void daca_defer(struct device *);
 void daca_init(struct daca_softc *);
 void daca_set_volume(struct daca_softc *, int, int);
 
-struct cfattach daca_ca = {
+const struct cfattach daca_ca = {
 	sizeof(struct daca_softc), daca_match, daca_attach
 };
 
@@ -71,7 +71,7 @@ struct cfdriver daca_cd = {
 	NULL, "daca", DV_DULL
 };
 
-struct audio_hw_if daca_hw_if = {
+const struct audio_hw_if daca_hw_if = {
 	i2s_open,
 	i2s_close,
 	i2s_set_params,
@@ -154,7 +154,7 @@ daca_defer(struct device *dev)
 
 	/* XXX If i2c has failed to attach, what should we do? */
 
-	audio_attach_mi(&daca_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&daca_hw_if, sc, NULL, &sc->sc_dev);
 
 	daca_init(sc);
 }

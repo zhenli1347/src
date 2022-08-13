@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_wi_pci.c,v 1.54 2019/12/31 10:05:32 mpi Exp $	*/
+/*	$OpenBSD: if_wi_pci.c,v 1.56 2022/03/11 18:00:50 mpi Exp $	*/
 
 /*
  * Copyright (c) 2001-2003 Todd C. Miller <millert@openbsd.org>
@@ -86,7 +86,7 @@ struct wi_pci_softc {
 	struct wi_softc		 sc_wi;		/* real softc */
 };
 
-struct cfattach wi_pci_ca = {
+const struct cfattach wi_pci_ca = {
 	sizeof (struct wi_pci_softc), wi_pci_match, wi_pci_attach, NULL,
 	wi_pci_activate
 };
@@ -201,7 +201,7 @@ wi_pci_wakeup(struct wi_softc *sc)
  * doesn't really help much since we don't know how it is programmed.
  * Details for this attachment were gleaned from a version of the
  * Linux orinoco driver modified by Tobias Hoffmann based on
- * what he discoverd from the Windows driver.
+ * what he discovered from the Windows driver.
  */
 int
 wi_pci_acex_attach(struct pci_attach_args *pa, struct wi_softc *sc)

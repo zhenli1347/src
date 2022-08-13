@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ddb.4,v 1.99 2020/10/26 18:53:20 deraadt Exp $
+.\"	$OpenBSD: ddb.4,v 1.103 2022/07/29 17:47:11 semarie Exp $
 .\"	$NetBSD: ddb.4,v 1.5 1994/11/30 16:22:09 jtc Exp $
 .\"
 .\" Mach Operating System
@@ -25,7 +25,7 @@
 .\" any improvements or extensions that they make and grant Carnegie Mellon
 .\" the rights to redistribute these changes.
 .\"
-.Dd $Mdocdate: October 26 2020 $
+.Dd $Mdocdate: July 29 2022 $
 .Dt DDB 4
 .Os
 .Sh NAME
@@ -665,7 +665,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified the complete map is printed.
+modifier is specified, the complete map is printed.
 .\" --------------------
 .It Ic show mbuf Ar addr
 Prints the
@@ -689,7 +689,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified prints out all
+modifier is specified, prints out all
 .Li vnodes
 (see also
 .Cm show vnode )
@@ -710,7 +710,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified prints out additional
+modifier is specified, prints out additional
 information as well.
 .\" --------------------
 .It Xo
@@ -724,7 +724,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified prints out additional
+modifier is specified, prints out additional
 information as well.
 .\" --------------------
 .It Xo
@@ -738,7 +738,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified the complete object is printed.
+modifier is specified, the complete object is printed.
 .\" --------------------
 .It Xo
 .Ic show page
@@ -751,7 +751,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified the complete page is printed.
+modifier is specified, the complete page is printed.
 .\" --------------------
 .It Ic show panic
 Prints the panic string.
@@ -776,7 +776,7 @@ Prints the
 .Li struct proc
 at
 .Ar addr .
-If an optional address is not specified
+If an optional address is not specified,
 .Li curproc
 is assumed.
 .\" --------------------
@@ -790,6 +790,12 @@ Note: The
 .Cm /u
 modifier is not supported on every machine, in which case
 incorrect information may be displayed.
+.\" --------------------
+.It Ic show route Ar addr
+Prints the
+.Li struct rtentry
+at
+.Ar addr .
 .\" --------------------
 .It Ic show socket Ar addr
 Prints the
@@ -812,6 +818,22 @@ as a struct
 Nested structures and bit fields are not printed.
 Character arrays are printed as bytes.
 .\" --------------------
+.It Ic show swap
+Prints a detailed list of all swaps.
+.\" --------------------
+.It Xo
+.Ic show tdb
+.Op Cm /f
+.Ar addr
+.Xc
+Prints the
+.Li struct tdb
+at
+.Ar addr .
+If the
+.Cm /f
+modifier is specified, prints out all fields of this IPsec SA.
+.\" --------------------
 .It Ic show uvmexp
 Displays a selection of uvm counters and statistics.
 .\" --------------------
@@ -826,7 +848,7 @@ at
 .Ar addr .
 If the
 .Cm /f
-modifier is specified prints out all
+modifier is specified, prints out all
 .Li bufs
 (see also
 .Cm show buf )
@@ -938,6 +960,37 @@ Display information for all outstanding NFS requests.
 For each NFS requests, print a more detailed output.
 See the
 .Ic show nfsreq
+command for more information.
+.El
+.\" --------------------
+.It Xo
+.Ic show all routes
+.Op Cm /iI
+.Op Ar rtableid
+.Op Ic \&, Ns Ar count
+.Xc
+Show internet routing tables.
+Default for
+.Ar rtableid
+is 0 and
+.Ar count
+is 1.
+.Pp
+.Bl -tag -width foo -compact
+.It Cm /i
+Restrict to AF_INET.
+.It Cm /I
+Restrict to AF_INET6.
+.El
+.\" --------------------
+.It Ic show all tdbs Op Cm /f
+Display information about all IPsec SAs in the system.
+.Pp
+.Bl -tag -width foo -compact
+.It Cm /f
+For each tdb, print a more detailed output.
+See the
+.Ic show tdb
 command for more information.
 .El
 .\" --------------------

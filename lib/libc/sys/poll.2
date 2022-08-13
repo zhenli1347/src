@@ -1,4 +1,4 @@
-.\"	$OpenBSD: poll.2,v 1.36 2018/08/18 16:55:30 cheloha Exp $
+.\"	$OpenBSD: poll.2,v 1.39 2022/01/21 15:23:36 millert Exp $
 .\"
 .\" Copyright (c) 1994 Jason R. Thorpe
 .\" All rights reserved.
@@ -28,7 +28,7 @@
 .\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\"
-.Dd $Mdocdate: August 18 2018 $
+.Dd $Mdocdate: January 21 2022 $
 .Dt POLL 2
 .Os
 .Sh NAME
@@ -65,7 +65,7 @@ Points to an array of
 structures, which are defined as:
 .Bd -literal -offset indent
 struct pollfd {
-	int fd;
+	int   fd;
 	short events;
 	short revents;
 };
@@ -300,6 +300,9 @@ and
 .Fn ppoll
 will fail if:
 .Bl -tag -width Er
+.It Bq Er EAGAIN
+The kernel failed to allocate memory for temporary data structures;
+a later call may succeed.
 .It Bq Er EFAULT
 .Fa fds
 points outside the process's allocated address space.
@@ -361,9 +364,3 @@ Similarly, the
 and
 .Dv POLLRDBAND
 flags are also equivalent.
-.Pp
-Internally to the kernel,
-.Fn poll
-and
-.Fn ppoll
-work poorly if multiple processes wait on the same file descriptor.

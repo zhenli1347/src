@@ -1,6 +1,6 @@
-/* $OpenBSD: mandoc_msg.c,v 1.14 2021/08/14 13:51:46 schwarze Exp $ */
+/* $OpenBSD: mandoc_msg.c,v 1.18 2022/06/07 09:51:03 schwarze Exp $ */
 /*
- * Copyright (c) 2014-2021 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2014-2022 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -164,13 +164,14 @@ static	const char *const type_message[MANDOCERR_MAX] = {
 	"invalid Boolean argument",
 	"argument contains two font escapes",
 	"unknown font, skipping request",
+	"ignoring distance argument",
 	"odd number of characters in request",
 
 	/* related to plain text */
 	"blank line in fill mode, using .sp",
 	"tab in filled text",
 	"new sentence, new line",
-	"invalid escape sequence",
+	"invalid escape sequence argument",
 	"undefined escape, printing literally",
 	"undefined string, using \"\"",
 
@@ -214,11 +215,13 @@ static	const char *const type_message[MANDOCERR_MAX] = {
 	"escaped character not allowed in a name",
 	"using macro argument outside macro",
 	"argument number is not numeric",
+	"negative argument, using 0",
 	"NOT IMPLEMENTED: Bd -file",
 	"skipping display without arguments",
 	"missing list type, using -item",
 	"argument is not numeric, using 1",
 	"argument is not a character",
+	"skipping unusable escape sequence",
 	"missing manual name, using \"\"",
 	"uname(3) system call failed, using UNKNOWN",
 	"unknown standard specifier",
@@ -230,6 +233,12 @@ static	const char *const type_message[MANDOCERR_MAX] = {
 	"skipping all arguments",
 	"skipping excess arguments",
 	"divide by zero",
+
+	/* related to escape sequences */
+	"incomplete escape sequence",
+	"invalid special character",
+	"unknown special character",
+	"invalid escape argument delimiter",
 
 	"unsupported feature",
 	"input too large",

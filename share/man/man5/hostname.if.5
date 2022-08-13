@@ -1,4 +1,4 @@
-.\"	$OpenBSD: hostname.if.5,v 1.77 2021/07/17 15:28:31 kn Exp $
+.\"	$OpenBSD: hostname.if.5,v 1.79 2022/07/26 00:36:54 kn Exp $
 .\"	$NetBSD: hosts.5,v 1.4 1994/11/30 19:31:20 jtc Exp $
 .\"
 .\" Copyright (c) 1983, 1991, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"     @(#)hosts.5	8.2 (Berkeley) 12/11/93
 .\"
-.Dd $Mdocdate: July 17 2021 $
+.Dd $Mdocdate: July 26 2022 $
 .Dt HOSTNAME.IF 5
 .Os
 .Sh NAME
@@ -67,21 +67,13 @@ inet 10.0.0.1 255.255.255.0 10.0.0.255 description "Bob's uplink"
 Each line is processed separately and in order.
 For example:
 .Bd -literal -offset indent
-nwid mynwid wpakey mywpakey
+join mynwid wpakey mywpakey
 inet6 autoconf
 inet autoconf
 .Ed
 .Pp
-would run ifconfig three times to set the
-.Cm nwid
-and
-.Cm wpakey
-of the interface,
-the
-.Sy AUTOCONF6
-flag and the
-.Sy AUTOCONF4
-flag, respectively.
+would run ifconfig three times to add a wireless network using WPA to the
+join list and enable dynamic address configuration for IPv6 and IPv4.
 .Sh STATIC ADDRESS CONFIGURATION
 The following packed formats are valid for configuring network
 interfaces with static addresses.
@@ -262,23 +254,6 @@ The
 .Va autoconf
 configurations will communicate learned DNS information to
 .Xr resolvd 8 .
-.Sh BRIDGE INTERFACE CONFIGURATION
-If the network interface is a bridge, the options described in
-the bridge section of the
-.Xr ifconfig 8
-manual page apply.
-.Pp
-For example:
-.Bd -literal -offset indent
-add fxp0
-add ep1
--learn fxp0
-#
-!ipsecctl -F
-#
-static fxp0 8:0:20:1e:2f:2b
-up    # and finally enable it
-.Ed
 .Sh FILES
 .Bl -tag -width "/etc/hostname.XXXXXX"
 .It Pa /etc/hostname.XXX

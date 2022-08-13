@@ -1,4 +1,4 @@
-/*	$OpenBSD: bktr_os.c,v 1.34 2021/03/05 12:40:14 jsg Exp $	*/
+/*	$OpenBSD: bktr_os.c,v 1.37 2022/07/02 08:50:42 visa Exp $	*/
 /* $FreeBSD: src/sys/dev/bktr/bktr_os.c,v 1.20 2000/10/20 08:16:53 roger Exp $ */
 
 /*
@@ -60,8 +60,6 @@
 #include <sys/kernel.h>
 #include <sys/signalvar.h>
 #include <sys/mman.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 #include <sys/vnode.h>
 #if NRADIO > 0
 #include <sys/radioio.h>
@@ -110,7 +108,7 @@ paddr_t	bktr_mmap(dev_t, off_t, int);
 static int      bktr_probe(struct device *, void *, void *);
 static void     bktr_attach(struct device *, struct device *, void *);
 
-struct cfattach bktr_ca = {
+const struct cfattach bktr_ca = {
         sizeof(struct bktr_softc), bktr_probe, bktr_attach
 };
 
@@ -123,7 +121,7 @@ struct cfdriver bktr_cd = {
 int	bktr_get_info(void *, struct radio_info *);
 int	bktr_set_info(void *, struct radio_info *);
 
-struct radio_hw_if bktr_hw_if = {
+const struct radio_hw_if bktr_hw_if = {
 	NULL,	/* open */
 	NULL,	/* close */
 	bktr_get_info,

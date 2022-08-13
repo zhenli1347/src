@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.h,v 1.2 2021/05/12 01:20:52 jsg Exp $	*/
+/*	$OpenBSD: conf.h,v 1.4 2022/06/28 14:43:50 visa Exp $	*/
 
 /*
  * Copyright (c) 1996 Christos Zoulas.  All rights reserved.
@@ -42,48 +42,9 @@ cdev_decl(mm);
 #define cdev_openprom_init(c,n) { \
 	dev_init(c,n,open), dev_init(c,n,close), (dev_type_read((*))) enodev, \
 	(dev_type_write((*))) enodev, dev_init(c,n,ioctl), \
-	(dev_type_stop((*))) nullop, 0, selfalse, \
+	(dev_type_stop((*))) nullop, 0, \
 	(dev_type_mmap((*))) enodev }
 
 cdev_decl(openprom);
-
-/*
- * These numbers have to be in sync with bdevsw/cdevsw.
- */
-
-#define BMAJ_WD		0
-#define BMAJ_SW		1
-#define BMAJ_SD		4
-#define BMAJ_ST		5
-
-#define CMAJ_MM		2
-#define CMAJ_PTS	5
-#define CMAJ_PTC	6
-#define CMAJ_COM	8
-#define CMAJ_WSDISPLAY	12
-#define CMAJ_ST		14
-#define CMAJ_LPT	16
-#define CMAJ_CH		17
-#define CMAJ_UK		20
-#define CMAJ_BPF	23
-#define CMAJ_TUN	40
-#define CMAJ_AUDIO	42
-#define CMAJ_VIDEO	44
-#define CMAJ_BKTR	49
-#define CMAJ_MIDI	52
-#define CMAJ_USB	61
-#define CMAJ_UHID	62
-#define CMAJ_UGEN	63
-#define CMAJ_ULPT	64
-#define CMAJ_UCOM	66
-#define CMAJ_WSKBD	67
-#define CMAJ_WSMOUSE	68
-#ifdef USER_PCICONF
-#define CMAJ_PCI	72
-#endif
-#define CMAJ_RADIO	76
-#define CMAJ_DRM	87
-#define CMAJ_GPIO	88
-#define CMAJ_VSCSI	89
 
 #endif	/* _MACHINE_CONF_H_ */

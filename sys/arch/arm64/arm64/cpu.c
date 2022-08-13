@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.55 2021/06/10 04:49:48 jsg Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.66 2022/08/05 12:52:35 robert Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -24,6 +24,7 @@
 #include <sys/device.h>
 #include <sys/sysctl.h>
 #include <sys/task.h>
+#include <sys/user.h>
 
 #include <uvm/uvm.h>
 
@@ -49,6 +50,7 @@
 #define CPU_IMPL_AMCC		0x50
 #define CPU_IMPL_APPLE		0x61
 
+/* ARM */
 #define CPU_PART_CORTEX_A34	0xd02
 #define CPU_PART_CORTEX_A53	0xd03
 #define CPU_PART_CORTEX_A35	0xd04
@@ -73,16 +75,26 @@
 #define CPU_PART_NEOVERSE_N2	0xd49
 #define CPU_PART_NEOVERSE_E1	0xd4a
 #define CPU_PART_CORTEX_A78C	0xd4b
+#define CPU_PART_CORTEX_X1C	0xd4c
+#define CPU_PART_CORTEX_A715	0xd4d
+#define CPU_PART_CORTEX_X3	0xd4e
 
+/* Cavium */
 #define CPU_PART_THUNDERX_T88	0x0a1
 #define CPU_PART_THUNDERX_T81	0x0a2
 #define CPU_PART_THUNDERX_T83	0x0a3
 #define CPU_PART_THUNDERX2_T99	0x0af
 
+/* Applied Micro */
 #define CPU_PART_X_GENE		0x000
 
+/* Apple */
 #define CPU_PART_ICESTORM	0x022
 #define CPU_PART_FIRESTORM	0x023
+#define CPU_PART_ICESTORM_PRO	0x024
+#define CPU_PART_FIRESTORM_PRO	0x025
+#define CPU_PART_ICESTORM_MAX	0x028
+#define CPU_PART_FIRESTORM_MAX	0x029
 
 #define CPU_IMPL(midr)  (((midr) >> 24) & 0xff)
 #define CPU_PART(midr)  (((midr) >> 4) & 0xfff)
@@ -117,8 +129,11 @@ struct cpu_cores cpu_cores_arm[] = {
 	{ CPU_PART_CORTEX_A78C, "Cortex-A78C" },
 	{ CPU_PART_CORTEX_A510, "Cortex-A510" },
 	{ CPU_PART_CORTEX_A710, "Cortex-A710" },
+	{ CPU_PART_CORTEX_A715, "Cortex-A715" },
 	{ CPU_PART_CORTEX_X1, "Cortex-X1" },
+	{ CPU_PART_CORTEX_X1C, "Cortex-X1C" },
 	{ CPU_PART_CORTEX_X2, "Cortex-X2" },
+	{ CPU_PART_CORTEX_X3, "Cortex-X3" },
 	{ CPU_PART_NEOVERSE_E1, "Neoverse E1" },
 	{ CPU_PART_NEOVERSE_N1, "Neoverse N1" },
 	{ CPU_PART_NEOVERSE_N2, "Neoverse N2" },
@@ -142,6 +157,10 @@ struct cpu_cores cpu_cores_amcc[] = {
 struct cpu_cores cpu_cores_apple[] = {
 	{ CPU_PART_ICESTORM, "Icestorm" },
 	{ CPU_PART_FIRESTORM, "Firestorm" },
+	{ CPU_PART_ICESTORM_PRO, "Icestorm Pro" },
+	{ CPU_PART_FIRESTORM_PRO, "Firestorm Pro" },
+	{ CPU_PART_ICESTORM_MAX, "Icestorm Max" },
+	{ CPU_PART_FIRESTORM_MAX, "Firestorm Max" },
 	{ 0, NULL },
 };
 
@@ -161,6 +180,9 @@ const struct implementers {
 char cpu_model[64];
 int cpu_node;
 
+uint64_t cpu_id_aa64isar0;
+uint64_t cpu_id_aa64isar1;
+
 #ifdef CRYPTO
 int arm64_has_aes;
 #endif
@@ -170,7 +192,7 @@ struct cpu_info *cpu_info_list = &cpu_info_primary;
 int	cpu_match(struct device *, void *, void *);
 void	cpu_attach(struct device *, struct device *, void *);
 
-struct cfattach cpu_ca = {
+const struct cfattach cpu_ca = {
 	sizeof(struct device), cpu_match, cpu_attach
 };
 
@@ -331,6 +353,15 @@ cpu_identify(struct cpu_info *ci)
 	/*
 	 * Print CPU features encoded in the ID registers.
 	 */
+
+	if (READ_SPECIALREG(id_aa64isar0_el1) != cpu_id_aa64isar0) {
+		printf("\n%s: mismatched ID_AA64ISAR0_EL1",
+		    ci->ci_dev->dv_xname);
+	}
+	if (READ_SPECIALREG(id_aa64isar1_el1) != cpu_id_aa64isar1) {
+		printf("\n%s: mismatched ID_AA64ISAR1_EL1",
+		    ci->ci_dev->dv_xname);
+	}
 
 	printf("\n%s: ", ci->ci_dev->dv_xname);
 
@@ -579,7 +610,8 @@ cpu_identify(struct cpu_info *ci)
 #endif
 }
 
-int	cpu_hatch_secondary(struct cpu_info *ci, int, uint64_t);
+void	cpu_init(void);
+int	cpu_start_secondary(struct cpu_info *ci, int, uint64_t);
 int	cpu_clockspeed(int *);
 
 int
@@ -604,20 +636,19 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 {
 	struct fdt_attach_args *faa = aux;
 	struct cpu_info *ci;
+	void *kstack;
+#ifdef MULTIPROCESSOR
 	uint64_t mpidr = READ_SPECIALREG(mpidr_el1);
-	uint64_t id_aa64mmfr1, sctlr;
+#endif
 	uint32_t opp;
 
 	KASSERT(faa->fa_nreg > 0);
 
+#ifdef MULTIPROCESSOR
 	if (faa->fa_reg[0].addr == (mpidr & MPIDR_AFF)) {
 		ci = &cpu_info_primary;
-#ifdef MULTIPROCESSOR
 		ci->ci_flags |= CPUF_RUNNING | CPUF_PRESENT | CPUF_PRIMARY;
-#endif
-	}
-#ifdef MULTIPROCESSOR
-	else {
+	} else {
 		ci = malloc(sizeof(*ci), M_DEVBUF, M_WAITOK | M_ZERO);
 		cpu_info[dev->dv_unit] = ci;
 		ci->ci_next = cpu_info_list->ci_next;
@@ -625,6 +656,8 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		ci->ci_flags |= CPUF_AP;
 		ncpus++;
 	}
+#else
+	ci = &cpu_info_primary;
 #endif
 
 	ci->ci_dev = dev;
@@ -634,6 +667,9 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 	ci->ci_self = ci;
 
 	printf(" mpidr %llx:", ci->ci_mpidr);
+
+	kstack = km_alloc(USPACE, &kv_any, &kp_zero, &kd_waitok);
+	ci->ci_el1_stkend = (vaddr_t)kstack + USPACE - 16;
 
 #ifdef MULTIPROCESSOR
 	if (ci->ci_flags & CPUF_AP) {
@@ -654,7 +690,7 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		}
 
 		sched_init_cpu(ci);
-		if (cpu_hatch_secondary(ci, spinup_method, spinup_data)) {
+		if (cpu_start_secondary(ci, spinup_method, spinup_data)) {
 			atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFY);
 			__asm volatile("dsb sy; sev" ::: "memory");
 
@@ -671,6 +707,9 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		}
 	} else {
 #endif
+		cpu_id_aa64isar0 = READ_SPECIALREG(id_aa64isar0_el1);
+		cpu_id_aa64isar1 = READ_SPECIALREG(id_aa64isar1_el1);
+
 		cpu_identify(ci);
 
 		if (OF_getproplen(ci->ci_node, "clocks") > 0) {
@@ -678,17 +717,7 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 			cpu_cpuspeed = cpu_clockspeed;
 		}
 
-		/* Enable PAN. */
-		id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
-		if (ID_AA64MMFR1_PAN(id_aa64mmfr1) >= ID_AA64MMFR1_PAN_IMPL) {
-			sctlr = READ_SPECIALREG(sctlr_el1);
-			sctlr &= ~SCTLR_SPAN;
-			WRITE_SPECIALREG(sctlr_el1, sctlr);
-		}
-
-		/* Initialize debug registers. */
-		WRITE_SPECIALREG(mdscr_el1, DBG_MDSCR_TDCC);
-		WRITE_SPECIALREG(oslar_el1, 0);
+		cpu_init();
 #ifdef MULTIPROCESSOR
 	}
 #endif
@@ -698,6 +727,34 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 		cpu_opp_init(ci, opp);
 
 	printf("\n");
+}
+
+void
+cpu_init(void)
+{
+	uint64_t id_aa64mmfr1, sctlr;
+	uint64_t tcr;
+
+	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
+	__asm volatile("isb");
+	tcr = READ_SPECIALREG(tcr_el1);
+	tcr &= ~TCR_T0SZ(0x3f);
+	tcr |= TCR_T0SZ(64 - USER_SPACE_BITS);
+	tcr |= TCR_A1;
+	WRITE_SPECIALREG(tcr_el1, tcr);
+	cpu_tlb_flush();
+
+	/* Enable PAN. */
+	id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
+	if (ID_AA64MMFR1_PAN(id_aa64mmfr1) >= ID_AA64MMFR1_PAN_IMPL) {
+		sctlr = READ_SPECIALREG(sctlr_el1);
+		sctlr &= ~SCTLR_SPAN;
+		WRITE_SPECIALREG(sctlr_el1, sctlr);
+	}
+
+	/* Initialize debug registers. */
+	WRITE_SPECIALREG(mdscr_el1, DBG_MDSCR_TDCC);
+	WRITE_SPECIALREG(oslar_el1, 0);
 }
 
 void
@@ -723,7 +780,7 @@ cpu_clockspeed(int *freq)
 #ifdef MULTIPROCESSOR
 
 void cpu_boot_secondary(struct cpu_info *ci);
-void cpu_hatch(void);
+void cpu_hatch_secondary(void);
 
 void
 cpu_boot_secondary_processors(void)
@@ -743,7 +800,7 @@ cpu_boot_secondary_processors(void)
 }
 
 void
-cpu_hatch_spin_table(struct cpu_info *ci, uint64_t start, uint64_t data)
+cpu_start_spin_table(struct cpu_info *ci, uint64_t start, uint64_t data)
 {
 	/* this reuses the zero page for the core */
 	vaddr_t start_pg = zero_page + (PAGE_SIZE * ci->ci_cpuid);
@@ -760,17 +817,13 @@ cpu_hatch_spin_table(struct cpu_info *ci, uint64_t start, uint64_t data)
 }
 
 int
-cpu_hatch_secondary(struct cpu_info *ci, int method, uint64_t data)
+cpu_start_secondary(struct cpu_info *ci, int method, uint64_t data)
 {
 	extern uint64_t pmap_avail_kvo;
 	extern paddr_t cpu_hatch_ci;
 	paddr_t startaddr;
-	void *kstack;
 	uint64_t ttbr1;
 	int rc = 0;
-
-	kstack = km_alloc(USPACE, &kv_any, &kp_zero, &kd_waitok);
-	ci->ci_el1_stkend = (vaddr_t)kstack + USPACE - 16;
 
 	pmap_extract(pmap_kernel(), (vaddr_t)ci, &cpu_hatch_ci);
 
@@ -780,7 +833,7 @@ cpu_hatch_secondary(struct cpu_info *ci, int method, uint64_t data)
 	cpu_dcache_wb_range((vaddr_t)&cpu_hatch_ci, sizeof(paddr_t));
 	cpu_dcache_wb_range((vaddr_t)ci, sizeof(*ci));
 
-	startaddr = (vaddr_t)cpu_hatch + pmap_avail_kvo;
+	startaddr = (vaddr_t)cpu_hatch_secondary + pmap_avail_kvo;
 
 	switch (method) {
 	case 1:
@@ -791,7 +844,7 @@ cpu_hatch_secondary(struct cpu_info *ci, int method, uint64_t data)
 		break;
 	case 2:
 		/* spin-table */
-		cpu_hatch_spin_table(ci, startaddr, data);
+		cpu_start_spin_table(ci, startaddr, data);
 		rc = 1;
 		break;
 	default:
@@ -813,45 +866,26 @@ cpu_boot_secondary(struct cpu_info *ci)
 }
 
 void
-cpu_start_secondary(struct cpu_info *ci)
+cpu_init_secondary(struct cpu_info *ci)
 {
-	uint64_t id_aa64mmfr1, sctlr;
-	uint64_t tcr;
 	int s;
 
 	ci->ci_flags |= CPUF_PRESENT;
 	__asm volatile("dsb sy" ::: "memory");
 
-	while ((ci->ci_flags & CPUF_IDENTIFY) == 0)
-		__asm volatile("wfe");
+	if ((ci->ci_flags & CPUF_IDENTIFIED) == 0) {
+		while ((ci->ci_flags & CPUF_IDENTIFY) == 0)
+			__asm volatile("wfe");
 
-	cpu_identify(ci);
-	atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFIED);
-	__asm volatile("dsb sy" ::: "memory");
+		cpu_identify(ci);
+		atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFIED);
+		__asm volatile("dsb sy" ::: "memory");
+	}
 
 	while ((ci->ci_flags & CPUF_GO) == 0)
 		__asm volatile("wfe");
 
-	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
-	__asm volatile("isb");
-	tcr = READ_SPECIALREG(tcr_el1);
-	tcr &= ~TCR_T0SZ(0x3f);
-	tcr |= TCR_T0SZ(64 - USER_SPACE_BITS);
-	tcr |= TCR_A1;
-	WRITE_SPECIALREG(tcr_el1, tcr);
-	cpu_tlb_flush();
-
-	/* Enable PAN. */
-	id_aa64mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
-	if (ID_AA64MMFR1_PAN(id_aa64mmfr1) >= ID_AA64MMFR1_PAN_IMPL) {
-		sctlr = READ_SPECIALREG(sctlr_el1);
-		sctlr &= ~SCTLR_SPAN;
-		WRITE_SPECIALREG(sctlr_el1, sctlr);
-	}
-
-	/* Initialize debug registers. */
-	WRITE_SPECIALREG(mdscr_el1, DBG_MDSCR_TDCC);
-	WRITE_SPECIALREG(oslar_el1, 0);
+	cpu_init();
 
 	s = splhigh();
 	arm_intr_cpu_enable();
@@ -866,6 +900,24 @@ cpu_start_secondary(struct cpu_info *ci)
 
 	SCHED_LOCK(s);
 	cpu_switchto(NULL, sched_chooseproc());
+}
+
+void
+cpu_halt(void)
+{
+	struct cpu_info *ci = curcpu();
+
+	KERNEL_ASSERT_UNLOCKED();
+	SCHED_ASSERT_UNLOCKED();
+
+	intr_disable();
+	ci->ci_flags &= ~CPUF_RUNNING;
+#if NPSCI > 0
+	psci_cpu_off();
+#endif
+	for (;;)
+		__asm volatile("wfi");
+	/* NOTREACHED */
 }
 
 void
@@ -887,6 +939,112 @@ cpu_unidle(struct cpu_info *ci)
 	if (ci != curcpu())
 		arm_send_ipi(ci, ARM_IPI_NOP);
 }
+
+#endif
+
+#ifdef SUSPEND
+
+void cpu_hatch_primary(void);
+
+label_t cpu_suspend_jmpbuf;
+int cpu_suspended;
+
+void
+cpu_init_primary(void)
+{
+	cpu_init();
+
+	cpu_startclock();
+
+	cpu_suspended = 1;
+	longjmp(&cpu_suspend_jmpbuf);
+}
+
+int
+cpu_suspend_primary(void)
+{
+	extern uint64_t pmap_avail_kvo;
+	struct cpu_info *ci = curcpu();
+	paddr_t startaddr, data;
+	uint64_t ttbr1;
+
+	cpu_suspended = 0;
+	setjmp(&cpu_suspend_jmpbuf);
+	if (cpu_suspended) {
+		/* XXX wait for debug output from SCP on Allwinner A64 */
+		delay(200000);
+		return 0;
+	}
+
+	pmap_extract(pmap_kernel(), (vaddr_t)ci, &data);
+
+	__asm("mrs %x0, ttbr1_el1": "=r"(ttbr1));
+	ci->ci_ttbr1 = ttbr1;
+
+	cpu_dcache_wb_range((vaddr_t)&data, sizeof(paddr_t));
+	cpu_dcache_wb_range((vaddr_t)ci, sizeof(*ci));
+
+	startaddr = (vaddr_t)cpu_hatch_primary + pmap_avail_kvo;
+
+#if NPSCI > 0
+	psci_system_suspend(startaddr, data);
+#endif
+
+	return EOPNOTSUPP;
+}
+
+#ifdef MULTIPROCESSOR
+
+void
+cpu_resume_secondary(struct cpu_info *ci)
+{
+	struct proc *p;
+	struct pcb *pcb;
+	struct trapframe *tf;
+	struct switchframe *sf;
+	int timeout = 10000;
+
+	ci->ci_curproc = NULL;
+	ci->ci_curpcb = NULL;
+	ci->ci_curpm = NULL;
+	ci->ci_cpl = IPL_NONE;
+	ci->ci_ipending = 0;
+	ci->ci_idepth = 0;
+	ci->ci_flags &= ~CPUF_PRESENT;
+
+#ifdef DIAGNOSTIC
+	ci->ci_mutex_level = 0;
+#endif
+	ci->ci_ttbr1 = 0;
+
+	p = ci->ci_schedstate.spc_idleproc;
+	pcb = &p->p_addr->u_pcb;
+
+	tf = (struct trapframe *)((u_long)p->p_addr
+	    + USPACE
+	    - sizeof(struct trapframe)
+	    - 0x10);
+
+	tf = (struct trapframe *)STACKALIGN(tf);
+	pcb->pcb_tf = tf;
+
+	sf = (struct switchframe *)tf - 1;
+	sf->sf_x19 = (uint64_t)sched_idle;
+	sf->sf_x20 = (uint64_t)ci;
+	sf->sf_lr = (uint64_t)proc_trampoline;
+	pcb->pcb_sp = (uint64_t)sf;
+
+	cpu_start_secondary(ci, 1, 0);
+	while ((ci->ci_flags & CPUF_PRESENT) == 0 && --timeout)
+		delay(1000);
+	if (timeout == 0) {
+		printf("%s: failed to spin up\n",
+		    ci->ci_dev->dv_xname);
+		ci->ci_flags = 0;
+	}
+}
+
+#endif
 
 #endif
 

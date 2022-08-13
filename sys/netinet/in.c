@@ -1,4 +1,4 @@
-/*	$OpenBSD: in.c,v 1.171 2021/03/10 10:21:48 jsg Exp $	*/
+/*	$OpenBSD: in.c,v 1.175 2022/08/06 15:57:59 bluhm Exp $	*/
 /*	$NetBSD: in.c,v 1.26 1996/02/13 23:41:39 christos Exp $	*/
 
 /*
@@ -103,7 +103,7 @@ in_canforward(struct in_addr in)
 {
 	u_int32_t net;
 
-	if (IN_EXPERIMENTAL(in.s_addr) || IN_MULTICAST(in.s_addr))
+	if (IN_MULTICAST(in.s_addr))
 		return (0);
 	if (IN_CLASSA(in.s_addr)) {
 		net = in.s_addr & IN_CLASSA_NET;
@@ -569,7 +569,7 @@ in_ioctl_get(u_long cmd, caddr_t data, struct ifnet *ifp)
 			return (error);
 	}
 
-	NET_RLOCK_IN_IOCTL();
+	NET_LOCK_SHARED();
 
 	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 		if (ifa->ifa_addr->sa_family != AF_INET)
@@ -620,7 +620,7 @@ in_ioctl_get(u_long cmd, caddr_t data, struct ifnet *ifp)
 	}
 
 err:
-	NET_RUNLOCK_IN_IOCTL();
+	NET_UNLOCK_SHARED();
 	return (error);
 }
 
@@ -866,10 +866,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		 * New address; allocate a new multicast record
 		 * and link it into the interface's multicast list.
 		 */
-		inm = malloc(sizeof(*inm), M_IPMADDR, M_NOWAIT | M_ZERO);
-		if (inm == NULL)
-			return (NULL);
-
+		inm = malloc(sizeof(*inm), M_IPMADDR, M_WAITOK | M_ZERO);
 		inm->inm_sin.sin_len = sizeof(struct sockaddr_in);
 		inm->inm_sin.sin_family = AF_INET;
 		inm->inm_sin.sin_addr = *ap;
@@ -894,7 +891,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		/*
 		 * Let IGMP know that we have joined a new IP multicast group.
 		 */
-		igmp_joingroup(inm);
+		igmp_joingroup(inm, ifp);
 	}
 
 	return (inm);
@@ -911,35 +908,34 @@ in_delmulti(struct in_multi *inm)
 
 	NET_ASSERT_LOCKED();
 
-	if (--inm->inm_refcnt == 0) {
+	if (--inm->inm_refcnt != 0)
+		return;
+
+	ifp = if_get(inm->inm_ifidx);
+	if (ifp != NULL) {
 		/*
 		 * No remaining claims to this record; let IGMP know that
 		 * we are leaving the multicast group.
 		 */
-		igmp_leavegroup(inm);
-		ifp = if_get(inm->inm_ifidx);
+		igmp_leavegroup(inm, ifp);
 
 		/*
 		 * Notify the network driver to update its multicast
 		 * reception filter.
 		 */
-		if (ifp != NULL) {
-			memset(&ifr, 0, sizeof(ifr));
-			satosin(&ifr.ifr_addr)->sin_len =
-			    sizeof(struct sockaddr_in);
-			satosin(&ifr.ifr_addr)->sin_family = AF_INET;
-			satosin(&ifr.ifr_addr)->sin_addr = inm->inm_addr;
-			KERNEL_LOCK();
-			(*ifp->if_ioctl)(ifp, SIOCDELMULTI, (caddr_t)&ifr);
-			KERNEL_UNLOCK();
+		memset(&ifr, 0, sizeof(ifr));
+		satosin(&ifr.ifr_addr)->sin_len = sizeof(struct sockaddr_in);
+		satosin(&ifr.ifr_addr)->sin_family = AF_INET;
+		satosin(&ifr.ifr_addr)->sin_addr = inm->inm_addr;
+		KERNEL_LOCK();
+		(*ifp->if_ioctl)(ifp, SIOCDELMULTI, (caddr_t)&ifr);
+		KERNEL_UNLOCK();
 
-			TAILQ_REMOVE(&ifp->if_maddrlist, &inm->inm_ifma,
-			    ifma_list);
-		}
-		if_put(ifp);
-
-		free(inm, M_IPMADDR, sizeof(*inm));
+		TAILQ_REMOVE(&ifp->if_maddrlist, &inm->inm_ifma, ifma_list);
 	}
+	if_put(ifp);
+
+	free(inm, M_IPMADDR, sizeof(*inm));
 }
 
 /*

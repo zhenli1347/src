@@ -1,4 +1,4 @@
-/*	$OpenBSD: autri.c,v 1.44 2020/01/11 09:08:39 cheloha Exp $	*/
+/*	$OpenBSD: autri.c,v 1.47 2022/03/21 19:22:40 miod Exp $	*/
 
 /*
  * Copyright (c) 2001 SOMEYA Yoshihiko and KUROSAWA Takahiro.
@@ -114,7 +114,7 @@ struct cfdriver autri_cd = {
 	NULL, "autri", DV_DULL
 };
 
-struct cfattach autri_ca = {
+const struct cfattach autri_ca = {
 	sizeof(struct autri_softc), autri_match, autri_attach, NULL,
 	autri_activate
 };
@@ -139,7 +139,7 @@ int	autri_query_devinfo(void *addr, mixer_devinfo_t *dip);
 
 int	autri_get_portnum_by_name(struct autri_softc *, char *, char *, char *);
 
-struct audio_hw_if autri_hw_if = {
+const struct audio_hw_if autri_hw_if = {
 	autri_open,
 	autri_close,
 	autri_set_params,
@@ -171,7 +171,7 @@ int	autri_midi_open(void *, int, void (*)(void *, int),
 			   void (*)(void *), void *);
 int	autri_midi_output(void *, int);
 
-struct midi_hw_if autri_midi_hw_if = {
+const struct midi_hw_if autri_midi_hw_if = {
 	autri_midi_open,
 	autri_midi_close,
 	autri_midi_output,
@@ -574,7 +574,7 @@ autri_attach(struct device *parent, struct device *self, void *aux)
 	ctl.dev = autri_get_portnum_by_name(sc,AudioCoutputs,AudioNmaster,NULL);
 	autri_mixer_set_port(sc, &ctl);
 
-	audio_attach_mi(&autri_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&autri_hw_if, sc, NULL, &sc->sc_dev);
 
 #if NMIDI > 0
 	midi_attach_mi(&autri_midi_hw_if, sc, &sc->sc_dev);

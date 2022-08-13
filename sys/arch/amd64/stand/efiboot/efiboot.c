@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.38 2021/06/07 00:04:20 krw Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.40 2022/07/11 19:45:02 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -424,8 +424,9 @@ efi_memprobe_internal(void)
 /***********************************************************************
  * Console
  ***********************************************************************/
-static SIMPLE_TEXT_OUTPUT_INTERFACE     *conout = NULL;
-static SIMPLE_INPUT_INTERFACE           *conin;
+static SIMPLE_TEXT_OUTPUT_INTERFACE	*conout = NULL;
+static SIMPLE_INPUT_INTERFACE		*conin;
+static EFI_GRAPHICS_OUTPUT		*gop = NULL;
 static EFI_GUID				 con_guid
 					    = EFI_CONSOLE_CONTROL_PROTOCOL_GUID;
 static EFI_GUID				 gop_guid
@@ -444,6 +445,28 @@ efi_video_init(void)
 	int				 i, mode80x25, mode100x31;
 	UINTN				 cols, rows;
 	EFI_STATUS			 status;
+	EFI_HANDLE			*handles;
+	UINTN				 nhandles;
+	EFI_GRAPHICS_OUTPUT		*first_gop = NULL;
+	EFI_DEVICE_PATH			*devp_test = NULL;
+
+	status = BS->LocateHandleBuffer(ByProtocol, &gop_guid, NULL, &nhandles,
+		&handles);
+	if (!EFI_ERROR(status)) {
+		for (i = 0; i < nhandles; i++) {
+			status = BS->HandleProtocol(handles[i], &gop_guid,
+			    (void **)&gop);
+			if (first_gop == NULL)
+				first_gop = gop;
+			status = BS->HandleProtocol(handles[i], &devp_guid,
+			    (void **)&devp_test);
+			if (status == EFI_SUCCESS)
+				break;
+		}
+		if (status != EFI_SUCCESS)
+			gop = first_gop;
+		BS->FreePool(handles);
+	}
 
 	conout = ST->ConOut;
 	status = BS->LocateProtocol(&con_guid, NULL, (void **)&conctrl);
@@ -808,7 +831,6 @@ efi_com_putc(dev_t dev, int c)
  */
 static EFI_GUID			 acpi_guid = ACPI_20_TABLE_GUID;
 static EFI_GUID			 smbios_guid = SMBIOS_TABLE_GUID;
-static EFI_GRAPHICS_OUTPUT	*gop;
 static int			 gopmode = -1;
 
 #define	efi_guidcmp(_a, _b)	memcmp((_a), (_b), sizeof(EFI_GUID))
@@ -853,8 +875,7 @@ efi_makebootargs(void)
 	/*
 	 * Frame buffer
 	 */
-	status = BS->LocateProtocol(&gop_guid, NULL, (void **)&gop);
-	if (!EFI_ERROR(status)) {
+	if (gop != NULL) {
 		if (gopmode < 0) {
 			for (i = 0; i < gop->Mode->MaxMode; i++) {
 				status = gop->QueryMode(gop, i, &sz, &gopi);
@@ -915,6 +936,70 @@ efi_makebootargs(void)
 #endif
 
 	addbootarg(BOOTARG_EFIINFO, sizeof(bios_efiinfo), &bios_efiinfo);
+}
+
+/* Vendor device path used to indicate the mmio UART on AMD SoCs. */
+#define AMDSOC_DEVPATH \
+	{ 0xe76fd4e9, 0x0a30, 0x4ca9, \
+	    { 0x95, 0x40, 0xd7, 0x99, 0x53, 0x4c, 0xc4, 0xff } }
+
+void
+efi_setconsdev(void)
+{
+	bios_consdev_t cd;
+	EFI_STATUS status;
+	UINT8 data[128];
+	UINTN size = sizeof(data);
+	EFI_DEVICE_PATH *dp = (void *)data;
+	VENDOR_DEVICE_PATH *vdp;
+	UART_DEVICE_PATH *udp;
+	EFI_GUID global = EFI_GLOBAL_VARIABLE;
+	EFI_GUID amdsoc = AMDSOC_DEVPATH;
+
+	memset(&cd, 0, sizeof(cd));
+	cd.consdev = cn_tab->cn_dev;
+	cd.conspeed = com_speed;
+	cd.consaddr = com_addr;
+
+	/*
+	 * If the ConOut variable indicates we're using a serial
+	 * console, use it to determine the baud rate.
+	 */
+	status = RS->GetVariable(L"ConOut", &global, NULL, &size, &data);
+	if (status == EFI_SUCCESS) {
+		for (dp = (void *)data; !IsDevicePathEnd(dp);
+		     dp = NextDevicePathNode(dp)) {
+			/*
+			 * AMD Ryzen Embedded V1000 SoCs integrate a
+			 * Synopsys DesignWare UART that is not
+			 * compatible with the traditional 8250 UART
+			 * found on the IBM PC.  Pass the magic
+			 * parameters to the kernel to make this UART
+			 * work.
+			 */
+			if (DevicePathType(dp) == HARDWARE_DEVICE_PATH &&
+			    DevicePathSubType(dp) == HW_VENDOR_DP) {
+				vdp = (VENDOR_DEVICE_PATH *)dp;
+				if (efi_guidcmp(&vdp->Guid, &amdsoc) == 0) {
+					cd.consdev = makedev(8, 4);
+					cd.consaddr = *(uint64_t *)(vdp + 1);
+					cd.consfreq = 48000000;
+					cd.flags = BCD_MMIO;
+					cd.reg_width = 4;
+					cd.reg_shift = 2;
+				}
+			}
+
+			if (DevicePathType(dp) == MESSAGING_DEVICE_PATH &&
+			    DevicePathSubType(dp) == MSG_UART_DP) {
+				udp = (UART_DEVICE_PATH *)dp;
+				if (cd.conspeed == -1)
+					cd.conspeed = udp->BaudRate;
+			}
+		}
+	}
+
+	addbootarg(BOOTARG_CONSDEV, sizeof(cd), &cd);
 }
 
 void
@@ -1030,10 +1115,10 @@ Xgop_efi(void)
 	EFI_GRAPHICS_OUTPUT_MODE_INFORMATION
 			*gopi;
 
-	status = BS->LocateProtocol(&gop_guid, NULL, (void **)&gop);
-	if (EFI_ERROR(status))
+	if (gop == NULL) {
+		printf("No GOP found\n");
 		return (0);
-
+	}
 	if (cmd.argc >= 2) {
 		mode = strtol(cmd.argv[1], NULL, 10);
 		if (0 <= mode && mode < gop->Mode->MaxMode) {

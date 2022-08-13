@@ -1,4 +1,4 @@
-/*	$OpenBSD: boot.c,v 1.36 2021/01/30 21:06:45 deraadt Exp $	*/
+/*	$OpenBSD: boot.c,v 1.39 2022/08/04 09:16:53 kn Exp $	*/
 /*	$NetBSD: boot.c,v 1.3 2001/05/31 08:55:19 mrg Exp $	*/
 /*
  * Copyright (c) 1997, 1999 Eduardo E. Horvath.  All rights reserved.
@@ -287,8 +287,6 @@ loadrandom(char *path, char *buf, size_t buflen)
 	struct stat sb;
 	int fd, i, error = 0;
 
-#define O_RDONLY	0
-
 	fd = open(path, O_RDONLY);
 	if (fd == -1)
 		return -1;
@@ -312,7 +310,10 @@ done:
 }
 
 #ifdef SOFTRAID
-/* Set bootdev_dip to the softraid boot volume, if specified. */
+/*
+ * Set bootdev_dip to the softraid boot volume, if specified.
+ * Otherwise default to the softraid volume on the boot device, if any.
+ */
 static int
 srbootdev(const char *bootline)
 {
@@ -337,7 +338,29 @@ srbootdev(const char *bootline)
 			printf("Unknown device: sr%d\n", unit);
 			return ENODEV;
 		}
+	} else {
+		struct sr_boot_chunk *bc;
 
+		/*
+		 * Check if the boot device is a member of any of the assembled
+		 * softraid volumes.
+		 */
+		SLIST_FOREACH(bv, &sr_volumes, sbv_link) {
+			if ((bv->sbv_flags & BIOC_SCBOOTABLE) == 0)
+				continue;
+
+			SLIST_FOREACH(bc, &bv->sbv_chunks, sbc_link) {
+				struct diskinfo *dip = bc->sbc_diskinfo;
+
+				if (!strcmp(dip->path, bootdev))
+					break;
+			}
+			if (bc != NULL)
+				break;
+		}
+	}
+
+	if (bv != NULL) {
 		if ((bv->sbv_flags & BIOC_SCBOOTABLE) == 0) {
 			printf("device sr%d is not bootable\n", unit);
 			return ENODEV;
@@ -483,7 +506,7 @@ main(void)
 		rc4_keysetup(&randomctx, rnddata, sizeof rnddata);
 		rc4_skip(&randomctx, 1536);
 
-		if ((fd = open(bootline, 0)) < 0) {
+		if ((fd = open(bootline, O_RDONLY)) < 0) {
 			printf("open %s: %s\n", opened_name, strerror(errno));
 			continue;
 		}

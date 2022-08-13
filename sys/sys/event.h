@@ -1,4 +1,4 @@
-/*	$OpenBSD: event.h,v 1.56 2021/06/16 14:26:30 visa Exp $	*/
+/*	$OpenBSD: event.h,v 1.67 2022/03/31 01:41:22 millert Exp $	*/
 
 /*-
  * Copyright (c) 1999,2000,2001 Jonathan Lemon <jlemon@FreeBSD.org>
@@ -74,7 +74,7 @@ struct kevent {
 #define EV_RECEIPT	0x0040          /* force EV_ERROR on success, data=0 */
 #define EV_DISPATCH	0x0080          /* disable event after reporting */
 
-#define EV_SYSFLAGS	0xF000		/* reserved by system */
+#define EV_SYSFLAGS	0xf800		/* reserved by system */
 #define EV_FLAG1	0x2000		/* filter-specific flag */
 
 /* returned values */
@@ -141,7 +141,8 @@ struct klist {
 #ifdef _KERNEL
 
 /* kernel-only flags */
-#define __EV_POLL	0x1000		/* match behavior of poll & select */
+#define __EV_SELECT	0x0800		/* match behavior of select */
+#define __EV_POLL	0x1000		/* match behavior of poll */
 #define __EV_HUP	EV_FLAG1	/* device or socket disconnected */
 
 #define EVFILT_MARKER	0xf			/* placemarker for tailq */
@@ -153,7 +154,7 @@ struct klist {
 
 #define KNOTE(list, hint)	do { \
 					struct klist *__list = (list); \
-					if (__list != NULL) \
+					if (!klist_empty(__list)) \
 						knote(__list, hint); \
 				} while (0)
 
@@ -245,14 +246,14 @@ struct knote {
 	} kn_ptr;
 	const struct		filterops *kn_fop;
 	void			*kn_hook;	/* [o] */
+	unsigned int		kn_pollid;	/* [I] */
+
 #define KN_ACTIVE	0x0001			/* event has been triggered */
 #define KN_QUEUED	0x0002			/* event is on queue */
 #define KN_DISABLED	0x0004			/* event is disabled */
 #define KN_DETACHED	0x0008			/* knote is detached */
 #define KN_PROCESSING	0x0010			/* knote is being processed */
 #define KN_WAITING	0x0020			/* waiting on processing */
-#define KN_ATTACHED	0x0040			/* knote is attached to
-						 * a knlist of the kqueue */
 
 #define kn_id		kn_kevent.ident		/* [I] */
 #define kn_filter	kn_kevent.filter	/* [I] */
@@ -285,23 +286,24 @@ struct timespec;
 
 extern const struct filterops sig_filtops;
 extern const struct filterops dead_filtops;
+extern const struct klistops socket_klistops;
 
-extern void	kqpoll_init(void);
+extern void	kqpoll_init(unsigned int);
+extern void	kqpoll_done(unsigned int);
 extern void	kqpoll_exit(void);
 extern void	knote(struct klist *list, long hint);
 extern void	knote_fdclose(struct proc *p, int fd);
-extern void	knote_processexit(struct proc *);
-extern void	knote_modify(const struct kevent *, struct knote *);
+extern void	knote_processexit(struct process *);
+extern void	knote_assign(const struct kevent *, struct knote *);
 extern void	knote_submit(struct knote *, struct kevent *);
 extern void	kqueue_init(void);
 extern void	kqueue_init_percpu(void);
-extern int	kqueue_register(struct kqueue *kq,
-		    struct kevent *kev, struct proc *p);
+extern int	kqueue_register(struct kqueue *kq, struct kevent *kev,
+		    unsigned int pollid, struct proc *p);
 extern int	kqueue_scan(struct kqueue_scan_state *, int, struct kevent *,
 		    struct timespec *, struct proc *, int *);
 extern void	kqueue_scan_setup(struct kqueue_scan_state *, struct kqueue *);
 extern void	kqueue_scan_finish(struct kqueue_scan_state *);
-extern void	kqueue_purge(struct proc *, struct kqueue *);
 extern int	filt_seltrue(struct knote *kn, long hint);
 extern int	seltrue_kqfilter(dev_t, struct knote *);
 extern void	klist_init(struct klist *, const struct klistops *, void *);
@@ -312,8 +314,52 @@ extern void	klist_insert(struct klist *, struct knote *);
 extern void	klist_insert_locked(struct klist *, struct knote *);
 extern void	klist_remove(struct klist *, struct knote *);
 extern void	klist_remove_locked(struct klist *, struct knote *);
-extern int	klist_empty(struct klist *);
 extern void	klist_invalidate(struct klist *);
+
+static inline int
+knote_modify_fn(const struct kevent *kev, struct knote *kn,
+    int (*f_event)(struct knote *, long))
+{
+	knote_assign(kev, kn);
+	return ((*f_event)(kn, 0));
+}
+
+static inline int
+knote_modify(const struct kevent *kev, struct knote *kn)
+{
+	return (knote_modify_fn(kev, kn, kn->kn_fop->f_event));
+}
+
+static inline int
+knote_process_fn(struct knote *kn, struct kevent *kev,
+    int (*f_event)(struct knote *, long))
+{
+	int active;
+
+	/*
+	 * If called from kqueue_scan(), skip f_event
+	 * when EV_ONESHOT is set, to preserve old behaviour.
+	 */
+	if (kev != NULL && (kn->kn_flags & EV_ONESHOT))
+		active = 1;
+	else
+		active = (*f_event)(kn, 0);
+	if (active)
+		knote_submit(kn, kev);
+	return (active);
+}
+
+static inline int
+knote_process(struct knote *kn, struct kevent *kev)
+{
+	return (knote_process_fn(kn, kev, kn->kn_fop->f_event));
+}
+
+static inline int
+klist_empty(struct klist *klist)
+{
+	return (SLIST_EMPTY(&klist->kl_list));
+}
 
 #else	/* !_KERNEL */
 

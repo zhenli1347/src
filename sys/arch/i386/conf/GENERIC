@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.857 2021/08/20 05:23:18 anton Exp $
+#	$OpenBSD: GENERIC,v 1.863 2022/06/26 20:05:06 sthen Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -19,7 +19,8 @@ option		APERTURE	# in-kernel aperture driver for XFree86
 option		MTRR		# CPU memory range attributes control
 
 option		NTFS		# NTFS support
-option		HIBERNATE	# Hibernate support
+option		SUSPEND
+option		HIBERNATE
 
 config		bsd	swap generic
 
@@ -94,7 +95,7 @@ iic*	at glxpcib?
 kate*	at pci?			# AMD K8 temperature sensor
 km*	at pci?			# AMD K10 temperature sensor
 amas*	at pci? disable		# AMD memory configuration
-pchtemp* at pci?		# Intel C610 termperature sensor
+pchtemp* at pci?		# Intel C610 temperature sensor
 
 # power management and other environmental stuff
 elansc*	at pci?			# AMD Elan SC520 System Controller
@@ -314,6 +315,7 @@ uath*	at uhub?		# Atheros AR5005UG/AR5005UX
 ural*	at uhub?		# Ralink RT2500USB
 rum*	at uhub?		# Ralink RT2501USB/RT2601USB
 run*	at uhub?		# Ralink RT2700U/RT2800U/RT3000U
+mtw*	at uhub?		# MediaTek MT7601U
 otus*	at uhub?		# Atheros AR9001U
 athn*	at uhub?		# Atheros AR9002U
 zyd*	at uhub?		# Zydas ZD1211
@@ -597,6 +599,8 @@ ale*	at pci?				# Attansic L1E Ethernet
 lii*	at pci?				# Attansic L2 Ethernet
 jme*	at pci?				# JMicron JMC250/JMC260 Ethernet
 vte*	at pci?				# RDC R6040 Ethernet
+aq*	at pci?				# Aquantia aQtion Ethernet
+igc*	at pci?				# Intel I225 Ethernet
 
 # Wireless network cards
 acx*	at pci?				# TI ACX100/ACX111 (802.11b/g)
@@ -624,8 +628,8 @@ ral*	at cardbus?			# Ralink RT2500/RT2501/RT2600
 rtw*	at pci?				# Realtek 8180
 rtw*	at cardbus?			# Realtek 8180
 rtwn*	at pci?				# Realtek 8188CE/8192CE
-pgt*	at pci?				# Prism54 (only full-mac varients)
-pgt*	at cardbus?			# Prism54 (only full-mac varients)
+pgt*	at pci?				# Prism54 Full-MAC
+pgt*	at cardbus?			# Prism54 Full-MAC
 malo*	at pci?				# Marvell Libertas
 malo*	at cardbus?			# Marvell Libertas
 malo*	at pcmcia?			# Marvell 88W8385
@@ -742,9 +746,6 @@ radio*	at fms?
 joy*	at isapnp?
 
 # crypto support
-hifn*	at pci?			# Hi/fn 7751 crypto card
-ubsec*	at pci?			# Bluesteel Networks 5xxx crypto card
-safe*	at pci?			# SafeNet SafeXcel 1141/1741
 glxsb*	at pci?			# AMD Geode LX series processor security block
 
 # GPIO ``pin bus'' drivers

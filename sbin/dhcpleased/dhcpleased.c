@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpleased.c,v 1.20 2021/08/24 14:54:02 florian Exp $	*/
+/*	$OpenBSD: dhcpleased.c,v 1.26 2022/07/23 09:33:18 florian Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -30,6 +30,7 @@
 
 #include <net/if.h>
 #include <net/route.h>
+#include <net/if_dl.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netinet/in_var.h>
@@ -97,7 +98,8 @@ static struct imsgev	*iev_engine;
 #ifndef SMALL
 struct dhcpleased_conf	*main_conf;
 #endif
-char			*conffile;
+const char		 default_conffile[] = _PATH_CONF_FILE;
+const char		*conffile = default_conffile;
 pid_t			 frontend_pid;
 pid_t			 engine_pid;
 
@@ -308,13 +310,8 @@ main(int argc, char *argv[])
 		warnx("control socket setup failed");
 #endif /* SMALL */
 
-	if (conffile != NULL) {
-		if (unveil(conffile, "r") == -1)
-			fatal("unveil %s", conffile);
-	} else {
-		if (unveil(_PATH_CONF_FILE, "r") == -1)
-			fatal("unveil %s", _PATH_CONF_FILE);
-	}
+	if (unveil(conffile, "r") == -1)
+		fatal("unveil %s", conffile);
 	if (unveil("/dev/bpf", "rw") == -1)
 		fatal("unveil /dev/bpf");
 
@@ -732,6 +729,9 @@ main_imsg_send_config(struct dhcpleased_conf *xconf)
 		    iface_conf->c_id, iface_conf->c_id_len);
 		main_imsg_compose_engine(IMSG_RECONF_C_ID, -1,
 		    iface_conf->c_id, iface_conf->c_id_len);
+		if (iface_conf->h_name != NULL)
+			main_imsg_compose_frontend(IMSG_RECONF_H_NAME, -1,
+			    iface_conf->h_name, strlen(iface_conf->h_name) + 1);
 	}
 
 	/* Config is now complete. */
@@ -785,16 +785,14 @@ configure_interface(struct imsg_configure_interface *imsg)
 		if (ifa->ifa_addr->sa_family != AF_INET)
 			continue;
 
-		addr.s_addr = ((struct sockaddr_in *)ifa->ifa_addr)
-		    ->sin_addr.s_addr;
-		mask.s_addr = ((struct sockaddr_in *)ifa->ifa_netmask)
-		    ->sin_addr.s_addr;
+		addr = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr;
+		mask = ((struct sockaddr_in *)ifa->ifa_netmask)->sin_addr;
 
 		if (imsg->addr.s_addr == addr.s_addr) {
 			if (imsg->mask.s_addr == mask.s_addr)
 				found = 1;
 			else {
-				req_sin_addr->sin_addr.s_addr = addr.s_addr;
+				req_sin_addr->sin_addr = addr;
 				if (ioctl(ioctl_sock, SIOCDIFADDR, &ifaliasreq)
 				    == -1) {
 					if (errno != EADDRNOTAVAIL)
@@ -805,12 +803,12 @@ configure_interface(struct imsg_configure_interface *imsg)
 		}
 	}
 
-	req_sin_addr->sin_addr.s_addr = imsg->addr.s_addr;
+	req_sin_addr->sin_addr = imsg->addr;
 	if (!found) {
 		req_sin_mask = (struct sockaddr_in *)&ifaliasreq.ifra_mask;
 		req_sin_mask->sin_family = AF_INET;
 		req_sin_mask->sin_len = sizeof(*req_sin_mask);
-		req_sin_mask->sin_addr.s_addr = imsg->mask.s_addr;
+		req_sin_mask->sin_addr = imsg->mask;
 		if (ioctl(ioctl_sock, SIOCAIFADDR, &ifaliasreq) == -1)
 			log_warn("SIOCAIFADDR");
 	}
@@ -916,8 +914,22 @@ deconfigure_interface(struct imsg_configure_interface *imsg)
 
 	memset(&ifaliasreq, 0, sizeof(ifaliasreq));
 
+#if 0
+	/*
+	 * When two default routes have the same gateway the kernel always
+	 * deletes the first which might be the wrong one. When we then
+	 * deconfigure the IP address from the interface the kernel deletes
+	 * all routes pointing out that interface and we end up with no
+	 * default.
+	 * This can happen with a wired & wireless interface on the same
+	 * layer 2 network and the user issues ifconfig $WIFI inet -autoconf.
+	 * Work around this issue by not deleting the default route and let
+	 * the kernel handle it when we remove the IP address a few lines
+	 * down.
+	 */
 	if (imsg->routes_len > 0)
 		configure_routes(RTM_DELETE, imsg);
+#endif
 
 	if (if_indextoname(imsg->if_index, ifaliasreq.ifra_name) == NULL) {
 		log_warnx("%s: cannot find interface %d", __func__,
@@ -931,7 +943,7 @@ deconfigure_interface(struct imsg_configure_interface *imsg)
 	req_sin_addr->sin_family = AF_INET;
 	req_sin_addr->sin_len = sizeof(*req_sin_addr);
 
-	req_sin_addr->sin_addr.s_addr = imsg->addr.s_addr;
+	req_sin_addr->sin_addr = imsg->addr;
 	if (ioctl(ioctl_sock, SIOCDIFADDR, &ifaliasreq) == -1) {
 		if (errno != EADDRNOTAVAIL)
 			log_warn("SIOCDIFADDR");
@@ -948,7 +960,7 @@ configure_routes(uint8_t rtm_type, struct imsg_configure_interface *imsg)
 	memset(&ifa, 0, sizeof(ifa));
 	ifa.sin_family = AF_INET;
 	ifa.sin_len = sizeof(ifa);
-	ifa.sin_addr.s_addr = imsg->addr.s_addr;
+	ifa.sin_addr = imsg->addr;
 
 	memset(&dst, 0, sizeof(dst));
 	dst.sin_family = AF_INET;
@@ -965,9 +977,9 @@ configure_routes(uint8_t rtm_type, struct imsg_configure_interface *imsg)
 	addrnet = imsg->addr.s_addr & imsg->mask.s_addr;
 
 	for (i = 0; i < imsg->routes_len; i++) {
-		dst.sin_addr.s_addr = imsg->routes[i].dst.s_addr;
-		mask.sin_addr.s_addr = imsg->routes[i].mask.s_addr;
-		gw.sin_addr.s_addr = imsg->routes[i].gw.s_addr;
+		dst.sin_addr = imsg->routes[i].dst;
+		mask.sin_addr = imsg->routes[i].mask;
+		gw.sin_addr = imsg->routes[i].gw;
 
 		if (gw.sin_addr.s_addr == INADDR_ANY) {
 			/* direct route */
@@ -988,8 +1000,7 @@ configure_routes(uint8_t rtm_type, struct imsg_configure_interface *imsg)
 				configure_route(rtm_type, imsg->if_index,
 				    imsg->rdomain, &gw, &mask, &ifa, NULL,
 				    RTF_CLONING);
-				mask.sin_addr.s_addr =
-				    imsg->routes[i].mask.s_addr;
+				mask.sin_addr = imsg->routes[i].mask;
 			}
 
 			if (gw.sin_addr.s_addr == ifa.sin_addr.s_addr) {
@@ -1018,8 +1029,9 @@ configure_route(uint8_t rtm_type, uint32_t if_index, int rdomain, struct
     struct sockaddr_in *ifa, int rtm_flags)
 {
 	struct rt_msghdr		 rtm;
+	struct sockaddr_dl		 ifp;
 	struct sockaddr_rtlabel		 rl;
-	struct iovec			 iov[12];
+	struct iovec			 iov[14];
 	long				 pad = 0;
 	int				 iovcnt = 0, padlen;
 
@@ -1032,7 +1044,8 @@ configure_route(uint8_t rtm_type, uint32_t if_index, int rdomain, struct
 	rtm.rtm_tableid = rdomain;
 	rtm.rtm_seq = ++rtm_seq;
 	rtm.rtm_priority = RTP_NONE;
-	rtm.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_LABEL;
+	rtm.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_IFP |
+	    RTA_LABEL;
 	rtm.rtm_flags = RTF_UP | RTF_STATIC | RTF_MPATH | rtm_flags;
 
 	if (ifa)
@@ -1071,6 +1084,20 @@ configure_route(uint8_t rtm_type, uint32_t if_index, int rdomain, struct
 		rtm.rtm_msglen += padlen;
 	}
 
+	memset(&ifp, 0, sizeof(ifp));
+	ifp.sdl_len = sizeof(struct sockaddr_dl);
+	ifp.sdl_family = AF_LINK;
+	ifp.sdl_index = if_index;
+	iov[iovcnt].iov_base = &ifp;
+	iov[iovcnt++].iov_len = sizeof(ifp);
+	rtm.rtm_msglen += sizeof(ifp);
+	padlen = ROUNDUP(sizeof(ifp)) - sizeof(ifp);
+	if (padlen > 0) {
+		iov[iovcnt].iov_base = &pad;
+		iov[iovcnt++].iov_len = padlen;
+		rtm.rtm_msglen += padlen;
+	}
+
 	if (ifa) {
 		iov[iovcnt].iov_base = ifa;
 		iov[iovcnt++].iov_len = ifa->sin_len;
@@ -1098,8 +1125,10 @@ configure_route(uint8_t rtm_type, uint32_t if_index, int rdomain, struct
 		rtm.rtm_msglen += padlen;
 	}
 
-	if (writev(routesock, iov, iovcnt) == -1)
-		log_warn("failed to send route message");
+	if (writev(routesock, iov, iovcnt) == -1) {
+		if (errno != EEXIST)
+			log_warn("failed to send route message");
+	}
 }
 
 #ifndef	SMALL
@@ -1177,7 +1206,7 @@ propose_rdns(struct imsg_propose_rdns *rdns)
 	}
 
 	if (writev(routesock, iov, iovcnt) == -1)
-		log_warn("failed to send route message");
+		log_warn("failed to propose nameservers");
 }
 
 void
@@ -1225,6 +1254,7 @@ merge_config(struct dhcpleased_conf *conf, struct dhcpleased_conf *xconf)
 		SIMPLEQ_REMOVE_HEAD(&conf->iface_list, entry);
 		free(iface_conf->vc_id);
 		free(iface_conf->c_id);
+		free(iface_conf->h_name);
 		free(iface_conf);
 	}
 

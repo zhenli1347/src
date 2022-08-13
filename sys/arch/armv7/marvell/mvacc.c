@@ -1,4 +1,4 @@
-/* $OpenBSD: mvacc.c,v 1.3 2017/03/24 15:22:45 patrick Exp $ */
+/* $OpenBSD: mvacc.c,v 1.5 2022/07/11 10:44:08 jmatthew Exp $ */
 /*
  * Copyright (c) 2016 Patrick Wildt <patrick@blueri.se>
  *
@@ -82,7 +82,7 @@ void	 mvacc_attach(struct device *, struct device *, void *);
 
 uint32_t mvacc_get_frequency(void *, uint32_t *);
 
-struct cfattach	mvacc_ca = {
+const struct cfattach	mvacc_ca = {
 	sizeof (struct mvacc_softc), mvacc_match, mvacc_attach
 };
 
@@ -115,7 +115,7 @@ mvacc_attach(struct device *parent, struct device *self, void *args)
 
 	printf("\n");
 
-	amptimer_set_clockrate(mvacc_get_frequency(sc, &idx) * 1000);
+	amptimer_set_clockrate(mvacc_get_frequency(sc, &idx));
 
 	sc->sc_cd.cd_node = sc->sc_node;
 	sc->sc_cd.cd_cookie = sc;

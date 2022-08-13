@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_command.c,v 1.91 2021/06/02 00:39:25 cheloha Exp $	*/
+/*	$OpenBSD: db_command.c,v 1.96 2022/07/29 17:47:11 semarie Exp $	*/
 /*	$NetBSD: db_command.c,v 1.20 1996/03/30 22:30:05 christos Exp $	*/
 
 /*
@@ -56,6 +56,7 @@
 #include <ddb/db_interface.h>
 #include <ddb/db_extern.h>
 
+#include <netinet/ip_ipsp.h>
 #include <uvm/uvm_ddb.h>
 
 /*
@@ -78,8 +79,9 @@ vaddr_t		db_prev;	/* last address examined
 vaddr_t		db_next;	/* next address to be examined
 				   or written */
 
-int	db_cmd_search(char *, struct db_command *, struct db_command **);
-void	db_cmd_list(struct db_command *);
+int	db_cmd_search(char *, const struct db_command *,
+	    const struct db_command **);
+void	db_cmd_list(const struct db_command *);
 void	db_ctf_pprint_cmd(db_expr_t, int, db_expr_t,char *);
 void	db_map_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_buf_print_cmd(db_expr_t, int, db_expr_t, char *);
@@ -89,15 +91,18 @@ void	db_mount_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_show_all_mounts(db_expr_t, int, db_expr_t, char *);
 void	db_show_all_vnodes(db_expr_t, int, db_expr_t, char *);
 void	db_show_all_bufs(db_expr_t, int, db_expr_t, char *);
+void	db_show_all_tdbs(db_expr_t, int, db_expr_t, char *);
 void	db_object_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_page_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_extent_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_pool_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_proc_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_uvmexp_print_cmd(db_expr_t, int, db_expr_t, char *);
+void	db_tdb_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_vnode_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_nfsreq_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_nfsnode_print_cmd(db_expr_t, int, db_expr_t, char *);
+void	db_swap_print_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_help_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_fncall(db_expr_t, int, db_expr_t, char *);
 void	db_boot_sync_cmd(db_expr_t, int, db_expr_t, char *);
@@ -143,9 +148,10 @@ db_skip_to_eol(void)
  * Search for command prefix.
  */
 int
-db_cmd_search(char *name, struct db_command *table, struct db_command **cmdp)
+db_cmd_search(char *name, const struct db_command *table,
+    const struct db_command **cmdp)
 {
-	struct db_command	*cmd;
+	const struct db_command	*cmd;
 	int			result = CMD_NONE;
 
 	for (cmd = table; cmd->name != 0; cmd++) {
@@ -177,9 +183,9 @@ db_cmd_search(char *name, struct db_command *table, struct db_command **cmdp)
 }
 
 void
-db_cmd_list(struct db_command *table)
+db_cmd_list(const struct db_command *table)
 {
-	struct db_command *cmd;
+	const struct db_command *cmd;
 
 	for (cmd = table; cmd->name != 0; cmd++) {
 		db_printf("%-12s", cmd->name);
@@ -188,9 +194,10 @@ db_cmd_list(struct db_command *table)
 }
 
 void
-db_command(struct db_command **last_cmdp, struct db_command *cmd_table)
+db_command(const struct db_command **last_cmdp,
+    const struct db_command *cmd_table)
 {
-	struct db_command	*cmd;
+	const struct db_command *cmd;
 	char		modif[TOK_STRING_SIZE];
 	db_expr_t	addr, count;
 	int		t, result, have_addr = 0;
@@ -399,6 +406,44 @@ db_show_all_bufs(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	pool_walk(&bufpool, full, db_printf, vfs_buf_print);
 }
 
+#ifdef IPSEC
+void
+db_show_all_tdbs(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
+{
+	int full = 0;
+
+	if (modif[0] == 'f')
+		full = 1;
+
+	pool_walk(&tdb_pool, full, db_printf, tdb_printit);
+}
+#endif
+
+void
+db_show_all_routes(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
+{
+	u_int rtableid = 0;
+
+	if (have_addr)
+		rtableid = addr;
+	if (count == -1)
+		count = 1;
+
+	while (count--) {
+		if (modif[0] != 'I')
+			db_show_rtable(AF_INET, rtableid);
+		if (modif[0] != 'i')
+			db_show_rtable(AF_INET6, rtableid);
+		rtableid++;
+	}
+}
+
+void
+db_show_route(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
+{
+	db_show_rtentry((void *)addr, NULL, -1);
+}
+
 /*ARGSUSED*/
 void
 db_object_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
@@ -463,6 +508,13 @@ db_nfsnode_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
 }
 #endif
 
+/*ARGSUSED*/
+void
+db_swap_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
+    char *modif)
+{
+	swap_print_all(db_printf);
+}
 
 /*ARGSUSED*/
 void
@@ -509,6 +561,19 @@ db_proc_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	proc_printit((struct proc *)addr, modif, db_printf);
 }
 
+#ifdef IPSEC
+void
+db_tdb_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
+{
+	int full = 0;
+
+	if (modif[0] == 'f')
+		full = 1;
+
+	tdb_printit((void *)addr, full, db_printf);
+}
+#endif
+
 /*ARGSUSED*/
 void
 db_uvmexp_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
@@ -529,16 +594,20 @@ db_bcstats_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif
  * 'show' commands
  */
 
-struct db_command db_show_all_cmds[] = {
+const struct db_command db_show_all_cmds[] = {
 	{ "procs",	db_show_all_procs,	0, NULL },
 	{ "callout",	db_show_callout,	0, NULL },
 	{ "pools",	db_show_all_pools,	0, NULL },
 	{ "mounts",	db_show_all_mounts,	0, NULL },
 	{ "vnodes",	db_show_all_vnodes,	0, NULL },
 	{ "bufs",	db_show_all_bufs,	0, NULL },
+	{ "routes",	db_show_all_routes,	0, NULL },
 #ifdef NFSCLIENT
 	{ "nfsreqs",	db_show_all_nfsreqs,	0, NULL },
 	{ "nfsnodes",	db_show_all_nfsnodes,	0, NULL },
+#endif
+#ifdef IPSEC
+	{ "tdbs",	db_show_all_tdbs,	0, NULL },
 #endif
 #ifdef WITNESS
 	{ "locks",	db_witness_list_all,	0, NULL },
@@ -546,7 +615,7 @@ struct db_command db_show_all_cmds[] = {
 	{ NULL,		NULL,			0, NULL }
 };
 
-struct db_command db_show_cmds[] = {
+const struct db_command db_show_cmds[] = {
 	{ "all",	NULL,			0,	db_show_all_cmds },
 	{ "bcstats",	db_bcstats_print_cmd,	0,	NULL },
 	{ "breaks",	db_listbreak_cmd,	0,	NULL },
@@ -569,8 +638,13 @@ struct db_command db_show_cmds[] = {
 	{ "pool",	db_pool_print_cmd,	0,	NULL },
 	{ "proc",	db_proc_print_cmd,	0,	NULL },
 	{ "registers",	db_show_regs,		0,	NULL },
+	{ "route",	db_show_route,		0,	NULL },
 	{ "socket",	db_socket_print_cmd,	0,	NULL },
 	{ "struct",	db_ctf_show_struct,	CS_OWN,	NULL },
+	{ "swap",	db_swap_print_cmd,	0,	NULL },
+#ifdef IPSEC
+	{ "tdb",	db_tdb_print_cmd,	0,	NULL },
+#endif
 	{ "uvmexp",	db_uvmexp_print_cmd,	0,	NULL },
 	{ "vnode",	db_vnode_print_cmd,	0,	NULL },
 	{ "watches",	db_listwatch_cmd,	0,	NULL },
@@ -580,7 +654,7 @@ struct db_command db_show_cmds[] = {
 	{ NULL,		NULL,			0,	NULL }
 };
 
-struct db_command db_boot_cmds[] = {
+const struct db_command db_boot_cmds[] = {
 	{ "sync",	db_boot_sync_cmd,	0,	0 },
 	{ "crash",	db_boot_crash_cmd,	0,	0 },
 	{ "dump",	db_boot_dump_cmd,	0,	0 },
@@ -590,10 +664,10 @@ struct db_command db_boot_cmds[] = {
 	{ NULL, }
 };
 
-struct db_command db_command_table[] = {
+const struct db_command db_command_table[] = {
 #ifdef DB_MACHINE_COMMANDS
   /* this must be the first entry, if it exists */
-	{ "machine",	NULL,			0,		NULL},
+	{ "machine",	NULL,			0, db_machine_command_table },
 #endif
 	{ "kill",	db_kill_cmd,		0,		NULL },
 	{ "print",	db_print_cmd,		0,		NULL },
@@ -631,19 +705,7 @@ struct db_command db_command_table[] = {
 	{ NULL,		NULL,			0,		NULL }
 };
 
-#ifdef DB_MACHINE_COMMANDS
-
-/* this function should be called to install the machine dependent
-   commands. It should be called before the debugger is enabled  */
-void
-db_machine_commands_install(struct db_command *ptr)
-{
-	db_command_table[0].more = ptr;
-}
-
-#endif
-
-struct db_command	*db_last_command = NULL;
+const struct db_command	*db_last_command = NULL;
 
 void
 db_help_cmd(db_expr_t addr, int haddr, db_expr_t count, char *modif)

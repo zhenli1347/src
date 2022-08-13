@@ -1,4 +1,4 @@
-/*	$OpenBSD: ufs_vnops.c,v 1.153 2020/12/25 12:59:53 visa Exp $	*/
+/*	$OpenBSD: ufs_vnops.c,v 1.156 2022/06/26 05:20:43 visa Exp $	*/
 /*	$NetBSD: ufs_vnops.c,v 1.18 1996/05/11 18:28:04 mycroft Exp $	*/
 
 /*
@@ -54,7 +54,6 @@
 #include <sys/dirent.h>
 #include <sys/lockf.h>
 #include <sys/event.h>
-#include <sys/poll.h>
 #include <sys/specdev.h>
 #include <sys/unistd.h>
 
@@ -580,17 +579,6 @@ ufs_ioctl(void *v)
 	struct vop_ioctl_args *ap = v;
 #endif
 	return (ENOTTY);
-}
-
-int
-ufs_poll(void *v)
-{
-	struct vop_poll_args *ap = v;
-
-	/*
-	 * We should really check to see if I/O is possible.
-	 */
-	return (ap->a_events & (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM));
 }
 
 int
@@ -1608,7 +1596,7 @@ ufs_strategy(void *v)
 	}
 	vp = ip->i_devvp;
 	bp->b_dev = vp->v_rdev;
-	(vp->v_op->vop_strategy)(ap);
+	VOP_STRATEGY(vp, bp);
 	return (0);
 }
 
@@ -1973,7 +1961,7 @@ filt_ufsread(struct knote *kn, long hint)
 		return (1);
 	}
 
-	if (kn->kn_flags & __EV_POLL)
+	if (kn->kn_flags & (__EV_POLL | __EV_SELECT))
 		return (1);
 
 	return (kn->kn_data != 0);

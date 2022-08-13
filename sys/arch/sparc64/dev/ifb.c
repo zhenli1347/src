@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifb.c,v 1.24 2021/03/11 11:17:00 jsg Exp $	*/
+/*	$OpenBSD: ifb.c,v 1.26 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2009 Miodrag Vallat.
@@ -300,7 +300,7 @@ struct wsdisplay_accessops ifb_accessops = {
 int	ifbmatch(struct device *, void *, void *);
 void	ifbattach(struct device *, struct device *, void *);
 
-struct cfattach ifb_ca = {
+const struct cfattach ifb_ca = {
 	sizeof (struct ifb_softc), ifbmatch, ifbattach
 };
 
@@ -561,6 +561,8 @@ ifb_ioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 256;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.68 2021/02/06 18:01:02 florian Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.73 2022/03/13 15:14:01 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -100,12 +100,13 @@ struct pending_query {
 	struct sldns_buffer		*abuf;
 	struct regional			*region;
 	struct query_info		 qinfo;
-	struct msg_parse		*qmsg;
 	struct edns_data		 edns;
 	struct event			 ev;		/* for tcp */
 	struct event			 resp_ev;	/* for tcp */
 	struct event			 tmo_ev;	/* for tcp */
 	uint64_t			 imsg_id;
+	uint16_t			 id;
+	uint16_t			 flags;
 	int				 fd;
 	int				 tcp;
 	int				 dns64_synthesize;
@@ -536,8 +537,7 @@ frontend_dispatch_resolver(int fd, short event, void *bula)
 				break;
 			}
 
-			if (answer_header->bogus && !(pq->qmsg->flags &
-			    BIT_CD)) {
+			if (answer_header->bogus && !(pq->flags & BIT_CD)) {
 				error_answer(pq, LDNS_RCODE_SERVFAIL);
 				send_answer(pq);
 				break;
@@ -716,15 +716,13 @@ udp_receive(int fd, short events, void *arg)
 	pq->qbuf = sldns_buffer_new(len);
 	pq->abuf = sldns_buffer_new(len); /* make sure we can send errors */
 	pq->region = regional_create();
-	pq->qmsg = regional_alloc(pq->region, sizeof(*pq->qmsg));
 
-	if (!pq->qbuf || !pq->abuf || !pq->region || !pq->qmsg) {
+	if (!pq->qbuf || !pq->abuf || !pq->region) {
 		log_warnx("out of memory");
 		free_pending_query(pq);
 		return;
 	}
 
-	memset(pq->qmsg, 0, sizeof(*pq->qmsg));
 	sldns_buffer_write(pq->qbuf, udpev->query, len);
 	sldns_buffer_flip(pq->qbuf);
 	handle_query(pq);
@@ -749,16 +747,16 @@ handle_query(struct pending_query *pq)
 		free(str);
 	}
 
-	if (!query_info_parse(&pq->qinfo, pq->qbuf)) {
-		log_warnx("query_info_parse failed");
+	if (sldns_buffer_remaining(pq->qbuf) < LDNS_HEADER_SIZE) {
+		log_warnx("bad query: too short, dropped");
 		goto drop;
 	}
 
-	sldns_buffer_rewind(pq->qbuf);
+	pq->id = sldns_buffer_read_u16_at(pq->qbuf, 0);
+	pq->flags = sldns_buffer_read_u16_at(pq->qbuf, 2);
 
-	if (parse_packet(pq->qbuf, pq->qmsg, pq->region) !=
-	    LDNS_RCODE_NOERROR) {
-		log_warnx("parse_packet failed");
+	if (!query_info_parse(&pq->qinfo, pq->qbuf)) {
+		log_warnx("query_info_parse failed");
 		goto drop;
 	}
 
@@ -773,7 +771,8 @@ handle_query(struct pending_query *pq)
 		goto send_answer;
 	}
 
-	rcode = parse_extract_edns(pq->qmsg, &pq->edns, pq->region);
+	rcode = parse_edns_from_query_pkt(pq->qbuf, &pq->edns, NULL, NULL,
+	    pq->region);
 	if (rcode != LDNS_RCODE_NOERROR) {
 		error_answer(pq, rcode);
 		goto send_answer;
@@ -884,7 +883,7 @@ noerror_answer(struct pending_query *pq)
 	}
 
 	sldns_buffer_clear(pq->abuf);
-	if (reply_info_encode(&pq->qinfo, rinfo, pq->qmsg->id, rinfo->flags,
+	if (reply_info_encode(&pq->qinfo, rinfo, htons(pq->id), rinfo->flags,
 	    pq->abuf, 0, pq->region, pq->tcp ? UINT16_MAX : pq->edns.udp_size,
 	    pq->edns.bits & EDNS_DO, MINIMIZE_ANSWER) == 0)
 		goto srvfail;
@@ -979,7 +978,7 @@ synthesize_dns64_answer(struct pending_query *pq)
 
 	sldns_buffer_clear(pq->abuf);
 
-	if (reply_info_encode(&pq->qinfo, synth_rinfo, pq->qmsg->id,
+	if (reply_info_encode(&pq->qinfo, synth_rinfo, htons(pq->id),
 	    synth_rinfo->flags, pq->abuf, 0, pq->region,
 	    pq->tcp ? UINT16_MAX : pq->edns.udp_size,
 	    pq->edns.bits & EDNS_DO, MINIMIZE_ANSWER) == 0)
@@ -1020,9 +1019,8 @@ resend_dns64_query(struct pending_query *opq) {
 	pq->qbuf = sldns_buffer_new(sldns_buffer_capacity(opq->qbuf));
 	pq->abuf = sldns_buffer_new(sldns_buffer_capacity(opq->abuf));
 	pq->region = regional_create();
-	pq->qmsg = regional_alloc(pq->region, sizeof(*pq->qmsg));
 
-	if (!pq->qbuf || !pq->abuf || !pq->region || !pq->qmsg) {
+	if (!pq->qbuf || !pq->abuf || !pq->region) {
 		log_warnx("out of memory");
 		free_pending_query(pq);
 		free_pending_query(opq);
@@ -1033,7 +1031,6 @@ resend_dns64_query(struct pending_query *opq) {
 	sldns_buffer_write(pq->qbuf, sldns_buffer_current(opq->qbuf),
 	    sldns_buffer_remaining(opq->qbuf));
 	sldns_buffer_flip(pq->qbuf);
-	memset(pq->qmsg, 0, sizeof(*pq->qmsg));
 
 	if (pq->tcp) {
 		struct timeval	 timeout = {TCP_TIMEOUT, 0};
@@ -1046,20 +1043,21 @@ resend_dns64_query(struct pending_query *opq) {
 		evtimer_add(&pq->tmo_ev, &timeout);
 	}
 
+	if (sldns_buffer_remaining(pq->qbuf) < LDNS_HEADER_SIZE) {
+		log_warnx("bad query: too short, dropped");
+		goto drop;
+	}
+
+	pq->id = sldns_buffer_read_u16_at(pq->qbuf, 0);
+	pq->flags = sldns_buffer_read_u16_at(pq->qbuf, 2);
+
 	if (!query_info_parse(&pq->qinfo, pq->qbuf)) {
 		log_warnx("query_info_parse failed");
 		goto drop;
 	}
 
-	sldns_buffer_rewind(pq->qbuf);
-
-	if (parse_packet(pq->qbuf, pq->qmsg, pq->region) !=
-	    LDNS_RCODE_NOERROR) {
-		log_warnx("parse_packet failed");
-		goto drop;
-	}
-
-	rcode = parse_extract_edns(pq->qmsg, &pq->edns, pq->region);
+	rcode = parse_edns_from_query_pkt(pq->qbuf, &pq->edns, NULL, NULL,
+	    pq->region);
 	if (rcode != LDNS_RCODE_NOERROR) {
 		error_answer(pq, rcode);
 		goto send_answer;
@@ -1140,8 +1138,8 @@ void
 error_answer(struct pending_query *pq, int rcode)
 {
 	sldns_buffer_clear(pq->abuf);
-	error_encode(pq->abuf, rcode, &pq->qinfo, pq->qmsg->id,
-	    pq->qmsg->flags, pq->edns.edns_present ? &pq->edns : NULL);
+	error_encode(pq->abuf, rcode, &pq->qinfo, htons(pq->id), pq->flags,
+	    pq->edns.edns_present ? &pq->edns : NULL);
 }
 
 int
@@ -1182,7 +1180,7 @@ check_query(sldns_buffer* pkt)
 		    LDNS_ARCOUNT(sldns_buffer_begin(pkt)));
 		return (LDNS_RCODE_FORMERR);
 	}
-	return 0;
+	return (LDNS_RCODE_NOERROR);
 }
 
 void
@@ -1342,23 +1340,6 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 			break;
 
 		rtdns = (struct sockaddr_rtdns*)rti_info[RTAX_DNS];
-		switch (rtdns->sr_family) {
-		case AF_INET:
-			if ((rtdns->sr_len - 2) % sizeof(struct in_addr) != 0) {
-				log_warnx("ignoring invalid RTM_PROPOSAL");
-				return;
-			}
-			break;
-		case AF_INET6:
-			if ((rtdns->sr_len - 2) % sizeof(struct in6_addr) != 0) {
-				log_warnx("ignoring invalid RTM_PROPOSAL");
-				return;
-			}
-			break;
-		default:
-			log_warnx("ignoring invalid RTM_PROPOSAL");
-			return;
-		}
 		rdns_proposal.if_index = rtm->rtm_index;
 		rdns_proposal.src = rtm->rtm_priority;
 		memcpy(&rdns_proposal.rtdns, rtdns, sizeof(rdns_proposal.rtdns));
@@ -1672,14 +1653,11 @@ tcp_accept(int fd, short events, void *arg)
 	pq->tcp = 1;
 	pq->qbuf = sldns_buffer_new(DEFAULT_TCP_SIZE);
 	pq->region = regional_create();
-	pq->qmsg = regional_alloc(pq->region, sizeof(*pq->qmsg));
 
-	if (!pq->qbuf || !pq->region || !pq->qmsg) {
+	if (!pq->qbuf || !pq->region) {
 		free_pending_query(pq);
 		return;
 	}
-
-	memset(pq->qmsg, 0, sizeof(*pq->qmsg));
 
 	event_set(&pq->ev, s, EV_READ | EV_PERSIST, tcp_request, pq);
 	event_add(&pq->ev, NULL);

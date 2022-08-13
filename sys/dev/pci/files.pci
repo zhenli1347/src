@@ -1,4 +1,4 @@
-#	$OpenBSD: files.pci,v 1.355 2021/09/02 10:11:21 mlarkin Exp $
+#	$OpenBSD: files.pci,v 1.359 2022/03/31 21:41:17 jmatthew Exp $
 #	$NetBSD: files.pci,v 1.20 1996/09/24 17:47:15 christos Exp $
 #
 # Config file and device description for machine-independent PCI code.
@@ -231,7 +231,7 @@ attach	sili at pci with sili_pci
 file	dev/pci/sili_pci.c		sili_pci
 
 # Aquantia/Atlantic 10-Gigabit Ethernet
-device  aq: ether, ifnet, ifmedia, mii
+device  aq: ether, ifnet, ifmedia, mii, intrmap, stoeplitz
 attach  aq at pci
 file    dev/pci/if_aq_pci.c                 aq
 
@@ -419,21 +419,6 @@ file	dev/pci/if_cas.c		cas
 device	nep: ether, ifnet, ifmedia, mii
 attach	nep at pci
 file	dev/pci/if_nep.c		nep
-
-# Hi/fn 7751/7811/7951
-device	hifn: crypto
-attach	hifn at pci
-file	dev/pci/hifn7751.c		hifn
-
-# Bluesteelnet (Broadcom) 5501/5601
-device	ubsec: crypto
-attach	ubsec at pci
-file	dev/pci/ubsec.c			ubsec
-
-# Safenet SafeXcel 1141
-device	safe: crypto
-attach	safe at pci
-file	dev/pci/safe.c			safe
 
 # Winbond W89C840F ethernet
 device	wb: ether, ifnet, mii, ifmedia, mii_phy
@@ -849,6 +834,17 @@ file	dev/pci/if_iavf.c		iavf
 device	rge: ether, ifnet, ifmedia
 attach	rge at pci
 file	dev/pci/if_rge.c		rge
+
+# Intel Ethernet I225 Series
+device	igc: ether, ifnet, ifmedia, intrmap, stoeplitz
+attach	igc at pci
+file	dev/pci/if_igc.c		igc
+file	dev/pci/igc_api.c		igc
+file	dev/pci/igc_base.c		igc
+file	dev/pci/igc_i225.c		igc
+file	dev/pci/igc_mac.c		igc
+file	dev/pci/igc_nvm.c		igc
+file	dev/pci/igc_phy.c		igc
 
 # NS16550 compatible UART
 attach	com at pci with com_pci

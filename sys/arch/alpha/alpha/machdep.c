@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.195 2020/11/08 20:37:21 mpi Exp $ */
+/* $OpenBSD: machdep.c,v 1.198 2022/08/10 10:41:35 miod Exp $ */
 /* $NetBSD: machdep.c,v 1.210 2000/06/01 17:12:38 thorpej Exp $ */
 
 /*-
@@ -180,9 +180,6 @@ u_int8_t	dec_3000_scsiid[2], dec_3000_scsifast[2];
 struct platform platform;
 
 /* for cpu_sysctl() */
-int	alpha_unaligned_print = 1;	/* warn about unaligned accesses */
-int	alpha_unaligned_fix = 1;	/* fix up unaligned accesses */
-int	alpha_unaligned_sigbus = 1;	/* SIGBUS on fixed-up accesses */
 #ifndef NO_IEEE
 int	alpha_fp_sync_complete = 0;	/* fp fixup if sync even without /s */
 #endif
@@ -801,7 +798,7 @@ cpu_startup()
 	/*
 	 * Good {morning,afternoon,evening,night}.
 	 */
-	printf(version);
+	printf("%s", version);
 	identifycpu();
 	printf("real mem = %lu (%luMB)\n", ptoa((psize_t)totalphysmem),
 	    ptoa((psize_t)totalphysmem) / 1024 / 1024);
@@ -1384,13 +1381,13 @@ regdump(framep)
  * Send an interrupt to process.
  */
 int
-sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
+sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
+    int info, int onstack)
 {
 	struct proc *p = curproc;
 	struct sigcontext ksc, *scp;
 	struct fpreg *fpregs = (struct fpreg *)&ksc.sc_fpregs;
 	struct trapframe *frame;
-	struct sigacts *psp = p->p_p->ps_sigacts;
 	unsigned long oldsp;
 	int fsize, rndfsize, kscsize;
 	siginfo_t *sip;
@@ -1400,7 +1397,8 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	fsize = sizeof ksc;
 	rndfsize = ((fsize + 15) / 16) * 16;
 	kscsize = rndfsize;
-	if (psp->ps_siginfo & sigmask(sig)) {
+
+	if (info) {
 		fsize += sizeof *ksip;
 		rndfsize = ((fsize + 15) / 16) * 16;
 	}
@@ -1409,7 +1407,7 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	 * Allocate space for the signal handler context.
 	 */
 	if ((p->p_sigstk.ss_flags & SS_DISABLE) == 0 &&
-	    !sigonstack(oldsp) && (psp->ps_sigonstack & sigmask(sig)))
+	    !sigonstack(oldsp) && onstack)
 		scp = (struct sigcontext *)
 		    (trunc_page((vaddr_t)p->p_sigstk.ss_sp + p->p_sigstk.ss_size)
 		    - rndfsize);
@@ -1442,7 +1440,7 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip)
 	memset(ksc.sc_reserved, 0, sizeof ksc.sc_reserved);	/* XXX */
 	memset(ksc.sc_xxx, 0, sizeof ksc.sc_xxx);		/* XXX */
 
-	if (psp->ps_siginfo & sigmask(sig)) {
+	if (info) {
 		sip = (void *)scp + kscsize;
 		if (copyout(ksip, (caddr_t)sip, fsize - kscsize) != 0)
 			return 1;
@@ -1554,18 +1552,6 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			sizeof consdev));
 
 #ifndef SMALL_KERNEL
-	case CPU_UNALIGNED_PRINT:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &alpha_unaligned_print));
-
-	case CPU_UNALIGNED_FIX:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &alpha_unaligned_fix));
-
-	case CPU_UNALIGNED_SIGBUS:
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
-		    &alpha_unaligned_sigbus));
-
 	case CPU_BOOTED_KERNEL:
 		return (sysctl_rdstring(oldp, oldlenp, newp,
 		    bootinfo.booted_kernel));

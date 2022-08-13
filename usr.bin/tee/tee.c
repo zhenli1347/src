@@ -1,4 +1,4 @@
-/*	$OpenBSD: tee.c,v 1.12 2017/07/11 13:14:59 bluhm Exp $	*/
+/*	$OpenBSD: tee.c,v 1.14 2021/12/13 18:33:23 cheloha Exp $	*/
 /*	$NetBSD: tee.c,v 1.5 1994/12/09 01:43:39 jtc Exp $	*/
 
 /*
@@ -43,6 +43,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#define BSIZE (64 * 1024)
+
 struct list {
 	SLIST_ENTRY(list) next;
 	int fd;
@@ -68,9 +70,8 @@ main(int argc, char *argv[])
 	struct list *p;
 	int fd;
 	ssize_t n, rval, wval;
-	char *bp;
 	int append, ch, exitval;
-	char buf[8192];
+	char *buf;
 
 	if (pledge("stdio wpath cpath", NULL) == -1)
 		err(1, "pledge");
@@ -110,20 +111,22 @@ main(int argc, char *argv[])
 	if (pledge("stdio", NULL) == -1)
 		err(1, "pledge");
 
-	while ((rval = read(STDIN_FILENO, buf, sizeof(buf))) > 0) {
+	buf = malloc(BSIZE);
+	if (buf == NULL)
+		err(1, NULL);
+	while ((rval = read(STDIN_FILENO, buf, BSIZE)) > 0) {
 		SLIST_FOREACH(p, &head, next) {
-			n = rval;
-			bp = buf;
-			do {
-				if ((wval = write(p->fd, bp, n)) == -1) {
+			for (n = 0; n < rval; n += wval) {
+				wval = write(p->fd, buf + n, rval - n);
+				if (wval == -1) {
 					warn("%s", p->name);
 					exitval = 1;
 					break;
 				}
-				bp += wval;
-			} while (n -= wval);
+			}
 		}
 	}
+	free(buf);
 	if (rval == -1) {
 		warn("read");
 		exitval = 1;

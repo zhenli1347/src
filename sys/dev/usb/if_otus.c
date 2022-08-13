@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_otus.c,v 1.69 2021/02/25 02:48:20 dlg Exp $	*/
+/*	$OpenBSD: if_otus.c,v 1.71 2022/04/21 21:03:03 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -884,7 +884,7 @@ otus_write_barrier(struct otus_softc *sc)
 struct ieee80211_node *
 otus_node_alloc(struct ieee80211com *ic)
 {
-	return malloc(sizeof (struct otus_node), M_DEVBUF, M_NOWAIT | M_ZERO);
+	return malloc(sizeof (struct otus_node), M_USBDEV, M_NOWAIT | M_ZERO);
 }
 
 int
@@ -1192,9 +1192,8 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len,
 
 	s = splnet();
 	ni = ieee80211_find_rxnode(ic, wh);
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = tail->rssi;
-	rxi.rxi_tstamp = 0;	/* unused */
 	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 
 	/* Node is no longer needed. */

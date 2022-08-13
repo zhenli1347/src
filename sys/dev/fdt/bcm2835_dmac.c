@@ -1,4 +1,4 @@
-/*     $OpenBSD: bcm2835_dmac.c,v 1.1 2020/04/21 18:56:54 tobhe Exp $ */
+/*     $OpenBSD: bcm2835_dmac.c,v 1.4 2022/08/10 20:19:22 mglocker Exp $ */
 
 /*
  * Copyright (c) 2020 Tobias Heider <tobhe@openbsd.org>
@@ -87,7 +87,7 @@ struct bcmdmac_channel {
 int bcmdmac_match(struct device *, void *, void *);
 void bcmdmac_attach(struct device *, struct device *, void *);
 
-struct cfattach bcmdmac_ca = {
+const struct cfattach bcmdmac_ca = {
 	sizeof(struct bcmdmac_softc),
 	bcmdmac_match,
 	bcmdmac_attach,
@@ -97,18 +97,18 @@ struct cfdriver bcmdmac_cd = { NULL, "bcmdmac", DV_DULL };
 
 /* utilities */
 enum bcmdmac_type
-bcmdmac_channel_type(struct bcmdmac_channel ch)
+bcmdmac_channel_type(struct bcmdmac_channel *ch)
 {
-	if (ISSET(ch.ch_debug, DMAC_DEBUG_LITE))
+	if (ISSET(ch->ch_debug, DMAC_DEBUG_LITE))
 		return BCMDMAC_TYPE_LITE;
 	else
 		return BCMDMAC_TYPE_NORMAL;
 }
 
 int
-bcmdmac_channel_used(struct bcmdmac_channel ch)
+bcmdmac_channel_used(struct bcmdmac_channel *ch)
 {
-	return ch.ch_callback != NULL;
+	return ch->ch_callback != NULL;
 }
 
 void
@@ -170,7 +170,7 @@ bcmdmac_attach(struct device *parent, struct device *self, void *aux)
 
 	mtx_init(&sc->sc_lock, IPL_SCHED);
 
-	sc->sc_nchannels = 31 - __builtin_clz(sc->sc_channelmask);
+	sc->sc_nchannels = 32 - __builtin_clz(sc->sc_channelmask);
 	sc->sc_channels = malloc(sizeof(*sc->sc_channels) * sc->sc_nchannels,
 	    M_DEVBUF, M_WAITOK);
 
@@ -233,9 +233,9 @@ bcmdmac_alloc(enum bcmdmac_type type, int ipl,
 	for (index = 0; index < sc->sc_nchannels; index++) {
 		if (!ISSET(sc->sc_channelmask, (1 << index)))
 			continue;
-		if (bcmdmac_channel_type(sc->sc_channels[index]) != type)
+		if (bcmdmac_channel_type(&sc->sc_channels[index]) != type)
 			continue;
-		if (bcmdmac_channel_used(sc->sc_channels[index]))
+		if (bcmdmac_channel_used(&sc->sc_channels[index]))
 			continue;
 
 		ch = &sc->sc_channels[index];

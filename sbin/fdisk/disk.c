@@ -1,4 +1,4 @@
-/*	$OpenBSD: disk.c,v 1.71 2021/08/07 13:33:12 krw Exp $	*/
+/*	$OpenBSD: disk.c,v 1.75 2022/04/25 17:10:09 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -38,6 +38,9 @@
 struct disk		disk;
 struct disklabel	dl;
 
+char		*readsectors(const uint64_t, const uint32_t);
+int		 writesectors(const void *, const uint64_t, const uint32_t);
+
 void
 DISK_open(const char *name, const int oflags)
 {
@@ -57,8 +60,6 @@ DISK_open(const char *name, const int oflags)
 	if (ioctl(disk.dk_fd, DIOCGPDINFO, &dl) == -1)
 		err(1, "DIOCGPDINFO");
 
-	unit_types[SECTORS].ut_conversion = dl.d_secsize;
-
 	/* Set geometry to use in MBR partitions. */
 	if (disk.dk_size > 0) {
 		/* -l has set disk size. */
@@ -73,7 +74,6 @@ DISK_open(const char *name, const int oflags)
 		disk.dk_size = DL_BLKTOSEC(&dl, sz);
 		disk.dk_sectors = DL_BLKTOSEC(&dl, disk.dk_sectors);
 	} else {
-		disk.dk_sectors = dl.d_nsectors;
 		disk.dk_cylinders = dl.d_ncylinders;
 		disk.dk_heads = dl.d_ntracks;
 		disk.dk_sectors = dl.d_nsectors;
@@ -101,28 +101,23 @@ DISK_open(const char *name, const int oflags)
 void
 DISK_printgeometry(const char *units)
 {
-	const int		secsize = unit_types[SECTORS].ut_conversion;
-	double			size;
-	int			i;
+	const struct unit_type	*ut;
+	const int		 secsize = dl.d_secsize;
+	double			 size;
 
-	i = unit_lookup(units);
-	size = ((double)disk.dk_size * secsize) / unit_types[i].ut_conversion;
-	printf("Disk: %s\t", disk.dk_name);
-	if (disk.dk_size) {
-		printf("geometry: %d/%d/%d [%.0f ", disk.dk_cylinders,
-		    disk.dk_heads, disk.dk_sectors, size);
-		if (i == SECTORS && secsize != sizeof(struct dos_mbr))
-			printf("%d-byte ", secsize);
-		printf("%s]\n", unit_types[i].ut_lname);
-	} else
-		printf("geometry: <none>\n");
+	size = units_size(units, disk.dk_size, &ut);
+	printf("Disk: %s\tgeometry: %d/%d/%d [%.0f ", disk.dk_name,
+	    disk.dk_cylinders, disk.dk_heads, disk.dk_sectors, size);
+	if (ut->ut_conversion == 0 && secsize != DEV_BSIZE)
+		printf("%d-byte ", secsize);
+	printf("%s]\n", ut->ut_lname);
 }
 
 /*
  * The caller must free() the returned memory!
  */
 char *
-DISK_readsectors(const uint64_t sector, const uint32_t count)
+readsectors(const uint64_t sector, const uint32_t count)
 {
 	char			*secbuf;
 	ssize_t			 len;
@@ -164,8 +159,7 @@ DISK_readsectors(const uint64_t sector, const uint32_t count)
 }
 
 int
-DISK_writesectors(const char *buf, const uint64_t sector,
-    const uint32_t count)
+writesectors(const void *buf, const uint64_t sector, const uint32_t count)
 {
 	ssize_t			len;
 	off_t			off, where;
@@ -197,4 +191,42 @@ DISK_writesectors(const char *buf, const uint64_t sector,
 	}
 
 	return 0;
+}
+
+int
+DISK_readbytes(void *buf, const uint64_t sector, const size_t sz)
+{
+	char			*secbuf;
+	uint32_t		 count;
+
+	count = (sz + dl.d_secsize - 1) / dl.d_secsize;
+
+	secbuf = readsectors(sector, count);
+	if (secbuf == NULL)
+		return -1;
+
+	memcpy(buf, secbuf, sz);
+	free(secbuf);
+
+	return 0;
+}
+
+int
+DISK_writebytes(const void *buf, const uint64_t sector, const size_t sz)
+{
+	char 			*secbuf;
+	uint32_t		 count;
+	int			 rslt;
+
+	count = (sz + dl.d_secsize - 1) / dl.d_secsize;
+
+	secbuf = readsectors(sector, count);
+	if (secbuf == NULL)
+		return -1;
+
+	memcpy(secbuf, buf, sz);
+	rslt = writesectors(secbuf, sector, count);
+	free(secbuf);
+
+	return rslt;
 }

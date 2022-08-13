@@ -1,4 +1,4 @@
-/*	$OpenBSD: pgt.c,v 1.100 2021/03/03 23:58:28 jsg Exp $  */
+/*	$OpenBSD: pgt.c,v 1.103 2022/04/21 21:03:02 stsp Exp $  */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -96,8 +96,7 @@
 
 /*
  * This is a driver for the Intersil Prism family of 802.11g network cards,
- * based upon version 1.2 of the Linux driver and firmware found at
- * http://www.prism54.org/.
+ * based upon version 1.2 of the Linux driver.
  */
 
 #define SCAN_TIMEOUT			5	/* 5 seconds */
@@ -1020,7 +1019,7 @@ input:
 				bpf_mtap(sc->sc_drvbpf, &mb, BPF_DIRECTION_IN);
 			}
 #endif
-			rxi.rxi_flags = 0;
+			memset(&rxi, 0, sizeof(rxi));
 			ni->ni_rssi = rxi.rxi_rssi = rssi;
 			ni->ni_rstamp = rxi.rxi_tstamp = rstamp;
 			ieee80211_inputm(ifp, m, ni, &rxi, &ml);
@@ -2458,7 +2457,7 @@ pgt_watchdog(struct ifnet *ifp)
 	if (sc->sc_flags & (SC_DYING | SC_NEEDS_RESET))
 		return;
 	/*
-	 * If we're goign to kick the device out of power-save mode
+	 * If we're going to kick the device out of power-save mode
 	 * just to update the BSSID and such, we should not do it
 	 * very often; need to determine in what way to do that.
 	 */

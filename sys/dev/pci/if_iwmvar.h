@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwmvar.h,v 1.69 2021/07/08 17:14:08 stsp Exp $	*/
+/*	$OpenBSD: if_iwmvar.h,v 1.78 2022/05/14 05:47:04 stsp Exp $	*/
 
 /*
  * Copyright (c) 2014 genua mbh <info@genua.de>
@@ -190,6 +190,7 @@ struct iwm_nvm_data {
 	int sku_cap_band_24GHz_enable;
 	int sku_cap_band_52GHz_enable;
 	int sku_cap_11n_enable;
+	int sku_cap_11ac_enable;
 	int sku_cap_amt_enable;
 	int sku_cap_ipan_enable;
 	int sku_cap_mimo_disable;
@@ -264,6 +265,7 @@ struct iwm_tx_data {
 
 	/* A-MPDU subframes */
 	int ampdu_txmcs;
+	int ampdu_txnss;
 	int ampdu_nframes;
 };
 
@@ -293,7 +295,6 @@ struct iwm_rx_ring {
 	struct iwm_dma_info	free_desc_dma;
 	struct iwm_dma_info	stat_dma;
 	struct iwm_dma_info	used_desc_dma;
-	struct iwm_dma_info	buf_dma;
 	void			*desc;
 	struct iwm_rb_status	*stat;
 	struct iwm_rx_data	data[IWM_RX_MQ_RING_COUNT];
@@ -360,6 +361,8 @@ struct iwm_phy_ctxt {
 	uint16_t color;
 	uint32_t ref;
 	struct ieee80211_channel *channel;
+	uint8_t sco; /* 40 MHz secondary channel offset */
+	uint8_t vht_chan_width;
 };
 
 struct iwm_bf_data {
@@ -472,6 +475,7 @@ struct iwm_softc {
 	struct ieee80211com sc_ic;
 	int (*sc_newstate)(struct ieee80211com *, enum ieee80211_state, int);
 	int sc_newstate_pending;
+	int attached;
 
 	struct ieee80211_amrr sc_amrr;
 	struct timeout sc_calib_to;
@@ -490,6 +494,9 @@ struct iwm_softc {
 
 	/* Task for ERP/HT prot/slot-time/EDCA updates. */
 	struct task		mac_ctxt_task;
+
+	/* Task for HT 20/40 MHz channel width updates. */
+	struct task		phy_ctxt_task;
 
 	bus_space_tag_t sc_st;
 	bus_space_handle_t sc_sh;
@@ -559,12 +566,12 @@ struct iwm_softc {
 
 	/*
 	 * So why do we need a separate stopped flag and a generation?
-	 * the former protects the device from issueing commands when it's
+	 * the former protects the device from issuing commands when it's
 	 * stopped (duh).  The latter protects against race from a very
 	 * fast stop/unstop cycle where threads waiting for responses do
 	 * not have a chance to run in between.  Notably: we want to stop
 	 * the device from interrupt context when it craps out, so we
-	 * don't have the luxury of waiting for quiescense.
+	 * don't have the luxury of waiting for quiescence.
 	 */
 	int sc_generation;
 
@@ -576,7 +583,8 @@ struct iwm_softc {
 	bus_size_t sc_fwdmasegsz;
 	size_t sc_nvm_max_section_size;
 	struct iwm_fw_info sc_fw;
-	int sc_fw_phy_config;
+	uint32_t sc_fw_phy_config;
+	uint32_t sc_extra_phy_config;
 	struct iwm_tlv_calib_ctrl sc_default_calib[IWM_UCODE_TYPE_MAX];
 
 	struct iwm_nvm_data sc_nvm;
@@ -584,9 +592,13 @@ struct iwm_softc {
 
 	struct iwm_bf_data sc_bf;
 
-	int sc_tx_timer;
+	int sc_tx_timer[IWM_MAX_QUEUES];
 	int sc_rx_ba_sessions;
 	int tx_ba_queue_mask;
+
+	struct task bgscan_done_task;
+	struct ieee80211_node_switch_bss_arg *bgscan_unref_arg;
+	size_t	bgscan_unref_arg_size;
 
 	int sc_scan_last_antenna;
 
@@ -654,12 +666,14 @@ struct iwm_softc {
 struct iwm_node {
 	struct ieee80211_node in_ni;
 	struct iwm_phy_ctxt *in_phyctxt;
+	uint8_t in_macaddr[ETHER_ADDR_LEN];
 
 	uint16_t in_id;
 	uint16_t in_color;
 
 	struct ieee80211_amrr_node in_amn;
 	struct ieee80211_ra_node in_rn;
+	struct ieee80211_ra_vht_node in_rn_vht;
 	int lq_rate_mismatch;
 
 	struct iwm_rxq_dup_data dup_data;

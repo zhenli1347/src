@@ -1,4 +1,4 @@
-/*      $OpenBSD: sv.c,v 1.35 2019/05/13 21:29:28 mpi Exp $ */
+/*      $OpenBSD: sv.c,v 1.40 2022/03/21 19:22:41 miod Exp $ */
 
 /*
  * Copyright (c) 1998 Constantine Paul Sapuntzakis
@@ -55,11 +55,9 @@
 
 #include <machine/bus.h>
 
-#ifdef __OpenBSD__
-struct        cfdriver sv_cd = {
-      NULL, "sv", DV_DULL
+struct cfdriver sv_cd = {
+	NULL, "sv", DV_DULL
 };
-#endif
 
 #ifdef AUDIO_DEBUG
 #define DPRINTF(x)	if (svdebug) printf x
@@ -120,7 +118,7 @@ struct sv_softc {
 };
 
 
-struct cfattach sv_ca = {
+const struct cfattach sv_ca = {
 	sizeof(struct sv_softc), sv_match, sv_attach
 };
 
@@ -148,7 +146,7 @@ int	sv_get_props(void *);
 
 void    sv_dumpregs(struct sv_softc *sc);
 
-struct audio_hw_if sv_hw_if = {
+const struct audio_hw_if sv_hw_if = {
 	sv_open,
 	sv_close,
 	sv_set_params,
@@ -359,7 +357,7 @@ sv_attach(struct device *parent, struct device *self, void *aux)
 
   sv_init_mixer(sc);
 
-  audio_attach_mi(&sv_hw_if, sc, &sc->sc_dev);
+  audio_attach_mi(&sv_hw_if, sc, NULL, &sc->sc_dev);
 }
 
 #ifdef AUDIO_DEBUG
@@ -618,14 +616,14 @@ sv_set_params(void *addr, int setmode, int usemode,
 	{
 	  /* The ADC reference frequency (f_out) is 512 * the sample rate */
 
-	  /* f_out is dervied from the 24.576MHZ crystal by three values:
+	  /* f_out is derived from the 24.576MHZ crystal by three values:
 	     M & N & R. The equation is as follows:
 
 	     f_out = (m + 2) * f_ref / ((n + 2) * (2 ^ a))
 
 	     with the constraint that:
 
-	     80 MhZ < (m + 2) / (n + 2) * f_ref <= 150MHz
+	     80 MHz < (m + 2) / (n + 2) * f_ref <= 150MHz
 	     and n, m >= 1
 	  */
 

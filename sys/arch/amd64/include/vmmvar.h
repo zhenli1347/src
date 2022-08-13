@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmmvar.h,v 1.73 2021/08/31 17:40:59 dv Exp $	*/
+/*	$OpenBSD: vmmvar.h,v 1.79 2022/06/30 13:17:58 dv Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -29,12 +29,13 @@
 #define VMM_MAX_PATH_CDROM	128
 #define VMM_MAX_NAME_LEN	64
 #define VMM_MAX_KERNEL_PATH	128
+#define VMM_MAX_VCPUS		512
 #define VMM_MAX_VCPUS_PER_VM	64
-#define VMM_MAX_VM_MEM_SIZE	32768
+#define VMM_MAX_VM_MEM_SIZE	32L * 1024 * 1024 * 1024	/* 32 GiB */
 #define VMM_MAX_NICS_PER_VM	4
 
 #define VMM_PCI_MMIO_BAR_BASE	0xF0000000ULL
-#define VMM_PCI_MMIO_BAR_END	0xFFFFFFFFULL
+#define VMM_PCI_MMIO_BAR_END	0xFFDFFFFFULL		/* 2 MiB below 4 GiB */
 #define VMM_PCI_MMIO_BAR_SIZE	0x00010000
 #define VMM_PCI_IO_BAR_BASE	0x1000
 #define VMM_PCI_IO_BAR_END	0xFFFF
@@ -323,7 +324,8 @@ enum {
 };
 
 enum {
-	VEE_FAULT_PROTECT
+	VEE_FAULT_HANDLED,
+	VEE_FAULT_PROTECT,
 };
 
 enum {
@@ -369,10 +371,10 @@ struct vm_exit_eptviolation {
  * register content
  */
 struct vcpu_segment_info {
-	uint16_t vsi_sel;
-	uint32_t vsi_limit;
-	uint32_t vsi_ar;
-	uint64_t vsi_base;
+	uint16_t	vsi_sel;
+	uint32_t	vsi_limit;
+	uint32_t	vsi_ar;
+	uint64_t	vsi_base;
 };
 
 #define VCPU_REGS_RAX		0
@@ -395,17 +397,17 @@ struct vcpu_segment_info {
 #define VCPU_REGS_RFLAGS	17
 #define VCPU_REGS_NGPRS		(VCPU_REGS_RFLAGS + 1)
 
-#define VCPU_REGS_CR0	0
-#define VCPU_REGS_CR2	1
-#define VCPU_REGS_CR3	2
-#define VCPU_REGS_CR4	3
-#define VCPU_REGS_CR8	4
-#define VCPU_REGS_XCR0	5
-#define VCPU_REGS_PDPTE0 6
-#define VCPU_REGS_PDPTE1 7
-#define VCPU_REGS_PDPTE2 8
-#define VCPU_REGS_PDPTE3 9
-#define VCPU_REGS_NCRS	(VCPU_REGS_PDPTE3 + 1)
+#define VCPU_REGS_CR0		0
+#define VCPU_REGS_CR2		1
+#define VCPU_REGS_CR3		2
+#define VCPU_REGS_CR4		3
+#define VCPU_REGS_CR8		4
+#define VCPU_REGS_XCR0		5
+#define VCPU_REGS_PDPTE0 	6
+#define VCPU_REGS_PDPTE1 	7
+#define VCPU_REGS_PDPTE2 	8
+#define VCPU_REGS_PDPTE3 	9
+#define VCPU_REGS_NCRS		(VCPU_REGS_PDPTE3 + 1)
 
 #define VCPU_REGS_CS		0
 #define VCPU_REGS_DS		1
@@ -424,7 +426,7 @@ struct vcpu_segment_info {
 #define VCPU_REGS_SFMASK 	4
 #define VCPU_REGS_KGSBASE	5
 #define VCPU_REGS_MISC_ENABLE	6
-#define VCPU_REGS_NMSRS	(VCPU_REGS_MISC_ENABLE + 1)
+#define VCPU_REGS_NMSRS		(VCPU_REGS_MISC_ENABLE + 1)
 
 #define VCPU_REGS_DR0		0
 #define VCPU_REGS_DR1		1
@@ -432,7 +434,7 @@ struct vcpu_segment_info {
 #define VCPU_REGS_DR3		3
 #define VCPU_REGS_DR6		4
 #define VCPU_REGS_DR7		5
-#define VCPU_REGS_NDRS	(VCPU_REGS_DR7 + 1)
+#define VCPU_REGS_NDRS		(VCPU_REGS_DR7 + 1)
 
 struct vcpu_reg_state {
 	uint64_t			vrs_gprs[VCPU_REGS_NGPRS];
@@ -446,7 +448,7 @@ struct vcpu_reg_state {
 
 struct vm_mem_range {
 	paddr_t	vmr_gpa;
-	vaddr_t vmr_va;
+	vaddr_t	vmr_va;
 	size_t	vmr_size;
 };
 
@@ -480,7 +482,7 @@ struct vm_create_params {
 	uint8_t			vcp_macs[VMM_MAX_NICS_PER_VM][6];
 
 	/* Output parameter from VMM_IOC_CREATE */
-	uint32_t	vcp_id;
+	uint32_t		vcp_id;
 };
 
 struct vm_run_params {
@@ -511,7 +513,7 @@ struct vm_info_result {
 
 struct vm_info_params {
 	/* Input parameters to VMM_IOC_INFO */
-	size_t			vip_size;	/* Output buffer size */
+	size_t			 vip_size;	/* Output buffer size */
 
 	/* Output Parameters from VMM_IOC_INFO */
 	size_t			 vip_info_ct;	/* # of entries returned */
@@ -683,19 +685,19 @@ struct vm_mprotect_ept_params {
 
 #ifdef _KERNEL
 
-#define VMX_FAIL_LAUNCH_UNKNOWN 1
-#define VMX_FAIL_LAUNCH_INVALID_VMCS 2
-#define VMX_FAIL_LAUNCH_VALID_VMCS 3
+#define VMX_FAIL_LAUNCH_UNKNOWN 	1
+#define VMX_FAIL_LAUNCH_INVALID_VMCS	2
+#define VMX_FAIL_LAUNCH_VALID_VMCS	3
 
-#define VMX_NUM_MSR_STORE 7
+#define VMX_NUM_MSR_STORE		7
 
 /* MSR bitmap manipulation macros */
-#define VMX_MSRIDX(m) ((m) / 8)
-#define VMX_MSRBIT(m) (1 << (m) % 8)
+#define VMX_MSRIDX(m)			((m) / 8)
+#define VMX_MSRBIT(m)			(1 << (m) % 8)
 
-#define SVM_MSRIDX(m) ((m) / 4)
-#define SVM_MSRBIT_R(m) (1 << (((m) % 4) * 2))
-#define SVM_MSRBIT_W(m) (1 << (((m) % 4) * 2 + 1))
+#define SVM_MSRIDX(m)			((m) / 4)
+#define SVM_MSRBIT_R(m)			(1 << (((m) % 4) * 2))
+#define SVM_MSRBIT_W(m)			(1 << (((m) % 4) * 2 + 1))
 
 enum {
 	VMM_MODE_UNKNOWN,
@@ -768,7 +770,7 @@ struct vmcb {
 			uint64_t	v_avic_phys;		/* 0F8h */
 
 		};
-		uint8_t vmcb_control[0x400];
+		uint8_t			vmcb_control[0x400];
 	};
 
 	union {
@@ -817,8 +819,7 @@ struct vmcb {
 			uint64_t		v_lastexcpfrom;	/* 288h */
 			uint64_t		v_lastexcpto;	/* 290h */
 		};
-
-		uint8_t vmcb_layout[PAGE_SIZE - 0x400];
+		uint8_t				vmcb_layout[PAGE_SIZE - 0x400];
 	};
 };
 
@@ -893,57 +894,67 @@ struct vm;
 
 /*
  * Virtual CPU
+ *
+ * Methods used to vcpu struct members:
+ *	a	atomic operations
+ *	I	immutable operations
+ *	K	kernel lock
+ *	r	reference count
+ *	v	vcpu rwlock
+ *	V	vm struct's vcpu list lock (vm_vcpu_lock)
  */
 struct vcpu {
 	/*
 	 * Guest FPU state - this must remain as the first member of the struct
 	 * to ensure 64-byte alignment (set up during vcpu_pool init)
 	 */
-	struct savefpu vc_g_fpu;
+	struct savefpu vc_g_fpu;		/* [v] */
 
 	/* VMCS / VMCB pointer */
-	vaddr_t vc_control_va;
-	paddr_t vc_control_pa;
+	vaddr_t vc_control_va;			/* [I] */
+	paddr_t vc_control_pa;			/* [I] */
 
 	/* VLAPIC pointer */
-	vaddr_t vc_vlapic_va;
-	uint64_t vc_vlapic_pa;
+	vaddr_t vc_vlapic_va;			/* [I] */
+	uint64_t vc_vlapic_pa;			/* [I] */
 
 	/* MSR bitmap address */
-	vaddr_t vc_msr_bitmap_va;
-	uint64_t vc_msr_bitmap_pa;
+	vaddr_t vc_msr_bitmap_va;		/* [I] */
+	uint64_t vc_msr_bitmap_pa;		/* [I] */
 
-	struct vm *vc_parent;
-	uint32_t vc_id;
-	uint16_t vc_vpid;
-	u_int vc_state;
-	SLIST_ENTRY(vcpu) vc_vcpu_link;
+	struct vm *vc_parent;			/* [I] */
+	uint32_t vc_id;				/* [I] */
+	uint16_t vc_vpid;			/* [I] */
+	u_int vc_state;				/* [a] */
+	SLIST_ENTRY(vcpu) vc_vcpu_link;		/* [V] */
 
-	uint8_t vc_virt_mode;
+	uint8_t vc_virt_mode;			/* [I] */
 
 	struct rwlock vc_lock;
-	struct cpu_info *vc_last_pcpu;
-	struct vm_exit vc_exit;
+	struct refcnt vc_refcnt;		/* [a] */
 
-	uint16_t vc_intr;
-	uint8_t vc_irqready;
+	struct cpu_info *vc_last_pcpu;		/* [v] */
+	struct vm_exit vc_exit;			/* [v] */
 
-	uint8_t vc_fpuinited;
+	uint16_t vc_intr;			/* [v] */
+	uint8_t vc_irqready;			/* [v] */
 
-	uint64_t vc_h_xcr0;
+	uint8_t vc_fpuinited;			/* [v] */
 
-	struct vcpu_gueststate vc_gueststate;
+	uint64_t vc_h_xcr0;			/* [v] */
+
+	struct vcpu_gueststate vc_gueststate;	/* [v] */
 
 	uint8_t vc_event;
 
-	uint32_t vc_pvclock_version;
-	paddr_t vc_pvclock_system_gpa;
-	uint32_t vc_pvclock_system_tsc_mul;
+	uint32_t vc_pvclock_version;		/* [v] */
+	paddr_t vc_pvclock_system_gpa;		/* [v] */
+	uint32_t vc_pvclock_system_tsc_mul;	/* [v] */
 
 	/* Shadowed MSRs */
-	uint64_t vc_shadow_pat;
+	uint64_t vc_shadow_pat;			/* [v] */
 
-	/* VMX only */
+	/* VMX only (all requiring [v]) */
 	uint64_t vc_vmx_basic;
 	uint64_t vc_vmx_entry_ctls;
 	uint64_t vc_vmx_true_entry_ctls;
@@ -963,11 +974,11 @@ struct vcpu {
 	uint8_t vc_vmx_vpid_enabled;
 	uint64_t vc_vmx_cr0_fixed1;
 	uint64_t vc_vmx_cr0_fixed0;
-	uint32_t vc_vmx_vmcs_state;
+	uint32_t vc_vmx_vmcs_state;		/* [a] */
 #define VMCS_CLEARED	0
 #define VMCS_LAUNCHED	1
 
-	/* SVM only */
+	/* SVM only (all requiring [v]) */
 	vaddr_t vc_svm_hsa_va;
 	paddr_t vc_svm_hsa_pa;
 	vaddr_t vc_svm_ioio_va;

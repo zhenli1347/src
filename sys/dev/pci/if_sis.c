@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_sis.c,v 1.139 2020/12/12 11:48:53 jan Exp $ */
+/*	$OpenBSD: if_sis.c,v 1.142 2022/03/11 18:00:48 mpi Exp $ */
 /*
  * Copyright (c) 1997, 1998, 1999
  *	Bill Paul <wpaul@ctr.columbia.edu>.  All rights reserved.
@@ -52,7 +52,7 @@
  * 128-bit multicast hash table. The SiS 900 has a built-in MII-based
  * transceiver while the 7016 requires an external transceiver chip.
  * Both chips offer the standard bit-bang MII interface as well as
- * an enchanced PHY interface which simplifies accessing MII registers.
+ * an enhanced PHY interface which simplifies accessing MII registers.
  *
  * The only downside to this chipset is that RX descriptors must be
  * longword aligned.
@@ -63,7 +63,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
@@ -98,7 +97,7 @@ int sis_probe(struct device *, void *, void *);
 void sis_attach(struct device *, struct device *, void *);
 int sis_activate(struct device *, int);
 
-struct cfattach sis_ca = {
+const struct cfattach sis_ca = {
 	sizeof(struct sis_softc), sis_probe, sis_attach, NULL,
 	sis_activate
 };

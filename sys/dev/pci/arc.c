@@ -1,4 +1,4 @@
-/*	$OpenBSD: arc.c,v 1.120 2020/09/22 19:32:53 krw Exp $ */
+/*	$OpenBSD: arc.c,v 1.123 2022/04/16 19:19:59 naddy Exp $ */
 
 /*
  * Copyright (c) 2006 David Gwynne <dlg@openbsd.org>
@@ -677,7 +677,7 @@ void			arc_refresh_sensors(void *);
 #endif /* SMALL_KERNEL */
 #endif
 
-struct cfattach arc_ca = {
+const struct cfattach arc_ca = {
 	sizeof(struct arc_softc), arc_match, arc_attach, arc_detach,
 	arc_activate
 };
@@ -686,7 +686,7 @@ struct cfdriver arc_cd = {
 	NULL, "arc", DV_DULL
 };
 
-struct scsi_adapter arc_switch = {
+const struct scsi_adapter arc_switch = {
 	arc_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -2221,7 +2221,7 @@ arc_bio_disk(struct arc_softc *sc, struct bioc_disk *bd)
 	bd->bd_lun = diskinfo->scsi_attr.lun;
 #endif
 	/*
-	 * the firwmare doesnt seem to fill scsi_attr in, so fake it with
+	 * the firmware doesnt seem to fill scsi_attr in, so fake it with
 	 * the diskid.
 	 */
 	bd->bd_channel = 0;
@@ -2691,7 +2691,7 @@ arc_refresh_sensors(void *arg)
 			break;
 
 		case BIOC_SVINVALID:
-			/* FALLTRHOUGH */
+			/* FALLTHROUGH */
 		default:
 			sc->sc_sensors[i].value = 0; /* unknown */
 			sc->sc_sensors[i].status = SENSOR_S_UNKNOWN;

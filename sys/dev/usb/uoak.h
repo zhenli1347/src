@@ -1,4 +1,4 @@
-/*	$OpenBSD: uoak.h,v 1.3 2013/04/15 09:23:02 mglocker Exp $   */
+/*	$OpenBSD: uoak.h,v 1.5 2022/04/09 20:09:03 naddy Exp $   */
 
 /*
  * Copyright (c) 2012 Yojiro UO <yuo@nui.org>
@@ -16,10 +16,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/* TORADEX OAK seriese sensors */
+/* TORADEX OAK series sensors */
 /* http://developer.toradex.com/files/toradex-dev/uploads/media/Oak/Oak_ProgrammingGuide.pdf */
 
-/* feture request direction */
+/* feature request direction */
 #define OAK_SET			0x0
 #define OAK_GET			0x1
 
@@ -133,7 +133,7 @@ struct uoak_softc {
 	struct uoak_config	 sc_config[OAK_TARGET_MAXTYPES];
 
 	/* device specific methods */
-	struct uoak_methods	 *sc_methods;
+	const struct uoak_methods *sc_methods;
 };
 
 

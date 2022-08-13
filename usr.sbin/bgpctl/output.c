@@ -1,4 +1,4 @@
-/*	$OpenBSD: output.c,v 1.19 2021/07/30 09:45:52 claudio Exp $ */
+/*	$OpenBSD: output.c,v 1.26 2022/08/10 10:21:47 claudio Exp $ */
 
 /*
  * Copyright (c) 2003 Henning Brauer <henning@openbsd.org>
@@ -45,12 +45,11 @@ show_head(struct parse_result *res)
 		    "MsgRcvd", "MsgSent", "OutQ", "Up/Down", "State/PrfRcvd");
 		break;
 	case SHOW_FIB:
-		printf("flags: * = valid, B = BGP, C = Connected, "
-		    "S = Static, D = Dynamic\n");
-		printf("       "
-		    "N = BGP Nexthop reachable via this route\n");
+		printf("flags: B = BGP, C = Connected, S = Static\n");
+		printf("       N = BGP Nexthop reachable via this route\n");
 		printf("       r = reject route, b = blackhole route\n\n");
-		printf("flags prio destination          gateway\n");
+		printf("%-5s %-4s %-32s %-32s\n", "flags", "prio",
+		    "destination", "gateway");
 		break;
 	case SHOW_FIB_TABLES:
 		printf("%-5s %-20s %-8s\n", "Table", "Description", "State");
@@ -83,7 +82,8 @@ show_head(struct parse_result *res)
 		break;
 	case NETWORK_SHOW:
 		printf("flags: S = Static\n");
-		printf("flags prio destination          gateway\n");
+		printf("%-5s %-4s %-32s %-32s\n", "flags", "prio",
+		    "destination", "gateway");
 		break;
 	default:
 		break;
@@ -134,11 +134,11 @@ show_summary(struct peer *p)
 static void
 show_neighbor_capa_mp(struct capabilities *capa)
 {
-	int		comma;
-	u_int8_t	i;
+	int	comma;
+	uint8_t	i;
 
 	printf("    Multiprotocol extensions: ");
-	for (i = 0, comma = 0; i < AID_MAX; i++)
+	for (i = AID_MIN, comma = 0; i < AID_MAX; i++)
 		if (capa->mp[i]) {
 			printf("%s%s", comma ? ", " : "", aid2str(i));
 			comma = 1;
@@ -151,10 +151,10 @@ show_neighbor_capa_add_path(struct capabilities *capa)
 {
 	const char	*mode;
 	int		comma;
-	u_int8_t	i;
+	uint8_t		i;
 
 	printf("    Add-path: ");
-	for (i = 0, comma = 0; i < AID_MAX; i++) {
+	for (i = AID_MIN, comma = 0; i < AID_MAX; i++) {
 		switch (capa->add_path[i]) {
 		case 0:
 		default:
@@ -177,13 +177,13 @@ show_neighbor_capa_add_path(struct capabilities *capa)
 static void
 show_neighbor_capa_restart(struct capabilities *capa)
 {
-	int		comma;
-	u_int8_t	i;
+	int	comma;
+	uint8_t	i;
 
 	printf("    Graceful Restart");
 	if (capa->grestart.timeout)
 		printf(": Timeout: %d, ", capa->grestart.timeout);
-	for (i = 0, comma = 0; i < AID_MAX; i++)
+	for (i = AID_MIN, comma = 0; i < AID_MAX; i++)
 		if (capa->grestart.flags[i] & CAPA_GR_PRESENT) {
 			if (!comma &&
 			    capa->grestart.flags[i] & CAPA_GR_RESTART)
@@ -242,11 +242,11 @@ show_neighbor_msgstats(struct peer *p)
 static void
 show_neighbor_full(struct peer *p, struct parse_result *res)
 {
-	const char		*errstr;
-	struct in_addr		 ina;
-	char			*s;
-	int			 hascapamp, hascapaap;
-	u_int8_t		 i;
+	const char	*errstr;
+	struct in_addr	 ina;
+	char		*s;
+	int		 hascapamp, hascapaap;
+	uint8_t		 i;
 
 	if ((p->conf.remote_addr.aid == AID_INET &&
 	    p->conf.remote_masklen != 32) ||
@@ -325,7 +325,7 @@ show_neighbor_full(struct peer *p, struct parse_result *res)
 	}
 	if (hascapamp || hascapaap || p->capa.peer.grestart.restart ||
 	    p->capa.peer.refresh || p->capa.peer.enhanced_rr ||
-	    p->capa.peer.as4byte) {
+	    p->capa.peer.as4byte || p->capa.peer.role_ena) {
 		printf("  Neighbor capabilities:\n");
 		if (hascapamp)
 			show_neighbor_capa_mp(&p->capa.peer);
@@ -339,6 +339,10 @@ show_neighbor_full(struct peer *p, struct parse_result *res)
 			show_neighbor_capa_restart(&p->capa.peer);
 		if (hascapaap)
 			show_neighbor_capa_add_path(&p->capa.peer);
+		if (p->capa.peer.role_ena)
+			printf("    Open Policy role %s (local %s)\n",
+			    log_policy(p->capa.peer.role),
+			    log_policy(p->capa.ann.role));
 	}
 
 	hascapamp = 0;
@@ -351,7 +355,7 @@ show_neighbor_full(struct peer *p, struct parse_result *res)
 	}
 	if (hascapamp || hascapaap || p->capa.neg.grestart.restart ||
 	    p->capa.neg.refresh || p->capa.neg.enhanced_rr ||
-	    p->capa.neg.as4byte) {
+	    p->capa.neg.as4byte || p->capa.neg.role_ena) {
 		printf("  Negotiated capabilities:\n");
 		if (hascapamp)
 			show_neighbor_capa_mp(&p->capa.neg);
@@ -365,6 +369,10 @@ show_neighbor_full(struct peer *p, struct parse_result *res)
 			show_neighbor_capa_restart(&p->capa.neg);
 		if (hascapaap)
 			show_neighbor_capa_add_path(&p->capa.neg);
+		if (p->capa.neg.role_ena)
+			printf("    Open Policy role %s (local %s)\n",
+			    log_policy(p->capa.neg.role),
+			    log_policy(p->capa.ann.role));
 	}
 	printf("\n");
 
@@ -455,11 +463,11 @@ show_timer(struct ctl_timer *t)
 static void
 show_fib(struct kroute_full *kf)
 {
-	char			*p;
+	char	*p;
 
 	if (asprintf(&p, "%s/%u", log_addr(&kf->prefix), kf->prefixlen) == -1)
 		err(1, NULL);
-	printf("%s%4i %-20s ", fmt_fib_flags(kf->flags), kf->priority, p);
+	printf("%-5s %4i %-32s ", fmt_fib_flags(kf->flags), kf->priority, p);
 	free(p);
 
 	if (kf->flags & F_CONNECTED)
@@ -480,42 +488,22 @@ show_fib_table(struct ktable *kt)
 static void
 show_nexthop(struct ctl_show_nexthop *nh)
 {
-	struct kroute		*k;
-	struct kroute6		*k6;
-	char			*s;
+	char		*s;
 
 	printf("%s %-15s ", nh->valid ? "*" : " ", log_addr(&nh->addr));
 	if (!nh->krvalid) {
 		printf("\n");
 		return;
 	}
-	switch (nh->addr.aid) {
-	case AID_INET:
-		k = &nh->kr.kr4;
-		if (asprintf(&s, "%s/%u", inet_ntoa(k->prefix),
-		    k->prefixlen) == -1)
-			err(1, NULL);
-		printf("%-20s", s);
-		free(s);
-		printf("%3i %-15s ", k->priority,
-		    k->flags & F_CONNECTED ? "connected" :
-		    inet_ntoa(k->nexthop));
-		break;
-	case AID_INET6:
-		k6 = &nh->kr.kr6;
-		if (asprintf(&s, "%s/%u", log_in6addr(&k6->prefix),
-		    k6->prefixlen) == -1)
-			err(1, NULL);
-		printf("%-20s", s);
-		free(s);
-		printf("%3i %-15s ", k6->priority,
-		    k6->flags & F_CONNECTED ? "connected" :
-		    log_in6addr(&k6->nexthop));
-		break;
-	default:
-		printf("unknown address family\n");
-		return;
-	}
+	if (asprintf(&s, "%s/%u", log_addr(&nh->kr.prefix),
+	    nh->kr.prefixlen) == -1)
+		err(1, NULL);
+	printf("%-20s", s);
+	free(s);
+	printf("%3i %-15s ", nh->kr.priority,
+	    nh->kr.flags & F_CONNECTED ? "connected" :
+	    log_addr(&nh->kr.nexthop));
+
 	if (nh->iface.ifname[0]) {
 		printf("%s (%s, %s)", nh->iface.ifname,
 		    nh->iface.is_up ? "UP" : "DOWN",
@@ -548,8 +536,8 @@ show_communities(u_char *data, size_t len, struct parse_result *res)
 {
 	struct community c;
 	size_t	i;
-	u_int64_t ext;
-	u_int8_t type = 0;
+	uint64_t ext;
+	uint8_t type = 0;
 
 	if (len % sizeof(c))
 		return;
@@ -574,19 +562,19 @@ show_communities(u_char *data, size_t len, struct parse_result *res)
 			    fmt_large_community(c.data1, c.data2, c.data3));
 			break;
 		case COMMUNITY_TYPE_EXT:
-			ext = (u_int64_t)c.data3 << 48;
+			ext = (uint64_t)c.data3 << 48;
 			switch (c.data3 >> 8) {
 			case EXT_COMMUNITY_TRANS_TWO_AS:
 			case EXT_COMMUNITY_TRANS_OPAQUE:
 			case EXT_COMMUNITY_TRANS_EVPN:
 			case EXT_COMMUNITY_NON_TRANS_OPAQUE:
-				ext |= ((u_int64_t)c.data1 & 0xffff) << 32;
-				ext |= (u_int64_t)c.data2;
+				ext |= ((uint64_t)c.data1 & 0xffff) << 32;
+				ext |= (uint64_t)c.data2;
 				break;
 			case EXT_COMMUNITY_TRANS_FOUR_AS:
 			case EXT_COMMUNITY_TRANS_IPV4:
-				ext |= (u_int64_t)c.data1 << 16;
-				ext |= (u_int64_t)c.data2 & 0xffff;
+				ext |= (uint64_t)c.data1 << 16;
+				ext |= (uint64_t)c.data2 & 0xffff;
 				break;
 			}
 			ext = htobe64(ext);
@@ -600,10 +588,10 @@ show_communities(u_char *data, size_t len, struct parse_result *res)
 }
 
 static void
-show_community(u_char *data, u_int16_t len)
+show_community(u_char *data, uint16_t len)
 {
-	u_int16_t	a, v;
-	u_int16_t	i;
+	uint16_t	a, v;
+	uint16_t	i;
 
 	if (len & 0x3) {
 		printf("bad length");
@@ -623,10 +611,10 @@ show_community(u_char *data, u_int16_t len)
 }
 
 static void
-show_large_community(u_char *data, u_int16_t len)
+show_large_community(u_char *data, uint16_t len)
 {
-	u_int32_t	a, l1, l2;
-	u_int16_t	i;
+	uint32_t	a, l1, l2;
+	uint16_t	i;
 
 	if (len % 12) {
 		printf("bad length");
@@ -648,9 +636,9 @@ show_large_community(u_char *data, u_int16_t len)
 }
 
 static void
-show_ext_community(u_char *data, u_int16_t len)
+show_ext_community(u_char *data, uint16_t len)
 {
-	u_int16_t	i;
+	uint16_t	i;
 
 	if (len & 0x7) {
 		printf("bad length");
@@ -672,9 +660,9 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 	struct in_addr	 id;
 	struct bgpd_addr prefix;
 	char		*aspath;
-	u_int32_t	 as, pathid;
-	u_int16_t	 alen, ioff, short_as, afi;
-	u_int8_t	 flags, type, safi, aid, prefixlen;
+	uint32_t	 as, pathid;
+	uint16_t	 alen, ioff, short_as, afi;
+	uint8_t		 flags, type, safi, aid, prefixlen;
 	int		 i, pos, e2, e4;
 
 	if (len < 3) {
@@ -691,7 +679,7 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 			warnx("Too short BGP attrbute");
 			return;
 		}
-		memcpy(&alen, data+2, sizeof(u_int16_t));
+		memcpy(&alen, data+2, sizeof(uint16_t));
 		alen = ntohs(alen);
 		data += 4;
 		len -= 4;
@@ -748,7 +736,7 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 	case ATTR_MED:
 	case ATTR_LOCALPREF:
 		if (alen == 4) {
-			u_int32_t val;
+			uint32_t val;
 			memcpy(&val, data, sizeof(val));
 			val = ntohl(val);
 			printf("%u", val);
@@ -810,7 +798,7 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 
 		if (type == ATTR_MP_REACH_NLRI) {
 			struct bgpd_addr nexthop;
-			u_int8_t nhlen;
+			uint8_t nhlen;
 			if (len == 0)
 				goto bad_len;
 			nhlen = *data++;
@@ -829,14 +817,14 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 				if (nhlen != 12)
 					goto bad_len;
 				nexthop.aid = AID_INET;
-				memcpy(&nexthop.v4, data + sizeof(u_int64_t),
+				memcpy(&nexthop.v4, data + sizeof(uint64_t),
 				    sizeof(nexthop.v4));
 				break;
 			case AID_VPN_IPv6:
 				if (nhlen != 24)
 					goto bad_len;
 				nexthop.aid = AID_INET6;
-				memcpy(&nexthop.v6, data + sizeof(u_int64_t),
+				memcpy(&nexthop.v6, data + sizeof(uint64_t),
 				    sizeof(nexthop.v6));
 				break;
 			default:
@@ -894,6 +882,15 @@ show_attr(u_char *data, size_t len, int reqflags, int addpath)
 		break;
 	case ATTR_LARGE_COMMUNITIES:
 		show_large_community(data, alen);
+		break;
+	case ATTR_OTC:
+		if (alen == 4) {
+			memcpy(&as, data, sizeof(as));
+			as = ntohl(as);
+			printf("%s", log_as(as));
+		} else {
+			printf("bad length");
+		}
 		break;
 	case ATTR_ATOMIC_AGGREGATE:
 	default:

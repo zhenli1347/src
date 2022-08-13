@@ -1,4 +1,4 @@
-/* $OpenBSD: doas.c,v 1.90 2021/07/12 15:09:19 beck Exp $ */
+/* $OpenBSD: doas.c,v 1.97 2022/03/22 20:36:49 deraadt Exp $ */
 /*
  * Copyright (c) 2015 Ted Unangst <tedu@openbsd.org>
  *
@@ -172,7 +172,7 @@ parseconfig(const char *filename, int checkperms)
 
 	yyparse();
 	fclose(yyfp);
-	if (parse_errors)
+	if (parse_error)
 		exit(1);
 }
 
@@ -199,25 +199,20 @@ checkconfig(const char *confpath, int argc, char **argv,
 	}
 }
 
-static void
-authuser(char *myname, char *login_style, int persist)
+static int
+authuser_checkpass(char *myname, char *login_style)
 {
 	char *challenge = NULL, *response, rbuf[1024], cbuf[128];
 	auth_session_t *as;
-	int fd = -1;
-
-	if (persist)
-		fd = open("/dev/tty", O_RDWR);
-	if (fd != -1) {
-		if (ioctl(fd, TIOCCHKVERAUTH) == 0)
-			goto good;
-	}
 
 	if (!(as = auth_userchallenge(myname, login_style, "auth-doas",
-	    &challenge)))
-		errx(1, "Authentication failed");
+	    &challenge))) {
+		warnx("Authentication failed");
+		return AUTH_FAILED;
+	}
 	if (!challenge) {
 		char host[HOST_NAME_MAX + 1];
+
 		if (gethostname(host, sizeof(host)))
 			snprintf(host, sizeof(host), "?");
 		snprintf(cbuf, sizeof(cbuf),
@@ -235,9 +230,29 @@ authuser(char *myname, char *login_style, int persist)
 		explicit_bzero(rbuf, sizeof(rbuf));
 		syslog(LOG_AUTHPRIV | LOG_NOTICE,
 		    "failed auth for %s", myname);
-		errx(1, "Authentication failed");
+		warnx("Authentication failed");
+		return AUTH_FAILED;
 	}
 	explicit_bzero(rbuf, sizeof(rbuf));
+	return AUTH_OK;
+}
+
+static void
+authuser(char *myname, char *login_style, int persist)
+{
+	int i, fd = -1;
+
+	if (persist)
+		fd = open("/dev/tty", O_RDWR);
+	if (fd != -1) {
+		if (ioctl(fd, TIOCCHKVERAUTH) == 0)
+			goto good;
+	}
+	for (i = 0; i < AUTH_RETRIES; i++) {
+		if (authuser_checkpass(myname, login_style) == AUTH_OK)
+			goto good;
+	}
+	exit(1);
 good:
 	if (fd != -1) {
 		int secs = 5 * 60;
@@ -420,6 +435,8 @@ main(int argc, char **argv)
 		err(1, "unveil %s", _PATH_LOGIN_CONF);
 	if (unveil(_PATH_LOGIN_CONF ".db", "r") == -1)
 		err(1, "unveil %s.db", _PATH_LOGIN_CONF);
+	if (unveil(_PATH_LOGIN_CONF_D, "r") == -1)
+		err(1, "unveil %s", _PATH_LOGIN_CONF_D);
 	if (rule->cmd) {
 		if (setenv("PATH", safepath, 1) == -1)
 			err(1, "failed to set PATH '%s'", safepath);
@@ -439,7 +456,7 @@ main(int argc, char **argv)
 	if (setusercontext(NULL, targpw, target, LOGIN_SETGROUP |
 	    LOGIN_SETPATH |
 	    LOGIN_SETPRIORITY | LOGIN_SETRESOURCES | LOGIN_SETUMASK |
-	    LOGIN_SETUSER) != 0)
+	    LOGIN_SETUSER | LOGIN_SETENV | LOGIN_SETRTABLE) != 0)
 		errx(1, "failed to set user context for target");
 
 	if (pledge("stdio rpath exec", NULL) == -1)

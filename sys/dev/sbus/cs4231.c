@@ -1,4 +1,4 @@
-/*	$OpenBSD: cs4231.c,v 1.38 2017/01/04 07:33:14 ratchov Exp $	*/
+/*	$OpenBSD: cs4231.c,v 1.41 2022/03/21 19:22:41 miod Exp $	*/
 
 /*
  * Copyright (c) 1999 Jason L. Wright (jason@thought.net)
@@ -151,7 +151,7 @@ int	cs4231_trigger_output(void *, void *, void *, int,
 int	cs4231_trigger_input(void *, void *, void *, int,
     void (*)(void *), void *, struct audio_params *);
 
-struct audio_hw_if cs4231_sa_hw_if = {
+const struct audio_hw_if cs4231_sa_hw_if = {
 	cs4231_open,
 	cs4231_close,
 	cs4231_set_params,
@@ -176,7 +176,7 @@ struct audio_hw_if cs4231_sa_hw_if = {
 	cs4231_trigger_input
 };
 
-struct cfattach audiocs_ca = {
+const struct cfattach audiocs_ca = {
 	sizeof (struct cs4231_softc), cs4231_match, cs4231_attach
 };
 
@@ -243,7 +243,7 @@ cs4231_attach(struct device *parent, struct device *self, void *aux)
 
 	printf("\n");
 
-	audio_attach_mi(&cs4231_sa_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&cs4231_sa_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* Default to speaker, unmuted, reasonable volume */
 	sc->sc_out_port = CSPORT_SPEAKER;

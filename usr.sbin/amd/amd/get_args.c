@@ -32,7 +32,7 @@
  * SUCH DAMAGE.
  *
  *	from: @(#)get_args.c	8.1 (Berkeley) 6/6/93
- *	$Id: get_args.c,v 1.14 2014/10/20 02:33:42 guenther Exp $
+ *	$Id: get_args.c,v 1.16 2021/11/15 15:14:24 millert Exp $
  */
 
 /*
@@ -43,9 +43,6 @@
 #include <syslog.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-extern int optind;
-extern char *optarg;
 
 #if defined(DEBUG) && defined(PARANOID)
 char **gargv;
@@ -245,8 +242,8 @@ get_args(int c, char *v[])
 			hostdomain = sub_domain;
 		if (*hostdomain == '.')
 			hostdomain++;
-		strlcat(hostd,  ".", 2 * MAXHOSTNAMELEN);
-		strlcat(hostd, hostdomain, 2 * MAXHOSTNAMELEN);
+		strlcat(hostd,  ".", 2 * (HOST_NAME_MAX+1));
+		strlcat(hostd, hostdomain, 2 * (HOST_NAME_MAX+1));
 
 #ifdef DEBUG
 		{ if (debug_flags & D_MTAB) {

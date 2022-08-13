@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# $OpenBSD: appstest.sh,v 1.51 2021/06/21 13:29:05 inoguchi Exp $
+# $OpenBSD: appstest.sh,v 1.55 2022/07/14 08:33:31 tb Exp $
 #
 # Copyright (c) 2016 Kinichiro Inoguchi <inoguchi@openbsd.org>
 #
@@ -649,7 +649,7 @@ __EOF__
 	fi
 
 	$openssl_bin req -new -keyout $tsa_key -out $tsa_csr \
-		-passout pass:$tsa_pass -subj $subj -asn1-kludge
+		-passout pass:$tsa_pass -subj $subj
 	check_exit_status $?
 
 	start_message "ca ... sign by CA with TSA extensions"
@@ -683,7 +683,7 @@ __EOF__
 	fi
 
 	$openssl_bin req -new -keyout $ocsp_key -nodes -out $ocsp_csr \
-		-subj $subj -no-asn1-kludge
+		-subj $subj
 	check_exit_status $?
 
 	start_message "ca ... sign by CA with OCSP extensions"
@@ -1510,7 +1510,7 @@ function test_sc_by_protocol_version {
 	fi
 
 	if [ $ver = "tls1_3" ] ; then
-		grep 'Server Temp Key: ECDH, P-384, 384 bits' $s_client_out \
+		grep 'Server Temp Key: ECDH, .*384.*, 384 bits' $s_client_out \
 			> /dev/null
 		check_exit_status $?
 	fi
@@ -1538,14 +1538,10 @@ function test_sc_all_cipher {
 	ciphers=$user1_dir/ciphers_${sc}_${ver}
 
 	if [ $ver = "tls1_3" ] ; then
-		if [ $c_id = "0" ] ; then
-			echo "AEAD-AES256-GCM-SHA384" > $ciphers
-			echo "AEAD-CHACHA20-POLY1305-SHA256" >> $ciphers
-			echo "AEAD-AES128-GCM-SHA256" >> $ciphers
-		else
-			echo "TLS_AES_256_GCM_SHA384" > $ciphers
-			echo "TLS_CHACHA20_POLY1305_SHA256" >> $ciphers
-			echo "TLS_AES_128_GCM_SHA256" >> $ciphers
+		echo "TLS_AES_256_GCM_SHA384" > $ciphers
+		echo "TLS_CHACHA20_POLY1305_SHA256" >> $ciphers
+		echo "TLS_AES_128_GCM_SHA256" >> $ciphers
+		if [ $c_id != "0" ] ; then
 			copt=ciphersuites
 		fi
 	else
@@ -1573,7 +1569,7 @@ function test_sc_all_cipher {
 				cipher_string="ALL:!ECDSA:!kGOST:!TLSv1.3"
 			fi
 		fi
-		$c_bin ciphers -v $cipher_string | awk '{print $1}' > $c_ciph
+		$c_bin ciphers -s -v $cipher_string | awk '{print $1}' > $c_ciph
 
 		grep -x -f $s_ciph $c_ciph | sort -R > $ciphers
 	fi
@@ -1770,8 +1766,10 @@ function test_server_client {
 	sleep 1
 
 	# test by protocol version
+	if [ "$other_openssl_version" = "OpenSSL 1." ] ; then
 	test_sc_by_protocol_version $sc tls1   'Protocol  : TLSv1$'    $c_id
 	test_sc_by_protocol_version $sc tls1_1 'Protocol  : TLSv1\.1$' $c_id
+	fi
 	test_sc_by_protocol_version $sc tls1_2 'Protocol  : TLSv1\.2$' $c_id
 	test_sc_by_protocol_version $sc tls1_3 'Protocol  : TLSv1\.3$' $c_id
 
@@ -1973,6 +1971,7 @@ function test_version {
 
 openssl_bin=${OPENSSL:-/usr/bin/openssl}
 other_openssl_bin=${OTHER_OPENSSL:-/usr/local/bin/eopenssl11}
+other_openssl_version=`$other_openssl_bin version | cut -b 1-10`
 
 ecdsa_tests=0
 gost_tests=0

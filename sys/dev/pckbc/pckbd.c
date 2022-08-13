@@ -1,4 +1,4 @@
-/* $OpenBSD: pckbd.c,v 1.45 2018/05/22 10:53:47 mpi Exp $ */
+/* $OpenBSD: pckbd.c,v 1.47 2022/04/06 18:59:29 naddy Exp $ */
 /* $NetBSD: pckbd.c,v 1.24 2000/06/05 22:20:57 sommerfeld Exp $ */
 
 /*-
@@ -125,7 +125,7 @@ int pckbdprobe(struct device *, void *, void *);
 void pckbdattach(struct device *, struct device *, void *);
 int pckbdactivate(struct device *, int);
 
-struct cfattach pckbd_ca = {
+const struct cfattach pckbd_ca = {
 	sizeof(struct pckbd_softc), 
 	pckbdprobe, 
 	pckbdattach, 
@@ -163,7 +163,7 @@ const struct wskbd_mapdata pckbd_keymapdata = {
 };
 
 /*
- * Hackish support for a bell on the PC Keyboard; when a suitable feeper
+ * Hackish support for a bell on the PC Keyboard; when a suitable beeper
  * is found, it attaches itself into the pckbd driver here.
  */
 void	(*pckbd_bell_fn)(void *, u_int, u_int, u_int, int);

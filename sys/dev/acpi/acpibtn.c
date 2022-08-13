@@ -1,4 +1,4 @@
-/* $OpenBSD: acpibtn.c,v 1.47 2019/01/20 02:45:44 tedu Exp $ */
+/* $OpenBSD: acpibtn.c,v 1.49 2022/04/06 18:59:27 naddy Exp $ */
 /*
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
  *
@@ -65,7 +65,7 @@ struct acpi_lid {
 SLIST_HEAD(acpi_lid_head, acpi_lid) acpibtn_lids =
     SLIST_HEAD_INITIALIZER(acpibtn_lids);
 
-struct cfattach acpibtn_ca = {
+const struct cfattach acpibtn_ca = {
 	sizeof(struct acpibtn_softc), acpibtn_match, acpibtn_attach, NULL,
 	acpibtn_activate
 };
@@ -245,7 +245,7 @@ acpibtn_notify(struct aml_node *node, int notify_type, void *arg)
 			/* Request to go to sleep */
 			if (acpi_record_event(sc->sc_acpi, APM_USER_HIBERNATE_REQ))
 				acpi_addtask(sc->sc_acpi, acpi_sleep_task,
-				    sc->sc_acpi, ACPI_SLEEP_HIBERNATE);
+				    sc->sc_acpi, SLEEP_HIBERNATE);
 			break;
 #endif
 		default:
@@ -264,7 +264,7 @@ sleep:
 			/* Request to go to sleep */
 			if (acpi_record_event(sc->sc_acpi, APM_USER_SUSPEND_REQ))
 				acpi_addtask(sc->sc_acpi, acpi_sleep_task,
-				    sc->sc_acpi, ACPI_SLEEP_SUSPEND);
+				    sc->sc_acpi, SLEEP_SUSPEND);
 			break;
 		}
 #endif /* SMALL_KERNEL */

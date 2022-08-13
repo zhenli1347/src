@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_dwxe.c,v 1.18 2020/12/12 11:48:52 jan Exp $	*/
+/*	$OpenBSD: if_dwxe.c,v 1.21 2022/07/09 20:51:39 kettenis Exp $	*/
 /*
  * Copyright (c) 2008 Mark Kettenis
  * Copyright (c) 2017 Patrick Wildt <patrick@blueri.se>
@@ -275,6 +275,7 @@ struct dwxe_softc {
 	bus_space_tag_t		sc_iot;
 	bus_space_handle_t	sc_ioh;
 	bus_dma_tag_t		sc_dmat;
+	void			*sc_ih;
 
 	struct arpcom		sc_ac;
 #define sc_lladdr	sc_ac.ac_enaddr
@@ -287,7 +288,6 @@ struct dwxe_softc {
 	struct dwxe_buf		*sc_txbuf;
 	struct dwxe_desc	*sc_txdesc;
 	int			sc_tx_prod;
-	int			sc_tx_cnt;
 	int			sc_tx_cons;
 
 	struct dwxe_dmamem	*sc_rxring;
@@ -307,11 +307,14 @@ struct dwxe_softc {
 
 int	dwxe_match(struct device *, void *, void *);
 void	dwxe_attach(struct device *, struct device *, void *);
+int	dwxe_activate(struct device *, int);
+void	dwxe_init(struct dwxe_softc *sc);
 void	dwxe_phy_setup_emac(struct dwxe_softc *);
 void	dwxe_phy_setup_gmac(struct dwxe_softc *);
 
-struct cfattach dwxe_ca = {
-	sizeof(struct dwxe_softc), dwxe_match, dwxe_attach
+const struct cfattach dwxe_ca = {
+	sizeof(struct dwxe_softc), dwxe_match, dwxe_attach,
+	NULL, dwxe_activate
 };
 
 struct cfdriver dwxe_cd = {
@@ -322,7 +325,7 @@ uint32_t dwxe_read(struct dwxe_softc *, bus_addr_t);
 void	dwxe_write(struct dwxe_softc *, bus_addr_t, uint32_t);
 
 int	dwxe_ioctl(struct ifnet *, u_long, caddr_t);
-void	dwxe_start(struct ifnet *);
+void	dwxe_start(struct ifqueue *);
 void	dwxe_watchdog(struct ifnet *);
 
 int	dwxe_media_change(struct ifnet *);
@@ -345,7 +348,7 @@ void	dwxe_rx_proc(struct dwxe_softc *);
 void	dwxe_up(struct dwxe_softc *);
 void	dwxe_down(struct dwxe_softc *);
 void	dwxe_iff(struct dwxe_softc *);
-int	dwxe_encap(struct dwxe_softc *, struct mbuf *, int *);
+int	dwxe_encap(struct dwxe_softc *, struct mbuf *, int *, int *);
 
 void	dwxe_reset(struct dwxe_softc *);
 void	dwxe_stop_dma(struct dwxe_softc *);
@@ -372,7 +375,7 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	struct dwxe_softc *sc = (void *)self;
 	struct fdt_attach_args *faa = aux;
 	struct ifnet *ifp;
-	uint32_t phy, phy_supply;
+	uint32_t phy;
 	int node;
 
 	sc->sc_node = faa->fa_node;
@@ -392,18 +395,6 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	else
 		sc->sc_phyloc = MII_PHY_ANY;
 
-	pinctrl_byname(faa->fa_node, "default");
-
-	/* Enable clock. */
-	clock_enable(faa->fa_node, "stmmaceth");
-	reset_deassert(faa->fa_node, "stmmaceth");
-	delay(5000);
-
-	/* Power up PHY. */
-	phy_supply = OF_getpropint(faa->fa_node, "phy-supply", 0);
-	if (phy_supply)
-		regulator_enable(phy_supply);
-
 	sc->sc_clk = clock_get_frequency(faa->fa_node, "stmmaceth");
 	if (sc->sc_clk > 160000000)
 		sc->sc_clk = DWXE_MDIO_CMD_MDC_DIV_RATIO_M_128;
@@ -419,11 +410,7 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 		dwxe_lladdr_read(sc, sc->sc_lladdr);
 	printf(": address %s\n", ether_sprintf(sc->sc_lladdr));
 
-	/* Do hardware specific initializations. */
-	if (OF_is_compatible(faa->fa_node, "allwinner,sun8i-r40-gmac"))
-		dwxe_phy_setup_gmac(sc);
-	else
-		dwxe_phy_setup_emac(sc);
+	dwxe_init(sc);
 
 	timeout_set(&sc->sc_tick, dwxe_tick, sc);
 	timeout_set(&sc->sc_rxto, dwxe_rxtick, sc);
@@ -431,8 +418,9 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	ifp = &sc->sc_ac.ac_if;
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifp->if_xflags = IFXF_MPSAFE;
 	ifp->if_ioctl = dwxe_ioctl;
-	ifp->if_start = dwxe_start;
+	ifp->if_qstart = dwxe_start;
 	ifp->if_watchdog = dwxe_watchdog;
 	ifq_set_maxlen(&ifp->if_snd, DWXE_NTXDESC - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
@@ -446,8 +434,6 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 
 	ifmedia_init(&sc->sc_media, 0, dwxe_media_change, dwxe_media_status);
 
-	dwxe_reset(sc);
-
 	mii_attach(self, &sc->sc_mii, 0xffffffff, sc->sc_phyloc,
 	    MII_OFFSET_ANY, MIIF_NOISOLATE);
 	if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
@@ -460,8 +446,57 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	if_attach(ifp);
 	ether_ifattach(ifp);
 
-	fdt_intr_establish(faa->fa_node, IPL_NET, dwxe_intr, sc,
-	    sc->sc_dev.dv_xname);
+	sc->sc_ih = fdt_intr_establish(faa->fa_node, IPL_NET | IPL_MPSAFE,
+	    dwxe_intr, sc, sc->sc_dev.dv_xname);
+	if (sc->sc_ih == NULL)
+		printf("%s: can't establish interrupt\n", sc->sc_dev.dv_xname);
+}
+
+int
+dwxe_activate(struct device *self, int act)
+{
+	struct dwxe_softc *sc = (struct dwxe_softc *)self;
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
+
+	switch (act) {
+	case DVACT_SUSPEND:
+		if (ifp->if_flags & IFF_RUNNING)
+			dwxe_down(sc);
+		break;
+	case DVACT_RESUME:
+		dwxe_init(sc);
+		if (ifp->if_flags & IFF_UP)
+			dwxe_up(sc);
+		break;
+	}
+
+	return 0;
+}
+
+void
+dwxe_init(struct dwxe_softc *sc)
+{
+	uint32_t phy_supply;
+
+	pinctrl_byname(sc->sc_node, "default");
+
+	/* Enable clock. */
+	clock_enable(sc->sc_node, "stmmaceth");
+	reset_deassert(sc->sc_node, "stmmaceth");
+	delay(5000);
+
+	/* Power up PHY. */
+	phy_supply = OF_getpropint(sc->sc_node, "phy-supply", 0);
+	if (phy_supply)
+		regulator_enable(phy_supply);
+
+	/* Do hardware specific initializations. */
+	if (OF_is_compatible(sc->sc_node, "allwinner,sun8i-r40-gmac"))
+		dwxe_phy_setup_gmac(sc);
+	else
+		dwxe_phy_setup_emac(sc);
+
+	dwxe_reset(sc);
 }
 
 void
@@ -509,7 +544,6 @@ dwxe_phy_setup_emac(struct dwxe_softc *sc)
 	syscon |= ((rx_delay / 100) << SYSCON_ERXDC_SHIFT) & SYSCON_ERXDC_MASK;
 
 	regmap_write_4(rm, SYSCON_EMAC, syscon);
-	dwxe_reset(sc);
 }
 
 void
@@ -542,7 +576,6 @@ dwxe_phy_setup_gmac(struct dwxe_softc *sc)
 	syscon |= ((rx_delay / 100) << SYSCON_ERXDC_SHIFT) & SYSCON_ERXDC_MASK;
 
 	regmap_write_4(rm, SYSCON_GMAC, syscon);
-	dwxe_reset(sc);
 }
 
 uint32_t
@@ -584,11 +617,12 @@ dwxe_lladdr_write(struct dwxe_softc *sc)
 }
 
 void
-dwxe_start(struct ifnet *ifp)
+dwxe_start(struct ifqueue *ifq)
 {
+	struct ifnet *ifp = ifq->ifq_if;
 	struct dwxe_softc *sc = ifp->if_softc;
 	struct mbuf *m;
-	int error, idx;
+	int error, idx, left, used;
 
 	if (!(ifp->if_flags & IFF_RUNNING))
 		return;
@@ -600,26 +634,28 @@ dwxe_start(struct ifnet *ifp)
 		return;
 
 	idx = sc->sc_tx_prod;
-	while ((sc->sc_txdesc[idx].sd_status & DWXE_TX_DESC_CTL) == 0) {
-		m = ifq_deq_begin(&ifp->if_snd);
+	left = sc->sc_tx_cons;
+	if (left <= idx)
+		left += DWXE_NTXDESC;
+	left -= idx;
+	used = 0;
+
+	for (;;) {
+		if (used + DWXE_NTXSEGS + 1 > left) {
+			ifq_set_oactive(ifq);
+			break;
+		}
+
+		m = ifq_dequeue(ifq);
 		if (m == NULL)
 			break;
 
-		error = dwxe_encap(sc, m, &idx);
-		if (error == ENOBUFS) {
-			ifq_deq_rollback(&ifp->if_snd, m);
-			ifq_set_oactive(&ifp->if_snd);
-			break;
-		}
+		error = dwxe_encap(sc, m, &idx, &used);
 		if (error == EFBIG) {
-			ifq_deq_commit(&ifp->if_snd, m);
 			m_freem(m); /* give up: drop it */
 			ifp->if_oerrors++;
 			continue;
 		}
-
-		/* Now we are committed to transmit the packet. */
-		ifq_deq_commit(&ifp->if_snd, m);
 
 #if NBPFILTER > 0
 		if (ifp->if_bpf)
@@ -632,6 +668,9 @@ dwxe_start(struct ifnet *ifp)
 
 		/* Set a timeout in case the chip goes out to lunch. */
 		ifp->if_timer = 5;
+
+		dwxe_write(sc, DWXE_TX_CTL1, dwxe_read(sc,
+		     DWXE_TX_CTL1) | DWXE_TX_CTL1_TX_DMA_START);
 	}
 }
 
@@ -877,7 +916,7 @@ dwxe_tx_proc(struct dwxe_softc *sc)
 	    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
 	txfree = 0;
-	while (sc->sc_tx_cnt > 0) {
+	while (sc->sc_tx_cons != sc->sc_tx_prod) {
 		idx = sc->sc_tx_cons;
 		KASSERT(idx < DWXE_NTXDESC);
 
@@ -896,7 +935,6 @@ dwxe_tx_proc(struct dwxe_softc *sc)
 		}
 
 		txfree++;
-		sc->sc_tx_cnt--;
 
 		if (sc->sc_tx_cons == (DWXE_NTXDESC - 1))
 			sc->sc_tx_cons = 0;
@@ -906,7 +944,7 @@ dwxe_tx_proc(struct dwxe_softc *sc)
 		txd->sd_status = 0;
 	}
 
-	if (sc->sc_tx_cnt == 0)
+	if (sc->sc_tx_cons == sc->sc_tx_prod)
 		ifp->if_timer = 0;
 
 	if (txfree) {
@@ -923,7 +961,7 @@ dwxe_rx_proc(struct dwxe_softc *sc)
 	struct dwxe_buf *rxb;
 	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct mbuf *m;
-	int idx, len;
+	int idx, len, cnt, put;
 
 	if ((ifp->if_flags & IFF_RUNNING) == 0)
 		return;
@@ -932,7 +970,9 @@ dwxe_rx_proc(struct dwxe_softc *sc)
 	    DWXE_DMA_LEN(sc->sc_rxring),
 	    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
-	while (if_rxr_inuse(&sc->sc_rx_ring) > 0) {
+	cnt = if_rxr_inuse(&sc->sc_rx_ring);
+	put = 0;
+	while (put < cnt) {
 		idx = sc->sc_rx_cons;
 		KASSERT(idx < DWXE_NRXDESC);
 
@@ -959,13 +999,14 @@ dwxe_rx_proc(struct dwxe_softc *sc)
 
 		ml_enqueue(&ml, m);
 
-		if_rxr_put(&sc->sc_rx_ring, 1);
+		put++;
 		if (sc->sc_rx_cons == (DWXE_NRXDESC - 1))
 			sc->sc_rx_cons = 0;
 		else
 			sc->sc_rx_cons++;
 	}
 
+	if_rxr_put(&sc->sc_rx_ring, put);
 	if (ifiq_input(&ifp->if_rcv, &ml))
 		if_rxr_livelocked(&sc->sc_rx_ring);
 
@@ -1005,7 +1046,6 @@ dwxe_up(struct dwxe_softc *sc)
 	    0, DWXE_DMA_LEN(sc->sc_txring), BUS_DMASYNC_PREWRITE);
 
 	sc->sc_tx_prod = sc->sc_tx_cons = 0;
-	sc->sc_tx_cnt = 0;
 
 	dwxe_write(sc, DWXE_TX_DESC_LIST, DWXE_DMA_DVA(sc->sc_txring));
 
@@ -1103,6 +1143,9 @@ dwxe_down(struct dwxe_softc *sc)
 
 	dwxe_write(sc, DWXE_INT_EN, 0);
 
+	intr_barrier(sc->sc_ih);
+	ifq_barrier(&ifp->if_snd);
+
 	for (i = 0; i < DWXE_NTXDESC; i++) {
 		txb = &sc->sc_txbuf[i];
 		if (txb->tb_m) {
@@ -1188,7 +1231,7 @@ dwxe_iff(struct dwxe_softc *sc)
 }
 
 int
-dwxe_encap(struct dwxe_softc *sc, struct mbuf *m, int *idx)
+dwxe_encap(struct dwxe_softc *sc, struct mbuf *m, int *idx, int *used)
 {
 	struct dwxe_desc *txd, *txd_start;
 	bus_dmamap_t map;
@@ -1202,11 +1245,6 @@ dwxe_encap(struct dwxe_softc *sc, struct mbuf *m, int *idx)
 			return (EFBIG);
 		if (bus_dmamap_load_mbuf(sc->sc_dmat, map, m, BUS_DMA_NOWAIT))
 			return (EFBIG);
-	}
-
-	if (map->dm_nsegs > (DWXE_NTXDESC - sc->sc_tx_cnt - 2)) {
-		bus_dmamap_unload(sc->sc_dmat, map);
-		return (ENOBUFS);
 	}
 
 	/* Sync the DMA map. */
@@ -1242,16 +1280,13 @@ dwxe_encap(struct dwxe_softc *sc, struct mbuf *m, int *idx)
 	bus_dmamap_sync(sc->sc_dmat, DWXE_DMA_MAP(sc->sc_txring),
 	    *idx * sizeof(*txd), sizeof(*txd), BUS_DMASYNC_PREWRITE);
 
-	dwxe_write(sc, DWXE_TX_CTL1, dwxe_read(sc,
-	     DWXE_TX_CTL1) | DWXE_TX_CTL1_TX_DMA_START);
-
 	KASSERT(sc->sc_txbuf[cur].tb_m == NULL);
 	sc->sc_txbuf[*idx].tb_map = sc->sc_txbuf[cur].tb_map;
 	sc->sc_txbuf[cur].tb_map = map;
 	sc->sc_txbuf[cur].tb_m = m;
 
-	sc->sc_tx_cnt += map->dm_nsegs;
 	*idx = frag;
+	*used += map->dm_nsegs;
 
 	return (0);
 }

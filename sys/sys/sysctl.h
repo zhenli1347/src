@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.h,v 1.218 2021/05/17 17:54:31 claudio Exp $	*/
+/*	$OpenBSD: sysctl.h,v 1.228 2022/05/13 15:32:00 claudio Exp $	*/
 /*	$NetBSD: sysctl.h,v 1.16 1996/04/09 20:55:36 cgd Exp $	*/
 
 /*
@@ -38,6 +38,7 @@
 #ifndef _SYS_SYSCTL_H_
 #define	_SYS_SYSCTL_H_
 
+#include <sys/syslimits.h>
 #include <uvm/uvmexp.h>
 
 /*
@@ -355,7 +356,7 @@ struct ctlname {
  * binary compatibility can be preserved.
  */
 #define	KI_NGROUPS	16
-#define	KI_MAXCOMLEN	24	/* extra for 8 byte alignment */
+#define	KI_MAXCOMLEN	_MAXCOMLEN	/* includes NUL */
 #define	KI_WMESGLEN	8
 #define	KI_MAXLOGNAME	32
 #define	KI_EMULNAMELEN	8
@@ -432,7 +433,7 @@ struct kinfo_proc {
 	u_int8_t p_nice;		/* U_CHAR: Process "nice" value. */
 
 	u_int16_t p_xstat;		/* U_SHORT: Exit status for wait; also stop signal. */
-	u_int16_t p_acflag;		/* U_SHORT: Accounting flags. */
+	u_int16_t p_spare;		/* U_SHORT: unused */
 
 	char	p_comm[KI_MAXCOMLEN];
 
@@ -474,7 +475,7 @@ struct kinfo_proc {
 	u_int32_t p_uctime_sec;		/* STRUCT TIMEVAL: child u+s time. */
 	u_int32_t p_uctime_usec;	/* STRUCT TIMEVAL: child u+s time. */
 	u_int32_t p_psflags;		/* UINT: PS_* flags on the process. */
-	int32_t p_spare;		/* INT: unused. */
+	u_int32_t p_acflag;		/* UINT: Accounting flags. */
 	u_int32_t p_svuid;		/* UID_T: saved user id */
 	u_int32_t p_svgid;		/* GID_T: saved group id */
 	char    p_emul[KI_EMULNAMELEN];	/* syscall emulation name */
@@ -580,6 +581,8 @@ struct kinfo_vmentry {
 
 #define PTRTOINT64(_x)	((u_int64_t)(u_long)(_x))
 
+#define	_FILL_KPROC_MIN(a,b) (((a)<(b))?(a):(b))
+
 #define FILL_KPROC(kp, copy_str, p, pr, uc, pg, paddr, \
     praddr, sess, vm, lim, sa, isthread, show_addresses) \
 do {									\
@@ -610,7 +613,7 @@ do {									\
 	(kp)->p_svgid = (uc)->cr_svgid;					\
 									\
 	memcpy((kp)->p_groups, (uc)->cr_groups,				\
-	    MIN(sizeof((kp)->p_groups), sizeof((uc)->cr_groups)));	\
+	    _FILL_KPROC_MIN(sizeof((kp)->p_groups), sizeof((uc)->cr_groups)));	\
 	(kp)->p_ngroups = (uc)->cr_ngroups;				\
 									\
 	(kp)->p_jobc = (pg)->pg_jobc;					\
@@ -639,8 +642,15 @@ do {									\
 									\
 	(kp)->p_siglist = (p)->p_siglist | (pr)->ps_siglist;		\
 	(kp)->p_sigmask = (p)->p_sigmask;				\
+									\
+	PR_LOCK(pr);							\
 	(kp)->p_sigignore = (sa) ? (sa)->ps_sigignore : 0;		\
 	(kp)->p_sigcatch = (sa) ? (sa)->ps_sigcatch : 0;		\
+									\
+	if (lim)							\
+		(kp)->p_rlim_rss_cur =					\
+		    (lim)->pl_rlimit[RLIMIT_RSS].rlim_cur;		\
+	PR_UNLOCK(pr);							\
 									\
 	(kp)->p_stat = (p)->p_stat;					\
 	(kp)->p_nice = (pr)->ps_nice;					\
@@ -649,12 +659,10 @@ do {									\
 	(kp)->p_acflag = (pr)->ps_acflag;				\
 	(kp)->p_pledge = (pr)->ps_pledge;				\
 									\
-	/* XXX depends on e_name being an array and not a pointer */	\
-	copy_str((kp)->p_emul, (char *)(pr)->ps_emul +			\
-	    offsetof(struct emul, e_name), sizeof((kp)->p_emul));	\
+	strlcpy((kp)->p_emul, "native", sizeof((kp)->p_emul));		\
 	strlcpy((kp)->p_comm, (pr)->ps_comm, sizeof((kp)->p_comm));	\
-	strlcpy((kp)->p_login, (sess)->s_login,			\
-	    MIN(sizeof((kp)->p_login), sizeof((sess)->s_login)));	\
+	strlcpy((kp)->p_login, (sess)->s_login,				\
+	    _FILL_KPROC_MIN(sizeof((kp)->p_login), sizeof((sess)->s_login)));	\
 									\
 	if ((sess)->s_ttyvp)						\
 		(kp)->p_eflag |= EPROC_CTTY;				\
@@ -684,12 +692,6 @@ do {									\
 		if (show_addresses)					\
 			(kp)->p_wchan = PTRTOINT64((p)->p_wchan);	\
 	}								\
-									\
-	PR_LOCK(pr);							\
-	if (lim)							\
-		(kp)->p_rlim_rss_cur =					\
-		    (lim)->pl_rlimit[RLIMIT_RSS].rlim_cur;		\
-	PR_UNLOCK(pr);							\
 									\
 	if (((pr)->ps_flags & PS_ZOMBIE) == 0) {			\
 		struct timeval __tv;					\
@@ -928,7 +930,8 @@ struct kinfo_file {
 #define	HW_PERFPOLICY		23	/* set performance policy */
 #define	HW_SMT			24	/* int: enable SMT/HT/CMT */
 #define	HW_NCPUONLINE		25	/* int: number of cpus being used */
-#define	HW_MAXID		26	/* number of valid hw ids */
+#define	HW_POWER		26	/* int: machine has wall-power */
+#define	HW_MAXID		27	/* number of valid hw ids */
 
 #define	CTL_HW_NAMES { \
 	{ 0, 0 }, \
@@ -957,6 +960,7 @@ struct kinfo_file {
 	{ "perfpolicy", CTLTYPE_STRING }, \
 	{ "smt", CTLTYPE_INT }, \
 	{ "ncpuonline", CTLTYPE_INT }, \
+	{ "power", CTLTYPE_INT }, \
 }
 
 /*
@@ -979,7 +983,7 @@ struct kinfo_file {
  * variable. The loader prevents multiple use by issuing errors
  * if a variable is initialized in more than one place. They are
  * aggregated into an array in debug_sysctl(), so that it can
- * conveniently locate them when querried. If more debugging
+ * conveniently locate them when queried. If more debugging
  * variables are added, they must also be declared here and also
  * entered into the array.
  */
@@ -1017,6 +1021,7 @@ typedef int (sysctlfn)(int *, u_int, void *, size_t *, void *, size_t, struct pr
 int sysctl_int_lower(void *, size_t *, void *, size_t, int *);
 int sysctl_int(void *, size_t *, void *, size_t, int *);
 int sysctl_rdint(void *, size_t *, void *, int);
+int sysctl_securelevel_int(void *, size_t *, void *, size_t, int *);
 int sysctl_int_bounded(void *, size_t *, void *, size_t, int *, int, int);
 int sysctl_bounded_arr(const struct sysctl_bounded_args *, u_int,
     int *, u_int, void *, size_t *, void *, size_t);

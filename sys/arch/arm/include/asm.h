@@ -1,4 +1,4 @@
-/*	$OpenBSD: asm.h,v 1.9 2017/06/29 17:36:16 deraadt Exp $	*/
+/*	$OpenBSD: asm.h,v 1.11 2022/05/24 17:15:22 guenther Exp $	*/
 /*	$NetBSD: asm.h,v 1.4 2001/07/16 05:43:32 matt Exp $	*/
 
 /*
@@ -61,8 +61,11 @@
  */
 #define _ASM_TYPE_FUNCTION	#function
 #define _ASM_TYPE_OBJECT	#object
-#define _ENTRY(x) \
-	.text; _ALIGN_TEXT; .globl x; .type x,_ASM_TYPE_FUNCTION; x:
+
+/* NB == No Binding: use .globl or .weak as necessary */
+#define _ENTRY_NB(x) \
+	.text; _ALIGN_TEXT; .type x,_ASM_TYPE_FUNCTION; x:
+#define _ENTRY(x)		.globl x; _ENTRY_NB(x)
 
 #if defined(PROF) || defined(GPROF)
 # define _PROF_PROLOGUE	\
@@ -73,16 +76,13 @@
 
 #define	ENTRY(y)	_ENTRY(_C_LABEL(y)); _PROF_PROLOGUE
 #define	ENTRY_NP(y)	_ENTRY(_C_LABEL(y))
+#define	ENTRY_NB(y)	_ENTRY_NB(y); _PROF_PROLOGUE
 #define	ASENTRY(y)	_ENTRY(_ASM_LABEL(y)); _PROF_PROLOGUE
 #define	ASENTRY_NP(y)	_ENTRY(_ASM_LABEL(y))
 #define	END(y)		.size y, . - y
 
 #if defined(__PIC__)
-#ifdef __STDC__
-#define	PIC_SYM(x,y)	x ## ( ## y ## )
-#else
-#define	PIC_SYM(x,y)	x/**/(/**/y/**/)
-#endif
+#define	PIC_SYM(x,y)	x(y)
 #else
 #define	PIC_SYM(x,y)	x
 #endif

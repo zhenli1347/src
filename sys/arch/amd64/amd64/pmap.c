@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.145 2021/06/18 06:17:28 guenther Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.153 2022/06/30 13:51:24 mlarkin Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -266,6 +266,7 @@ struct pool pmap_pv_pool;
  */
 
 struct pmap_head pmaps;
+struct mutex pmaps_lock = MUTEX_INITIALIZER(IPL_VM);
 
 /*
  * pool that pmap structures are allocated from
@@ -671,7 +672,7 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 
 	kpm = pmap_kernel();
 	for (i = 0; i < PTP_LEVELS - 1; i++) {
-		uvm_obj_init(&kpm->pm_obj[i], NULL, 1);
+		uvm_obj_init(&kpm->pm_obj[i], &pmap_pager, 1);
 		kpm->pm_ptphint[i] = NULL;
 	}
 	memset(&kpm->pm_list, 0, sizeof(kpm->pm_list));  /* pm_list not used */
@@ -1307,12 +1308,13 @@ pmap_create(void)
 
 	/* init uvm_object */
 	for (i = 0; i < PTP_LEVELS - 1; i++) {
-		uvm_obj_init(&pmap->pm_obj[i], NULL, 1);
+		uvm_obj_init(&pmap->pm_obj[i], &pmap_pager, 1);
 		pmap->pm_ptphint[i] = NULL;
 	}
 	pmap->pm_stats.wired_count = 0;
 	pmap->pm_stats.resident_count = 1;	/* count the PDP allocd below */
 	pmap->pm_type = PMAP_TYPE_NORMAL;
+	pmap->eptp = 0;
 
 	/* allocate PDP */
 
@@ -1344,7 +1346,9 @@ pmap_create(void)
 		pmap->pm_pdirpa_intel = 0;
 	}
 
+	mtx_enter(&pmaps_lock);
 	LIST_INSERT_HEAD(&pmaps, pmap, pm_list);
+	mtx_leave(&pmaps_lock);
 	return (pmap);
 }
 
@@ -1372,7 +1376,9 @@ pmap_destroy(struct pmap *pmap)
 	/*
 	 * remove it from global list of pmaps
 	 */
+	mtx_enter(&pmaps_lock);
 	LIST_REMOVE(pmap, pm_list);
+	mtx_leave(&pmaps_lock);
 
 	/*
 	 * free any remaining PTPs
@@ -1499,7 +1505,7 @@ pmap_pdes_valid(vaddr_t va, pd_entry_t *lastpde)
 int
 pmap_extract(struct pmap *pmap, vaddr_t va, paddr_t *pap)
 {
-	pt_entry_t *ptes;
+	pt_entry_t *ptes, pte;
 	int level, offs;
 
 	if (pmap == pmap_kernel() && va >= PMAP_DIRECT_BASE &&
@@ -1508,16 +1514,23 @@ pmap_extract(struct pmap *pmap, vaddr_t va, paddr_t *pap)
 		return 1;
 	}
 
-	level = pmap_find_pte_direct(pmap, va, &ptes, &offs);
+	if (pmap != pmap_kernel())
+		mtx_enter(&pmap->pm_mtx);
 
-	if (__predict_true(level == 0 && pmap_valid_entry(ptes[offs]))) {
+	level = pmap_find_pte_direct(pmap, va, &ptes, &offs);
+	pte = ptes[offs];
+
+	if (pmap != pmap_kernel())
+		mtx_leave(&pmap->pm_mtx);
+
+	if (__predict_true(level == 0 && pmap_valid_entry(pte))) {
 		if (pap != NULL)
-			*pap = (ptes[offs] & PG_FRAME) | (va & PAGE_MASK);
+			*pap = (pte & PG_FRAME) | (va & PAGE_MASK);
 		return 1;
 	}
-	if (level == 1 && (ptes[offs] & (PG_PS|PG_V)) == (PG_PS|PG_V)) {
+	if (level == 1 && (pte & (PG_PS|PG_V)) == (PG_PS|PG_V)) {
 		if (pap != NULL)
-			*pap = (ptes[offs] & PG_LGFRAME) | (va & PAGE_MASK_L2);
+			*pap = (pte & PG_LGFRAME) | (va & PAGE_MASK_L2);
 		return 1;
 	}
 
@@ -1576,7 +1589,6 @@ pmap_copy_page(struct vm_page *srcpg, struct vm_page *dstpg)
 /*
  * pmap_remove_ptes: remove PTEs from a PTP
  *
- * => must have proper locking on pmap_master_lock
  * => PTP must be mapped into KVA
  * => PTP should be null if pmap == pmap_kernel()
  */
@@ -1655,7 +1667,6 @@ pmap_remove_ptes(struct pmap *pmap, struct vm_page *ptp, vaddr_t ptpva,
 /*
  * pmap_remove_pte: remove a single PTE from a PTP
  *
- * => must have proper locking on pmap_master_lock
  * => PTP must be mapped into KVA
  * => PTP should be null if pmap == pmap_kernel()
  * => returns true if we removed a mapping
@@ -1776,8 +1787,8 @@ pmap_do_remove(struct pmap *pmap, vaddr_t sva, vaddr_t eva, int flags)
 				ptp = pmap_find_ptp(pmap, sva, ptppa, 1);
 #ifdef DIAGNOSTIC
 				if (ptp == NULL)
-					panic("%s: unmanaged PTP detected",
-					      __func__);
+					panic("%s: unmanaged PTP detected "
+					    "in shortcut path", __func__);
 #endif
 			}
 
@@ -2828,16 +2839,34 @@ enter_now:
 	if (pmap == pmap_kernel())
 		npte |= pg_g_kern;
 
-	PTE_BASE[pl1_i(va)] = npte;		/* zap! */
-
 	/*
-	 * If we changed anything other than modified/used bits,
-	 * flush the TLB.  (is this overkill?)
+	 * If the old entry wasn't valid, we can just update it and
+	 * go.  If it was valid, and this isn't a read->write
+	 * transition, then we can safely just update it and flush
+	 * any old TLB entries.
+	 *
+	 * If it _was_ valid and this _is_ a read->write transition,
+	 * then this could be a CoW resolution and we need to make
+	 * sure no CPU can see the new writable mapping while another
+	 * still has the old mapping in its TLB, so insert a correct
+	 * but unwritable mapping, flush any old TLB entries, then
+	 * make it writable.
 	 */
-	if (pmap_valid_entry(opte)) {
+	if (! pmap_valid_entry(opte)) {
+		PTE_BASE[pl1_i(va)] = npte;
+	} else if ((opte | (npte ^ PG_RW)) & PG_RW) {
+		/* previously writable or not making writable */
+		PTE_BASE[pl1_i(va)] = npte;
 		if (nocache && (opte & PG_N) == 0)
 			wbinvd_on_all_cpus();
 		pmap_tlb_shootpage(pmap, va, shootself);
+	} else {
+		PTE_BASE[pl1_i(va)] = npte ^ PG_RW;
+		if (nocache && (opte & PG_N) == 0) /* XXX impossible? */
+			wbinvd_on_all_cpus();
+		pmap_tlb_shootpage(pmap, va, shootself);
+		pmap_tlb_shootwait();
+		PTE_BASE[pl1_i(va)] = npte;
 	}
 
 	pmap_unmap_ptes(pmap, scr3);
@@ -2974,11 +3003,13 @@ pmap_growkernel(vaddr_t maxkvaddr)
 	 */
 	if (needed_kptp[PTP_LEVELS - 1] != 0) {
 		newpdes = nkptp[PTP_LEVELS - 1] - old;
+		mtx_enter(&pmaps_lock);
 		LIST_FOREACH(pm, &pmaps, pm_list) {
 			memcpy(&pm->pm_pdir[PDIR_SLOT_KERN + old],
 			       &kpm->pm_pdir[PDIR_SLOT_KERN + old],
 			       newpdes * sizeof (pd_entry_t));
 		}
+		mtx_leave(&pmaps_lock);
 	}
 	pmap_maxkvaddr = maxkvaddr;
 	splx(s);
@@ -3063,11 +3094,8 @@ pmap_virtual_space(vaddr_t *vstartp, vaddr_t *vendp)
  * Parameters:
  *  pmap: the pmap to convert
  *  mode: the new mode (see pmap.h, PMAP_TYPE_xxx)
- *
- * Return value:
- *  always 0
  */
-int
+void
 pmap_convert(struct pmap *pmap, int mode)
 {
 	pt_entry_t *pte;
@@ -3085,8 +3113,6 @@ pmap_convert(struct pmap *pmap, int mode)
 			pmap->pm_pdir_intel = NULL;
 		}
 	}
-
-	return (0);
 }
 
 #ifdef MULTIPROCESSOR

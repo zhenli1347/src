@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.98 2021/01/18 00:46:58 mortimer Exp $	*/
+/*	$OpenBSD: main.c,v 1.100 2022/04/10 18:05:39 jca Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -53,6 +53,7 @@
 enum program_mode pmode;
 
 int cat, decomp, pipin, force, verbose, testmode, list, recurse, storename;
+int kflag;
 extern char *__progname;
 
 const struct compressor {
@@ -75,8 +76,8 @@ const struct compressor {
 		"deflate",
 		".gz",
 		"\037\213",
-		"123456789ab:cdfhLlNnOo:qrS:tVv",
-		"cfhLlNno:qrtVv",
+		"123456789ab:cdfhkLlNnOo:qrS:tVv",
+		"cfhkLlNno:qrtVv",
 		"fhqr",
 		gz_ropen,
 		gz_read,
@@ -141,6 +142,7 @@ const struct option longopts[] = {
 	{ "uncompress",	no_argument,		0, 'd' },
 	{ "force",	no_argument,		0, 'f' },
 	{ "help",	no_argument,		0, 'h' },
+	{ "keep",	no_argument,		0, 'k' },
 	{ "list",	no_argument,		0, 'l' },
 	{ "license",	no_argument,		0, 'L' },
 	{ "no-name",	no_argument,		0, 'n' },
@@ -275,6 +277,9 @@ main(int argc, char *argv[])
 			method = M_DEFLATE;
 			strlcpy(suffix, method->suffix, sizeof(suffix));
 			bits = 6;
+			break;
+		case 'k':
+			kflag = 1;
 			break;
 		case 'l':
 			list++;
@@ -458,8 +463,8 @@ main(int argc, char *argv[])
 
 		switch (error) {
 		case SUCCESS:
-			if (!cat && !testmode) {
-				if (!pipin && unlink(infile) && verbose >= 0)
+			if (!cat && !pipin && !testmode && !kflag) {
+				if (unlink(infile) == -1 && verbose >= 0)
 					warn("input: %s", infile);
 			}
 			break;
@@ -928,8 +933,9 @@ verbose_info(const char *file, off_t compressed, off_t uncompressed,
 		return;
 	}
 	if (!pipin) {
-		fprintf(stderr, "\t%4.1f%% -- replaced with %s\n",
-		    (uncompressed - compressed) * 100.0 / uncompressed, file);
+		fprintf(stderr, "\t%4.1f%% -- %s %s\n",
+		    (uncompressed - compressed) * 100.0 / uncompressed,
+		    kflag ? "created" : "replaced with", file);
 	}
 	compressed += hlen;
 	fprintf(stderr, "%lld bytes in, %lld bytes out\n",
@@ -947,13 +953,13 @@ usage(int status)
 		fprintf(stderr, "usage: %s [-123456789cdf%sh%slNnOqrt%sv] "
 		    "[-b bits] [-o filename] [-S suffix]\n"
 		    "       %*s [file ...]\n", __progname,
-		    !gzip ? "g" : "", gzip ? "L" : "", gzip ? "V" : "",
+		    !gzip ? "g" : "", gzip ? "kL" : "", gzip ? "V" : "",
 		    (int)strlen(__progname), "");
 		break;
 	case MODE_DECOMP:
 		fprintf(stderr, "usage: %s [-cfh%slNnqrt%sv] [-o filename] "
 		    "[file ...]\n", __progname,
-		    gzip ? "L" : "", gzip ? "V" : "");
+		    gzip ? "kL" : "", gzip ? "V" : "");
 		break;
 	case MODE_CAT:
 		fprintf(stderr, "usage: %s [-f%shqr] [file ...]\n",

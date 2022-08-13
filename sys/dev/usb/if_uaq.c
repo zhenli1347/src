@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_uaq.c,v 1.1 2021/09/04 12:11:45 jmatthew Exp $	*/
+/*	$OpenBSD: if_uaq.c,v 1.4 2022/06/26 15:25:03 jmatthew Exp $	*/
 /*-
  * Copyright (c) 2021 Jonathan Matthew <jonathan@d14n.org>
  * All rights reserved.
@@ -75,7 +75,7 @@ int	uaqdebug = 0;
 #define UAQ_RX_BUF_ALIGN	8
 
 #define UAQ_TX_BUFSZ		16384
-#define UAQ_RX_BUFSZ		32768
+#define UAQ_RX_BUFSZ		(62 * 1024)
 
 #define UAQ_CTL_READ		1
 #define UAQ_CTL_WRITE		2
@@ -658,12 +658,15 @@ uaq_iff(struct uaq_softc *sc)
 
 	sc->sc_rxctl &= ~(UAQ_SFR_RX_CTL_PRO | UAQ_SFR_RX_CTL_AMALL |
 	    UAQ_SFR_RX_CTL_AM);
-	if (ifp->if_flags & IFF_PROMISC || sc->sc_ac.ac_multirangecnt > 0) {
+	ifp->if_flags &= ~IFF_ALLMULTI;
+
+	if (ifp->if_flags & IFF_PROMISC) {
+		ifp->if_flags |= IFF_ALLMULTI;
 		sc->sc_rxctl |= UAQ_SFR_RX_CTL_PRO;
-	} else if (ifp->if_flags & IFF_ALLMULTI ||
-	    sc->sc_ac.ac_multirangecnt > 0) {
+	} else if (sc->sc_ac.ac_multirangecnt > 0) {
+		ifp->if_flags |= IFF_ALLMULTI;
 		sc->sc_rxctl |= UAQ_SFR_RX_CTL_AMALL;
-	} else if (sc->sc_ac.ac_multicnt > 0) {
+	} else {
 		sc->sc_rxctl |= UAQ_SFR_RX_CTL_AM;
 
 		bzero(filter, sizeof(filter));
@@ -777,8 +780,11 @@ uaq_init(void *xsc)
 	if (err) {
 		printf("%s: couldn't open interrupt pipe\n",
 		    sc->sc_dev.dv_xname);
+		splx(s);
 		return;
 	}
+
+	uaq_iff(sc);
 
 	uaq_ifmedia_upd(ifp);
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ums.c,v 1.48 2021/03/24 02:49:57 jcs Exp $ */
+/*	$OpenBSD: ums.c,v 1.51 2021/11/22 11:29:17 anton Exp $ */
 /*	$NetBSD: ums.c,v 1.60 2003/03/11 16:44:00 augustss Exp $	*/
 
 /*
@@ -92,6 +92,9 @@ ums_match(struct device *parent, void *match, void *aux)
 	struct uhidev_attach_arg *uha = (struct uhidev_attach_arg *)aux;
 	int size;
 	void *desc;
+
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
+		return (UMATCH_NONE);
 
 	uhidev_get_report_desc(uha->parent, &desc, &size);
 

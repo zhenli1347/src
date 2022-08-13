@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvscom.c,v 1.39 2020/07/31 10:49:33 mglocker Exp $ */
+/*	$OpenBSD: uvscom.c,v 1.42 2022/07/02 08:50:42 visa Exp $ */
 /*	$NetBSD: uvscom.c,v 1.9 2003/02/12 15:36:20 ichiro Exp $	*/
 /*-
  * Copyright (c) 2001-2002, Shunsuke Akiyama <akiyama@jp.FreeBSD.org>.
@@ -44,7 +44,6 @@
 #include <sys/tty.h>
 #include <sys/ioctl.h>
 #include <sys/device.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbcdc.h>
@@ -173,7 +172,7 @@ int  uvscom_param(void *, int, struct termios *);
 int  uvscom_open(void *, int);
 void uvscom_close(void *, int);
 
-struct ucom_methods uvscom_methods = {
+const struct ucom_methods uvscom_methods = {
 	uvscom_get_status,
 	uvscom_set,
 	uvscom_param,
@@ -676,7 +675,7 @@ uvscom_open(void *addr, int portno)
 
 		err = uvscom_readstat(sc);
 		if (err) {
-			DPRINTF(("%s: uvscom_open: readstat faild\n",
+			DPRINTF(("%s: uvscom_open: readstat failed\n",
 				 sc->sc_dev.dv_xname));
 			return (EIO);
 		}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwc2.c,v 1.58 2021/07/30 18:56:01 mglocker Exp $	*/
+/*	$OpenBSD: dwc2.c,v 1.62 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: dwc2.c,v 1.32 2014/09/02 23:26:20 macallan Exp $	*/
 
 /*-
@@ -35,7 +35,6 @@
 #include <sys/malloc.h>
 #include <sys/kernel.h>
 #include <sys/device.h>
-#include <sys/select.h>
 #include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/endian.h>
@@ -146,7 +145,7 @@ dwc2_free_bus_bandwidth(struct dwc2_hsotg *hsotg, u16 bw,
 
 #define DWC2_INTR_ENDPT 1
 
-STATIC struct usbd_bus_methods dwc2_bus_methods = {
+STATIC const struct usbd_bus_methods dwc2_bus_methods = {
 	.open_pipe =	dwc2_open,
 	.dev_setaddr =	dwc2_setaddr,
 	.soft_intr =	dwc2_softintr,
@@ -155,7 +154,7 @@ STATIC struct usbd_bus_methods dwc2_bus_methods = {
 	.freex =	dwc2_freex,
 };
 
-STATIC struct usbd_pipe_methods dwc2_root_ctrl_methods = {
+STATIC const struct usbd_pipe_methods dwc2_root_ctrl_methods = {
 	.transfer =	dwc2_root_ctrl_transfer,
 	.start =	dwc2_root_ctrl_start,
 	.abort =	dwc2_root_ctrl_abort,
@@ -164,7 +163,7 @@ STATIC struct usbd_pipe_methods dwc2_root_ctrl_methods = {
 	.done =		dwc2_root_ctrl_done,
 };
 
-STATIC struct usbd_pipe_methods dwc2_root_intr_methods = {
+STATIC const struct usbd_pipe_methods dwc2_root_intr_methods = {
 	.transfer =	dwc2_root_intr_transfer,
 	.start =	dwc2_root_intr_start,
 	.abort =	dwc2_root_intr_abort,
@@ -173,7 +172,7 @@ STATIC struct usbd_pipe_methods dwc2_root_intr_methods = {
 	.done =		dwc2_root_intr_done,
 };
 
-STATIC struct usbd_pipe_methods dwc2_device_ctrl_methods = {
+STATIC const struct usbd_pipe_methods dwc2_device_ctrl_methods = {
 	.transfer =	dwc2_device_ctrl_transfer,
 	.start =	dwc2_device_ctrl_start,
 	.abort =	dwc2_device_ctrl_abort,
@@ -182,7 +181,7 @@ STATIC struct usbd_pipe_methods dwc2_device_ctrl_methods = {
 	.done =		dwc2_device_ctrl_done,
 };
 
-STATIC struct usbd_pipe_methods dwc2_device_intr_methods = {
+STATIC const struct usbd_pipe_methods dwc2_device_intr_methods = {
 	.transfer =	dwc2_device_intr_transfer,
 	.start =	dwc2_device_intr_start,
 	.abort =	dwc2_device_intr_abort,
@@ -191,7 +190,7 @@ STATIC struct usbd_pipe_methods dwc2_device_intr_methods = {
 	.done =		dwc2_device_intr_done,
 };
 
-STATIC struct usbd_pipe_methods dwc2_device_bulk_methods = {
+STATIC const struct usbd_pipe_methods dwc2_device_bulk_methods = {
 	.transfer =	dwc2_device_bulk_transfer,
 	.start =	dwc2_device_bulk_start,
 	.abort =	dwc2_device_bulk_abort,
@@ -200,7 +199,7 @@ STATIC struct usbd_pipe_methods dwc2_device_bulk_methods = {
 	.done =		dwc2_device_bulk_done,
 };
 
-STATIC struct usbd_pipe_methods dwc2_device_isoc_methods = {
+STATIC const struct usbd_pipe_methods dwc2_device_isoc_methods = {
 	.transfer =	dwc2_device_isoc_transfer,
 	.start =	dwc2_device_isoc_start,
 	.abort =	dwc2_device_isoc_abort,
@@ -681,7 +680,6 @@ dwc2_root_ctrl_start(struct usbd_xfer *xfer)
 		switch (value) {
 		case C(0, UDESC_DEVICE):
 			l = min(len, USB_DEVICE_DESCRIPTOR_SIZE);
-//			USETW(dwc2_devd.idVendor, sc->sc_id_vendor);
 			memcpy(buf, &dwc2_devd, l);
 			buf += l;
 			len -= l;
@@ -1366,9 +1364,7 @@ dwc2_device_start(struct usbd_xfer *xfer)
 				dwc2_hcd_get_ep_bandwidth(hsotg, dpipe),
 				xfer);
 	}
-
 	mtx_leave(&hsotg->lock);
-// 	mtx_exit(&sc->sc_lock);
 
 	return USBD_IN_PROGRESS;
 
@@ -1481,7 +1477,7 @@ dwc2_init(struct dwc2_softc *sc)
 	pool_init(&sc->sc_qtdpool, sizeof(struct dwc2_qtd), 0, IPL_USB, 0,
 	    "dwc2qtd", NULL);
 
-	sc->sc_hsotg = malloc(sizeof(struct dwc2_hsotg), M_DEVBUF,
+	sc->sc_hsotg = malloc(sizeof(struct dwc2_hsotg), M_USBHC,
 	    M_ZERO | M_WAITOK);
 	sc->sc_hsotg->hsotg_sc = sc;
 	sc->sc_hsotg->dev = &sc->sc_bus.bdev;
@@ -1517,7 +1513,7 @@ dwc2_init(struct dwc2_softc *sc)
 		goto fail2;
 	}
 
-	hsotg->core_params = malloc(sizeof(*hsotg->core_params), M_DEVBUF,
+	hsotg->core_params = malloc(sizeof(*hsotg->core_params), M_USBHC,
 	    M_ZERO | M_WAITOK);
 	dwc2_set_all_params(hsotg->core_params, -1);
 
@@ -1557,7 +1553,7 @@ dwc2_init(struct dwc2_softc *sc)
 
 fail2:
 	err = -retval;
-	free(sc->sc_hsotg, M_DEVBUF, sizeof(struct dwc2_hsotg));
+	free(sc->sc_hsotg, M_USBHC, sizeof(struct dwc2_hsotg));
 	softintr_disestablish(sc->sc_rhc_si);
 
 	return err;
@@ -1706,7 +1702,7 @@ void dwc2_host_complete(struct dwc2_hsotg *hsotg, struct dwc2_qtd *qtd,
 		 * everything else does.
 		 */
 		if (!(xfertype == UE_CONTROL &&
-		    xfer->length == 0) &&
+		    UGETW(xfer->request.wLength) == 0) &&
 		    xfer->actlen > 0 /* XXX PR/53503 */
 		    ) {
 			int rd = usbd_xfer_isread(xfer);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: yds.c,v 1.55 2020/03/27 15:24:59 krw Exp $	*/
+/*	$OpenBSD: yds.c,v 1.59 2022/03/21 19:22:41 miod Exp $	*/
 /*	$NetBSD: yds.c,v 1.5 2001/05/21 23:55:04 minoura Exp $	*/
 
 /*
@@ -141,7 +141,7 @@ void YWRITE4(struct yds_softc *sc,bus_size_t r,u_int32_t x)
 #define	YWRITEREGION4(sc, r, x, c)	\
 	bus_space_write_region_4((sc)->memt, (sc)->memh, (r), (x), (c) / 4)
 
-struct cfattach yds_ca = {
+const struct cfattach yds_ca = {
 	sizeof(struct yds_softc), yds_match, yds_attach, NULL,
 	yds_activate
 };
@@ -199,7 +199,7 @@ static void yds_dump_play_slot(struct yds_softc *, int);
 #define	YDS_DUMP_PLAY_SLOT(n,sc,bank)
 #endif /* AUDIO_DEBUG */
 
-static struct audio_hw_if yds_hw_if = {
+const static struct audio_hw_if yds_hw_if = {
 	yds_open,
 	yds_close,
 	yds_set_params,
@@ -388,7 +388,7 @@ yds_download_mcode(struct yds_softc *sc)
 	YWRITEREGION4(sc, YDS_CTRL_INSTRAM, p, size);
 
 	yds_enable_dsp(sc);
-	delay(10*1000);		/* neccesary on my 724F (??) */
+	delay(10*1000);		/* necessary on my 724F (??) */
 
 	free(buf, M_DEVBUF, buflen);
 	return 0;
@@ -785,7 +785,7 @@ yds_attachhook(struct device *self)
 		sc->sc_codec[0].codec_if, AudioCoutputs, AudioNmaster, NULL);
 	yds_mixer_set_port(sc, &ctl);
 
-	audio_attach_mi(&yds_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&yds_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* Watch for power changes */
 	sc->suspend = DVACT_RESUME;
@@ -858,7 +858,7 @@ yds_write_codec(void *sc_, u_int8_t reg, u_int16_t data)
 }
 
 /*
- * XXX: Must handle the secondary differntly!!
+ * XXX: Must handle the secondary differently!!
  */
 void
 yds_reset_codec(void *sc_)

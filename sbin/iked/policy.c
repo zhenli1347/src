@@ -1,4 +1,4 @@
-/*	$OpenBSD: policy.c,v 1.83 2021/09/01 15:30:06 tobhe Exp $	*/
+/*	$OpenBSD: policy.c,v 1.89 2021/12/01 16:42:13 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2020-2021 Tobias Heider <tobhe@openbsd.org>
@@ -53,7 +53,7 @@ static __inline int
 
 static int	policy_test_flows(struct iked_policy *, struct iked_policy *);
 static int	proposals_match(struct iked_proposal *, struct iked_proposal *,
-		    struct iked_transform **, int);
+		    struct iked_transform **, int, int);
 
 void
 policy_init(struct iked *env)
@@ -103,14 +103,23 @@ policy_lookup(struct iked *env, struct iked_message *msg,
 		pol.pol_flags |= IKED_POLICY_TRANSPORT;
 	memcpy(&pol.pol_peer.addr, &msg->msg_peer, sizeof(msg->msg_peer));
 	memcpy(&pol.pol_local.addr, &msg->msg_local, sizeof(msg->msg_local));
-	if (msg->msg_id.id_type &&
-	    ikev2_print_id(&msg->msg_id, idstr, IKED_ID_SIZE) == 0 &&
+	if (msg->msg_peerid.id_type &&
+	    ikev2_print_id(&msg->msg_peerid, idstr, IKED_ID_SIZE) == 0 &&
 	    (s = strchr(idstr, '/')) != NULL) {
-		pol.pol_peerid.id_type = msg->msg_id.id_type;
+		pol.pol_peerid.id_type = msg->msg_peerid.id_type;
 		pol.pol_peerid.id_length = strlen(s+1);
 		strlcpy(pol.pol_peerid.id_data, s+1,
 		    sizeof(pol.pol_peerid.id_data));
 		log_debug("%s: peerid '%s'", __func__, s+1);
+	}
+	if (msg->msg_localid.id_type &&
+	    ikev2_print_id(&msg->msg_localid, idstr, IKED_ID_SIZE) == 0 &&
+	    (s = strchr(idstr, '/')) != NULL) {
+		pol.pol_localid.id_type = msg->msg_localid.id_type;
+		pol.pol_localid.id_length = strlen(s+1);
+		strlcpy(pol.pol_localid.id_data, s+1,
+		    sizeof(pol.pol_localid.id_data));
+		log_debug("%s: localid '%s'", __func__, s+1);
 	}
 
 	/* Try to find a matching policy for this message */
@@ -223,9 +232,6 @@ policy_test(struct iked *env, struct iked_policy *key)
 		else if (key->pol_af && p->pol_af &&
 		    key->pol_af != p->pol_af)
 			p = p->pol_skip[IKED_SKIP_AF];
-		else if (key->pol_ipproto && p->pol_ipproto &&
-		    key->pol_ipproto != p->pol_ipproto)
-			p = p->pol_skip[IKED_SKIP_PROTO];
 		else if (sockaddr_cmp((struct sockaddr *)&key->pol_peer.addr,
 		    (struct sockaddr *)&p->pol_peer.addr,
 		    p->pol_peer.addr_mask) != 0)
@@ -276,7 +282,7 @@ policy_test(struct iked *env, struct iked_policy *key)
 			/* Make sure the proposals are compatible */
 			if (TAILQ_FIRST(&key->pol_proposals) &&
 			    proposals_negotiate(NULL, &p->pol_proposals,
-			    &key->pol_proposals, 0) == -1) {
+			    &key->pol_proposals, 0, -1) == -1) {
 				p = TAILQ_NEXT(p, pol_entry);
 				continue;
 			}
@@ -334,9 +340,6 @@ policy_calc_skip_steps(struct iked_policies *policies)
 		    prev->pol_af != AF_UNSPEC &&
 		    cur->pol_af != prev->pol_af)
 			IKED_SET_SKIP_STEPS(IKED_SKIP_AF);
-		if (cur->pol_ipproto && prev->pol_ipproto &&
-		    cur->pol_ipproto != prev->pol_ipproto)
-			IKED_SET_SKIP_STEPS(IKED_SKIP_PROTO);
 		if (IKED_ADDR_NEQ(&cur->pol_peer, &prev->pol_peer))
 			IKED_SET_SKIP_STEPS(IKED_SKIP_DST_ADDR);
 		if (IKED_ADDR_NEQ(&cur->pol_local, &prev->pol_local))
@@ -650,7 +653,7 @@ sa_free_flows(struct iked *env, struct iked_saflows *head)
 		if (flow->flow_loaded)
 			RB_REMOVE(iked_flows, &env->sc_activeflows, flow);
 		TAILQ_REMOVE(head, flow, flow_entry);
-		(void)pfkey_flow_delete(env->sc_pfkey, flow);
+		(void)pfkey_flow_delete(env, flow);
 		flow_free(flow);
 	}
 }
@@ -896,7 +899,7 @@ sa_dstid_remove(struct iked *env, struct iked_sa *sa)
 static __inline int
 sa_dstid_cmp(struct iked_sa *a, struct iked_sa *b)
 {
-	struct iked_id          *aid = NULL, *bid = NULL;
+	struct iked_id		*aid = NULL, *bid = NULL;
 	size_t			 alen, blen;
 	uint8_t			*aptr, *bptr;
 
@@ -971,7 +974,7 @@ user_cmp(struct iked_user *a, struct iked_user *b)
  */
 int
 proposals_negotiate(struct iked_proposals *result, struct iked_proposals *local,
-    struct iked_proposals *peer, int rekey)
+    struct iked_proposals *peer, int rekey, int groupid)
 {
 	struct iked_proposal	*ppeer = NULL, *plocal, *prop, vpeer, vlocal;
 	struct iked_transform	 chosen[IKEV2_XFORMTYPE_MAX];
@@ -996,7 +999,7 @@ proposals_negotiate(struct iked_proposals *result, struct iked_proposals *local,
 				continue;
 			bzero(match, sizeof(match));
 			score = proposals_match(plocal, ppeer, match,
-			    rekey);
+			    rekey, groupid);
 			log_debug("%s: score %d", __func__, score);
 			if (score && (!chosen_score || score < chosen_score)) {
 				chosen_score = score;
@@ -1051,10 +1054,11 @@ proposals_negotiate(struct iked_proposals *result, struct iked_proposals *local,
 
 static int
 proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
-    struct iked_transform **xforms, int rekey)
+    struct iked_transform **xforms, int rekey, int dhgroup)
 {
 	struct iked_transform	*tpeer, *tlocal;
 	unsigned int		 i, j, type, score, requiredh = 0, nodh = 0, noauth = 0;
+	unsigned int		 dhforced = 0;
 	uint8_t			 protoid = peer->prop_protoid;
 	uint8_t			 peerxfs[IKEV2_XFORMTYPE_MAX];
 
@@ -1111,6 +1115,18 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
 			    tpeer->xform_length != tlocal->xform_length)
 				continue;
 			type = tpeer->xform_type;
+
+			if (rekey && nodh == 0 && dhgroup >= 0 &&
+			    protoid == IKEV2_SAPROTO_ESP &&
+			    type == IKEV2_XFORMTYPE_DH) {
+				if (dhforced)
+					continue;
+				/* reset xform, so this xform w/matching group is enforced */
+				if (tlocal->xform_id == dhgroup) {
+					xforms[type] = NULL;
+					dhforced = 1;
+				}
+			}
 
 			if (xforms[type] == NULL || tlocal->xform_score <
 			    xforms[type]->xform_score) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tl.c,v 1.74 2020/07/10 13:26:38 patrick Exp $	*/
+/*	$OpenBSD: if_tl.c,v 1.76 2022/03/11 18:00:50 mpi Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998
@@ -112,7 +112,7 @@
  * When a frame is received, the chip will DMA it into the memory regions
  * specified by the fragment descriptors and then trigger an RX 'end of
  * frame interrupt' when done. The driver may choose to use only one
- * fragment per list; this may result is slighltly less efficient use
+ * fragment per list; this may result in slightly less efficient use
  * of memory in exchange for improving performance.
  *
  * To transmit frames, the driver again sets up lists and fragment
@@ -2021,7 +2021,7 @@ tl_wait_up(void *xsc)
 	ifq_clr_oactive(&ifp->if_snd);
 }
 
-struct cfattach tl_ca = {
+const struct cfattach tl_ca = {
 	sizeof(struct tl_softc), tl_probe, tl_attach
 };
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: phb.c,v 1.21 2020/12/20 21:03:53 kettenis Exp $	*/
+/*	$OpenBSD: phb.c,v 1.23 2022/04/06 18:59:27 naddy Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -100,7 +100,7 @@ void	phb_dmamem_free(bus_dma_tag_t, struct phb_dmamem *);
 int	phb_match(struct device *, void *, void *);
 void	phb_attach(struct device *, struct device *, void *);
 
-struct cfattach	phb_ca = {
+const struct cfattach phb_ca = {
 	sizeof (struct phb_softc), phb_match, phb_attach
 };
 
@@ -358,7 +358,7 @@ phb_attach(struct device *parent, struct device *self, void *aux)
 	 * physical page at address zero as mapped at 4 GB in PCI
 	 * address space.  If we fail to set up this TCE table we fall
 	 * back on using no-translate operation, which means that
-	 * devices that don't implenent 64 address lines may not
+	 * devices that don't implement 64 address lines may not
 	 * function properly.
 	 */
 	phb_setup_tce_table(sc);

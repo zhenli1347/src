@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_wg.c,v 1.18 2021/08/05 13:37:04 sthen Exp $ */
+/*	$OpenBSD: if_wg.c,v 1.26 2022/07/21 11:26:50 kn Exp $ */
 
 /*
  * Copyright (C) 2015-2020 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
@@ -30,7 +30,6 @@
 #include <sys/percpu.h>
 #include <sys/ioctl.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -326,7 +325,7 @@ void	wg_peer_send_buf(struct wg_peer *, uint8_t *, size_t);
 void	wg_send_initiation(void *);
 void	wg_send_response(struct wg_peer *);
 void	wg_send_cookie(struct wg_softc *, struct cookie_macs *, uint32_t,
-	    struct wg_endpoint *e);
+	    struct wg_endpoint *);
 void	wg_send_keepalive(void *);
 void	wg_peer_clear_secrets(void *);
 void	wg_handshake(struct wg_softc *, struct mbuf *);
@@ -371,7 +370,6 @@ int	wg_clone_destroy(struct ifnet *);
 void	wgattach(int);
 
 uint64_t	peer_counter = 0;
-uint64_t	keypair_counter = 0;
 struct pool	wg_aip_pool;
 struct pool	wg_peer_pool;
 struct pool	wg_ratelimit_pool;
@@ -599,9 +597,8 @@ wg_aip_add(struct wg_softc *sc, struct wg_peer *peer, struct wg_aip_io *d)
 	default: return EAFNOSUPPORT;
 	}
 
-	if ((aip = pool_get(&wg_aip_pool, PR_NOWAIT)) == NULL)
+	if ((aip = pool_get(&wg_aip_pool, PR_NOWAIT|PR_ZERO)) == NULL)
 		return ENOBUFS;
-	bzero(aip, sizeof(*aip));
 
 	rw_enter_write(&root->ar_lock);
 	node = art_insert(root, &aip->a_node, &d->a_addr, d->a_cidr);
@@ -682,7 +679,7 @@ wg_socket_open(struct socket **so, int af, in_port_t *port,
 	struct sockaddr_in6	*sin6;
 #endif
 	struct sockaddr_in	*sin;
-	int			 ret, s;
+	int			 ret;
 
 	m_inithdr(&mhostnam);
 	m_inithdr(&mrtable);
@@ -716,7 +713,7 @@ wg_socket_open(struct socket **so, int af, in_port_t *port,
 	if ((ret = socreate(af, so, SOCK_DGRAM, 0)) != 0)
 		return ret;
 
-	s = solock(*so);
+	solock(*so);
 	sotoinpcb(*so)->inp_upcall = wg_input;
 	sotoinpcb(*so)->inp_upcall_arg = upcall_arg;
 
@@ -726,7 +723,7 @@ wg_socket_open(struct socket **so, int af, in_port_t *port,
 			*rtable = sotoinpcb(*so)->inp_rtableid;
 		}
 	}
-	sounlock(*so, s);
+	sounlock(*so);
 
 	if (ret != 0)
 		wg_socket_close(so);
@@ -1622,7 +1619,7 @@ wg_decap(struct wg_softc *sc, struct mbuf *m)
 	 * IP header, we just worry about the sizeof and the version, so we can
 	 * read the source address in wg_aip_lookup.
 	 *
-	 * We also need to trim the packet, as it was likely paddded before
+	 * We also need to trim the packet, as it was likely padded before
 	 * encryption. While we could drop it here, it will be more helpful to
 	 * pass it to bpf_mtap and use the counters that people are expecting
 	 * in ipv4_input and ipv6_input. We can rely on ipv4_input and
@@ -2025,7 +2022,7 @@ wg_input(void *_sc, struct mbuf *m, struct ip *ip, struct ip6_hdr *ip6,
 
 	/*
 	 * Ensure mbuf is contiguous over full length of packet. This is done
-	 * os we can directly read the handshake values in wg_handshake, and so
+	 * so we can directly read the handshake values in wg_handshake, and so
 	 * we can decrypt a transport packet by passing a single buffer to
 	 * noise_remote_decrypt in wg_decap.
 	 */
@@ -2157,7 +2154,7 @@ wg_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *sa,
 	}
 
 	if (m->m_pkthdr.ph_loopcnt++ > M_MAXLOOP) {
-		DPRINTF(sc, "Packet looped");
+		DPRINTF(sc, "Packet looped\n");
 		ret = ELOOP;
 		goto error;
 	}
@@ -2170,7 +2167,7 @@ wg_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *sa,
 	 * another aip_lookup in wg_qstart, or refcnting as mentioned before.
 	 */
 	if (m->m_pkthdr.pf.delay > 0) {
-		DPRINTF(sc, "PF Delay Unsupported");
+		DPRINTF(sc, "PF delay unsupported\n");
 		ret = EOPNOTSUPP;
 		goto error;
 	}

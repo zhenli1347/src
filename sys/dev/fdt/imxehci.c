@@ -1,4 +1,4 @@
-/*	$OpenBSD: imxehci.c,v 1.4 2020/04/27 20:15:41 patrick Exp $ */
+/*	$OpenBSD: imxehci.c,v 1.6 2022/04/06 18:59:28 naddy Exp $ */
 /*
  * Copyright (c) 2012-2013 Patrick Wildt <patrick@blueri.se>
  *
@@ -94,7 +94,7 @@ struct imxehci_softc {
 	uint32_t		sc_unit;
 };
 
-struct cfattach imxehci_ca = {
+const struct cfattach imxehci_ca = {
 	sizeof (struct imxehci_softc), imxehci_match, imxehci_attach,
 	imxehci_detach
 };
@@ -130,9 +130,12 @@ imxehci_attach(struct device *parent, struct device *self, void *aux)
 	if (faa->fa_nreg < 1)
 		return;
 
-	if (OF_getpropintarray(faa->fa_node, "fsl,usbphy",
-	    phy, sizeof(phy)) != sizeof(phy))
-		return;
+	if (OF_getpropintarray(faa->fa_node, "phys",
+	    phy, sizeof(phy)) != sizeof(phy)) {
+		if (OF_getpropintarray(faa->fa_node, "fsl,usbphy",
+		    phy, sizeof(phy)) != sizeof(phy))
+			return;
+	}
 
 	if (OF_getpropintarray(faa->fa_node, "fsl,usbmisc",
 	    misc, sizeof(misc)) != sizeof(misc))

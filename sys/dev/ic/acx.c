@@ -1,4 +1,4 @@
-/*	$OpenBSD: acx.c,v 1.125 2021/02/25 02:48:19 dlg Exp $ */
+/*	$OpenBSD: acx.c,v 1.127 2022/04/21 21:03:02 stsp Exp $ */
 
 /*
  * Copyright (c) 2006 Jonathan Gray <jsg@openbsd.org>
@@ -566,7 +566,7 @@ acx_stop(struct acx_softc *sc)
 
 	acx_disable_intr(sc);
 
-	/* Stop backgroud scanning */
+	/* Stop background scanning */
 	timeout_del(&sc->sc_chanscan_timer);
 
 	/* Turn off power led */
@@ -1354,7 +1354,7 @@ acx_rxeof(struct acx_softc *sc)
 			    sc->chip_rxbuf_exhdr);
 			wh = mtod(m, struct ieee80211_frame *);
 
-			rxi.rxi_flags = 0;
+			memset(&rxi, 0, sizeof(rxi));
 			if ((wh->i_fc[1] & IEEE80211_FC1_WEP) &&
 			    sc->chip_hw_crypt) {
 				/* Short circuit software WEP */
@@ -2389,7 +2389,7 @@ acx_beacon_locate(struct mbuf *m, u_int8_t type)
 	 * beacon frame format
 	 *	[8] time stamp
 	 *	[2] beacon interval
-	 *	[2] cabability information
+	 *	[2] capability information
 	 *	from here on [tlv] values
 	 */
 

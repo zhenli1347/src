@@ -1,4 +1,4 @@
-/*	$OpenBSD: socketvar.h,v 1.100 2021/07/26 05:51:13 mpi Exp $	*/
+/*	$OpenBSD: socketvar.h,v 1.106 2022/07/15 17:20:24 deraadt Exp $	*/
 /*	$NetBSD: socketvar.h,v 1.18 1996/02/09 18:25:38 christos Exp $	*/
 
 /*-
@@ -38,6 +38,7 @@
 #include <sys/task.h>
 #include <sys/timeout.h>
 #include <sys/rwlock.h>
+#include <sys/refcnt.h>
 
 #ifndef	_SOCKLEN_T_DEFINED_
 #define	_SOCKLEN_T_DEFINED_
@@ -55,6 +56,7 @@ TAILQ_HEAD(soqhead, socket);
 struct socket {
 	const struct protosw *so_proto;	/* protocol handle */
 	struct rwlock so_lock;		/* this socket lock */
+	struct refcnt so_refcnt;	/* references to this socket */
 	void	*so_pcb;		/* protocol control block */
 	u_int	so_state;		/* internal state flags SS_*, below */
 	short	so_type;		/* generic type, see socket.h */
@@ -80,6 +82,7 @@ struct socket {
 	short	so_q0len;		/* partials on so_q0 */
 	short	so_qlen;		/* number of connections on so_q */
 	short	so_qlimit;		/* max number queued connections */
+	u_long	so_newconn;		/* # of pending sonewconn() threads */
 	short	so_timeo;		/* connection timeout */
 	u_long	so_oobmark;		/* chars to oob mark */
 	u_int	so_error;		/* error affecting connection */
@@ -122,7 +125,6 @@ struct socket {
 #define	SB_LOCK		0x01		/* lock on data queue */
 #define	SB_WANT		0x02		/* someone is waiting to lock */
 #define	SB_WAIT		0x04		/* someone is waiting for data/space */
-#define	SB_SEL		0x08		/* someone is selecting */
 #define	SB_ASYNC	0x10		/* ASYNC I/O, need signals */
 #define	SB_SPLICE	0x20		/* buffer is splice source or drain */
 #define	SB_NOINTR	0x40		/* operations not interruptible */
@@ -150,18 +152,26 @@ struct socket {
 #define	SS_CONNECTOUT		0x1000	/* connect, not accept, at this end */
 #define	SS_ISSENDING		0x2000	/* hint for lower layer */
 #define	SS_DNS			0x4000	/* created using SOCK_DNS socket(2) */
+#define	SS_NEWCONN_WAIT		0x8000	/* waiting sonewconn() relock */
+#define	SS_YP			0x10000	/* created using ypconnect(2) */
 
 #ifdef _KERNEL
 
 #include <lib/libkern/libkern.h>
 
-/*
- * Values for sounlock()/sofree().
- */
-#define SL_NOUNLOCK	0x00
-#define SL_LOCKED	0x42
-
 void	soassertlocked(struct socket *);
+
+static inline void
+soref(struct socket *so)
+{
+	refcnt_take(&so->so_refcnt);
+}
+
+static inline void
+sorele(struct socket *so)
+{
+	refcnt_rele_wake(&so->so_refcnt);
+}
 
 /*
  * Macros for sockets and socket buffering.
@@ -178,7 +188,7 @@ sb_notify(struct socket *so, struct sockbuf *sb)
 {
 	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
 	soassertlocked(so);
-	return ((sb->sb_flags & (SB_WAIT|SB_SEL|SB_ASYNC|SB_SPLICE)) != 0 ||
+	return ((sb->sb_flags & (SB_WAIT|SB_ASYNC|SB_SPLICE)) != 0 ||
 	    !klist_empty(&sb->sb_sel.si_note));
 }
 
@@ -276,7 +286,6 @@ struct knote;
 int	soo_read(struct file *, struct uio *, int);
 int	soo_write(struct file *, struct uio *, int);
 int	soo_ioctl(struct file *, u_long, caddr_t, struct proc *);
-int	soo_poll(struct file *, int, struct proc *);
 int	soo_kqfilter(struct file *, struct knote *);
 int 	soo_close(struct file *, struct proc *);
 int	soo_stat(struct file *, struct stat *, struct proc *);
@@ -311,6 +320,7 @@ int	soconnect(struct socket *, struct mbuf *);
 int	soconnect2(struct socket *, struct socket *);
 int	socreate(int, struct socket **, int, int);
 int	sodisconnect(struct socket *);
+struct socket *soalloc(int);
 void	sofree(struct socket *, int);
 int	sogetopt(struct socket *, int, int, struct mbuf *);
 void	sohasoutofband(struct socket *);
@@ -335,8 +345,10 @@ void	sowwakeup(struct socket *);
 int	sockargs(struct mbuf **, const void *, size_t, int);
 
 int	sosleep_nsec(struct socket *, void *, int, const char *, uint64_t);
-int	solock(struct socket *);
-void	sounlock(struct socket *, int);
+void	solock(struct socket *);
+int	solock_persocket(struct socket *);
+void	solock_pair(struct socket *, struct socket *);
+void	sounlock(struct socket *);
 
 int	sendit(struct proc *, int, struct msghdr *, int, register_t *);
 int	recvit(struct proc *, int, struct msghdr *, caddr_t, register_t *);

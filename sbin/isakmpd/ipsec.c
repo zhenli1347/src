@@ -1,4 +1,4 @@
-/* $OpenBSD: ipsec.c,v 1.150 2018/01/15 09:54:48 mpi Exp $	 */
+/* $OpenBSD: ipsec.c,v 1.152 2022/01/16 14:30:11 naddy Exp $	 */
 /* $EOM: ipsec.c,v 1.143 2000/12/11 23:57:42 niklas Exp $	 */
 
 /*
@@ -1019,7 +1019,7 @@ ipsec_validate_transform_id(u_int8_t proto, u_int8_t transform_id)
 		    transform_id > IPSEC_ESP_AES_TWOFISH ? -1 : 0;
 	case IPSEC_PROTO_IPCOMP:
 		return transform_id < IPSEC_IPCOMP_OUI ||
-		    transform_id > IPSEC_IPCOMP_V42BIS ? -1 : 0;
+		    transform_id > IPSEC_IPCOMP_DEFLATE ? -1 : 0;
 	}
 }
 
@@ -2090,7 +2090,6 @@ ipsec_decode_id(char *buf, size_t size, u_int8_t *id, size_t id_len,
 {
 	int             id_type;
 	char           *addr = 0, *mask = 0;
-	u_int32_t      *idp;
 
 	if (id) {
 		if (!isakmpform) {
@@ -2102,7 +2101,6 @@ ipsec_decode_id(char *buf, size_t size, u_int8_t *id, size_t id_len,
 			id_len += ISAKMP_GEN_SZ;
 		}
 		id_type = GET_ISAKMP_ID_TYPE(id);
-		idp = (u_int32_t *) (id + ISAKMP_ID_DATA_OFF);
 		switch (id_type) {
 		case IPSEC_ID_IPV4_ADDR:
 			util_ntoa(&addr, AF_INET, id + ISAKMP_ID_DATA_OFF);

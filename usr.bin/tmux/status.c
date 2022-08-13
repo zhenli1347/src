@@ -1,4 +1,4 @@
-/* $OpenBSD: status.c,v 1.227 2021/08/20 17:50:42 nicm Exp $ */
+/* $OpenBSD: status.c,v 1.234 2022/05/30 13:07:46 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -439,7 +439,8 @@ status_redraw(struct client *c)
 			screen_write_cursormove(&ctx, 0, i, 0);
 
 			status_free_ranges(&sle->ranges);
-			format_draw(&ctx, &gc, width, expanded, &sle->ranges);
+			format_draw(&ctx, &gc, width, expanded, &sle->ranges,
+			    0);
 
 			free(sle->expanded);
 			sle->expanded = expanded;
@@ -562,7 +563,7 @@ status_message_redraw(struct client *c)
 	if (c->message_ignore_styles)
 		screen_write_nputs(&ctx, len, &gc, "%s", c->message_string);
 	else
-		format_draw(&ctx, &gc, c->tty.sx, c->message_string, NULL);
+		format_draw(&ctx, &gc, c->tty.sx, c->message_string, NULL, 0);
 	screen_write_stop(&ctx);
 
 	if (grid_compare(sl->active->grid, old_screen.grid) == 0) {
@@ -717,7 +718,7 @@ status_prompt_redraw(struct client *c)
 	memcpy(&cursorgc, &gc, sizeof cursorgc);
 	cursorgc.attr ^= GRID_ATTR_REVERSE;
 
-	start = screen_write_strlen("%s", c->prompt_string);
+	start = format_width(c->prompt_string);
 	if (start > c->tty.sx)
 		start = c->tty.sx;
 
@@ -727,7 +728,7 @@ status_prompt_redraw(struct client *c)
 	for (offset = 0; offset < c->tty.sx; offset++)
 		screen_write_putc(&ctx, &gc, ' ');
 	screen_write_cursormove(&ctx, 0, lines - 1, 0);
-	screen_write_nputs(&ctx, start, &gc, "%s", c->prompt_string);
+	format_draw(&ctx, &gc, start, c->prompt_string, NULL, 0);
 	screen_write_cursormove(&ctx, start, lines - 1, 0);
 
 	left = c->tty.sx - start;
@@ -747,6 +748,7 @@ status_prompt_redraw(struct client *c)
 		offset = 0;
 	if (pwidth > left)
 		pwidth = left;
+	c->prompt_cursor = start + c->prompt_index - offset;
 
 	width = 0;
 	for (i = 0; c->prompt_buffer[i].size != 0; i++) {
@@ -809,14 +811,23 @@ status_prompt_translate_key(struct client *c, key_code key, key_code *new_key)
 {
 	if (c->prompt_mode == PROMPT_ENTRY) {
 		switch (key) {
+		case '\001': /* C-a */
 		case '\003': /* C-c */
+		case '\005': /* C-e */
 		case '\007': /* C-g */
 		case '\010': /* C-h */
 		case '\011': /* Tab */
+		case '\013': /* C-k */
+		case '\016': /* C-n */
+		case '\020': /* C-p */
+		case '\024': /* C-t */
 		case '\025': /* C-u */
 		case '\027': /* C-w */
+		case '\031': /* C-y */
 		case '\n':
 		case '\r':
+		case KEYC_LEFT|KEYC_CTRL:
+		case KEYC_RIGHT|KEYC_CTRL:
 		case KEYC_BSPACE:
 		case KEYC_DC:
 		case KEYC_DOWN:
@@ -837,6 +848,9 @@ status_prompt_translate_key(struct client *c, key_code key, key_code *new_key)
 	}
 
 	switch (key) {
+	case KEYC_BSPACE:
+		*new_key = KEYC_LEFT;
+		return (1);
 	case 'A':
 	case 'I':
 	case 'C':
@@ -882,7 +896,7 @@ status_prompt_translate_key(struct client *c, key_code key, key_code *new_key)
 		*new_key = 'B'|KEYC_VI;
 		return (1);
 	case 'd':
-		*new_key = '\025';
+		*new_key = '\025'; /* C-u */
 		return (1);
 	case 'e':
 		*new_key = 'e'|KEYC_VI;
@@ -1562,11 +1576,25 @@ status_prompt_add_history(const char *line, u_int type)
 	status_prompt_hsize[type] = newsize;
 }
 
+/* Add to completion list. */
+static void
+status_prompt_add_list(char ***list, u_int *size, const char *s)
+{
+	u_int	i;
+
+	for (i = 0; i < *size; i++) {
+		if (strcmp((*list)[i], s) == 0)
+			return;
+	}
+	*list = xreallocarray(*list, (*size) + 1, sizeof **list);
+	(*list)[(*size)++] = xstrdup(s);
+}
+
 /* Build completion list. */
 static char **
 status_prompt_complete_list(u_int *size, const char *s, int at_start)
 {
-	char					**list = NULL;
+	char					**list = NULL, *tmp;
 	const char				**layout, *value, *cp;
 	const struct cmd_entry			**cmdent;
 	const struct options_table_entry	 *oe;
@@ -1580,15 +1608,11 @@ status_prompt_complete_list(u_int *size, const char *s, int at_start)
 
 	*size = 0;
 	for (cmdent = cmd_table; *cmdent != NULL; cmdent++) {
-		if (strncmp((*cmdent)->name, s, slen) == 0) {
-			list = xreallocarray(list, (*size) + 1, sizeof *list);
-			list[(*size)++] = xstrdup((*cmdent)->name);
-		}
+		if (strncmp((*cmdent)->name, s, slen) == 0)
+			status_prompt_add_list(&list, size, (*cmdent)->name);
 		if ((*cmdent)->alias != NULL &&
-		    strncmp((*cmdent)->alias, s, slen) == 0) {
-			list = xreallocarray(list, (*size) + 1, sizeof *list);
-			list[(*size)++] = xstrdup((*cmdent)->alias);
-		}
+		    strncmp((*cmdent)->alias, s, slen) == 0)
+			status_prompt_add_list(&list, size, (*cmdent)->alias);
 	}
 	o = options_get_only(global_options, "command-alias");
 	if (o != NULL) {
@@ -1601,8 +1625,9 @@ status_prompt_complete_list(u_int *size, const char *s, int at_start)
 			if (slen > valuelen || strncmp(value, s, slen) != 0)
 				goto next;
 
-			list = xreallocarray(list, (*size) + 1, sizeof *list);
-			list[(*size)++] = xstrndup(value, valuelen);
+			xasprintf(&tmp, "%.*s", (int)valuelen, value);
+			status_prompt_add_list(&list, size, tmp);
+			free(tmp);
 
 		next:
 			a = options_array_next(a);
@@ -1610,18 +1635,13 @@ status_prompt_complete_list(u_int *size, const char *s, int at_start)
 	}
 	if (at_start)
 		return (list);
-
 	for (oe = options_table; oe->name != NULL; oe++) {
-		if (strncmp(oe->name, s, slen) == 0) {
-			list = xreallocarray(list, (*size) + 1, sizeof *list);
-			list[(*size)++] = xstrdup(oe->name);
-		}
+		if (strncmp(oe->name, s, slen) == 0)
+			status_prompt_add_list(&list, size, oe->name);
 	}
 	for (layout = layouts; *layout != NULL; layout++) {
-		if (strncmp(*layout, s, slen) == 0) {
-			list = xreallocarray(list, (*size) + 1, sizeof *list);
-			list[(*size)++] = xstrdup(*layout);
-		}
+		if (strncmp(*layout, s, slen) == 0)
+			status_prompt_add_list(&list, size, *layout);
 	}
 	return (list);
 }
@@ -1714,7 +1734,7 @@ status_prompt_complete_list_menu(struct client *c, char **list, u_int size,
 		item.name = list[i];
 		item.key = '0' + (i - spm->start);
 		item.command = NULL;
-		menu_add_item(menu, &item, NULL, NULL, NULL);
+		menu_add_item(menu, &item, NULL, c, NULL);
 	}
 
 	if (options_get_number(c->session->options, "status-position") == 0)
@@ -1784,7 +1804,7 @@ status_prompt_complete_window_menu(struct client *c, struct session *s,
 		item.name = tmp;
 		item.key = '0' + size - 1;
 		item.command = NULL;
-		menu_add_item(menu, &item, NULL, NULL, NULL);
+		menu_add_item(menu, &item, NULL, c, NULL);
 		free(tmp);
 
 		if (size == height)

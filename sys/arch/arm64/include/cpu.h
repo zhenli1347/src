@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.22 2021/07/06 09:34:06 kettenis Exp $ */
+/* $OpenBSD: cpu.h,v 1.27 2022/07/13 09:28:19 kettenis Exp $ */
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -26,11 +26,15 @@
  * CTL_MACHDEP definitions.
  */
 #define	CPU_COMPATIBLE		1	/* compatible property */
-#define	CPU_MAXID		2	/* number of valid machdep ids */
+#define	CPU_ID_AA64ISAR0	2
+#define	CPU_ID_AA64ISAR1	3
+#define	CPU_MAXID		4	/* number of valid machdep ids */
 
 #define	CTL_MACHDEP_NAMES { \
 	{ 0, 0 }, \
 	{ "compatible", CTLTYPE_STRING }, \
+	{ "id_aa64isar0", CTLTYPE_QUAD }, \
+	{ "id_aa64isar1", CTLTYPE_QUAD }, \
 }
 
 #ifdef _KERNEL
@@ -92,13 +96,15 @@ struct cpu_info {
 	int			ci_node;
 	struct cpu_info		*ci_self;
 
-	struct proc		*ci_curproc;
-	struct pmap		*ci_curpm;
-	struct proc		*ci_fpuproc;
-	u_int32_t		ci_randseed;
+#define __HAVE_CPU_TOPOLOGY
+	u_int32_t		ci_smt_id;
+	u_int32_t		ci_core_id;
+	u_int32_t		ci_pkg_id;
 
+	struct proc		*ci_curproc;
 	struct pcb		*ci_curpcb;
-	struct pcb		*ci_idle_pcb;
+	struct pmap		*ci_curpm;
+	u_int32_t		ci_randseed;
 
 	u_int32_t		ci_ctrl; /* The CPU control register */
 
@@ -112,6 +118,9 @@ struct cpu_info {
 
 	void			(*ci_flush_bp)(void);
 
+	uint64_t		ci_ttbr1;
+	vaddr_t			ci_el1_stkend;
+	
 	struct opp_table	*ci_opp_table;
 	volatile int		ci_opp_idx;
 	volatile int		ci_opp_max;
@@ -120,8 +129,6 @@ struct cpu_info {
 #ifdef MULTIPROCESSOR
 	struct srp_hazard	ci_srp_hazards[SRP_HAZARD_NUM];
 	volatile int		ci_flags;
-	uint64_t		ci_ttbr1;
-	vaddr_t			ci_el1_stkend;
 
 	volatile int		ci_ddb_paused;
 #define CI_DDB_RUNNING		0
@@ -176,7 +183,7 @@ extern struct cpu_info *cpu_info_list;
 #define CPU_INFO_FOREACH(cii, ci)	for (cii = 0, ci = cpu_info_list; \
 					    ci != NULL; ci = ci->ci_next)
 #define CPU_INFO_UNIT(ci)	((ci)->ci_dev ? (ci)->ci_dev->dv_unit : 0)
-#define MAXCPUS	32
+#define MAXCPUS	256
 
 extern struct cpu_info *cpu_info[MAXCPUS];
 
@@ -304,7 +311,10 @@ intr_restore(u_long daif)
 	restore_daif(daif);
 }
 
+void	cpu_halt(void);
 void	cpu_startclock(void);
+int	cpu_suspend_primary(void);
+void	cpu_resume_secondary(struct cpu_info *);
 
 void	delay (unsigned);
 #define	DELAY(x)	delay(x)

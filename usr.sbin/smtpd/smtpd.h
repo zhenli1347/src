@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpd.h,v 1.670 2021/07/28 19:39:51 benno Exp $	*/
+/*	$OpenBSD: smtpd.h,v 1.674 2022/02/18 16:57:36 millert Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -57,7 +57,7 @@
 #define SMTPD_QUEUE_EXPIRY	 (4 * 24 * 60 * 60)
 #define SMTPD_SOCKET		 "/var/run/smtpd.sock"
 #define	SMTPD_NAME		 "OpenSMTPD"
-#define	SMTPD_VERSION		 "6.9.0"
+#define	SMTPD_VERSION		 "7.0.0"
 #define SMTPD_SESSION_TIMEOUT	 300
 #define SMTPD_BACKLOG		 5
 
@@ -99,7 +99,6 @@
 
 #define RELAY_AUTH		0x08
 #define RELAY_LMTP		0x80
-#define	RELAY_TLS_VERIFY	0x200
 
 #define MTA_EXT_DSN		0x400
 
@@ -1189,7 +1188,7 @@ struct dispatcher_remote {
 
 	char	*auth;
 	int	 tls_required;
-	int	 tls_noverify;
+	int	 tls_verify;
 	char	*tls_protocols;
 	char	*tls_ciphers;
 

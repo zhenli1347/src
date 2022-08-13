@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: Installed.pm,v 1.38 2017/03/11 11:25:01 espie Exp $
+# $OpenBSD: Installed.pm,v 1.44 2022/05/08 13:21:04 espie Exp $
 #
 # Copyright (c) 2007-2014 Marc Espie <espie@openbsd.org>
 #
@@ -47,6 +47,36 @@ sub expand_locations
 		    '%c',
 		    'packages', 
 		    OpenBSD::Paths->machine_architecture);
+	}
+}
+
+sub get_cached_info
+{
+	my ($repository, $name) = @_;
+	if (defined $repository->{info_cache}) {
+		return $repository->{info_cache}->get_cached_info($name);
+	} else {
+		return undef;
+	}
+}
+
+sub setup_cache
+{
+	my ($repo, $setlist) = @_;
+
+	my $state = $repo->{state};
+	return if $state->defines("NO_CACHING");
+	
+	require OpenBSD::PackageRepository::Cache;
+
+	$repo->{info_cache} = 
+	    OpenBSD::PackageRepository::Cache->new($state, $setlist);
+	# if we're on package-stable, assume this new quirks also works
+	# with the corresponding release
+	if (defined $repo->{release}) {
+		my $url = $repo->urlscheme."://$repo->{host}$repo->{release}";
+		my $r2 = $repo->parse_url(\$url, $state);
+		$r2->{info_cache} = $repo->{info_cache};
 	}
 }
 
@@ -183,6 +213,27 @@ sub locations_list
 
 sub reinitialize
 {
+}
+
+sub decorate
+{
+	my ($self, $plist, $location) = @_;
+	unless ($plist->has('url')) {
+		OpenBSD::PackingElement::Url->add($plist, $location->url);
+	}
+	unless ($plist->has('signer')) {
+		if (exists $location->{signer}) {
+			OpenBSD::PackingElement::Signer->add($plist, 
+			    $location->{signer});
+		}
+	}
+	unless ($plist->has('digital-signature')) {
+		if (exists $location->{signdate}) {
+			OpenBSD::PackingElement::DigitalSignature->add($plist,
+			    join(':', 'signify2', $location->{signdate}, 
+			    	'external'));
+		}
+	}
 }
 
 package OpenBSD::PackageRepository::Installed;

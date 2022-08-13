@@ -1,4 +1,4 @@
-/*	$OpenBSD: unfdpass.c,v 1.20 2018/11/28 08:06:22 claudio Exp $	*/
+/*	$OpenBSD: unfdpass.c,v 1.22 2021/12/13 16:56:50 deraadt Exp $	*/
 /*	$NetBSD: unfdpass.c,v 1.3 1998/06/24 23:51:30 thorpej Exp $	*/
 
 /*-
@@ -35,7 +35,6 @@
  * Test passing of file descriptors over Unix domain sockets and socketpairs.
  */
 
-#include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -303,7 +302,7 @@ child(int sock, int type, int oflag)
 	files = (int *)CMSG_DATA(cmp);
 	for (i = 0; i < nfds; i++) {
 		(void) snprintf(fname, sizeof fname, "file%d", i + 1);
-		if ((fd = open(fname, O_RDONLY, 0666)) == -1)
+		if ((fd = open(fname, O_RDONLY)) == -1)
 			err(1, "child open %s", fname);
 		files[i] = fd;
 	}

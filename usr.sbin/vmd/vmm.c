@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmm.c,v 1.101 2021/04/26 22:58:27 dv Exp $	*/
+/*	$OpenBSD: vmm.c,v 1.105 2022/04/10 19:36:58 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -16,7 +16,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* nitems */
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/wait.h>
@@ -29,7 +29,6 @@
 #include <dev/isa/isareg.h>
 #include <dev/pci/pcireg.h>
 
-#include <machine/param.h>
 #include <machine/psl.h>
 #include <machine/specialreg.h>
 #include <machine/vmmvar.h>
@@ -52,6 +51,7 @@
 
 #include "vmd.h"
 #include "vmm.h"
+#include "atomicio.h"
 
 void	vmm_sighdlr(int, short, void *);
 int	vmm_start_vm(struct imsg *, uint32_t *, pid_t *);
@@ -103,7 +103,7 @@ int
 vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	struct privsep		*ps = p->p_ps;
-	int			 res = 0, cmd = 0, verbose, ret;
+	int			 res = 0, cmd = 0, verbose;
 	struct vmd_vm		*vm = NULL;
 	struct vm_terminate_params vtp;
 	struct vmop_id		 vid;
@@ -146,7 +146,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	case IMSG_VMDOP_START_VM_END:
 		res = vmm_start_vm(imsg, &id, &pid);
 		/* Check if the ID can be mapped correctly */
-		if ((id = vm_id2vmid(id, NULL)) == 0)
+		if (res == 0 && (id = vm_id2vmid(id, NULL)) == 0)
 			res = ENOENT;
 		cmd = IMSG_VMDOP_START_VM_RESPONSE;
 		break;
@@ -279,8 +279,12 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	case IMSG_VMDOP_RECEIVE_VM_REQUEST:
 		IMSG_SIZE_CHECK(imsg, &vmc);
 		memcpy(&vmc, imsg->data, sizeof(vmc));
-		ret = vm_register(ps, &vmc, &vm,
-		    imsg->hdr.peerid, vmc.vmc_owner.uid);
+		if (vm_register(ps, &vmc, &vm,
+		    imsg->hdr.peerid, vmc.vmc_owner.uid) != 0) {
+			res = errno;
+			cmd = IMSG_VMDOP_START_VM_RESPONSE;
+			break;
+		}
 		vm->vm_tty = imsg->fd;
 		vm->vm_state |= VM_STATE_RECEIVED;
 		vm->vm_state |= VM_STATE_PAUSED;
@@ -329,6 +333,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 		if (id == 0)
 			id = imsg->hdr.peerid;
+		/* FALLTHROUGH */
 	case IMSG_VMDOP_PAUSE_VM_RESPONSE:
 	case IMSG_VMDOP_UNPAUSE_VM_RESPONSE:
 	case IMSG_VMDOP_TERMINATE_VM_RESPONSE:
@@ -611,7 +616,8 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 	struct vmd_vm		*vm;
 	int			 ret = EINVAL;
 	int			 fds[2];
-	size_t			 i, j;
+	pid_t			 vm_pid;
+	size_t			 i, j, sz;
 
 	if ((vm = vm_getbyvmid(imsg->hdr.peerid)) == NULL) {
 		log_warnx("%s: can't find vm", __func__);
@@ -631,18 +637,18 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 		fatal("socketpair");
 
 	/* Start child vmd for this VM (fork, chroot, drop privs) */
-	ret = fork();
+	vm_pid = fork();
 
 	/* Start child failed? - cleanup and leave */
-	if (ret == -1) {
+	if (vm_pid == -1) {
 		log_warnx("%s: start child failed", __func__);
 		ret = EIO;
 		goto err;
 	}
 
-	if (ret > 0) {
+	if (vm_pid > 0) {
 		/* Parent */
-		vm->vm_pid = ret;
+		vm->vm_pid = vm_pid;
 		close(fds[1]);
 
 		for (i = 0 ; i < vcp->vcp_ndisks; i++) {
@@ -670,9 +676,14 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 		}
 
 		/* Read back the kernel-generated vm id from the child */
-		if (read(fds[0], &vcp->vcp_id, sizeof(vcp->vcp_id)) !=
-		    sizeof(vcp->vcp_id))
-			fatal("read vcp id");
+		sz = atomicio(read, fds[0], &vcp->vcp_id, sizeof(vcp->vcp_id));
+		if (sz != sizeof(vcp->vcp_id)) {
+			log_debug("%s: failed to receive vm id from vm %s",
+			    __func__, vcp->vcp_name);
+			/* vmd could not allocate memory for the vm. */
+			ret = ENOMEM;
+			goto err;
+		}
 
 		if (vcp->vcp_id == 0)
 			goto err;
@@ -768,7 +779,7 @@ get_info_vm(struct privsep *ps, struct imsg *imsg, int terminate)
 		if (terminate) {
 			vtp.vtp_vm_id = info[i].vir_id;
 			if ((ret = terminate_vm(&vtp)) != 0)
-				return (ret);
+				break;
 			log_debug("%s: terminated vm %s (id %d)", __func__,
 			    info[i].vir_name, info[i].vir_id);
 			continue;
@@ -777,10 +788,12 @@ get_info_vm(struct privsep *ps, struct imsg *imsg, int terminate)
 		vir.vir_info.vir_id = vm_id2vmid(info[i].vir_id, NULL);
 		if (proc_compose_imsg(ps, PROC_PARENT, -1,
 		    IMSG_VMDOP_GET_INFO_VM_DATA, imsg->hdr.peerid, -1,
-		    &vir, sizeof(vir)) == -1)
-			return (EIO);
+		    &vir, sizeof(vir)) == -1) {
+			ret = EIO;
+			break;
+		}
 	}
 	free(info);
 
-	return (0);
+	return (ret);
 }

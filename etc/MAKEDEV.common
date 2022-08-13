@@ -1,4 +1,4 @@
-vers(a, {-$OpenBSD: MAKEDEV.common,v 1.113 2021/02/12 10:26:33 jsg Exp $-})dnl
+vers(a, {-$OpenBSD: MAKEDEV.common,v 1.115 2022/01/07 01:13:15 jsg Exp $-})dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
 dnl
@@ -354,10 +354,6 @@ _mkdev(dri, dri, {-RMlist[${#RMlist[*]}]=";mkdir -p dri;rm -f"
 		n=Add($n, 1)
 	done
 	MKlist[${#MKlist[*]}]=";chmod 555 dri"-})dnl
-__devitem(drm, drm*, {-Direct Rendering Manager-})dnl
-_mkdev(drm, drm*, {-M drm$U c major_drm_c $U 600
-	r=Add($U, 128)
-	M drmR$r c major_drm_c $r 600-})dnl
 __devtitle(prn, Printers)dnl
 __devitem(lpt, lpt*, IEEE 1284 centronics printer)dnl
 _mkdev(lpt, lpt*|lpa*,
@@ -466,12 +462,10 @@ _mkdev(bpf, bpf, {-M bpf c major_bpf_c 0 600
 	M bpf0 c major_bpf_c 0 600-})dnl
 _mkdev(tun, {-tun*-}, {-M tun$U c major_tun_c $U 600-}, 600)dnl
 _mkdev(tap, {-tap*-}, {-M tap$U c major_tap_c $U 600-}, 600)dnl
-_mkdev(switch, {-switch*-}, {-M switch$U c major_switch_c $U 600-}, 600)dnl
 __devitem(speak, speaker, PC speaker,spkr)dnl
 _mkdev(speak, speaker, {-M speaker c major_speak_c 0 600-})dnl
 __devitem(tun, tun*, Network tunnel driver)dnl
 __devitem(tap, tap*, Ethernet tunnel driver)dnl
-__devitem(switch, switch*, Switch driver)dnl
 __devitem(rnd, *random, In-kernel random data source,random)dnl
 _mkdev(rnd, *random, {-M urandom c major_rnd_c 0 644
 	RMlist[${#RMlist[*]}]=random

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pluart_fdt.c,v 1.3 2019/04/22 10:18:20 kettenis Exp $	*/
+/*	$OpenBSD: pluart_fdt.c,v 1.8 2022/06/27 13:03:32 anton Exp $	*/
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2005 Dale Rahn <drahn@dalerahn.com>
@@ -27,12 +27,13 @@
 
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_clock.h>
 #include <dev/ofw/ofw_pinctrl.h>
 
 int	pluart_fdt_match(struct device *, void *, void *);
 void	pluart_fdt_attach(struct device *, struct device *, void *);
 
-struct cfattach pluart_fdt_ca = {
+const struct cfattach pluart_fdt_ca = {
 	sizeof(struct pluart_softc), pluart_fdt_match, pluart_fdt_attach
 };
 
@@ -63,11 +64,23 @@ pluart_fdt_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct fdt_attach_args *faa = aux;
 	struct pluart_softc *sc = (struct pluart_softc *) self;
+	uint32_t periphid;
 
 	if (faa->fa_nreg < 1) {
 		printf(": no registers\n");
 		return;
 	}
+
+	if (OF_is_compatible(faa->fa_node, "arm,sbsa-uart")) {
+		sc->sc_hwflags |= COM_HW_SBSA;
+	} else {
+		clock_enable_all(faa->fa_node);
+		sc->sc_clkfreq = clock_get_frequency(faa->fa_node, "uartclk");
+	}
+
+	periphid = OF_getpropint(faa->fa_node, "arm,primecell-periphid", 0);
+	if (periphid != 0)
+		sc->sc_hwrev = (periphid >> 20) & 0x0f;
 
 	sc->sc_irq = fdt_intr_establish(faa->fa_node, IPL_TTY, pluart_intr,
 	    sc, sc->sc_dev.dv_xname);

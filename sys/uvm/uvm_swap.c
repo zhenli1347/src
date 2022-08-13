@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_swap.c,v 1.150 2021/03/26 13:40:05 mpi Exp $	*/
+/*	$OpenBSD: uvm_swap.c,v 1.163 2022/08/06 13:44:04 semarie Exp $	*/
 /*	$NetBSD: uvm_swap.c,v 1.40 2000/11/17 11:39:39 mrg Exp $	*/
 
 /*
@@ -43,6 +43,7 @@
 #include <sys/vnode.h>
 #include <sys/fcntl.h>
 #include <sys/extent.h>
+#include <sys/blist.h>
 #include <sys/mount.h>
 #include <sys/pool.h>
 #include <sys/syscallargs.h>
@@ -52,7 +53,6 @@
 #include <sys/pledge.h>
 #if defined(NFSCLIENT)
 #include <sys/socket.h>
-#include <sys/domain.h>
 #include <netinet/in.h>
 #include <nfs/nfsproto.h>
 #include <nfs/nfsdiskless.h>
@@ -137,8 +137,7 @@ struct swapdev {
 	int			swd_npgbad;	/* #pages bad */
 	int			swd_drumoffset;	/* page0 offset in drum */
 	int			swd_drumsize;	/* #pages in drum */
-	struct extent		*swd_ex;	/* extent for this swapdev */
-	char			swd_exname[12];	/* name of extent above */
+	blist_t			swd_blist;	/* blist for this swapdev */
 	struct vnode		*swd_vp;	/* backing vnode */
 	TAILQ_ENTRY(swapdev)	swd_next;	/* priority tailq */
 
@@ -214,6 +213,10 @@ struct swap_priority swap_priority;
 /* locks */
 struct rwlock swap_syscall_lock = RWLOCK_INITIALIZER("swplk");
 
+struct mutex oommtx = MUTEX_INITIALIZER(IPL_VM);
+struct vm_page *oompps[SWCLUSTPAGES];
+int oom = 0;
+
 /*
  * prototypes
  */
@@ -236,7 +239,7 @@ void sw_reg_start(struct swapdev *);
 int uvm_swap_io(struct vm_page **, int, int, int);
 
 void swapmount(void);
-boolean_t uvm_swap_allocpages(struct vm_page **, int);
+int uvm_swap_allocpages(struct vm_page **, int, int);
 
 #ifdef UVM_SWAP_ENCRYPT
 /* for swap encrypt */
@@ -254,6 +257,8 @@ void uvm_swap_initcrypt(struct swapdev *, int);
 void
 uvm_swap_init(void)
 {
+	int error;
+
 	/*
 	 * first, init the swap list, its counter, and its lock.
 	 * then get a handle on the vnode for /dev/drum by using
@@ -281,6 +286,10 @@ uvm_swap_init(void)
 	    "swp vnx", NULL);
 	pool_init(&vndbuf_pool, sizeof(struct vndbuf), 0, IPL_BIO, 0,
 	    "swp vnd", NULL);
+
+	/* allocate pages for OOM situations. */
+	error = uvm_swap_allocpages(oompps, SWCLUSTPAGES, UVM_PLA_NOWAIT);
+	KASSERT(error == 0);
 
 	/* Setup the initial swap partition */
 	swapmount();
@@ -324,27 +333,35 @@ uvm_swap_initcrypt(struct swapdev *sdp, int npages)
 
 #endif /* UVM_SWAP_ENCRYPT */
 
-boolean_t
-uvm_swap_allocpages(struct vm_page **pps, int npages)
+int
+uvm_swap_allocpages(struct vm_page **pps, int npages, int flags)
 {
 	struct pglist	pgl;
-	int i;
-	boolean_t fail;
+	int error, i;
 
-	/* Estimate if we will succeed */
-	uvm_lock_fpageq();
-
-	fail = uvmexp.free - npages < uvmexp.reserve_kernel;
-
-	uvm_unlock_fpageq();
-
-	if (fail)
-		return FALSE;
+	KASSERT(npages <= SWCLUSTPAGES);
 
 	TAILQ_INIT(&pgl);
-	if (uvm_pglistalloc(npages * PAGE_SIZE, dma_constraint.ucr_low,
-	    dma_constraint.ucr_high, 0, 0, &pgl, npages, UVM_PLA_NOWAIT))
-		return FALSE;
+again:
+	error = uvm_pglistalloc(npages * PAGE_SIZE, dma_constraint.ucr_low,
+	    dma_constraint.ucr_high, 0, 0, &pgl, npages, flags);
+	if (error && (curproc == uvm.pagedaemon_proc)) {
+		mtx_enter(&oommtx);
+		if (oom) {
+			msleep_nsec(&oom, &oommtx, PVM | PNORELOCK,
+			 "oom", INFSLP);
+			goto again;
+		}
+		oom = 1;
+		for (i = 0; i < npages; i++) {
+			pps[i] = oompps[i];
+			atomic_setbits_int(&pps[i]->pg_flags, PG_BUSY);
+		}
+		mtx_leave(&oommtx);
+		return 0;
+	}
+	if (error)
+		return error;
 
 	for (i = 0; i < npages; i++) {
 		pps[i] = TAILQ_FIRST(&pgl);
@@ -353,7 +370,7 @@ uvm_swap_allocpages(struct vm_page **pps, int npages)
 		TAILQ_REMOVE(&pgl, pps[i], pageq);
 	}
 
-	return TRUE;
+	return 0;
 }
 
 void
@@ -361,10 +378,23 @@ uvm_swap_freepages(struct vm_page **pps, int npages)
 {
 	int i;
 
+	if (pps[0] == oompps[0]) {
+		for (i = 0; i < npages; i++)
+			uvm_pageclean(pps[i]);
+
+		mtx_enter(&oommtx);
+		KASSERT(oom == 1);
+		oom = 0;
+		mtx_leave(&oommtx);
+		wakeup(&oom);
+		return;
+	}
+
 	uvm_lock_pageq();
 	for (i = 0; i < npages; i++)
 		uvm_pagefree(pps[i]);
 	uvm_unlock_pageq();
+
 }
 
 #ifdef UVM_SWAP_ENCRYPT
@@ -455,8 +485,8 @@ swaplist_insert(struct swapdev *sdp, struct swappri *newspp, int priority)
 	/*
 	 * find entry at or after which to insert the new device.
 	 */
-	for (pspp = NULL, spp = LIST_FIRST(&swap_priority); spp != NULL;
-	     spp = LIST_NEXT(spp, spi_swappri)) {
+	pspp = NULL;
+	LIST_FOREACH(spp, &swap_priority, spi_swappri) {
 		if (priority <= spp->spi_priority)
 			break;
 		pspp = spp;
@@ -607,6 +637,9 @@ sys_swapctl(struct proc *p, void *v, register_t *retval)
 
 	misc = SCARG(uap, misc);
 
+	if ((error = pledge_swapctl(p, SCARG(uap, cmd))))
+		return error;
+
 	/*
 	 * ensure serialized syscall access by grabbing the swap_syscall_lock
 	 */
@@ -666,7 +699,7 @@ sys_swapctl(struct proc *p, void *v, register_t *retval)
 	}
 
 	/* all other requests require superuser privs.   verify. */
-	if ((error = suser(p)) || (error = pledge_swapctl(p)))
+	if ((error = suser(p)))
 		goto out;
 
 	/*
@@ -814,7 +847,6 @@ out:
 int
 swap_on(struct proc *p, struct swapdev *sdp)
 {
-	static int count = 0;	/* static */
 	struct vnode *vp;
 	int error, npages, nblocks, size;
 	long addr;
@@ -932,30 +964,20 @@ swap_on(struct proc *p, struct swapdev *sdp)
 	}
 
 	/*
-	 * now we need to allocate an extent to manage this swap device
+	 * now we need to allocate a blist to manage this swap device
 	 */
-	snprintf(sdp->swd_exname, sizeof(sdp->swd_exname), "swap0x%04x",
-	    count++);
+	sdp->swd_blist = blist_create(npages);
+	/* mark all expect the `saved' region free. */
+	blist_free(sdp->swd_blist, addr, size);
 
-	/* note that extent_create's 3rd arg is inclusive, thus "- 1" */
-	sdp->swd_ex = extent_create(sdp->swd_exname, 0, npages - 1, M_VMSWAP,
-				    0, 0, EX_WAITOK);
-	/* allocate the `saved' region from the extent so it won't be used */
-	if (addr) {
-		if (extent_alloc_region(sdp->swd_ex, 0, addr, EX_WAITOK))
-			panic("disklabel reserve");
-		/* XXX: is extent synchronized with swd_npginuse? */
-	}
 #ifdef HIBERNATE
 	/*
 	 * Lock down the last region of primary disk swap, in case
 	 * hibernate needs to place a signature there.
 	 */
 	if (dev == swdevt[0].sw_dev && vp->v_type == VBLK && size > 3 ) {
-		if (extent_alloc_region(sdp->swd_ex,
-		    npages - 1 - 1, 1, EX_WAITOK))
+		if (blist_fill(sdp->swd_blist, npages - 1, 1) != 1)
 			panic("hibernate reserve");
-		/* XXX: is extent synchronized with swd_npginuse? */
 	}
 #endif
 
@@ -1040,7 +1062,7 @@ swap_off(struct proc *p, struct swapdev *sdp)
 	 */
 	extent_free(swapmap, sdp->swd_drumoffset, sdp->swd_drumsize,
 		    EX_WAITOK);
-	extent_destroy(sdp->swd_ex);
+	blist_destroy(sdp->swd_blist);
 	/* free sdp->swd_path ? */
 	free(sdp, M_VMSWAP, sizeof(*sdp));
 	return (0);
@@ -1099,7 +1121,7 @@ swstrategy(struct buf *bp)
 
 		bp->b_blkno = bn;
       		splx(s);
-		VOP_STRATEGY(bp);
+		VOP_STRATEGY(bp->b_vp, bp);
 		return;
 	case VREG:
 		/* delegate to sw_reg_strategy function. */
@@ -1299,7 +1321,7 @@ sw_reg_start(struct swapdev *sdp)
 		if ((bp->b_flags & B_READ) == 0)
 			bp->b_vp->v_numoutput++;
 
-		VOP_STRATEGY(bp);
+		VOP_STRATEGY(bp->b_vp, bp);
 	}
 	sdp->swd_flags &= ~SWF_BUSY;
 }
@@ -1392,7 +1414,6 @@ uvm_swap_alloc(int *nslots, boolean_t lessok)
 {
 	struct swapdev *sdp;
 	struct swappri *spp;
-	u_long	result;
 
 	/*
 	 * no swap devices configured yet?   definite failure.
@@ -1407,16 +1428,18 @@ uvm_swap_alloc(int *nslots, boolean_t lessok)
 ReTry:	/* XXXMRG */
 	LIST_FOREACH(spp, &swap_priority, spi_swappri) {
 		TAILQ_FOREACH(sdp, &spp->spi_swapdev, swd_next) {
+			swblk_t result;
+
 			/* if it's not enabled, then we can't swap from it */
 			if ((sdp->swd_flags & SWF_ENABLE) == 0)
 				continue;
 			if (sdp->swd_npginuse + *nslots > sdp->swd_npages)
 				continue;
-			if (extent_alloc(sdp->swd_ex, *nslots, EX_NOALIGN, 0,
-					 EX_NOBOUNDARY, EX_MALLOCOK|EX_NOWAIT,
-					 &result) != 0) {
+			result = blist_alloc(sdp->swd_blist, *nslots);
+			if (result == SWAPBLK_NONE) {
 				continue;
 			}
+			KASSERT(result < sdp->swd_drumsize);
 
 			/*
 			 * successful allocation!  now rotate the tailq.
@@ -1433,7 +1456,8 @@ ReTry:	/* XXXMRG */
 	/* XXXMRG: BEGIN HACK */
 	if (*nslots > 1 && lessok) {
 		*nslots = 1;
-		goto ReTry;	/* XXXMRG: ugh!  extent should support this for us */
+		/* XXXMRG: ugh!  blist should support this for us */
+		goto ReTry;
 	}
 	/* XXXMRG: END HACK */
 
@@ -1510,12 +1534,7 @@ uvm_swap_free(int startslot, int nslots)
 	KASSERT(uvmexp.nswapdev >= 1);
 	KASSERT(sdp != NULL);
 	KASSERT(sdp->swd_npginuse >= nslots);
-	if (extent_free(sdp->swd_ex, startslot - sdp->swd_drumoffset, nslots,
-			EX_MALLOCOK|EX_NOWAIT) != 0) {
-		printf("warning: resource shortage: %d pages of swap lost\n",
-			nslots);
-	}
-
+	blist_free(sdp->swd_blist, startslot - sdp->swd_drumoffset, nslots);
 	sdp->swd_npginuse -= nslots;
 	uvmexp.swpginuse -= nslots;
 #ifdef UVM_SWAP_ENCRYPT
@@ -1573,17 +1592,15 @@ uvm_swap_get(struct vm_page *page, int swslot, int flags)
 	}
 
 	KERNEL_LOCK();
-	/* this page is (about to be) no longer only in swap. */
-	atomic_dec_int(&uvmexp.swpgonly);
-
-	result = uvm_swap_io(&page, swslot, 1, B_READ |
-	    ((flags & PGO_SYNCIO) ? 0 : B_ASYNC));
-
-	if (result != VM_PAGER_OK && result != VM_PAGER_PEND) {
-		/* oops, the read failed so it really is still only in swap. */
-		atomic_inc_int(&uvmexp.swpgonly);
-	}
+	result = uvm_swap_io(&page, swslot, 1, B_READ);
 	KERNEL_UNLOCK();
+
+	if (result == VM_PAGER_OK || result == VM_PAGER_PEND) {
+		/*
+		 * this page is no longer only in swap.
+		 */
+		atomic_dec_int(&uvmexp.swpgonly);
+	}
 	return (result);
 }
 
@@ -1600,7 +1617,8 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 	int	result, s, mapinflags, pflag, bounce = 0, i;
 	boolean_t write, async;
 	vaddr_t bouncekva;
-	struct vm_page *tpps[MAXBSIZE >> PAGE_SHIFT];
+	struct vm_page *tpps[SWCLUSTPAGES];
+	int pdaemon = (curproc == uvm.pagedaemon_proc);
 #ifdef UVM_SWAP_ENCRYPT
 	struct swapdev *sdp;
 	int	encrypt = 0;
@@ -1614,16 +1632,23 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 	/* convert starting drum slot to block number */
 	startblk = btodb((u_int64_t)startslot << PAGE_SHIFT);
 
+	pflag = (async || pdaemon) ? PR_NOWAIT : PR_WAITOK;
+	bp = pool_get(&bufpool, pflag | PR_ZERO);
+	if (bp == NULL)
+		return (VM_PAGER_AGAIN);
+
 	/*
-	 * first, map the pages into the kernel (XXX: currently required
+	 * map the pages into the kernel (XXX: currently required
 	 * by buffer system).
 	 */
 	mapinflags = !write ? UVMPAGER_MAPIN_READ : UVMPAGER_MAPIN_WRITE;
 	if (!async)
 		mapinflags |= UVMPAGER_MAPIN_WAITOK;
 	kva = uvm_pagermapin(pps, npages, mapinflags);
-	if (kva == 0)
+	if (kva == 0) {
+		pool_put(&bufpool, bp);
 		return (VM_PAGER_AGAIN);
+	}
 
 #ifdef UVM_SWAP_ENCRYPT
 	if (write) {
@@ -1671,20 +1696,24 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 	}
 
 	if (bounce)  {
-		int swmapflags;
+		int swmapflags, plaflags;
 
 		/* We always need write access. */
 		swmapflags = UVMPAGER_MAPIN_READ;
-		if (!async)
+		plaflags = UVM_PLA_NOWAIT;
+		if (!async) {
 			swmapflags |= UVMPAGER_MAPIN_WAITOK;
-
-		if (!uvm_swap_allocpages(tpps, npages)) {
+			plaflags = UVM_PLA_WAITOK;
+		}
+		if (uvm_swap_allocpages(tpps, npages, plaflags)) {
+			pool_put(&bufpool, bp);
 			uvm_pagermapout(kva, npages);
 			return (VM_PAGER_AGAIN);
 		}
 
 		bouncekva = uvm_pagermapin(tpps, npages, swmapflags);
 		if (bouncekva == 0) {
+			pool_put(&bufpool, bp);
 			uvm_pagermapout(kva, npages);
 			uvm_swap_freepages(tpps, npages);
 			return (VM_PAGER_AGAIN);
@@ -1730,35 +1759,6 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 				      PGO_PDFREECLUST);
 
 		kva = bouncekva;
-	}
-
-	/*
-	 * now allocate a buf for the i/o.
-	 * [make sure we don't put the pagedaemon to sleep...]
-	 */
-	pflag = (async || curproc == uvm.pagedaemon_proc) ? PR_NOWAIT :
-	    PR_WAITOK;
-	bp = pool_get(&bufpool, pflag | PR_ZERO);
-
-	/*
-	 * if we failed to get a swapbuf, return "try again"
-	 */
-	if (bp == NULL) {
-		if (write && bounce) {
-#ifdef UVM_SWAP_ENCRYPT
-			int i;
-
-			/* swap encrypt needs cleanup */
-			if (encrypt)
-				for (i = 0; i < npages; i++)
-					SWAP_KEY_PUT(sdp, SWD_KEY(sdp,
-					    startslot + i));
-#endif
-
-			uvm_pagermapout(kva, npages);
-			uvm_swap_freepages(tpps, npages);
-		}
-		return (VM_PAGER_AGAIN);
 	}
 
 	/*
@@ -1811,13 +1811,12 @@ uvm_swap_io(struct vm_page **pps, int startslot, int npages, int flags)
 
 	/* for async ops we must set up the iodone handler. */
 	if (async) {
-		bp->b_flags |= B_CALL | (curproc == uvm.pagedaemon_proc ?
-					 B_PDAEMON : 0);
+		bp->b_flags |= B_CALL | (pdaemon ? B_PDAEMON : 0);
 		bp->b_iodone = uvm_aio_biodone;
 	}
 
 	/* now we start the I/O, and if async, return. */
-	VOP_STRATEGY(bp);
+	VOP_STRATEGY(bp->b_vp, bp);
 	if (async)
 		return (VM_PAGER_PEND);
 
@@ -1953,8 +1952,6 @@ uvm_hibswap(dev_t dev, u_long *sp, u_long *ep)
 {
 	struct swapdev *sdp, *swd = NULL;
 	struct swappri *spp;
-	struct extent_region *exr, *exrn;
-	u_long start = 0, end = 0, size = 0;
 
 	/* no swap devices configured yet? */
 	if (uvmexp.nswapdev < 1 || dev != swdevt[0].sw_dev)
@@ -1970,27 +1967,48 @@ uvm_hibswap(dev_t dev, u_long *sp, u_long *ep)
 	if (swd == NULL || (swd->swd_flags & SWF_ENABLE) == 0)
 		return (1);
 
-	LIST_FOREACH(exr, &swd->swd_ex->ex_regions, er_link) {
-		u_long gapstart, gapend, gapsize;
-	
-		gapstart = exr->er_end + 1;
-		exrn = LIST_NEXT(exr, er_link);
-		if (!exrn)
-			break;
-		gapend = exrn->er_start - 1;
-		gapsize = gapend - gapstart;
-		if (gapsize > size) {
-			start = gapstart;
-			end = gapend;
-			size = gapsize;
-		}
-	}
+	blist_gapfind(swd->swd_blist, sp, ep);
 
-	if (size) {
-		*sp = start;
-		*ep = end;
-		return (0);
-	}
-	return (1);
+	if (*ep - *sp == 0)
+		/* no gap found */
+		return (1);
+
+	/*
+	 * blist_gapfind returns the gap as [sp,ep[ ,
+	 * whereas [sp,ep] is expected from uvm_hibswap().
+	 */
+	*ep -= 1;
+
+	return (0);
 }
 #endif /* HIBERNATE */
+
+#ifdef DDB
+void
+swap_print_all(int (*pr)(const char *, ...))
+{
+	struct swappri *spp;
+	struct swapdev *sdp;
+
+	LIST_FOREACH(spp, &swap_priority, spi_swappri) {
+		TAILQ_FOREACH(sdp, &spp->spi_swapdev, swd_next) {
+#ifdef HIBERNATE
+			u_long bgap = 0, egap = 0;
+#endif
+
+			pr("swap %p path \"%s\" flags 0x%x\n", sdp,
+			    sdp->swd_path, sdp->swd_flags);
+
+			blist_print(sdp->swd_blist);
+
+#ifdef HIBERNATE
+			if (!uvm_hibswap(sdp->swd_dev, &bgap, &egap))
+				pr("hibernate gap: [0x%lx, 0x%lx] size=%lu\n",
+				    bgap, egap, (egap - bgap + 1));
+			else
+				pr("hibernate gap: not found\n");
+#endif
+		}
+	}
+}
+#endif /* DDB */

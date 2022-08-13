@@ -1,4 +1,4 @@
-/*	$OpenBSD: video.c,v 1.54 2021/02/17 17:21:58 mglocker Exp $	*/
+/*	$OpenBSD: video.c,v 1.57 2022/07/02 08:50:41 visa Exp $	*/
 
 /*
  * Copyright (c) 2008 Robert Nagy <robert@openbsd.org>
@@ -22,7 +22,6 @@
 #include <sys/errno.h>
 #include <sys/ioctl.h>
 #include <sys/fcntl.h>
-#include <sys/poll.h>
 #include <sys/device.h>
 #include <sys/vnode.h>
 #include <sys/kernel.h>
@@ -46,7 +45,7 @@ struct video_softc {
 	struct device		 dev;
 	void			*hw_hdl;	/* hardware driver handle */
 	struct device		*sc_dev;	/* hardware device struct */
-	struct video_hw_if	*hw_if;		/* hardware interface */
+	const struct video_hw_if *hw_if;	/* hardware interface */
 	char			 sc_dying;	/* device detached */
 	struct process		*sc_owner;	/* owner process */
 	uint8_t			 sc_open;	/* device opened */
@@ -74,7 +73,7 @@ void	video_intr(void *);
 int	video_stop(struct video_softc *);
 int	video_claim(struct video_softc *, struct process *);
 
-struct cfattach video_ca = {
+const struct cfattach video_ca = {
 	sizeof(struct video_softc), videoprobe, videoattach,
 	videodetach, videoactivate
 };
@@ -390,54 +389,6 @@ videoioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 	return (error);
 }
 
-int
-videopoll(dev_t dev, int events, struct proc *p)
-{
-	int unit = VIDEOUNIT(dev);
-	struct video_softc *sc;
-	int error, revents = 0;
-
-	KERNEL_ASSERT_LOCKED();
-
-	if (unit >= video_cd.cd_ndevs ||
-	    (sc = video_cd.cd_devs[unit]) == NULL)
-		return (POLLERR);
-
-	if (sc->sc_dying)
-		return (POLLERR);
-
-	if ((error = video_claim(sc, p->p_p)))
-		return (error);
-
-	DPRINTF(1, "%s: events=0x%x\n", __func__, events);
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (sc->sc_frames_ready > 0)
-			revents |= events & (POLLIN | POLLRDNORM);
-	}
-	if (revents == 0) {
-		if (events & (POLLIN | POLLRDNORM)) {
-			/*
-			 * Start the stream in read() mode if not already
-			 * started.  If the user wanted mmap() mode,
-			 * he should have called mmap() before now.
-			 */
-			if (sc->sc_vidmode == VIDMODE_NONE &&
-			    sc->hw_if->start_read) {
-				error = sc->hw_if->start_read(sc->hw_hdl);
-				if (error)
-					return (POLLERR);
-				sc->sc_vidmode = VIDMODE_READ;
-			}
-			selrecord(p, &sc->sc_rsel);
-		}
-	}
-
-	DPRINTF(1, "%s: revents=0x%x\n", __func__, revents);
-
-	return (revents);
-}
-
 paddr_t
 videommap(dev_t dev, off_t off, int prot)
 {
@@ -562,7 +513,7 @@ video_submatch(struct device *parent, void *match, void *aux)
  * probed/attached to the hardware driver
  */
 struct device *
-video_attach_mi(struct video_hw_if *rhwp, void *hdlp, struct device *dev)
+video_attach_mi(const struct video_hw_if *rhwp, void *hdlp, struct device *dev)
 {
 	struct video_attach_args arg;
 

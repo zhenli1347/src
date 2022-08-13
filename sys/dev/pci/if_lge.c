@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_lge.c,v 1.76 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_lge.c,v 1.78 2022/03/11 18:00:45 mpi Exp $	*/
 /*
  * Copyright (c) 2001 Wind River Systems
  * Copyright (c) 1997, 1998, 1999, 2000, 2001
@@ -112,7 +112,7 @@
 int lge_probe(struct device *, void *, void *);
 void lge_attach(struct device *, struct device *, void *);
 
-struct cfattach lge_ca = {
+const struct cfattach lge_ca = {
 	sizeof(struct lge_softc), lge_probe, lge_attach
 };
 
@@ -1086,7 +1086,7 @@ lge_init(void *xsc)
 
 	/*
 	 * Enable the delivery of PHY interrupts based on
-	 * link/speed/duplex status chalges.
+	 * link/speed/duplex status changes.
 	 */
 	CSR_WRITE_4(sc, LGE_MODE1, LGE_MODE1_SETRST_CTL0|LGE_MODE1_GMIIPOLL);
 

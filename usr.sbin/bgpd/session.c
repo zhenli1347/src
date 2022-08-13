@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.c,v 1.424 2021/09/03 07:48:24 claudio Exp $ */
+/*	$OpenBSD: session.c,v 1.432 2022/07/28 13:11:51 deraadt Exp $ */
 
 /*
  * Copyright (c) 2003, 2004, 2005 Henning Brauer <henning@openbsd.org>
@@ -66,38 +66,38 @@ void	session_accept(int);
 int	session_connect(struct peer *);
 void	session_tcp_established(struct peer *);
 void	session_capa_ann_none(struct peer *);
-int	session_capa_add(struct ibuf *, u_int8_t, u_int8_t);
-int	session_capa_add_mp(struct ibuf *, u_int8_t);
-int	session_capa_add_afi(struct peer *, struct ibuf *, u_int8_t, u_int8_t);
-struct bgp_msg	*session_newmsg(enum msg_type, u_int16_t);
+int	session_capa_add(struct ibuf *, uint8_t, uint8_t);
+int	session_capa_add_mp(struct ibuf *, uint8_t);
+int	session_capa_add_afi(struct peer *, struct ibuf *, uint8_t, uint8_t);
+struct bgp_msg	*session_newmsg(enum msg_type, uint16_t);
 int	session_sendmsg(struct bgp_msg *, struct peer *);
 void	session_open(struct peer *);
 void	session_keepalive(struct peer *);
-void	session_update(u_int32_t, void *, size_t);
-void	session_notification(struct peer *, u_int8_t, u_int8_t, void *,
+void	session_update(uint32_t, void *, size_t);
+void	session_notification(struct peer *, uint8_t, uint8_t, void *,
 	    ssize_t);
-void	session_rrefresh(struct peer *, u_int8_t, u_int8_t);
+void	session_rrefresh(struct peer *, uint8_t, uint8_t);
 int	session_graceful_restart(struct peer *);
 int	session_graceful_stop(struct peer *);
 int	session_dispatch_msg(struct pollfd *, struct peer *);
 void	session_process_msg(struct peer *);
-int	parse_header(struct peer *, u_char *, u_int16_t *, u_int8_t *);
+int	parse_header(struct peer *, u_char *, uint16_t *, uint8_t *);
 int	parse_open(struct peer *);
 int	parse_update(struct peer *);
 int	parse_rrefresh(struct peer *);
 int	parse_notification(struct peer *);
-int	parse_capabilities(struct peer *, u_char *, u_int16_t, u_int32_t *);
-int	capa_neg_calc(struct peer *);
+int	parse_capabilities(struct peer *, u_char *, uint16_t, uint32_t *);
+int	capa_neg_calc(struct peer *, uint8_t *);
 void	session_dispatch_imsg(struct imsgbuf *, int, u_int *);
 void	session_up(struct peer *);
 void	session_down(struct peer *);
-int	imsg_rde(int, u_int32_t, void *, u_int16_t);
+int	imsg_rde(int, uint32_t, void *, uint16_t);
 void	session_demote(struct peer *, int);
 void	merge_peers(struct bgpd_config *, struct bgpd_config *);
 
 int		 la_cmp(struct listen_addr *, struct listen_addr *);
 void		 session_template_clone(struct peer *, struct sockaddr *,
-		    u_int32_t, u_int32_t);
+		    uint32_t, uint32_t);
 int		 session_match_mask(struct peer *, struct bgpd_addr *);
 
 static struct bgpd_config	*conf, *nconf;
@@ -288,7 +288,7 @@ session_main(int debug, int verbose)
 		if (peer_cnt > peer_l_elms) {
 			if ((newp = reallocarray(peer_l, peer_cnt,
 			    sizeof(struct peer *))) == NULL) {
-				/* panic for now  */
+				/* panic for now */
 				log_warn("could not resize peer_l from %u -> %u"
 				    " entries", peer_l_elms, peer_cnt);
 				fatalx("exiting");
@@ -313,7 +313,7 @@ session_main(int debug, int verbose)
 		if (mrt_cnt > mrt_l_elms) {
 			if ((newp = reallocarray(mrt_l, mrt_cnt,
 			    sizeof(struct mrt *))) == NULL) {
-				/* panic for now  */
+				/* panic for now */
 				log_warn("could not resize mrt_l from %u -> %u"
 				    " entries", mrt_l_elms, mrt_cnt);
 				fatalx("exiting");
@@ -327,7 +327,7 @@ session_main(int debug, int verbose)
 		if (new_cnt > pfd_elms) {
 			if ((newp = reallocarray(pfd, new_cnt,
 			    sizeof(struct pollfd))) == NULL) {
-				/* panic for now  */
+				/* panic for now */
 				log_warn("could not resize pfd from %u -> %u"
 				    " entries", pfd_elms, new_cnt);
 				fatalx("exiting");
@@ -452,9 +452,11 @@ session_main(int debug, int verbose)
 			timeout = 1;
 		if (timeout < 0)
 			timeout = 0;
-		if (poll(pfd, i, timeout * 1000) == -1)
-			if (errno != EINTR)
-				fatal("poll error");
+		if (poll(pfd, i, timeout * 1000) == -1) {
+			if (errno == EINTR)
+				continue;
+			fatal("poll error");
+		}
 
 		/*
 		 * If we previously saw fd exhaustion, we stop accept()
@@ -567,7 +569,7 @@ init_peer(struct peer *p)
 	p->fd = p->wbuf.fd = -1;
 
 	if (p->conf.if_depend[0])
-		imsg_compose(ibuf_main, IMSG_IFINFO, 0, 0, -1,
+		imsg_compose(ibuf_main, IMSG_SESSION_DEPENDON, 0, 0, -1,
 		    p->conf.if_depend, sizeof(p->conf.if_depend));
 	else
 		p->depend_ok = 1;
@@ -1099,7 +1101,7 @@ session_connect(struct peer *peer)
 		return (-1);
 	}
 
-	sa = addr2sa(&peer->conf.remote_addr, BGP_PORT, &sa_len);
+	sa = addr2sa(&peer->conf.remote_addr, peer->conf.remote_port, &sa_len);
 	if (connect(peer->fd, sa, sa_len) == -1) {
 		if (errno != EINPROGRESS) {
 			if (errno != peer->lasterr)
@@ -1302,7 +1304,7 @@ session_capa_ann_none(struct peer *peer)
 }
 
 int
-session_capa_add(struct ibuf *opb, u_int8_t capa_code, u_int8_t capa_len)
+session_capa_add(struct ibuf *opb, uint8_t capa_code, uint8_t capa_len)
 {
 	int errs = 0;
 
@@ -1312,10 +1314,10 @@ session_capa_add(struct ibuf *opb, u_int8_t capa_code, u_int8_t capa_len)
 }
 
 int
-session_capa_add_mp(struct ibuf *buf, u_int8_t aid)
+session_capa_add_mp(struct ibuf *buf, uint8_t aid)
 {
-	u_int8_t		 safi, pad = 0;
-	u_int16_t		 afi;
+	uint8_t			 safi, pad = 0;
+	uint16_t		 afi;
 	int			 errs = 0;
 
 	if (aid2afi(aid, &afi, &safi) == -1)
@@ -1329,12 +1331,12 @@ session_capa_add_mp(struct ibuf *buf, u_int8_t aid)
 }
 
 int
-session_capa_add_afi(struct peer *p, struct ibuf *b, u_int8_t aid,
-    u_int8_t flags)
+session_capa_add_afi(struct peer *p, struct ibuf *b, uint8_t aid,
+    uint8_t flags)
 {
 	u_int		errs = 0;
-	u_int16_t	afi;
-	u_int8_t	safi;
+	uint16_t	afi;
+	uint8_t		safi;
 
 	if (aid2afi(aid, &afi, &safi)) {
 		log_warn("session_capa_add_afi: bad AID");
@@ -1350,7 +1352,7 @@ session_capa_add_afi(struct peer *p, struct ibuf *b, u_int8_t aid,
 }
 
 struct bgp_msg *
-session_newmsg(enum msg_type msgtype, u_int16_t len)
+session_newmsg(enum msg_type msgtype, uint16_t len)
 {
 	struct bgp_msg		*msg;
 	struct msg_header	 hdr;
@@ -1414,8 +1416,8 @@ session_open(struct peer *p)
 	struct bgp_msg		*buf;
 	struct ibuf		*opb;
 	struct msg_open		 msg;
-	u_int16_t		 len, optparamlen = 0;
-	u_int8_t		 i, op_type;
+	uint16_t		 len, optparamlen = 0;
+	uint8_t			 i, op_type;
 	int			 errs = 0, extlen = 0;
 	int			 mpcapa = 0;
 
@@ -1437,10 +1439,16 @@ session_open(struct peer *p)
 	if (p->capa.ann.refresh)	/* no data */
 		errs += session_capa_add(opb, CAPA_REFRESH, 0);
 
+	/* BGP open policy, RFC 9234 */
+	if (p->capa.ann.role_ena) {
+		errs += session_capa_add(opb, CAPA_ROLE, 1);
+		errs += ibuf_add(opb, &p->capa.ann.role, 1);
+	}
+
 	/* graceful restart and End-of-RIB marker, RFC 4724 */
 	if (p->capa.ann.grestart.restart) {
 		int		rst = 0;
-		u_int16_t	hdr = 0;
+		uint16_t	hdr = 0;
 
 		for (i = 0; i < AID_MAX; i++) {
 			if (p->capa.neg.grestart.flags[i] & CAPA_GR_RESTARTING)
@@ -1458,7 +1466,7 @@ session_open(struct peer *p)
 
 	/* 4-bytes AS numbers, RFC6793 */
 	if (p->capa.ann.as4byte) {	/* 4 bytes data */
-		u_int32_t	nas;
+		uint32_t	nas;
 
 		nas = htonl(p->conf.local_as);
 		errs += session_capa_add(opb, CAPA_AS4BYTE, sizeof(nas));
@@ -1467,7 +1475,7 @@ session_open(struct peer *p)
 
 	/* advertisement of multiple paths, RFC7911 */
 	if (p->capa.ann.add_path[0]) {	/* variable */
-		u_int8_t	aplen;
+		uint8_t	aplen;
 
 		if (mpcapa)
 			aplen = 4 * mpcapa;
@@ -1527,7 +1535,7 @@ session_open(struct peer *p)
 
 	if (extlen) {
 		/* write RFC9072 extra header */
-		u_int16_t op_extlen = htons(optparamlen - 3);
+		uint16_t op_extlen = htons(optparamlen - 3);
 		op_type = OPT_PARAM_EXT_LEN;
 		errs += ibuf_add(buf->buf, &op_type, 1);
 		errs += ibuf_add(buf->buf, &op_extlen, 2);
@@ -1540,10 +1548,10 @@ session_open(struct peer *p)
 		optparamlen = ibuf_size(opb);
 		if (extlen) {
 			/* RFC9072: 2-byte extended length */
-			u_int16_t op_extlen = htons(optparamlen);
+			uint16_t op_extlen = htons(optparamlen);
 			errs += ibuf_add(buf->buf, &op_extlen, 2);
 		} else {
-			u_int8_t op_len = optparamlen;
+			uint8_t op_len = optparamlen;
 			errs += ibuf_add(buf->buf, &op_len, 1);
 		}
 		errs += ibuf_add(buf->buf, opb->buf, ibuf_size(opb));
@@ -1582,7 +1590,7 @@ session_keepalive(struct peer *p)
 }
 
 void
-session_update(u_int32_t peerid, void *data, size_t datalen)
+session_update(uint32_t peerid, void *data, size_t datalen)
 {
 	struct peer		*p;
 	struct bgp_msg		*buf;
@@ -1617,7 +1625,7 @@ session_update(u_int32_t peerid, void *data, size_t datalen)
 }
 
 void
-session_notification(struct peer *p, u_int8_t errcode, u_int8_t subcode,
+session_notification(struct peer *p, uint8_t errcode, uint8_t subcode,
     void *data, ssize_t datalen)
 {
 	struct bgp_msg		*buf;
@@ -1667,7 +1675,7 @@ session_notification(struct peer *p, u_int8_t errcode, u_int8_t subcode,
 int
 session_neighbor_rrefresh(struct peer *p)
 {
-	u_int8_t	i;
+	uint8_t	i;
 
 	if (!(p->capa.neg.refresh || p->capa.neg.enhanced_rr))
 		return (-1);
@@ -1681,12 +1689,12 @@ session_neighbor_rrefresh(struct peer *p)
 }
 
 void
-session_rrefresh(struct peer *p, u_int8_t aid, u_int8_t subtype)
+session_rrefresh(struct peer *p, uint8_t aid, uint8_t subtype)
 {
 	struct bgp_msg		*buf;
 	int			 errs = 0;
-	u_int16_t		 afi;
-	u_int8_t		 safi;
+	uint16_t		 afi;
+	uint8_t			 safi;
 
 	switch (subtype) {
 	case ROUTE_REFRESH_REQUEST:
@@ -1737,7 +1745,7 @@ session_rrefresh(struct peer *p, u_int8_t aid, u_int8_t subtype)
 int
 session_graceful_restart(struct peer *p)
 {
-	u_int8_t	i;
+	uint8_t	i;
 
 	timer_set(&p->timers, Timer_RestartTimeout,
 	    p->capa.neg.grestart.timeout);
@@ -1766,7 +1774,7 @@ session_graceful_restart(struct peer *p)
 int
 session_graceful_stop(struct peer *p)
 {
-	u_int8_t	i;
+	uint8_t	i;
 
 	for (i = 0; i < AID_MAX; i++) {
 		/*
@@ -1885,8 +1893,8 @@ session_process_msg(struct peer *p)
 	struct mrt	*mrt;
 	ssize_t		rpos, av, left;
 	int		processed = 0;
-	u_int16_t	msglen;
-	u_int8_t	msgtype;
+	uint16_t	msglen;
+	uint8_t		msgtype;
 
 	rpos = 0;
 	av = p->rbuf->wpos;
@@ -1964,11 +1972,11 @@ session_process_msg(struct peer *p)
 }
 
 int
-parse_header(struct peer *peer, u_char *data, u_int16_t *len, u_int8_t *type)
+parse_header(struct peer *peer, u_char *data, uint16_t *len, uint8_t *type)
 {
 	u_char			*p;
-	u_int16_t		 olen;
-	static const u_int8_t	 marker[MSGSIZE_HEADER_MARKER] = { 0xff, 0xff,
+	uint16_t		 olen;
+	static const uint8_t	 marker[MSGSIZE_HEADER_MARKER] = { 0xff, 0xff,
 				    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
@@ -2063,12 +2071,12 @@ int
 parse_open(struct peer *peer)
 {
 	u_char		*p, *op_val;
-	u_int8_t	 version, rversion;
-	u_int16_t	 short_as, msglen;
-	u_int16_t	 holdtime, oholdtime, myholdtime;
-	u_int32_t	 as, bgpid;
-	u_int16_t	 optparamlen, extlen, plen, op_len;
-	u_int8_t	 op_type;
+	uint8_t		 version, rversion;
+	uint16_t	 short_as, msglen;
+	uint16_t	 holdtime, oholdtime, myholdtime;
+	uint32_t	 as, bgpid;
+	uint16_t	 optparamlen, extlen, plen, op_len;
+	uint8_t		 op_type, suberr = 0;
 
 	p = peer->rbuf->rptr;
 	p += MSGSIZE_HEADER_MARKER;
@@ -2166,7 +2174,7 @@ bad_len:
 			extlen = 1;
 		}
 
-		/* RFC9020 encoding has 3 extra bytes */ 
+		/* RFC9020 encoding has 3 extra bytes */
 		if (optparamlen + 3 * extlen != msglen - MSGSIZE_OPEN_MIN)
 			goto bad_len;
 	}
@@ -2256,10 +2264,8 @@ bad_len:
 		return (-1);
 	}
 
-	if (capa_neg_calc(peer) == -1) {
-		log_peer_warnx(&peer->conf,
-		    "capability negotiation calculation failed");
-		session_notification(peer, ERR_OPEN, 0, NULL, 0);
+	if (capa_neg_calc(peer, &suberr) == -1) {
+		session_notification(peer, ERR_OPEN, suberr, NULL, 0);
 		change_state(peer, STATE_IDLE, EVNT_RCVD_OPEN);
 		return (-1);
 	}
@@ -2271,7 +2277,7 @@ int
 parse_update(struct peer *peer)
 {
 	u_char		*p;
-	u_int16_t	 datalen;
+	uint16_t	 datalen;
 
 	/*
 	 * we pass the message verbatim to the rde.
@@ -2297,8 +2303,8 @@ int
 parse_rrefresh(struct peer *peer)
 {
 	struct route_refresh rr;
-	u_int16_t afi, datalen;
-	u_int8_t aid, safi, subtype;
+	uint16_t afi, datalen;
+	uint8_t aid, safi, subtype;
 	u_char *p;
 
 	p = peer->rbuf->rptr;
@@ -2397,13 +2403,13 @@ int
 parse_notification(struct peer *peer)
 {
 	u_char		*p;
-	u_int16_t	 datalen;
-	u_int8_t	 errcode;
-	u_int8_t	 subcode;
-	u_int8_t	 capa_code;
-	u_int8_t	 capa_len;
+	uint16_t	 datalen;
+	uint8_t		 errcode;
+	uint8_t		 subcode;
+	uint8_t		 capa_code;
+	uint8_t		 capa_len;
 	size_t		 reason_len;
-	u_int8_t	 i;
+	uint8_t		 i;
 
 	/* just log */
 	p = peer->rbuf->rptr;
@@ -2518,14 +2524,14 @@ parse_notification(struct peer *peer)
 			reason_len = *p++;
 			datalen--;
 			if (datalen < reason_len) {
-			    log_peer_warnx(&peer->conf,
-				"received truncated shutdown reason");
-			    return (0);
+				log_peer_warnx(&peer->conf,
+				    "received truncated shutdown reason");
+				return (0);
 			}
 			if (reason_len > REASON_LEN - 1) {
-			    log_peer_warnx(&peer->conf,
-				"received overly long shutdown reason");
-			    return (0);
+				log_peer_warnx(&peer->conf,
+				    "received overly long shutdown reason");
+				return (0);
 			}
 			memcpy(peer->stats.last_reason, p, reason_len);
 			peer->stats.last_reason[reason_len] = '\0';
@@ -2541,19 +2547,19 @@ parse_notification(struct peer *peer)
 }
 
 int
-parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
+parse_capabilities(struct peer *peer, u_char *d, uint16_t dlen, uint32_t *as)
 {
 	u_char		*capa_val;
-	u_int32_t	 remote_as;
-	u_int16_t	 len;
-	u_int16_t	 afi;
-	u_int16_t	 gr_header;
-	u_int8_t	 safi;
-	u_int8_t	 aid;
-	u_int8_t	 flags;
-	u_int8_t	 capa_code;
-	u_int8_t	 capa_len;
-	u_int8_t	 i;
+	uint32_t	 remote_as;
+	uint16_t	 len;
+	uint16_t	 afi;
+	uint16_t	 gr_header;
+	uint8_t		 safi;
+	uint8_t		 aid;
+	uint8_t		 flags;
+	uint8_t		 capa_code;
+	uint8_t		 capa_len;
+	uint8_t		 i;
 
 	len = dlen;
 	while (len > 0) {
@@ -2604,6 +2610,16 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 			break;
 		case CAPA_REFRESH:
 			peer->capa.peer.refresh = 1;
+			break;
+		case CAPA_ROLE:
+			if (capa_len != 1) {
+				log_peer_warnx(&peer->conf,
+				    "Bad open policy capability length: "
+				    "%u", capa_len);
+				break;
+			}
+			peer->capa.peer.role_ena = 1;
+			peer->capa.peer.role = *capa_val;
 			break;
 		case CAPA_RESTART:
 			if (capa_len == 2) {
@@ -2720,9 +2736,9 @@ parse_capabilities(struct peer *peer, u_char *d, u_int16_t dlen, u_int32_t *as)
 }
 
 int
-capa_neg_calc(struct peer *p)
+capa_neg_calc(struct peer *p, uint8_t *suberr)
 {
-	u_int8_t	i, hasmp = 0;
+	uint8_t	i, hasmp = 0;
 
 	/* a capability is accepted only if both sides announced it */
 
@@ -2773,8 +2789,11 @@ capa_neg_calc(struct peer *p)
 				    CAPA_GR_RESTARTING;
 			} else {
 				if (imsg_rde(IMSG_SESSION_FLUSH, p->conf.id,
-				    &i, sizeof(i)) == -1)
+				    &i, sizeof(i)) == -1) {
+					log_peer_warnx(&p->conf,
+					    "imsg send failed");
 					return (-1);
+				}
 				log_peer_warnx(&p->conf, "graceful restart of "
 				    "%s, not restarted, flushing", aid2str(i));
 			}
@@ -2808,6 +2827,53 @@ capa_neg_calc(struct peer *p)
 		}
 	}
 
+	/*
+	 * Open policy: check that the policy is sensible.
+	 *
+	 * Make sure that the roles match and set the negotiated capability
+	 * to the role of the peer. So the RDE can inject the OTC attribute.
+	 * See RFC 9234, section 4.2.
+	 */
+	if (p->capa.ann.role_ena != 0 && p->capa.peer.role_ena != 0) {
+		switch (p->capa.ann.role) {
+		case CAPA_ROLE_PROVIDER:
+			if (p->capa.peer.role != CAPA_ROLE_CUSTOMER)
+				goto fail;
+			break;
+		case CAPA_ROLE_RS:
+			if (p->capa.peer.role != CAPA_ROLE_RS_CLIENT)
+				goto fail;
+			break;
+		case CAPA_ROLE_RS_CLIENT:
+			if (p->capa.peer.role != CAPA_ROLE_RS)
+				goto fail;
+			break;
+		case CAPA_ROLE_CUSTOMER:
+			if (p->capa.peer.role != CAPA_ROLE_PROVIDER)
+				goto fail;
+			break;
+		case CAPA_ROLE_PEER:
+			if (p->capa.peer.role != CAPA_ROLE_PEER)
+				goto fail;
+			break;
+		default:
+ fail:
+			log_peer_warnx(&p->conf, "open policy role mismatch: "
+			    "%s vs %s", log_policy(p->capa.ann.role),
+			    log_policy(p->capa.peer.role));
+			*suberr = ERR_OPEN_ROLE;
+			return (-1);
+		}
+		p->capa.neg.role_ena = 1;
+		p->capa.neg.role = p->capa.peer.role;
+	} else if (p->capa.ann.role_ena == 2) {
+		/* enforce presence of open policy role capability */
+		log_peer_warnx(&p->conf, "open policy role enforced but "
+		    "not present");
+		*suberr = ERR_OPEN_ROLE;
+		return (-1);
+	}
+
 	return (0);
 }
 
@@ -2821,11 +2887,11 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 	struct imsgbuf		*i;
 	struct peer		*p;
 	struct listen_addr	*la, *nla;
-	struct kif		*kif;
+	struct session_dependon	*sdon;
 	u_char			*data;
 	int			 n, fd, depend_ok, restricted;
-	u_int16_t		 t;
-	u_int8_t		 aid, errcode, subcode;
+	uint16_t		 t;
+	uint8_t			 aid, errcode, subcode;
 
 	while (ibuf) {
 		if ((n = imsg_get(ibuf, &imsg)) == -1)
@@ -2926,7 +2992,7 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 				fatalx("reconf request not from parent");
 			if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(restricted))
-				fatalx("IFINFO imsg with wrong len");
+				fatalx("RECONF_CTRL imsg with wrong len");
 			memcpy(&restricted, imsg.data, sizeof(restricted));
 			if (imsg.fd == -1) {
 				log_warnx("expected to receive fd for control "
@@ -2998,17 +3064,17 @@ session_dispatch_imsg(struct imsgbuf *ibuf, int idx, u_int *listener_cnt)
 			 * the peer config sent in merge_peers().
 			 */
 			break;
-		case IMSG_IFINFO:
+		case IMSG_SESSION_DEPENDON:
 			if (idx != PFD_PIPE_MAIN)
 				fatalx("IFINFO message not from parent");
 			if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct kif))
-				fatalx("IFINFO imsg with wrong len");
-			kif = imsg.data;
-			depend_ok = kif->depend_state;
+			    sizeof(struct session_dependon))
+				fatalx("DEPENDON imsg with wrong len");
+			sdon = imsg.data;
+			depend_ok = sdon->depend_state;
 
 			RB_FOREACH(p, peer_head, &conf->peers)
-				if (!strcmp(p->conf.if_depend, kif->ifname)) {
+				if (!strcmp(p->conf.if_depend, sdon->ifname)) {
 					if (depend_ok && !p->depend_ok) {
 						p->depend_ok = depend_ok;
 						bgp_fsm(p, EVNT_START);
@@ -3271,7 +3337,7 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 {
 	struct bgpd_addr addr;
 	struct peer	*p, *newpeer, *loose = NULL;
-	u_int32_t	 id;
+	uint32_t	 id;
 
 	sa2addr(ip, &addr, NULL);
 
@@ -3316,7 +3382,7 @@ getpeerbyip(struct bgpd_config *c, struct sockaddr *ip)
 }
 
 struct peer *
-getpeerbyid(struct bgpd_config *c, u_int32_t peerid)
+getpeerbyid(struct bgpd_config *c, uint32_t peerid)
 {
 	static struct peer lookup;
 
@@ -3343,8 +3409,8 @@ peer_matched(struct peer *p, struct ctl_neighbor *n)
 }
 
 void
-session_template_clone(struct peer *p, struct sockaddr *ip, u_int32_t id,
-    u_int32_t as)
+session_template_clone(struct peer *p, struct sockaddr *ip, uint32_t id,
+    uint32_t as)
 {
 	struct bgpd_addr	remote_addr;
 
@@ -3380,23 +3446,11 @@ session_template_clone(struct peer *p, struct sockaddr *ip, u_int32_t id,
 int
 session_match_mask(struct peer *p, struct bgpd_addr *a)
 {
-	struct in_addr	 v4masked;
-	struct in6_addr	 v6masked;
+	struct bgpd_addr masked;
 
-	switch (p->conf.remote_addr.aid) {
-	case AID_INET:
-		inet4applymask(&v4masked, &a->v4, p->conf.remote_masklen);
-		if (p->conf.remote_addr.v4.s_addr == v4masked.s_addr)
-			return (1);
-		return (0);
-	case AID_INET6:
-		inet6applymask(&v6masked, &a->v6, p->conf.remote_masklen);
-
-		if (memcmp(&v6masked, &p->conf.remote_addr.v6,
-		    sizeof(v6masked)) == 0)
-			return (1);
-		return (0);
-	}
+	applymask(&masked, a, p->conf.remote_masklen);
+	if (memcmp(&masked, &p->conf.remote_addr, sizeof(masked)) == 0)
+		return (1);
 	return (0);
 }
 
@@ -3443,20 +3497,18 @@ session_up(struct peer *p)
 }
 
 int
-imsg_ctl_parent(int type, u_int32_t peerid, pid_t pid, void *data,
-    u_int16_t datalen)
+imsg_ctl_parent(int type, uint32_t peerid, pid_t pid, void *data,
+    uint16_t datalen)
 {
 	return (imsg_compose(ibuf_main, type, peerid, pid, -1, data, datalen));
 }
 
 int
-imsg_ctl_rde(int type, pid_t pid, void *data, u_int16_t datalen)
+imsg_ctl_rde(int type, pid_t pid, void *data, uint16_t datalen)
 {
-	if (ibuf_rde_ctl == NULL) {
-		log_warnx("Can't send message %u to RDE, ctl pipe closed",
-		    type);
+	if (ibuf_rde_ctl == NULL)
 		return (0);
-	}
+
 	/*
 	 * Use control socket to talk to RDE to bypass the queue of the
 	 * regular imsg socket.
@@ -3465,12 +3517,10 @@ imsg_ctl_rde(int type, pid_t pid, void *data, u_int16_t datalen)
 }
 
 int
-imsg_rde(int type, uint32_t peerid, void *data, u_int16_t datalen)
+imsg_rde(int type, uint32_t peerid, void *data, uint16_t datalen)
 {
-	if (ibuf_rde == NULL) {
-		log_warnx("Can't send message %u to RDE, pipe closed", type);
+	if (ibuf_rde == NULL)
 		return (0);
-	}
 
 	return (imsg_compose(ibuf_rde, type, peerid, 0, -1, data, datalen));
 }
@@ -3491,7 +3541,7 @@ session_demote(struct peer *p, int level)
 }
 
 void
-session_stop(struct peer *peer, u_int8_t subcode)
+session_stop(struct peer *peer, uint8_t subcode)
 {
 	char data[REASON_LEN];
 	size_t datalen;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_vfsops.c,v 1.189 2021/05/01 16:18:29 gnezdo Exp $	*/
+/*	$OpenBSD: ffs_vfsops.c,v 1.193 2022/08/12 14:30:53 visa Exp $	*/
 /*	$NetBSD: ffs_vfsops.c,v 1.19 1996/02/09 22:22:26 christos Exp $	*/
 
 /*
@@ -1159,14 +1159,12 @@ ffs_sync_vnode(struct vnode *vp, void *arg)
 	struct ffs_sync_args *fsa = arg;
 	struct inode *ip;
 	int error, nlink0 = 0;
+	int s, skip = 0;
 
 	if (vp->v_type == VNON)
 		return (0);
 
 	ip = VTOI(vp);
-
-	if (vp->v_inflight && !(vp->v_type == VCHR || vp->v_type == VBLK))
-		fsa->inflight = MIN(fsa->inflight+1, 65536);
 
 	/*
 	 * If unmounting or converting rw to ro, then stop deferring
@@ -1180,14 +1178,19 @@ ffs_sync_vnode(struct vnode *vp, void *arg)
 	if (ip->i_effnlink == 0)
 		nlink0 = 1;
 
+	s = splbio();
 	if ((ip->i_flag &
 	    (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) == 0 &&
 	    LIST_EMPTY(&vp->v_dirtyblkhd)) {
-		goto end;
+		skip = 1;
 	}
+	splx(s);
+
+	if (skip)
+		goto end;
 
 	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT)) {
-		nlink0 = 1;		/* potentially.. */
+		fsa->inflight = MIN(fsa->inflight+1, 65536);
 		goto end;
 	}
 

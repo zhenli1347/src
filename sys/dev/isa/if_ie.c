@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ie.c,v 1.57 2021/03/07 06:17:03 jsg Exp $	*/
+/*	$OpenBSD: if_ie.c,v 1.59 2022/04/06 18:59:28 naddy Exp $	*/
 /*	$NetBSD: if_ie.c,v 1.51 1996/05/12 23:52:48 mycroft Exp $	*/
 
 /*-
@@ -112,7 +112,6 @@ iomem, and to make 16-pointers, we subtract sc_maddr and and with 0xffff.
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/buf.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
@@ -304,7 +303,7 @@ static __inline int ie_packet_len(struct ie_softc *);
 
 static void run_tdr(struct ie_softc *, struct ie_tdr_cmd *);
 
-struct cfattach ie_isa_ca = {
+const struct cfattach ie_isa_ca = {
 	sizeof(struct ie_softc), ieprobe, ieattach
 };
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: csh.c,v 1.47 2020/08/30 22:23:47 mortimer Exp $	*/
+/*	$OpenBSD: csh.c,v 1.49 2022/01/28 05:15:05 guenther Exp $	*/
 /*	$NetBSD: csh.c,v 1.14 1995/04/29 23:21:28 mycroft Exp $	*/
 
 /*-
@@ -153,7 +153,7 @@ bool    tellwhat = 0;
 extern char **environ;
 
 static int	readf(void *, char *, int);
-static fpos_t	seekf(void *, fpos_t, int);
+static off_t	seekf(void *, off_t, int);
 static int	writef(void *, const char *, int);
 static int	closef(void *);
 static int	srccat(Char *, Char *);
@@ -921,7 +921,7 @@ phup(int sig)
 	    do
 		/*
 		 * If a process is in the foreground; we try to kill
-		 * it's process group. If we succeed, then the
+		 * its process group. If we succeed, then the
 		 * whole job is gone. Otherwise we keep going...
 		 * But avoid sending HUP to the shell again.
 		 */
@@ -1271,8 +1271,8 @@ writef(void *oreo, const char *buf, int siz)
     return write(DESC(oreo), buf, siz);
 }
 
-static fpos_t
-seekf(void *oreo, fpos_t off, int whence)
+static off_t
+seekf(void *oreo, off_t off, int whence)
 {
     return lseek(DESC(oreo), off, whence);
 }

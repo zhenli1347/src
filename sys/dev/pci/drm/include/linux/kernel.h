@@ -25,6 +25,10 @@
 	const __typeof( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
 
+#define offsetofend(s, e) (offsetof(s, e) + sizeof((((s *)0)->e)))
+
+#define typeof_member(s, e)	typeof(((s *)0)->e)
+
 #define S8_MAX		INT8_MAX
 #define S16_MAX		INT16_MAX
 #define S32_MAX		INT32_MAX
@@ -67,7 +71,7 @@
 #define roundup2(x, y) (((x) + ((y) - 1)) & (~((__typeof(x))(y) - 1)))
 #define round_up(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 #define round_down(x, y) (((x) / (y)) * (y)) /* y is power of two */
-#define rounddown(x, y) (((x) / (y)) * (y)) /* arbitary y */
+#define rounddown(x, y) (((x) / (y)) * (y)) /* arbitrary y */
 #define DIV_ROUND_UP(x, y)	(((x) + ((y) - 1)) / (y))
 #define DIV_ROUND_UP_ULL(x, y)	DIV_ROUND_UP(x, y)
 #define DIV_ROUND_DOWN(x, y)	((x) / (y))
@@ -79,38 +83,33 @@
 #define PTR_ALIGN(x, y)		((__typeof(x))roundup2((unsigned long)(x), (y)))
 
 static inline char *
-kasprintf(int flags, const char *fmt, ...)
+kvasprintf(int flags, const char *fmt, va_list ap)
 {
 	char *buf;
 	size_t len;
-	va_list ap;
+	va_list vl;
 
-	va_start(ap, fmt);
-	len = vsnprintf(NULL, 0, fmt, ap);
-	va_end(ap);
+	va_copy(vl, ap);
+	len = vsnprintf(NULL, 0, fmt, vl);
+	va_end(vl);
 
 	buf = malloc(len + 1, M_DRM, flags);
 	if (buf) {
-		va_start(ap, fmt);
 		vsnprintf(buf, len + 1, fmt, ap);
-		va_end(ap);
 	}
 
 	return buf;
 }
 
 static inline char *
-kvasprintf(int flags, const char *fmt, va_list ap)
+kasprintf(int flags, const char *fmt, ...)
 {
 	char *buf;
-	size_t len;
+	va_list ap;
 
-	len = vsnprintf(NULL, 0, fmt, ap);
-
-	buf = malloc(len + 1, M_DRM, flags);
-	if (buf) {
-		vsnprintf(buf, len + 1, fmt, ap);
-	}
+	va_start(ap, fmt);
+	buf = kvasprintf(flags, fmt, ap);
+	va_end(ap);
 
 	return buf;
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.136 2021/07/24 08:21:13 visa Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.138 2022/01/28 16:20:09 visa Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993
@@ -407,12 +407,10 @@ void	tlb_asid_wrap(struct cpu_info *);
 void	tlb_flush(int);
 void	tlb_flush_addr(vaddr_t);
 void	tlb_init(unsigned int);
-int64_t	tlb_probe(vaddr_t);
 void	tlb_set_page_mask(uint32_t);
 void	tlb_set_pid(u_int);
 void	tlb_set_wired(uint32_t);
 int	tlb_update(vaddr_t, register_t);
-void	tlb_update_indexed(vaddr_t, register_t, register_t, uint);
 
 void	build_trampoline(vaddr_t, vaddr_t);
 void	cpu_switchto_asm(struct proc *, struct proc *);
@@ -427,11 +425,6 @@ void	MipsSaveCurFPState(struct proc *);
 void	MipsSaveCurFPState16(struct proc *);
 void	MipsSwitchFPState(struct proc *, struct trapframe *);
 void	MipsSwitchFPState16(struct proc *, struct trapframe *);
-
-int	guarded_read_1(paddr_t, uint8_t *);
-int	guarded_read_2(paddr_t, uint16_t *);
-int	guarded_read_4(paddr_t, uint32_t *);
-int	guarded_write_4(paddr_t, uint32_t);
 
 void	MipsFPTrap(struct trapframe *);
 register_t MipsEmulateBranch(struct trapframe *, vaddr_t, uint32_t, uint32_t);

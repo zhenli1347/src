@@ -1,4 +1,4 @@
-/*	$OpenBSD: scsiconf.c,v 1.237 2020/11/19 13:45:15 krw Exp $	*/
+/*	$OpenBSD: scsiconf.c,v 1.253 2022/04/06 17:39:13 krw Exp $	*/
 /*	$NetBSD: scsiconf.c,v 1.57 1996/05/02 01:09:01 neil Exp $	*/
 
 /*
@@ -75,7 +75,8 @@ int	scsibussubprint(void *, const char *);
 int	scsibusbioctl(struct device *, u_long, caddr_t);
 #endif /* NBIO > 0 */
 
-void	scsi_get_target_luns(struct scsi_link *, struct scsi_lun_array *);
+void	scsi_get_target_luns(struct scsibus_softc *, int,
+    struct scsi_lun_array *);
 void	scsi_add_link(struct scsi_link *);
 void	scsi_remove_link(struct scsi_link *);
 void	scsi_print_link(struct scsi_link *);
@@ -95,7 +96,7 @@ int	scsi_activate_lun(struct scsibus_softc *, int, int, int);
 
 int	scsi_autoconf = SCSI_AUTOCONF;
 
-struct cfattach scsibus_ca = {
+const struct cfattach scsibus_ca = {
 	sizeof(struct scsibus_softc), scsibusmatch, scsibusattach,
 	scsibusdetach, scsibusactivate
 };
@@ -441,18 +442,15 @@ int
 scsi_probe_target(struct scsibus_softc *sb, int target)
 {
 	struct scsi_lun_array		 lunarray;
-	struct scsi_link		*link0;
 	int				 i, r, rv = 0;
 
 	if (target < 0 || target == sb->sb_adapter_target)
 		return EINVAL;
 
-	/* Probe all possible luns on target. */
-	scsi_probe_link(sb, target, 0, 0);
-	link0 = scsi_get_link(sb, target, 0);
-	if (link0 == NULL)
+	scsi_get_target_luns(sb, target, &lunarray);
+	if (lunarray.count == 0)
 		return EINVAL;
-	scsi_get_target_luns(link0, &lunarray);
+
 	for (i = 0; i < lunarray.count; i++) {
 		r = scsi_probe_link(sb, target, lunarray.luns[i],
 		    lunarray.dumbscan);
@@ -474,12 +472,6 @@ scsi_probe_lun(struct scsibus_softc *sb, int target, int lun)
 	return scsi_probe_link(sb, target, lun, 0);
 }
 
-/*
- * Given a target and lun, ask the device what it is, and find the correct
- * driver table entry.
- *
- * Return 0 if further LUNs are possible, EINVAL if not.
- */
 int
 scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 {
@@ -497,8 +489,7 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 
 	link = malloc(sizeof(*link), M_DEVBUF, M_NOWAIT);
 	if (link == NULL) {
-		SC_DEBUG(link, SDEV_DB2, ("Bad LUN. can't allocate "
-		    "scsi_link.\n"));
+		SC_DEBUG(link, SDEV_DB2, ("malloc(scsi_link) failed.\n"));
 		return EINVAL;
 	}
 
@@ -525,11 +516,11 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	if (sb->sb_adapter->dev_probe != NULL &&
 	    sb->sb_adapter->dev_probe(link) != 0) {
 		if (lun == 0) {
-			SC_DEBUG(link, SDEV_DB2, ("Bad LUN 0. dev_probe() "
-			    "failed.\n"));
+			SC_DEBUG(link, SDEV_DB2, ("dev_probe(link) failed.\n"));
 			rslt = EINVAL;
 		}
-		goto free;
+		free(link, M_DEVBUF, sizeof(*link));
+		return rslt;
 	}
 
 	/*
@@ -537,16 +528,14 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	 * using link->openings.
 	 */
 	if (link->pool == NULL) {
-		link->pool = malloc(sizeof(*link->pool),
-		    M_DEVBUF, M_NOWAIT);
+		link->pool = malloc(sizeof(*link->pool), M_DEVBUF, M_NOWAIT);
 		if (link->pool == NULL) {
-			SC_DEBUG(link, SDEV_DB2, ("Bad LUN. can't allocate "
-			    "link->pool.\n"));
+			SC_DEBUG(link, SDEV_DB2, ("malloc(pool) failed.\n"));
 			rslt = ENOMEM;
 			goto bad;
 		}
-		scsi_iopool_init(link->pool, link,
-		    scsi_default_get, scsi_default_put);
+		scsi_iopool_init(link->pool, link, scsi_default_get,
+		    scsi_default_put);
 
 		SET(link->flags, SDEV_OWN_IOPL);
 	}
@@ -581,18 +570,15 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	/* Now go ask the device all about itself. */
 	inqbuf = dma_alloc(sizeof(*inqbuf), PR_NOWAIT | PR_ZERO);
 	if (inqbuf == NULL) {
-		SC_DEBUG(link, SDEV_DB2, ("Bad LUN. can't allocate inqbuf.\n"));
+		SC_DEBUG(link, SDEV_DB2, ("dma_alloc(inqbuf) failed.\n"));
 		rslt = ENOMEM;
 		goto bad;
 	}
 
 	rslt = scsi_inquire(link, inqbuf, scsi_autoconf | SCSI_SILENT);
 	if (rslt != 0) {
-		if (lun == 0) {
-			SC_DEBUG(link, SDEV_DB2, ("Bad LUN 0. inquiry rslt = "
-			    "%i\n", rslt));
+		if (lun == 0)
 			rslt = EINVAL;
-		}
 		dma_free(inqbuf, sizeof(*inqbuf));
 		goto bad;
 	}
@@ -612,24 +598,16 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	switch (inqbuf->device & SID_QUAL) {
 	case SID_QUAL_RSVD:
 	case SID_QUAL_BAD_LU:
+		goto bad;
 	case SID_QUAL_LU_OFFLINE:
-		SC_DEBUG(link, SDEV_DB1, ("Bad LUN. SID_QUAL = 0x%02x\n",
-		    inqbuf->device & SID_QUAL));
+		if (lun == 0 && (inqbuf->device & SID_TYPE) == T_NODEVICE)
+			break;
 		goto bad;
-
 	case SID_QUAL_LU_OK:
-		break;
-
 	default:
-		SC_DEBUG(link, SDEV_DB1, ("Vendor-specific SID_QUAL = 0x%02x\n",
-		    inqbuf->device & SID_QUAL));
+		if ((inqbuf->device & SID_TYPE) == T_NODEVICE)
+			goto bad;
 		break;
-	}
-
-	if ((inqbuf->device & SID_TYPE) == T_NODEVICE) {
-		SC_DEBUG(link, SDEV_DB1,
-		    ("Bad LUN. SID_TYPE = T_NODEVICE\n"));
-		goto bad;
 	}
 
 	scsi_devid(link);
@@ -644,10 +622,9 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	else if (dumbscan == 1 && memcmp(inqbuf, &link0->inqdata,
 	    sizeof(*inqbuf)) == 0) {
 		/* The device doesn't distinguish between LUNs. */
-		SC_DEBUG(link, SDEV_DB1, ("Bad LUN. IDENTIFY not supported."
-		    "\n"));
+		SC_DEBUG(link, SDEV_DB1, ("IDENTIFY not supported.\n"));
 		rslt = EINVAL;
-		goto free_devid;
+		goto bad;
 	}
 
 	link->quirks = devquirks;	/* Restore what the device wanted. */
@@ -700,11 +677,11 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 
 	sa.sa_sc_link = link;
 
-	if ((cf = config_search(scsibussubmatch, (struct device *)sb,
-	    &sa)) == 0) {
+	cf = config_search(scsibussubmatch, (struct device *)sb, &sa);
+	if (cf == NULL) {
 		scsibussubprint(&sa, sb->sc_dev.dv_xname);
 		printf(" not configured\n");
-		goto free_devid;
+		goto bad;
 	}
 
 	/*
@@ -740,20 +717,10 @@ scsi_probe_link(struct scsibus_softc *sb, int target, int lun, int dumbscan)
 	    SCSI_IGNORE_NOT_READY | SCSI_IGNORE_MEDIA_CHANGE);
 
 	config_attach((struct device *)sb, cf, &sa, scsibussubprint);
-
 	return 0;
 
-free_devid:
-	if (link->id)
-		devid_free(link->id);
 bad:
-	if (ISSET(link->flags, SDEV_OWN_IOPL))
-		free(link->pool, M_DEVBUF, sizeof(*link->pool));
-
-	if (sb->sb_adapter->dev_free != NULL)
-		sb->sb_adapter->dev_free(link);
-free:
-	free(link, M_DEVBUF, sizeof(*link));
+	scsi_detach_link(link, DETACH_FORCE);
 	return rslt;
 }
 
@@ -825,16 +792,18 @@ scsi_detach_link(struct scsi_link *link, int flags)
 	/* Detaching a device from scsibus is a five step process. */
 
 	/* 1. Wake up processes sleeping for an xs. */
-	scsi_link_shutdown(link);
+	if (link->pool != NULL)
+		scsi_link_shutdown(link);
 
 	/* 2. Detach the device. */
-	rv = config_detach(link->device_softc, flags);
-
-	if (rv != 0)
-		return rv;
+	if (link->device_softc != NULL) {
+		rv = config_detach(link->device_softc, flags);
+		if (rv != 0)
+			return rv;
+	}
 
 	/* 3. If it's using the openings io allocator, clean that up. */
-	if (ISSET(link->flags, SDEV_OWN_IOPL)) {
+	if (link->pool != NULL && ISSET(link->flags, SDEV_OWN_IOPL)) {
 		scsi_iopool_destroy(link->pool);
 		free(link->pool, M_DEVBUF, sizeof(*link->pool));
 	}
@@ -874,14 +843,36 @@ scsi_add_link(struct scsi_link *link)
 void
 scsi_remove_link(struct scsi_link *link)
 {
-	SLIST_REMOVE(&link->bus->sc_link_list, link, scsi_link, bus_list);
+	struct scsibus_softc	*sb = link->bus;
+	struct scsi_link	*elm, *prev = NULL;
+
+	SLIST_FOREACH(elm, &sb->sc_link_list, bus_list) {
+		if (elm == link) {
+			if (prev == NULL)
+				SLIST_REMOVE_HEAD(&sb->sc_link_list, bus_list);
+			else
+				SLIST_REMOVE_AFTER(prev, bus_list);
+			break;
+		}
+		prev = elm;
+	}
 }
 
 void
-scsi_get_target_luns(struct scsi_link *link0, struct scsi_lun_array *lunarray)
+scsi_get_target_luns(struct scsibus_softc *sb, int target,
+    struct scsi_lun_array *lunarray)
 {
 	struct scsi_report_luns_data	*report;
+	struct scsi_link		*link0;
 	int				 i, nluns, rv = 0;
+
+	/* LUN 0 *must* be present. */
+	scsi_probe_link(sb, target, 0, 0);
+	link0 = scsi_get_link(sb, target, 0);
+	if (link0 == NULL) {
+		lunarray->count = 0;
+		return;
+	}
 
 	/* Initialize dumbscan result. Just in case. */
 	report = NULL;

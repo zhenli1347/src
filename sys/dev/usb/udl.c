@@ -1,4 +1,4 @@
-/*	$OpenBSD: udl.c,v 1.94 2020/07/31 10:49:33 mglocker Exp $ */
+/*	$OpenBSD: udl.c,v 1.98 2022/07/15 17:57:27 kettenis Exp $ */
 
 /*
  * Copyright (c) 2009 Marcus Glocker <mglocker@openbsd.org>
@@ -509,6 +509,8 @@ udl_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		wdf->height = sc->sc_height;
 		wdf->width = sc->sc_width;
 		wdf->depth = sc->sc_depth;
+		wdf->stride = sc->sc_width * (sc->sc_depth / 8);
+		wdf->offset = 0;
 		wdf->cmsize = 0;	/* XXX fill up colormap size */
 		break;
 	case WSDISPLAYIO_SMODE:
@@ -640,7 +642,7 @@ udl_alloc_screen(void *v, const struct wsscreen_descr *type,
 
 	/* allocate character backing store */
 	sc->sc_cbs = mallocarray(sc->sc_ri.ri_rows, sc->sc_ri.ri_cols *
-	    sizeof(*sc->sc_cbs), M_DEVBUF, M_NOWAIT|M_ZERO);
+	    sizeof(*sc->sc_cbs), M_USBDEV, M_NOWAIT|M_ZERO);
 	if (sc->sc_cbs == NULL) {
 		printf("%s: can't allocate mem for character backing store!\n",
 		    DN(sc));
@@ -669,7 +671,7 @@ udl_free_screen(void *v, void *cookie)
 
 	/* free character backing store */
 	if (sc->sc_cbs != NULL)
-		free(sc->sc_cbs, M_DEVBUF, sc->sc_cbslen);
+		free(sc->sc_cbs, M_USBDEV, sc->sc_cbslen);
 
 	sc->sc_nscreens--;
 }
@@ -929,7 +931,7 @@ udl_putchar(void *cookie, int row, int col, u_int uc, uint32_t attr)
 
 	if (uc == ' ') {
 		/*
-		 * Writting a block for the space character instead rendering
+		 * Writing a block for the space character instead rendering
 		 * it from font bits is more slim.
 		 */
 		r = (sc->udl_fb_block_write)(sc, bgc, x, y,
@@ -1299,7 +1301,7 @@ udl_select_chip(struct udl_softc *sc)
 		/*
 		 * WS Tech DVI is DL120 or DL160. All deviced uses the
 		 * same revision (0.04) so iSerialNumber must be used
-		 * to determin which chip it is.
+		 * to determine which chip it is.
 		 */
 
 		bzero(serialnum, sizeof serialnum);
@@ -1337,7 +1339,7 @@ udl_select_chip(struct udl_softc *sc)
 		/*
 		 * SUNWEIT DVI is DL160, DL125, DL165 or DL195. Major revision
 		 * can be used to differ between DL1x0 and DL1x5. Minor to
-		 * differ between DL1x5. iSerialNumber seems not to be uniqe.
+		 * differ between DL1x5. iSerialNumber seems not to be unique.
 		 */
 
 		sc->sc_chip = DL160;
@@ -1418,7 +1420,7 @@ void
 udl_free_huffman(struct udl_softc *sc)
 {
 	if (sc->sc_huffman != NULL) {
-		free(sc->sc_huffman, M_DEVBUF, sc->sc_huffman_size);
+		free(sc->sc_huffman, M_USBDEV, sc->sc_huffman_size);
 		sc->sc_huffman = NULL;
 		sc->sc_huffman_size = 0;
 		DPRINTF(1, "%s: huffman table freed\n", DN(sc));
@@ -1434,7 +1436,7 @@ udl_fbmem_alloc(struct udl_softc *sc)
 	size = round_page(size);
 
 	if (sc->sc_fbmem == NULL) {
-		sc->sc_fbmem = malloc(size, M_DEVBUF, M_NOWAIT|M_ZERO);
+		sc->sc_fbmem = malloc(size, M_USBDEV, M_NOWAIT|M_ZERO);
 		if (sc->sc_fbmem == NULL)
 			return (-1);
 	}
@@ -1446,7 +1448,7 @@ void
 udl_fbmem_free(struct udl_softc *sc)
 {
 	if (sc->sc_fbmem != NULL) {
-		free(sc->sc_fbmem, M_DEVBUF, sc->sc_fbmemsize);
+		free(sc->sc_fbmem, M_USBDEV, sc->sc_fbmemsize);
 		sc->sc_fbmem = NULL;
 		sc->sc_fbmemsize = 0;
 	}
@@ -1500,7 +1502,7 @@ udl_cmd_alloc_buf(struct udl_softc *sc)
 {
 	struct udl_cmd_buf *cb = &sc->sc_cmd_buf;
 
-	cb->buf = malloc(UDL_CMD_MAX_XFER_SIZE, M_DEVBUF, M_NOWAIT|M_ZERO);
+	cb->buf = malloc(UDL_CMD_MAX_XFER_SIZE, M_USBDEV, M_NOWAIT|M_ZERO);
 	if (cb->buf == NULL) {
 		printf("%s: %s: can't allocate buffer!\n",
 		    DN(sc), FUNC);
@@ -1518,7 +1520,7 @@ udl_cmd_free_buf(struct udl_softc *sc)
 	struct udl_cmd_buf *cb = &sc->sc_cmd_buf;
 
 	if (cb->buf != NULL) {
-		free(cb->buf, M_DEVBUF, UDL_CMD_MAX_XFER_SIZE);
+		free(cb->buf, M_USBDEV, UDL_CMD_MAX_XFER_SIZE);
 		cb->buf = NULL;
 	}
 	cb->off = 0;
@@ -1665,7 +1667,7 @@ udl_cmd_insert_buf_comp(struct udl_softc *sc, uint8_t *buf, uint32_t len)
 
 	/*
 	 * Finish up a 512 byte main-block.  The leftover space gets
-	 * padded to zero.  Finally terminate the block by writting the
+	 * padded to zero.  Finally terminate the block by writing the
 	 * 0xff-into-UDL_REG_SYNC-register sequence.
 	 */
 	if (eob == 1) {

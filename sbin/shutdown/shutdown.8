@@ -1,4 +1,4 @@
-.\"	$OpenBSD: shutdown.8,v 1.40 2015/01/21 19:29:52 naddy Exp $
+.\"	$OpenBSD: shutdown.8,v 1.42 2022/08/05 09:15:28 schwarze Exp $
 .\"	$NetBSD: shutdown.8,v 1.6 1995/03/18 15:01:07 cgd Exp $
 .\"
 .\" Copyright (c) 1988, 1991, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"     @(#)shutdown.8	8.1 (Berkeley) 6/5/93
 .\"
-.Dd $Mdocdate: January 21 2015 $
+.Dd $Mdocdate: August 5 2022 $
 .Dt SHUTDOWN 8
 .Os
 .Sh NAME
@@ -50,7 +50,7 @@ saving them from system administrators, hackers, and gurus, who
 would otherwise not bother with such niceties.
 When the
 .Nm
-command is issued without options the system is placed in single
+command is issued without options, the system is placed in single
 user mode at the indicated time after shutting down all system
 services.
 .Pp
@@ -203,7 +203,8 @@ a colon
 .Pq Sq \&:
 for backward compatibility.
 .Sh HISTORY
-The
+A
 .Nm
-command appeared in
-.Bx 4.0 .
+command first appeared outside of Bell Labs in PWB/UNIX 1.0
+and has been available since
+.Bx 4.1c .

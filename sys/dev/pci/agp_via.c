@@ -1,4 +1,4 @@
-/*	$OpenBSD: agp_via.c,v 1.20 2014/05/27 12:40:00 kettenis Exp $	*/
+/*	$OpenBSD: agp_via.c,v 1.22 2022/03/11 18:00:45 mpi Exp $	*/
 /*	$NetBSD: agp_via.c,v 1.2 2001/09/15 00:25:00 thorpej Exp $	*/
 
 /*-
@@ -75,7 +75,7 @@ const struct agp_methods agp_via_methods = {
 	agp_via_flush_tlb,
 };
 
-struct cfattach viaagp_ca = {
+const struct cfattach viaagp_ca = {
 	sizeof(struct agp_via_softc), agp_via_probe, agp_via_attach,
 	NULL, agp_via_activate
 };
@@ -153,7 +153,7 @@ agp_via_attach(struct device *parent, struct device *self, void *aux)
 			break;
 
 		/*
-		 * Probably failed to alloc congigious memory. Try reducing the
+		 * Probably failed to alloc contiguous memory. Try reducing the
 		 * aperture so that the gatt size reduces.
 		 */
 		vsc->vsc_apsize /= 2;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_elf.h,v 1.90 2021/04/23 15:53:07 drahn Exp $	*/
+/*	$OpenBSD: exec_elf.h,v 1.94 2021/12/25 01:25:51 guenther Exp $	*/
 /*
  * Copyright (c) 1995, 1996 Erik Theisen.  All rights reserved.
  *
@@ -255,7 +255,7 @@ typedef struct {
 #define SHT_DYNAMIC		6	/* dynamic section */
 #define SHT_NOTE		7	/* note section */
 #define SHT_NOBITS		8	/* no space section */
-#define SHT_REL			9	/* relation section without addends */
+#define SHT_REL			9	/* relocation section without addends */
 #define SHT_SHLIB		10	/* reserved - purpose unknown */
 #define SHT_DYNSYM		11	/* dynamic symbol table section */
 #define SHT_NUM			12	/* number of section types */
@@ -264,6 +264,7 @@ typedef struct {
 #define SHT_PREINIT_ARRAY	16	/* ptrs to funcs called before init */
 #define SHT_GROUP		17	/* defines a section group */
 #define SHT_SYMTAB_SHNDX	18	/* Section indexes (see SHN_XINDEX). */
+#define SHT_RELR		19	/* relative-only relocation section */
 #define SHT_LOOS	0x60000000	/* reserved range for OS specific */
 #define SHT_SUNW_dof	0x6ffffff4	/* used by dtrace */
 #define SHT_GNU_LIBLIST	0x6ffffff7	/* libraries to be prelinked */
@@ -428,6 +429,13 @@ typedef struct {
 #define	ELF64_R_INFO(s,t)	(((__uint64_t)swap32(t) << 32) + (__uint32_t)(s))
 #endif	/* __mips64__ && __MIPSEL__ */
 
+/*
+ * Relative Relocation info.
+ * c.f. decode_relrs() in gnu/llvm/llvm/lib/Object/ELF.cpp
+ */
+typedef Elf32_Word	Elf32_Relr;
+typedef Elf64_Xword	Elf64_Relr;
+
 /* Program Header */
 typedef struct {
 	Elf32_Word	p_type;		/* segment type */
@@ -532,6 +540,9 @@ typedef struct {
 #define DT_ENCODING	31		/* further DT_* follow encoding rules */
 #define DT_PREINIT_ARRAY	32	/* address of array of preinit func */
 #define DT_PREINIT_ARRAYSZ	33	/* size of array of preinit func */
+#define DT_RELRSZ	35		/* size of DT_RELR relocation table */
+#define DT_RELR		36		/* addr of DT_RELR relocation table */
+#define DT_RELRENT	37		/* size of DT_RELR relocation entry */
 #define DT_LOOS		0x6000000d	/* reserved range for OS */
 #define DT_HIOS		0x6ffff000	/*  specific dynamic array tags */
 #define DT_LOPROC	0x70000000	/* reserved range for processor */
@@ -565,6 +576,19 @@ typedef struct {
 #define DF_1_NODEFLIB	0x00000800
 #define DF_1_NODUMP	0x00001000
 #define DF_1_CONLFAT	0x00002000
+#define DF_1_ENDFILTEE	0x00004000
+#define DF_1_DISPRELDNE	0x00008000
+#define DF_1_DISPRELPND	0x00010000
+#define DF_1_NODIRECT	0x00020000
+#define DF_1_IGNMULDEF	0x00040000
+#define DF_1_NOKSYMS	0x00080000
+#define DF_1_NOHDR	0x00100000
+#define DF_1_EDITED	0x00200000
+#define DF_1_NORELOC	0x00400000
+#define DF_1_SYMINTPOSE	0x00800000
+#define DF_1_GLOBAUDIT	0x01000000
+#define DF_1_SINGLETON	0x02000000
+#define DF_1_PIE	0x08000000
 
 /*
  * Note header
@@ -723,6 +747,7 @@ struct elf_args {
 #define Elf_Sym		Elf32_Sym
 #define Elf_Rel		Elf32_Rel
 #define Elf_RelA	Elf32_Rela
+#define Elf_Relr	Elf32_Relr
 #define Elf_Dyn		Elf32_Dyn
 #define Elf_Half	Elf32_Half
 #define Elf_Word	Elf32_Word
@@ -750,6 +775,7 @@ struct elf_args {
 #define Elf_Sym		Elf64_Sym
 #define Elf_Rel		Elf64_Rel
 #define Elf_RelA	Elf64_Rela
+#define Elf_Relr	Elf64_Relr
 #define Elf_Dyn		Elf64_Dyn
 #define Elf_Half	Elf64_Half
 #define Elf_Word	Elf64_Word
@@ -777,9 +803,17 @@ extern Elf_Dyn		_DYNAMIC[];
 #endif
 
 #ifdef	_KERNEL
+/*
+ * How many entries are in the AuxInfo array we pass to the process?
+ */
+#define	ELF_AUX_ENTRIES	9
+#define	ELF_AUX_WORDS	(sizeof(AuxInfo) * ELF_AUX_ENTRIES / sizeof(char *))
+
 struct exec_package;
 
 int	exec_elf_makecmds(struct proc *, struct exec_package *);
+int	exec_elf_fixup(struct proc *, struct exec_package *);
+int	coredump_elf(struct proc *, void *);
 #endif /* _KERNEL */
 
 #define ELF_TARG_VER	1	/* The ver for which this code is intended */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rrdp.c,v 1.11 2021/08/31 15:18:53 claudio Exp $ */
+/*	$OpenBSD: rrdp.c,v 1.24 2022/05/15 16:43:35 tb Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -19,7 +19,6 @@
 #include <sys/stat.h>
 
 #include <assert.h>
-#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -50,7 +49,7 @@ static struct msgbuf	msgq;
 
 struct rrdp {
 	TAILQ_ENTRY(rrdp)	 entry;
-	size_t			 id;
+	unsigned int		 id;
 	char			*notifyuri;
 	char			*local;
 	char			*last_mod;
@@ -74,15 +73,7 @@ struct rrdp {
 	struct delta_xml	*dxml;
 };
 
-TAILQ_HEAD(,rrdp)	states = TAILQ_HEAD_INITIALIZER(states);
-
-struct publish_xml {
-	char			*uri;
-	char			*data;
-	char			 hash[SHA256_DIGEST_LENGTH];
-	int			 data_length;
-	enum publish_type	 type;
-};
+TAILQ_HEAD(, rrdp)	states = TAILQ_HEAD_INITIALIZER(states);
 
 char *
 xstrdup(const char *s)
@@ -94,58 +85,20 @@ xstrdup(const char *s)
 }
 
 /*
- * Hex decode hexstring into the supplied buffer.
- * Return 0 on success else -1, if buffer too small or bad encoding.
- */
-int
-hex_decode(const char *hexstr, char *buf, size_t len)
-{
-	unsigned char ch, r;
-	size_t pos = 0;
-	int i;
-
-	while (*hexstr) {
-		r = 0;
-		for (i = 0; i < 2; i++) {
-			ch = hexstr[i];
-			if (isdigit(ch))
-				ch -= '0';
-			else if (islower(ch))
-				ch -= ('a' - 10);
-			else if (isupper(ch))
-				ch -= ('A' - 10);
-			else
-				return -1;
-			if (ch > 0xf)
-				return -1;
-			r = r << 4 | ch;
-		}
-		if (pos < len)
-			buf[pos++] = r;
-		else
-			return -1;
-
-		hexstr += 2;
-	}
-	return 0;
-}
-
-/*
  * Report back that a RRDP request finished.
  * ok should only be set to 1 if the cache is now up-to-date.
  */
 static void
-rrdp_done(size_t id, int ok)
+rrdp_done(unsigned int id, int ok)
 {
 	enum rrdp_msg type = RRDP_END;
 	struct ibuf *b;
 
-	if ((b = ibuf_open(sizeof(type) + sizeof(id) + sizeof(ok))) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &type, sizeof(type));
 	io_simple_buffer(b, &id, sizeof(id));
 	io_simple_buffer(b, &ok, sizeof(ok));
-	ibuf_close(&msgq, b);
+	io_close_buffer(&msgq, b);
 }
 
 /*
@@ -157,18 +110,17 @@ rrdp_done(size_t id, int ok)
  * should be set to NULL, else it should point to a proper date string.
  */
 static void
-rrdp_http_req(size_t id, const char *uri, const char *last_mod)
+rrdp_http_req(unsigned int id, const char *uri, const char *last_mod)
 {
 	enum rrdp_msg type = RRDP_HTTP_REQ;
 	struct ibuf *b;
 
-	if ((b = ibuf_dynamic(256, UINT_MAX)) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &type, sizeof(type));
 	io_simple_buffer(b, &id, sizeof(id));
 	io_str_buffer(b, uri);
 	io_str_buffer(b, last_mod);
-	ibuf_close(&msgq, b);
+	io_close_buffer(&msgq, b);
 }
 
 /*
@@ -180,18 +132,57 @@ rrdp_state_send(struct rrdp *s)
 	enum rrdp_msg type = RRDP_SESSION;
 	struct ibuf *b;
 
-	if ((b = ibuf_dynamic(256, UINT_MAX)) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &type, sizeof(type));
 	io_simple_buffer(b, &s->id, sizeof(s->id));
 	io_str_buffer(b, s->current.session_id);
 	io_simple_buffer(b, &s->current.serial, sizeof(s->current.serial));
 	io_str_buffer(b, s->current.last_mod);
-	ibuf_close(&msgq, b);
+	io_close_buffer(&msgq, b);
+}
+
+/*
+ * Inform parent to clear the RRDP repository before start of snapshot.
+ */
+static void
+rrdp_clear_repo(struct rrdp *s)
+{
+	enum rrdp_msg type = RRDP_CLEAR;
+	struct ibuf *b;
+
+	b = io_new_buffer();
+	io_simple_buffer(b, &type, sizeof(type));
+	io_simple_buffer(b, &s->id, sizeof(s->id));
+	io_close_buffer(&msgq, b);
+}
+
+/*
+ * Send a blob of data to the main process to store it in the repository.
+ */
+void
+rrdp_publish_file(struct rrdp *s, struct publish_xml *pxml,
+    unsigned char *data, size_t datasz)
+{
+	enum rrdp_msg type = RRDP_FILE;
+	struct ibuf *b;
+
+	/* only send files if the fetch did not fail already */
+	if (s->file_failed == 0) {
+		b = io_new_buffer();
+		io_simple_buffer(b, &type, sizeof(type));
+		io_simple_buffer(b, &s->id, sizeof(s->id));
+		io_simple_buffer(b, &pxml->type, sizeof(pxml->type));
+		if (pxml->type != PUB_ADD)
+			io_simple_buffer(b, &pxml->hash, sizeof(pxml->hash));
+		io_str_buffer(b, pxml->uri);
+		io_buf_buffer(b, data, datasz);
+		io_close_buffer(&msgq, b);
+		s->file_pending++;
+	}
 }
 
 static struct rrdp *
-rrdp_new(size_t id, char *local, char *notify, char *session_id,
+rrdp_new(unsigned int id, char *local, char *notify, char *session_id,
     long long serial, char *last_mod)
 {
 	struct rrdp *s;
@@ -211,7 +202,8 @@ rrdp_new(size_t id, char *local, char *notify, char *session_id,
 	if ((s->parser = XML_ParserCreate("US-ASCII")) == NULL)
 		err(1, "XML_ParserCreate");
 
-	s->nxml = new_notification_xml(s->parser, &s->repository, &s->current);
+	s->nxml = new_notification_xml(s->parser, &s->repository, &s->current,
+	    notify);
 
 	TAILQ_INSERT_TAIL(&states, s, entry);
 
@@ -246,7 +238,7 @@ rrdp_free(struct rrdp *s)
 }
 
 static struct rrdp *
-rrdp_get(size_t id)
+rrdp_get(unsigned int id)
 {
 	struct rrdp *s;
 
@@ -259,16 +251,16 @@ rrdp_get(size_t id)
 static void
 rrdp_failed(struct rrdp *s)
 {
-	size_t id = s->id;
+	unsigned int id = s->id;
 
 	/* reset file state before retrying */
 	s->file_failed = 0;
 
-	/* XXX MUST do some cleanup in the repo here */
 	if (s->task == DELTA) {
 		/* fallback to a snapshot as per RFC8182 */
 		free_delta_xml(s->dxml);
 		s->dxml = NULL;
+		rrdp_clear_repo(s);
 		s->sxml = new_snapshot_xml(s->parser, &s->current, s);
 		s->task = SNAPSHOT;
 		s->state = RRDP_STATE_REQ;
@@ -287,7 +279,7 @@ rrdp_failed(struct rrdp *s)
 static void
 rrdp_finished(struct rrdp *s)
 {
-	size_t id = s->id;
+	unsigned int id = s->id;
 
 	/* check if all parts of the process have finished */
 	if ((s->state & RRDP_STATE_DONE) != RRDP_STATE_DONE)
@@ -338,6 +330,7 @@ rrdp_finished(struct rrdp *s)
 				break;
 			case SNAPSHOT:
 				logx("%s: downloading snapshot", s->local);
+				rrdp_clear_repo(s);
 				s->sxml = new_snapshot_xml(p, &s->current, s);
 				s->state = RRDP_STATE_REQ;
 				break;
@@ -381,54 +374,61 @@ rrdp_finished(struct rrdp *s)
 static void
 rrdp_input_handler(int fd)
 {
+	static struct ibuf *inbuf;
 	char *local, *notify, *session_id, *last_mod;
+	struct ibuf *b;
 	struct rrdp *s;
 	enum rrdp_msg type;
 	enum http_result res;
 	long long serial;
-	size_t id;
-	int infd, ok;
+	unsigned int id;
+	int ok;
 
-	infd = io_recvfd(fd, &type, sizeof(type));
-	io_simple_read(fd, &id, sizeof(id));
+	b = io_buf_recvfd(fd, &inbuf);
+	if (b == NULL)
+		return;
+
+	io_read_buf(b, &type, sizeof(type));
+	io_read_buf(b, &id, sizeof(id));
 
 	switch (type) {
 	case RRDP_START:
-		io_str_read(fd, &local);
-		io_str_read(fd, &notify);
-		io_str_read(fd, &session_id);
-		io_simple_read(fd, &serial, sizeof(serial));
-		io_str_read(fd, &last_mod);
-		if (infd != -1)
-			errx(1, "received unexpected fd %d", infd);
+		io_read_str(b, &local);
+		io_read_str(b, &notify);
+		io_read_str(b, &session_id);
+		io_read_buf(b, &serial, sizeof(serial));
+		io_read_str(b, &last_mod);
+		if (b->fd != -1)
+			errx(1, "received unexpected fd");
 
 		s = rrdp_new(id, local, notify, session_id, serial, last_mod);
 		break;
 	case RRDP_HTTP_INI:
-		if (infd == -1)
+		if (b->fd == -1)
 			errx(1, "expected fd not received");
 		s = rrdp_get(id);
 		if (s == NULL)
-			errx(1, "rrdp session %zu does not exist", id);
+			errx(1, "rrdp session %u does not exist", id);
 		if (s->state != RRDP_STATE_WAIT)
 			errx(1, "%s: bad internal state", s->local);
 
-		s->infd = infd;
+		s->infd = b->fd;
 		s->state = RRDP_STATE_PARSE;
 		break;
 	case RRDP_HTTP_FIN:
-		io_simple_read(fd, &res, sizeof(res));
-		io_str_read(fd, &last_mod);
-		if (infd != -1)
+		io_read_buf(b, &res, sizeof(res));
+		io_read_str(b, &last_mod);
+		if (b->fd != -1)
 			errx(1, "received unexpected fd");
 
 		s = rrdp_get(id);
 		if (s == NULL)
-			errx(1, "rrdp session %zu does not exist", id);
+			errx(1, "rrdp session %u does not exist", id);
 		if (!(s->state & RRDP_STATE_PARSE))
 			errx(1, "%s: bad internal state", s->local);
 
 		s->res = res;
+		free(s->last_mod);
 		s->last_mod = last_mod;
 		s->state |= RRDP_STATE_HTTP_DONE;
 		rrdp_finished(s);
@@ -436,13 +436,12 @@ rrdp_input_handler(int fd)
 	case RRDP_FILE:
 		s = rrdp_get(id);
 		if (s == NULL)
-			errx(1, "rrdp session %zu does not exist", id);
-		if (infd != -1)
-			errx(1, "received unexpected fd %d", infd);
-		io_simple_read(fd, &ok, sizeof(ok));
-		if (ok != 1) {
+			errx(1, "rrdp session %u does not exist", id);
+		if (b->fd != -1)
+			errx(1, "received unexpected fd");
+		io_read_buf(b, &ok, sizeof(ok));
+		if (ok != 1)
 			s->file_failed++;
-		}
 		s->file_pending--;
 		if (s->file_pending == 0)
 			rrdp_finished(s);
@@ -450,6 +449,7 @@ rrdp_input_handler(int fd)
 	default:
 		errx(1, "unexpected message %d", type);
 	}
+	ibuf_free(b);
 }
 
 static void
@@ -554,20 +554,21 @@ proc_rrdp(int fd)
 		if (msgq.queued)
 			pfds[0].events |= POLLOUT;
 
-		if (poll(pfds, i, INFTIM) == -1)
+		if (poll(pfds, i, INFTIM) == -1) {
+			if (errno == EINTR)
+				continue;
 			err(1, "poll");
+		}
 
 		if (pfds[0].revents & POLLHUP)
 			break;
 		if (pfds[0].revents & POLLOUT) {
-			io_socket_nonblocking(fd);
 			switch (msgbuf_write(&msgq)) {
 			case 0:
 				errx(1, "write: connection closed");
 			case -1:
 				err(1, "write");
 			}
-			io_socket_blocking(fd);
 		}
 		if (pfds[0].revents & POLLIN)
 			rrdp_input_handler(fd);
@@ -581,104 +582,4 @@ proc_rrdp(int fd)
 	}
 
 	exit(0);
-}
-
-/*
- * Both snapshots and deltas use publish_xml to store the publish and
- * withdraw records. Once all the content is added the request is sent
- * to the main process where it is processed.
- */
-struct publish_xml *
-new_publish_xml(enum publish_type type, char *uri, char *hash, size_t hlen)
-{
-	struct publish_xml *pxml;
-
-	if ((pxml = calloc(1, sizeof(*pxml))) == NULL)
-		err(1, "%s", __func__);
-
-	pxml->type = type;
-	pxml->uri = uri;
-	if (hlen > 0) {
-		assert(hlen == sizeof(pxml->hash));
-		memcpy(pxml->hash, hash, hlen);
-	}
-
-	return pxml;
-}
-
-void
-free_publish_xml(struct publish_xml *pxml)
-{
-	if (pxml == NULL)
-		return;
-
-	free(pxml->uri);
-	free(pxml->data);
-	free(pxml);
-}
-
-/*
- * Add buf to the base64 data string, ensure that this remains a proper
- * string by NUL-terminating the string.
- */
-void
-publish_add_content(struct publish_xml *pxml, const char *buf, int length)
-{
-	int new_length;
-
-	/*
-	 * optmisiation, this often gets called with '\n' as the
-	 * only data... seems wasteful
-	 */
-	if (length == 1 && buf[0] == '\n')
-		return;
-
-	/* append content to data */
-	new_length = pxml->data_length + length;
-	pxml->data = realloc(pxml->data, new_length + 1);
-	if (pxml->data == NULL)
-		err(1, "%s", __func__);
-
-	memcpy(pxml->data + pxml->data_length, buf, length);
-	pxml->data[new_length] = '\0';
-	pxml->data_length = new_length;
-}
-
-/*
- * Base64 decode the data blob and send the file to the main process
- * where the hash is validated and the file stored in the repository.
- * Increase the file_pending counter to ensure the RRDP process waits
- * until all files have been processed before moving to the next stage.
- * Returns 0 on success or -1 on errors (base64 decode failed).
- */
-int
-publish_done(struct rrdp *s, struct publish_xml *pxml)
-{
-	enum rrdp_msg type = RRDP_FILE;
-	struct ibuf *b;
-	unsigned char *data = NULL;
-	size_t datasz = 0;
-
-	if (pxml->data_length > 0)
-		if ((base64_decode(pxml->data, &data, &datasz)) == -1)
-			return -1;
-
-	/* only send files if the fetch did not fail already */
-	if (s->file_failed == 0) {
-		if ((b = ibuf_dynamic(256, UINT_MAX)) == NULL)
-			err(1, NULL);
-		io_simple_buffer(b, &type, sizeof(type));
-		io_simple_buffer(b, &s->id, sizeof(s->id));
-		io_simple_buffer(b, &pxml->type, sizeof(pxml->type));
-		if (pxml->type != PUB_ADD)
-			io_simple_buffer(b, &pxml->hash, sizeof(pxml->hash));
-		io_str_buffer(b, pxml->uri);
-		io_buf_buffer(b, data, datasz);
-		ibuf_close(&msgq, b);
-		s->file_pending++;
-	}
-
-	free(data);
-	free_publish_xml(pxml);
-	return 0;
 }

@@ -1,20 +1,28 @@
-#	$OpenBSD: Makefile,v 1.8 2021/09/03 08:58:53 beck Exp $
+#	$OpenBSD: Makefile,v 1.14 2022/06/28 07:56:34 beck Exp $
 
-PROGS =	constraints verify x509attribute x509name callback
-LDADD=	-Wl,-Bstatic -lcrypto -Wl,-Bdynamic
-DPADD=	${LIBCRYPTO}
-WARNINGS=	Yes
-CFLAGS+=	-DLIBRESSL_INTERNAL -Wall -Werror -I$(BSDSRCDIR)/lib/libcrypto/x509
+PROGS =	constraints verify x509attribute x509name x509req_ext callback
+PROGS += expirecallback callbackfailures
+LDADD =	-lcrypto
+DPADD =	${LIBCRYPTO}
 
-SUBDIR += bettertls
+LDADD_constraints = ${CRYPTO_INT}
+LDADD_verify = ${CRYPTO_INT}
+
+WARNINGS =	Yes
+CFLAGS +=	-DLIBRESSL_INTERNAL -Wall -Werror -I$(BSDSRCDIR)/lib/libcrypto/x509
+
+SUBDIR += bettertls rfc3779
 
 REGRESS_TARGETS += regress-verify
 REGRESS_TARGETS += regress-constraints
 REGRESS_TARGETS += regress-x509attribute
 REGRESS_TARGETS += regress-x509name
+REGRESS_TARGETS += regress-x509req_ext
 REGRESS_TARGETS += regress-callback
+REGRESS_TARGETS += regress-expirecallback
+REGRESS_TARGETS += regress-callbackfailures
 
-CLEANFILES+=	x509name.result callbackout
+CLEANFILES +=	x509name.result callbackout
 
 .if make(clean) || make(cleandir)
 . if ${.OBJDIR} != ${.CURDIR}
@@ -37,8 +45,17 @@ regress-x509name: x509name
 	./x509name > x509name.result
 	diff -u ${.CURDIR}/x509name.expected x509name.result
 
+regress-x509req_ext: x509req_ext
+	./x509req_ext
+
 regress-callback: callback
 	./callback ${.CURDIR}/../certs
 	perl ${.CURDIR}/callback.pl callback.out
+
+regress-expirecallback: expirecallback
+	./expirecallback ${.CURDIR}/../certs
+
+regress-callbackfailures: callbackfailures
+	./callbackfailures ${.CURDIR}/../certs
 
 .include <bsd.regress.mk>

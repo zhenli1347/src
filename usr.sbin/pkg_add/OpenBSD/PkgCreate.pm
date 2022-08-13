@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 # ex:ts=8 sw=4:
-# $OpenBSD: PkgCreate.pm,v 1.171 2021/01/26 12:13:21 espie Exp $
+# $OpenBSD: PkgCreate.pm,v 1.182 2022/06/28 09:01:45 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -48,6 +48,7 @@ sub error
 	my $msg = shift;
 	$self->{bad}++;
 	$self->progress->disable;
+	# XXX the actual format is $msg.
 	$self->errsay("Error: $msg", @_);
 }
 
@@ -133,14 +134,19 @@ sub handle_options
 	}
 	$state->{wrkobjdir} = $state->defines('WRKOBJDIR');
 	$state->{fullpkgpath} = $state->{subst}->value('FULLPKGPATH') // '';
+	$state->{no_ts_in_plist} = $state->defines('NO_TS_IN_PLIST');
 }
 
 sub parse_userdb
 {
 	my ($self, $fname) = @_;
 	my $result = {};
-	open(my $fh, '<', $fname) or 
+	my $bad = 0;
+	open(my $fh, '<', $fname) or $bad = 1;
+	if ($bad) {
 		$self->error("Can't open #1: #2", $fname, $!);
+		return;
+	}
 	# skip header
 	my $separator_found = 0;
 	while (<$fh>) {
@@ -208,9 +214,9 @@ sub pretend_to_archive
 sub record_digest {}
 sub stub_digest {}
 sub archive {}
-sub really_archived { 0 }
 sub comment_create_package {}
 sub grab_manpages {}
+sub register_for_archival {}
 
 sub print_file {}
 
@@ -268,6 +274,7 @@ sub compute_checksum
 	my ($self, $result, $state, $base) = @_;
 	my $name = $self->fullname;
 	my $fname = $name;
+	my $okay = 1;
 	if (defined $base) {
 		$fname = $base.$fname;
 	}
@@ -275,6 +282,7 @@ sub compute_checksum
 		if (defined $result->{$field}) {
 			$state->error("User tried to define @#1 for #2",
 			    $field, $fname);
+			$okay = 0;
 		}
 	}
 	if (defined $self->{wtempname}) {
@@ -284,12 +292,14 @@ sub compute_checksum
 		if (!defined $base) {
 			$state->error("special file #1 can't be a symlink",
 			    $self->stringize);
+			$okay = 0;
 		}
 		my $value = readlink $fname;
 		my $chk = resolve_link($fname, $base);
 		$fname =~ s|^//|/|; # cosmetic
 		if (!defined $chk) {
 			$state->error("bogus symlink: #1 (too deep)", $fname);
+			$okay = 0;
 		} elsif (!-e $chk) {
 			push(@{$state->{bad_symlinks}{$chk}}, $fname);
 		}
@@ -298,6 +308,7 @@ sub compute_checksum
 		    	$state->error(
 			    "bad symlink: #1 (points into WRKOBJDIR)",
 			    $fname);
+			$okay = 0;
 		}
 		$result->make_symlink($value);
 	} elsif (-f _) {
@@ -312,27 +323,35 @@ sub compute_checksum
 			$result->add_digest($self->compute_digest($fname))
 			    unless $state->{bad};
 			$result->add_size($size);
-			$result->add_timestamp($mtime);
+			unless ($state->{no_ts_in_plist}) {
+				$result->add_timestamp($mtime);
+			}
 		}
 	} elsif (-d _) {
 		$state->error("#1 should be a file and not a directory", $fname);
+		$okay = 0;
 	} else {
 		$state->error("#1 does not exist", $fname);
+		$okay = 0;
 	}
+	return $okay;
 }
 
 sub makesum_plist_with_base
 {
 	my ($self, $plist, $state, $base) = @_;
-	$self->compute_checksum($self, $state, $base);
-	$self->add_object($plist);
+	if ($self->compute_checksum($self, $state, $base)) {
+		$self->add_object($plist);
+	}
 }
 
 sub verify_checksum_with_base
 {
 	my ($self, $state, $base) = @_;
 	my $check = ref($self)->new($self->name);
-	$self->compute_checksum($check, $state, $base);
+	if (!$self->compute_checksum($check, $state, $base)) {
+		return;
+	}
 
 	for my $field (qw(symlink link size)) {  # md5
 		if ((defined $check->{$field} && defined $self->{$field} &&
@@ -394,17 +413,19 @@ sub archive
 	$state->new_gstream;
 }
 
-package OpenBSD::PackingElement::Meta;
-sub record_digest
+package OpenBSD::PackingElement::LRUFrontier;
+our @ISA = qw(OpenBSD::PackingElement::Meta);
+sub new
 {
-	my ($self, $original, $entries, $new, $tail) = @_;
-	push(@$new, $self);
+	my $class = shift;
+	bless {}, $class;
 }
 
-sub stub_digest
+sub comment_create_package
 {
-	my ($self, $ordered) = @_;
-	push(@$ordered, $self);
+	my ($self, $state) = @_;
+	$self->SUPER::comment_create_package($state);
+	$state->say("LRU: end of modified files");
 }
 
 package OpenBSD::PackingElement::RcScript;
@@ -419,6 +440,18 @@ sub set_destdir
 }
 
 package OpenBSD::PackingElement::SpecialFile;
+sub record_digest
+{
+	my ($self, $original, $entries, $new, $tail) = @_;
+	push(@$new, $self);
+}
+
+sub stub_digest
+{
+	my ($self, $ordered) = @_;
+	push(@$ordered, $self);
+}
+
 sub archive
 {
 	&OpenBSD::PackingElement::FileBase::archive;
@@ -475,7 +508,7 @@ sub prepare_for_archival
 
 sub forbidden() { 1 }
 
-sub stub_digest
+sub register_for_archival
 {
 	my ($self, $ordered) = @_;
 	push(@$ordered, $self);
@@ -495,14 +528,12 @@ sub archive
 {
 	my ($self, $state) = @_;
 	$self->SUPER::archive($state);
-	$state->new_gstream;
 }
 
 sub comment_create_package
 {
 	my ($self, $state) = @_;
 	$self->SUPER::comment_create_package($state);
-	$state->say("GZIP: END OF SIGNATURE CHUNK");
 }
 
 sub stub_digest
@@ -543,6 +574,12 @@ sub record_digest
 	}
 }
 
+sub register_for_archival
+{
+	my ($self, $ordered) = @_;
+	push(@$ordered, $self);
+}
+
 sub set_destdir
 {
 	my ($self, $state) = @_;
@@ -560,7 +597,6 @@ sub archive
 	$o->write unless $state->{bad};
 }
 
-sub really_archived { 1 }
 sub pretend_to_archive
 {
 	my ($self, $state) = @_;
@@ -1546,72 +1582,76 @@ sub finish_manpages
 	}
 }
 
+# we maintain an LRU cache of files (by checksum) to speed-up
+# pkg_add -u
 sub save_history
 {
-	my ($self, $plist, $dir) = @_;
+	my ($self, $plist, $state, $dir) = @_;
 
-	# grab the old stuff:
-	# - order
-	# - and presence
-	my (%known, %found);
-	my $fname;
-	if (defined $dir) {
-		unless (-d $dir) {
-			require File::Path;
+	unless (-d $dir) {
+		require File::Path;
 
-			File::Path::make_path($dir);
-		}
-
-		my $name = $plist->fullpkgpath;
-		$name =~ s,/,.,g;
-		my $fname = "$dir/$name";
-		my $n = 0;
-
-		if (open(my $f, '<', $fname)) {
-			while (<$f>) {
-				chomp;
-				$known{$_} //= $n++;
-			}
-			close($f);
-		}
+		File::Path::make_path($dir);
 	}
-	my @new;
+
+	my $name = $plist->fullpkgpath;
+	$name =~ s,/,.,g;
+	my $fname = "$dir/$name";
+
+	# if we have history, we record the order of checksums
+	my $known = {};
+	if (open(my $f, '<', $fname)) {
+		while (<$f>) {
+			chomp;
+			$known->{$_} //= $.;
+		}
+		close($f);
+	}
+
+	my $todo = [];		
 	my $entries = {};
 	my $list = [];
 	my $tail = [];
-	$plist->record_digest(\@new, $entries, $list, $tail);
+	# scan the plist: find data we need to sort, index them by hash,
+	# directly put some stuff at start of list, and put non indexed stuff
+	# at end (e.g., symlinks and hardlinks)
+	$plist->record_digest($todo, $entries, $list, $tail);
 
-	my $f;
-	if (defined $fname) {
-		open($f, ">", "$fname.new");
-	}
+	my $name2 = "$fname.new";
+	open(my $f, ">", $name2) or 
+	    $state->fatal("Can't create #1: #2", $name2, $!);
 	
-	# split list
+	my $found = {};
+	# split the remaining list
 	# - first, unknown stuff
-	for my $h (@new) {
-		if ($known{$h}) {
-			$found{$h} = $known{$h};
+	for my $h (@$todo) {
+		if ($known->{$h}) {
+			$found->{$h} = $known->{$h};
 		} else {
 			print $f "$h\n" if defined $f;
 			push(@$list, (shift @{$entries->{$h}}));
 		}
 	}
+	# dummy entry for verbose output
+	push(@$list, OpenBSD::PackingElement::LRUFrontier->new);
 	# - then known stuff, preserve the order
-	for my $h (sort  {$found{$a} <=> $found{$b}} keys %found) {
+	for my $h (sort  {$found->{$a} <=> $found->{$b}} keys %$found) {
 		print $f "$h\n" if defined $f;
 		push(@$list, @{$entries->{$h}});
 	}
-	if (defined $f) {
-		close($f);
-		rename("$fname.new", $fname);
-	}
-	# create a new list with check points.
+	close($f);
+	rename($name2, $fname) or 
+	    $state->fatal("Can't rename #1->#2: #3", $name2, $fname, $!);
+	# even with no former history, it's a good idea to save chunks
+	# for instance: packages like texlive will not change all that
+	# fast, so there's a good chance the end chunks will be ordered
+	# correctly
 	my $l = [@$tail];
 	my $i = 0;
 	my $end_marker = OpenBSD::PackingElement::StreamMarker->new;
 	while (@$list > 0) {
 		my $e = pop @$list;
-		if ($e->really_archived && $i++ % 16 == 0) {
+		if ($i++ % 16 == 0) {
 			unshift @$l, $end_marker;
 		}
 		unshift @$l, $e;
@@ -1621,6 +1661,42 @@ sub save_history
 		pop @$l;
 	}
 	return $l;
+}
+
+sub validate_pkgname
+{
+	my ($self, $state, $pkgname) = @_;
+
+	my $revision = $state->defines('REVISION_CHECK');
+	my $epoch = $state->defines('EPOCH_CHECK');
+	my $flavor_list = $state->defines('FLAVOR_LIST_CHECK');
+	if ($revision eq '') {
+		$revision = -1;
+	}
+	if ($epoch eq '') {
+		$epoch = -1;
+	}
+	my $okay_flavors = {map {($_, 1)} split(/\s+/, $flavor_list) };
+	my $v = OpenBSD::PackageName->from_string($pkgname);
+	my $errors = 0;
+	if ($v->{version}->p != $revision) {
+		$state->errsay("REVISION mismatch (REVISION=#1)", $revision);
+		$errors++;
+	}
+	if ($v->{version}->v != $epoch) {
+		$state->errsay("EPOCH mismatch (EPOCH=#1)", $epoch);
+		$errors++;
+	}
+	for my $f (keys %{$v->{flavors}}) {
+		if (!exists $okay_flavors->{$f}) {
+			$state->errsay("bad FLAVOR #1 (admissible flavors #2)",
+			    $f, $flavor_list);
+			$errors++;
+		}
+	}
+	if ($errors) {
+		$state->fatal("Can't continue");
+	}
 }
 
 sub run_command
@@ -1665,9 +1741,17 @@ sub run_command
 			} else {
 				$plist = $self->make_plist_with_sum($state, 
 				    $plist);
+				my $h = $plist->get('always-update');
+				if (defined $h) {
+					$h->hash_plist($plist);
+				}
 			}
-			$ordered = $self->save_history($plist, 
-			    $state->defines('HISTORY_DIR'));
+			if (defined(my $dir = $state->defines('HISTORY_DIR'))) {
+				$ordered = $self->save_history($plist, 
+				    $state, $dir);
+			} else {
+				$plist->register_for_archival($ordered);
+			}
 			$self->show_bad_symlinks($state);
 		}
 		$state->end_status;
@@ -1675,6 +1759,9 @@ sub run_command
 
 	if (!defined $plist->pkgname) {
 		$state->fatal("can't write unnamed packing-list");
+	}
+	if (defined $state->defines('REVISION_CHECK')) {
+		$self->validate_pkgname($state, $plist->pkgname);
 	}
 
 	if (defined $state->opt('q')) {
@@ -1734,10 +1821,8 @@ sub parse_and_run
 	if (@ARGV == 0) {
 		$state->{regen_package} = 1;
 	} elsif (@ARGV != 1) {
-		if (defined $state->{contents} || 
-		    !defined $state->{signature_params}) {
-			$state->usage("Exactly one single package name is required: #1", join(' ', @ARGV));
-		}
+		$state->usage("Exactly one single package name is required: #1",
+		    join(' ', @ARGV));
 	}
 
 	$self->try_and_run_command($state);

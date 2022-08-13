@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_upgt.c,v 1.87 2020/07/31 10:49:32 mglocker Exp $ */
+/*	$OpenBSD: if_upgt.c,v 1.89 2022/04/21 21:03:03 stsp Exp $ */
 
 /*
  * Copyright (c) 2007 Marcus Glocker <mglocker@openbsd.org>
@@ -1049,7 +1049,7 @@ upgt_eeprom_parse_freq3(struct upgt_softc *sc, uint8_t *data, int len)
 
 		sc->sc_eeprom_freq3[channel] = freq3[i];
 
-		DPRINTF(2, "%s: frequence=%d, channel=%d\n",
+		DPRINTF(2, "%s: frequency=%d, channel=%d\n",
 		    sc->sc_dev.dv_xname,
 		    letoh16(sc->sc_eeprom_freq3[channel].freq), channel);
 	}
@@ -1088,7 +1088,7 @@ upgt_eeprom_parse_freq4(struct upgt_softc *sc, uint8_t *data, int len)
 			sc->sc_eeprom_freq4[channel][j].pad = 0;
 		}
 
-		DPRINTF(2, "%s: frequence=%d, channel=%d\n",
+		DPRINTF(2, "%s: frequency=%d, channel=%d\n",
 		    sc->sc_dev.dv_xname,
 		    letoh16(freq4_1[i].freq), channel);
 	}
@@ -1112,7 +1112,7 @@ upgt_eeprom_parse_freq6(struct upgt_softc *sc, uint8_t *data, int len)
 
 		sc->sc_eeprom_freq6[channel] = freq6[i];
 
-		DPRINTF(2, "%s: frequence=%d, channel=%d\n",
+		DPRINTF(2, "%s: frequency=%d, channel=%d\n",
 		    sc->sc_dev.dv_xname,
 		    letoh16(sc->sc_eeprom_freq6[channel].freq), channel);
 	}
@@ -1560,7 +1560,7 @@ upgt_tx_task(void *arg)
 	}
 
 	/*
-	 * If we don't regulary read the device statistics, the RX queue
+	 * If we don't regularly read the device statistics, the RX queue
 	 * will stall.  It's strange, but it works, so we keep reading
 	 * the statistics here.  *shrug*
 	 */
@@ -1741,9 +1741,9 @@ upgt_rx(struct upgt_softc *sc, uint8_t *data, int pkglen)
 	ni = ieee80211_find_rxnode(ic, wh);
 
 	/* push the frame up to the 802.11 stack */
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_flags = 0;
 	rxi.rxi_rssi = rxdesc->rssi;
-	rxi.rxi_tstamp = 0;	/* unused */
 	ieee80211_input(ifp, m, ni, &rxi);
 
 	/* node is no longer needed */

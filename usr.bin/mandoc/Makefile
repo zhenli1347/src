@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.118 2020/03/13 00:31:04 schwarze Exp $
+# $OpenBSD: Makefile,v 1.120 2022/07/04 15:45:27 schwarze Exp $
 
 .include <bsd.own.mk>
 
@@ -8,7 +8,8 @@ LDADD	+= -lutil -lz
 
 SRCS=	mandoc_aux.c mandoc_ohash.c mandoc.c mandoc_msg.c mandoc_xr.c \
 	arch.c chars.c msec.c preconv.c read.c tag.c
-SRCS+=	roff.c roff_validate.c tbl.c tbl_opts.c tbl_layout.c tbl_data.c eqn.c
+SRCS+=	roff.c roff_escape.c roff_validate.c
+SRCS+=	tbl.c tbl_opts.c tbl_layout.c tbl_data.c eqn.c
 SRCS+=	mdoc.c mdoc_argv.c mdoc_macro.c mdoc_state.c mdoc_validate.c \
 	att.c st.c
 SRCS+=	man_macro.c man.c man_validate.c
@@ -51,7 +52,7 @@ afterinstall:
 LIBMDOC_OBJS =	mdoc_argv.o mdoc_macro.o mdoc_state.o \
 		mdoc_validate.o mdoc.o att.o st.o
 LIBMAN_OBJS =	man.o man_macro.o man_validate.o
-LIBROFF_OBJS =	roff.o roff_validate.o eqn.o \
+LIBROFF_OBJS =	roff.o roff_escape.o roff_validate.o eqn.o \
 		tbl.o tbl_data.o tbl_layout.o tbl_opts.o
 LIBMANDOC_OBJS = ${LIBMDOC_OBJS} ${LIBMAN_OBJS} ${LIBROFF_OBJS} \
 		arch.o mandoc.o mandoc_aux.o mandoc_msg.o mandoc_ohash.o \

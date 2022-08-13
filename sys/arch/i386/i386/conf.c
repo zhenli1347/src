@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.171 2021/01/23 05:08:35 thfr Exp $	*/
+/*	$OpenBSD: conf.c,v 1.173 2022/06/28 14:43:50 visa Exp $	*/
 /*	$NetBSD: conf.c,v 1.75 1996/05/03 19:40:20 christos Exp $	*/
 
 /*
@@ -81,21 +81,21 @@ int	nblkdev = nitems(bdevsw);
 #define cdev_joy_init(c,n) { \
 	dev_init(c,n,open), dev_init(c,n,close), dev_init(c,n,read), \
 	(dev_type_write((*))) enodev, dev_init(c,n,ioctl), \
-	(dev_type_stop((*))) enodev, 0, seltrue, \
+	(dev_type_stop((*))) enodev, 0, \
         (dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
 
 /* open, close, ioctl */
 #define cdev_ocis_init(c,n) { \
         dev_init(c,n,open), dev_init(c,n,close), (dev_type_read((*))) enodev, \
         (dev_type_write((*))) enodev, dev_init(c,n,ioctl), \
-        (dev_type_stop((*))) enodev, 0,  seltrue, \
+        (dev_type_stop((*))) enodev, 0, \
         (dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
 
 /* open, close, read */
 #define cdev_nvram_init(c,n) { \
 	dev_init(c,n,open), dev_init(c,n,close), dev_init(c,n,read), \
 	(dev_type_write((*))) enodev, (dev_type_ioctl((*))) enodev, \
-	(dev_type_stop((*))) enodev, 0, seltrue, \
+	(dev_type_stop((*))) enodev, 0, \
         (dev_type_mmap((*))) enodev, 0, 0, seltrue_kqfilter }
 
 #define	mmread	mmrw
@@ -173,7 +173,6 @@ cdev_decl(pci);
 #include "fuse.h"
 #include "pvbus.h"
 #include "ipmi.h"
-#include "switch.h"
 
 struct cdevsw	cdevsw[] =
 {
@@ -286,7 +285,7 @@ struct cdevsw	cdevsw[] =
 	cdev_tun_init(NTUN,tap),	/* 94: Ethernet network tunnel */
 	cdev_pvbus_init(NPVBUS,pvbus),	/* 95: pvbus(4) control interface */
 	cdev_ipmi_init(NIPMI,ipmi),	/* 96: ipmi */
-	cdev_switch_init(NSWITCH,switch), /* 97: switch(4) control interface */
+	cdev_notdef(),			/* 97: was switch(4) */
 	cdev_fido_init(NFIDO,fido),	/* 98: FIDO/U2F security key */
 	cdev_pppx_init(NPPPX,pppac),	/* 99: PPP Access Concentrator */
 	cdev_ujoy_init(NUJOY,ujoy),	/* 100: USB joystick/gamecontroller */

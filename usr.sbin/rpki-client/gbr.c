@@ -1,4 +1,4 @@
-/*	$OpenBSD: gbr.c,v 1.9 2021/03/29 06:50:44 tb Exp $ */
+/*	$OpenBSD: gbr.c,v 1.16 2022/05/11 21:19:06 job Exp $ */
 /*
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
  *
@@ -36,13 +36,15 @@ struct	parse {
 	struct gbr	 *res; /* results */
 };
 
+extern ASN1_OBJECT	*gbr_oid;
+
 /*
  * Parse a full RFC 6493 file and signed by the certificate "cacert"
  * (the latter is optional and may be passed as NULL to disable).
  * Returns the payload or NULL if the document was malformed.
  */
 struct gbr *
-gbr_parse(X509 **x509, const char *fn)
+gbr_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 {
 	struct parse	 p;
 	size_t		 cmsz;
@@ -51,10 +53,7 @@ gbr_parse(X509 **x509, const char *fn)
 	memset(&p, 0, sizeof(struct parse));
 	p.fn = fn;
 
-	/* OID from section 9.1, RFC 6493. */
-
-	cms = cms_parse_validate(x509, fn,
-	    "1.2.840.113549.1.9.16.1.35", &cmsz);
+	cms = cms_parse_validate(x509, fn, der, len, gbr_oid, &cmsz);
 	if (cms == NULL)
 		return NULL;
 
@@ -64,19 +63,30 @@ gbr_parse(X509 **x509, const char *fn)
 		err(1, NULL);
 	free(cms);
 
-	p.res->aia = x509_get_aia(*x509, fn);
-	p.res->aki = x509_get_aki(*x509, 0, fn);
-	p.res->ski = x509_get_ski(*x509, fn);
+	if (!x509_get_aia(*x509, fn, &p.res->aia))
+		goto out;
+	if (!x509_get_aki(*x509, fn, &p.res->aki))
+		goto out;
+	if (!x509_get_ski(*x509, fn, &p.res->ski))
+		goto out;
 	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
 		warnx("%s: RFC 6487 section 4.8: "
 		    "missing AIA, AKI or SKI X509 extension", fn);
-		gbr_free(p.res);
-		X509_free(*x509);
-		*x509 = NULL;
-		return NULL;
+		goto out;
+	}
+
+	if (!x509_inherits(*x509)) {
+		warnx("%s: RFC 3779 extension not set to inherit", fn);
+		goto out;
 	}
 
 	return p.res;
+
+ out:
+	gbr_free(p.res);
+	X509_free(*x509);
+	*x509 = NULL;
+	return NULL;
 }
 
 /*

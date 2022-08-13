@@ -1,4 +1,4 @@
-/*	$OpenBSD: brk.S,v 1.10 2017/11/21 19:08:36 kettenis Exp $	*/
+/*	$OpenBSD: brk.S,v 1.12 2022/05/24 17:15:23 guenther Exp $	*/
 /*	$NetBSD: brk.S,v 1.7 2003/12/26 11:23:44 martin Exp $	*/
 
 /*-
@@ -44,12 +44,10 @@ __minbrk:
 	.word	_C_LABEL(_end)
 	END(__minbrk)
 
-	.weak	brk
-
 /*
  * Change the data segment size
  */
-ENTRY(brk)
+ENTRY_NB(brk)
 #ifdef __PIC__
 	/* Setup the GOT */
 	ldr	r3, .Lgot
@@ -96,3 +94,4 @@ ENTRY(brk)
 .Lcurbrk:
 	.word	PIC_SYM(__curbrk, GOT)
 END(brk)
+	.weak	brk

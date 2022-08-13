@@ -1,8 +1,8 @@
 #!/bin/ksh
 #
-# $OpenBSD: rcctl.sh,v 1.110 2021/02/27 09:28:04 ajacoutot Exp $
+# $OpenBSD: rcctl.sh,v 1.113 2022/05/26 11:27:03 ajacoutot Exp $
 #
-# Copyright (c) 2014, 2015-2021 Antoine Jacoutot <ajacoutot@openbsd.org>
+# Copyright (c) 2014, 2015-2022 Antoine Jacoutot <ajacoutot@openbsd.org>
 # Copyright (c) 2014 Ingo Schwarze <schwarze@openbsd.org>
 #
 # Permission to use, copy, modify, and distribute this software for any
@@ -35,7 +35,7 @@ usage()
 	"usage:	rcctl get|getdef|set service | daemon [variable [arguments]]
 	rcctl [-df] ${_a} daemon ...
 	rcctl disable|enable|order [daemon ...]
-	rcctl ls all|failed|off|on|started|stopped"
+	rcctl ls all|failed|off|on|rogue|started|stopped"
 }
 
 needs_root()
@@ -228,6 +228,13 @@ svc_ls()
 				unset _on
 			done
 			;;
+		rogue)
+			for _svc in $(svc_ls off); do
+				! svc_is_special ${_svc} && \
+					/etc/rc.d/${_svc} check >/dev/null && \
+					echo ${_svc} && _ret=1
+			done
+			;;
 		started|stopped)
 			for _svc in $(ls_rcscripts); do
 				/etc/rc.d/${_svc} check >/dev/null && _started=1
@@ -251,8 +258,8 @@ svc_get()
 	[ -n "${_svc}" ] || return
 
 	local _status=0 _val _var=$2
-	local daemon_class daemon_flags daemon_logger daemon_rtable
-	local daemon_timeout daemon_user
+	local daemon_class daemon_execdir daemon_flags daemon_logger
+	local daemon_rtable daemon_timeout daemon_user
 
 	if svc_is_special ${_svc}; then
 		daemon_flags="$(eval echo \${${_svc}})"
@@ -267,10 +274,16 @@ svc_get()
 		if ! svc_is_meta ${_svc}; then
 			# these are expensive, make sure they are explicitly requested
 			if [ -z "${_var}" -o "${_var}" = "class" ]; then
-				getcap -f /etc/login.conf ${_svc} 1>/dev/null 2>&1 && \
-					daemon_class=${_svc}
+				getcap -f /etc/login.conf.d/${_svc}:/etc/login.conf \
+					${_svc} 1>/dev/null 2>&1 && daemon_class=${_svc} 
 				[ -z "${daemon_class}" ] && \
 					daemon_class="$(svc_getdef ${_svc} class)"
+			fi
+			if [ -z "${_var}" -o "${_var}" = "execdir" ]; then
+				[ -z "${daemon_execdir}" ] && \
+					daemon_execdir="$(eval echo \"\${${_svc}_execdir}\")"
+				[ -z "${daemon_execdir}" ] && \
+					daemon_execdir="$(svc_getdef ${_svc} execdir)"
 			fi
 			if [[ -z ${_var} || ${_var} == @(flags|status) ]]; then
 				[ -z "${daemon_flags}" ] && \
@@ -317,6 +330,7 @@ svc_get()
 			echo "${_svc}=${daemon_flags}"
 		else
 			echo "${_svc}_class=${daemon_class}"
+			echo "${_svc}_execdir=${daemon_execdir}"
 			echo "${_svc}_flags=${daemon_flags}"
 			echo "${_svc}_logger=${daemon_logger}"
 			echo "${_svc}_rtable=${daemon_rtable}"
@@ -334,8 +348,8 @@ svc_getdef()
 	[ -n "${_svc}" ] || return
 
 	local _status=0 _val _var=$2
-	local daemon_class daemon_flags daemon_logger daemon_rtable
-	local daemon_timeout daemon_user
+	local daemon_class daemon_execdir daemon_flags daemon_logger
+	local daemon_rtable daemon_timeout daemon_user
 
 	if svc_is_special ${_svc}; then
 		# unconditionally parse: we always output flags and/or status
@@ -375,6 +389,7 @@ svc_getdef()
 			echo "${_svc}=${daemon_flags}"
 		else
 			echo "${_svc}_class=${daemon_class}"
+			echo "${_svc}_execdir=${daemon_execdir}"
 			echo "${_svc}_flags=${daemon_flags}"
 			echo "${_svc}_logger=${daemon_logger}"
 			echo "${_svc}_rtable=${daemon_rtable}"
@@ -396,7 +411,7 @@ svc_rm()
 		( svc_getdef ${_svc} status ) && \
 			echo "${_svc}=NO" >>${_TMP_RCCONF}
 	else
-		grep -Ev "^${_svc}_(flags|logger|rtable|timeout|user).*=" \
+		grep -Ev "^${_svc}_(execdir|flags|logger|rtable|timeout|user).*=" \
 			/etc/rc.conf.local >${_TMP_RCCONF}
 		( svc_getdef ${_svc} status ) && \
 			echo "${_svc}_flags=NO" >>${_TMP_RCCONF}
@@ -449,6 +464,10 @@ svc_set()
 	fi
 
 	if [ -n "${_args}" ]; then
+		if [ "${_var}" = "execdir" ]; then
+			[[ ${_args%${_args#?}} == / ]] ||
+				rcctl_err "\"${_args}\" must be an absolute path"
+		fi
 		if [ "${_var}" = "logger" ]; then
 			logger -p "${_args}" </dev/null >/dev/null 2>&1 ||
 				rcctl_err "unknown priority name: \"${_args}\""
@@ -502,7 +521,7 @@ ret=0
 case ${action} in
 	ls)
 		lsarg=$2
-		[[ ${lsarg} == @(all|failed|off|on|started|stopped) ]] || usage
+		[[ ${lsarg} == @(all|failed|off|on|rogue|started|stopped) ]] || usage
 		;;
 	order)
 		shift 1
@@ -532,13 +551,13 @@ case ${action} in
 			rcctl_err "service ${svc} does not exist" 2
 		if [ -n "${var}" ]; then
 			[ "${svc}" = "all" ] && usage
-			[[ ${var} != @(class|flags|logger|rtable|status|timeout|user) ]] && usage
+			[[ ${var} != @(class|execdir|flags|logger|rtable|status|timeout|user) ]] && usage
 			if svc_is_meta ${svc}; then
 				[ "${var}" != "status" ] && \
 					rcctl_err "/etc/rc.d/${svc} is a meta script, cannot \"${action} ${var}\""
 			fi
 			if svc_is_special ${svc}; then
-				[[ ${var} == @(class|logger|rtable|timeout|user) ]] && \
+				[[ ${var} == @(class|execdir|logger|rtable|timeout|user) ]] && \
 					rcctl_err "\"${svc}\" is a special variable, cannot \"${action} ${var}\""
 			fi
 		fi
@@ -554,7 +573,7 @@ case ${action} in
 			svc_is_avail ${svc} || \
 				rcctl_err "service ${svc} does not exist" 2
 		fi
-		[[ ${var} != @(class|flags|logger|rtable|status|timeout|user) ]] && usage
+		[[ ${var} != @(class|execdir|flags|logger|rtable|status|timeout|user) ]] && usage
 		svc_is_meta ${svc} && [ "${var}" != "status" ] && \
 			rcctl_err "/etc/rc.d/${svc} is a meta script, cannot \"${action} ${var}\""
 		[[ ${var} = flags && ${args} = NO ]] && \

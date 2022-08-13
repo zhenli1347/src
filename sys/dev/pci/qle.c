@@ -1,4 +1,4 @@
-/*	$OpenBSD: qle.c,v 1.61 2020/09/22 19:32:53 krw Exp $ */
+/*	$OpenBSD: qle.c,v 1.63 2022/04/16 19:19:59 naddy Exp $ */
 
 /*
  * Copyright (c) 2013, 2014 Jonathan Matthew <jmatthew@openbsd.org>
@@ -235,7 +235,7 @@ int	qle_match(struct device *, void *, void *);
 void	qle_attach(struct device *, struct device *, void *);
 int	qle_detach(struct device *, int);
 
-struct cfattach qle_ca = {
+const struct cfattach qle_ca = {
 	sizeof(struct qle_softc),
 	qle_match,
 	qle_attach,
@@ -252,7 +252,7 @@ void		qle_scsi_cmd(struct scsi_xfer *);
 int		qle_scsi_probe(struct scsi_link *);
 
 
-struct scsi_adapter qle_switch = {
+const struct scsi_adapter qle_switch = {
 	qle_scsi_cmd, NULL, qle_scsi_probe, NULL, NULL
 };
 

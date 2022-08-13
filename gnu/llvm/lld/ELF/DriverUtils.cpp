@@ -26,6 +26,7 @@
 #include "llvm/Support/Host.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/TimeProfiler.h"
 
 using namespace llvm;
 using namespace llvm::sys;
@@ -132,7 +133,7 @@ opt::InputArgList ELFOptTable::parse(ArrayRef<const char *> argv) {
   if (missingCount)
     error(Twine(args.getArgString(missingIndex)) + ": missing argument");
 
-  for (auto *arg : args.filtered(OPT_UNKNOWN)) {
+  for (opt::Arg *arg : args.filtered(OPT_UNKNOWN)) {
     std::string nearest;
     if (findNearest(arg->getAsString(args), nearest) > 1)
       error("unknown argument '" + arg->getAsString(args) + "'");
@@ -144,7 +145,7 @@ opt::InputArgList ELFOptTable::parse(ArrayRef<const char *> argv) {
 }
 
 void elf::printHelp() {
-  ELFOptTable().PrintHelp(
+  ELFOptTable().printHelp(
       lld::outs(), (config->progName + " [options] file...").str().c_str(),
       "lld", false /*ShowHidden*/, true /*ShowAllAliases*/);
   lld::outs() << "\n";
@@ -183,10 +184,16 @@ std::string elf::createResponseFile(const opt::InputArgList &args) {
       // fail because the archive we are creating doesn't contain empty
       // directories for the output path (-o doesn't create directories).
       // Strip directories to prevent the issue.
-      os << "-o " << quote(sys::path::filename(arg->getValue())) << "\n";
+      os << "-o " << quote(path::filename(arg->getValue())) << "\n";
       break;
+    case OPT_lto_sample_profile:
+      os << arg->getSpelling() << quote(rewritePath(arg->getValue())) << "\n";
+      break;
+    case OPT_call_graph_ordering_file:
     case OPT_dynamic_list:
+    case OPT_just_symbols:
     case OPT_library_path:
+    case OPT_retain_symbols_file:
     case OPT_rpath:
     case OPT_script:
     case OPT_symbol_ordering_file:
@@ -223,6 +230,38 @@ Optional<std::string> elf::findFromSearchPaths(StringRef path) {
   return None;
 }
 
+namespace {
+// Must be in sync with findMajMinShlib in clang/lib/Driver/Driver.cpp.
+llvm::Optional<std::string> findMajMinShlib(StringRef dir, const Twine& libNameSo) {
+  // Handle OpenBSD-style maj/min shlib scheme
+  llvm::SmallString<128> Scratch;
+  const StringRef LibName = (libNameSo + ".").toStringRef(Scratch);
+  int MaxMaj = -1, MaxMin = -1;
+  std::error_code EC;
+  for (llvm::sys::fs::directory_iterator LI(dir, EC), LE;
+       LI != LE; LI = LI.increment(EC)) {
+    StringRef FilePath = LI->path();
+    StringRef FileName = llvm::sys::path::filename(FilePath);
+    if (!(FileName.startswith(LibName)))
+      continue;
+    std::pair<StringRef, StringRef> MajMin =
+      FileName.substr(LibName.size()).split('.');
+    int Maj, Min;
+    if (MajMin.first.getAsInteger(10, Maj) || Maj < 0)
+      continue;
+    if (MajMin.second.getAsInteger(10, Min) || Min < 0)
+      continue;
+    if (Maj > MaxMaj)
+      MaxMaj = Maj, MaxMin = Min;
+    if (MaxMaj == Maj && Min > MaxMin)
+      MaxMin = Min;
+  }
+  if (MaxMaj >= 0)
+    return findFile(dir, LibName + Twine(MaxMaj) + "." + Twine(MaxMin));
+  return None;
+}
+}  // namespace
+
 // This is for -l<basename>. We'll look for lib<basename>.so or lib<basename>.a from
 // search paths.
 Optional<std::string> elf::searchLibraryBaseName(StringRef name) {
@@ -230,32 +269,8 @@ Optional<std::string> elf::searchLibraryBaseName(StringRef name) {
     if (!config->isStatic) {
       if (Optional<std::string> s = findFile(dir, "lib" + name + ".so"))
         return s;
-
-      // Handle OpenBSD-style maj/min shlib scheme
-      llvm::SmallString<128> Scratch;
-      const StringRef LibName = ("lib" + name + ".so.").toStringRef(Scratch);
-      int MaxMaj = -1, MaxMin = -1;
-      std::error_code EC;
-      for (fs::directory_iterator LI(dir, EC), LE;
-          LI != LE; LI = LI.increment(EC)) {
-        StringRef FilePath = LI->path();
-        StringRef FileName = path::filename(FilePath);
-        if (!(FileName.startswith(LibName)))
-          continue;
-        std::pair<StringRef, StringRef> MajMin =
-          FileName.substr(LibName.size()).split('.');
-        int Maj, Min;
-        if (MajMin.first.getAsInteger(10, Maj) || Maj < 0)
-          continue;
-        if (MajMin.second.getAsInteger(10, Min) || Min < 0)
-          continue;
-        if (Maj > MaxMaj)
-          MaxMaj = Maj, MaxMin = Min;
-        if (MaxMaj == Maj && Min > MaxMin)
-          MaxMin = Min;
-      }
-      if (MaxMaj >= 0)
-        return findFile(dir, LibName + Twine(MaxMaj) + "." + Twine(MaxMin));
+      if (Optional<std::string> s = findMajMinShlib(dir, "lib" + name + ".so"))
+        return s;
     }
     if (Optional<std::string> s = findFile(dir, "lib" + name + ".a"))
       return s;
@@ -265,6 +280,7 @@ Optional<std::string> elf::searchLibraryBaseName(StringRef name) {
 
 // This is for -l<namespec>.
 Optional<std::string> elf::searchLibrary(StringRef name) {
+  llvm::TimeTraceScope timeScope("Locate library", name);
   if (name.startswith(":"))
     return findFromSearchPaths(name.substr(1));
   return searchLibraryBaseName(name);

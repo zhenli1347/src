@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpireg.h,v 1.55 2021/03/23 09:41:12 patrick Exp $	*/
+/*	$OpenBSD: acpireg.h,v 1.58 2022/01/09 05:42:37 jsg Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
@@ -23,7 +23,7 @@
 struct acpi_rsdp1 {
 	uint8_t		signature[8];
 #define	RSDP_SIG	"RSD PTR "
-#define	rsdp_signaturee	rsdp1.signature
+#define	rsdp_signature	rsdp1.signature
 	uint8_t		checksum;	/* make sum == 0 */
 #define	rsdp_checksum	rsdp1.checksum
 	uint8_t		oemid[6];
@@ -122,7 +122,7 @@ struct acpi_fadt {
 	uint8_t		s4bios_req;	/* value for S4 */
 	uint8_t		pstate_cnt;	/* value for performance (hdr_revision > 2) */
 	uint32_t	pm1a_evt_blk;	/* power management 1a */
-	uint32_t	pm1b_evt_blk;	/* power mangement 1b */
+	uint32_t	pm1b_evt_blk;	/* power management 1b */
 	uint32_t	pm1a_cnt_blk;	/* pm control 1a */
 	uint32_t	pm1b_cnt_blk;	/* pm control 1b */
 	uint32_t	pm2_cnt_blk;	/* pm control 2 */
@@ -178,7 +178,7 @@ struct acpi_fadt {
 	/*
 	 * Following values only exist when rev > 1
 	 * If the extended addresses exists, they
-	 * must be used in preferense to the non-
+	 * must be used in preference to the non-
 	 * extended values above
 	 */
 	struct acpi_gas	reset_reg;
@@ -464,6 +464,14 @@ struct acpi_facs {
 	uint64_t	x_wakeup_vector;
 	uint8_t		version;
 	uint8_t		reserved[31];
+} __packed;
+
+struct acpi_tpm2 {
+	struct acpi_table_header	hdr;
+#define TPM2_SIG	"TPM2"
+	uint32_t	reserved;
+	uint64_t	control_addr;
+	uint32_t	start_method;
 } __packed;
 
 /*

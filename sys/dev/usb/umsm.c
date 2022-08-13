@@ -1,4 +1,4 @@
-/*	$OpenBSD: umsm.c,v 1.119 2021/05/18 14:23:03 kevlo Exp $	*/
+/*	$OpenBSD: umsm.c,v 1.121 2022/04/09 20:07:44 naddy Exp $	*/
 
 /*
  * Copyright (c) 2008 Yojiro UO <yuo@nui.org>
@@ -83,7 +83,7 @@ usbd_status umsm_huawei_changemode(struct usbd_device *);
 usbd_status umsm_truinstall_changemode(struct usbd_device *);
 usbd_status umsm_umass_changemode(struct umsm_softc *);
 
-struct ucom_methods umsm_methods = {
+const struct ucom_methods umsm_methods = {
 	umsm_get_status,
 	umsm_set,
 	NULL,
@@ -757,7 +757,7 @@ umsm_umass_changemode(struct umsm_softc *sc)
 			target_ep = ed->bEndpointAddress;
 	}
 
-	/* open command endppoint */
+	/* open command endpoint */
 	err = usbd_open_pipe(sc->sc_iface, target_ep,
 		USBD_EXCLUSIVE_USE, &cmdpipe);
 	if (err) {

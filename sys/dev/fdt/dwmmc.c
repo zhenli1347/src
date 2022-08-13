@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwmmc.c,v 1.24 2021/05/05 09:17:19 jsg Exp $	*/
+/*	$OpenBSD: dwmmc.c,v 1.27 2022/06/09 14:43:28 kettenis Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -221,7 +221,7 @@ struct dwmmc_softc {
 int	dwmmc_match(struct device *, void *, void *);
 void	dwmmc_attach(struct device *, struct device *, void *);
 
-struct cfattach dwmmc_ca = {
+const struct cfattach dwmmc_ca = {
 	sizeof(struct dwmmc_softc), dwmmc_match, dwmmc_attach
 };
 
@@ -602,7 +602,9 @@ dwmmc_card_detect(sdmmc_chipset_handle_t sch)
 	struct dwmmc_softc *sc = sch;
 	uint32_t cdetect;
 
-	if (OF_getproplen(sc->sc_node, "non-removable") == 0)
+	/* XXX treat broken-cd as non-removable */
+	if (OF_getproplen(sc->sc_node, "non-removable") == 0 ||
+	    OF_getproplen(sc->sc_node, "broken-cd") == 0)
 		return 1;
 
 	if (sc->sc_gpio[0]) {
@@ -960,7 +962,7 @@ dwmmc_exec_command(sdmmc_chipset_handle_t sch, struct sdmmc_command *cmd)
 		dwmmc_dma_setup(sc, cmd);
 		HWRITE4(sc, SDMMC_PLDMND, 1);
 
-		/* Ennable DMA if we did PIO before. */
+		/* Enable DMA if we did PIO before. */
 		if (!sc->sc_dmamode)
 			dwmmc_dma_mode(sc);
 

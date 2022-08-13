@@ -1,4 +1,4 @@
-/*	$OpenBSD: spif.c,v 1.25 2021/09/01 16:10:39 jan Exp $	*/
+/*	$OpenBSD: spif.c,v 1.27 2022/07/02 08:50:42 visa Exp $	*/
 
 /*
  * Copyright (c) 1999-2002 Jason L. Wright (jason@thought.net)
@@ -90,11 +90,10 @@ int	sbppread(dev_t, struct uio *, int);
 int	sbppwrite(dev_t, struct uio *, int);
 int	sbpp_rw(dev_t, struct uio *);
 int	spifppcintr(void *);
-int	sbpppoll(dev_t, int, struct proc *);
 int	sbppkqfilter(dev_t, struct knote *);
 int	sbppioctl(dev_t, u_long, caddr_t, int, struct proc *);
 
-struct cfattach spif_ca = {
+const struct cfattach spif_ca = {
 	sizeof (struct spif_softc), spifmatch, spifattach
 };
 
@@ -102,7 +101,7 @@ struct cfdriver spif_cd = {
 	NULL, "spif", DV_DULL
 };
 
-struct cfattach stty_ca = {
+const struct cfattach stty_ca = {
 	sizeof(struct stty_softc), sttymatch, sttyattach
 };
 
@@ -110,7 +109,7 @@ struct cfdriver stty_cd = {
 	NULL, "stty", DV_TTY
 };
 
-struct cfattach sbpp_ca = {
+const struct cfattach sbpp_ca = {
 	sizeof(struct sbpp_softc), sbppmatch, sbppattach
 };
 
@@ -1040,11 +1039,6 @@ sbpp_rw(dev_t dev, struct uio *uio)
 	return (ENXIO);
 }
 
-int
-sbpppoll(dev_t dev, int events, struct proc *p)
-{
-	return (seltrue(dev, events, p));
-}
 int
 sbppkqfilter(dev_t dev, struct knote *kn)
 {

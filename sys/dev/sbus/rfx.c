@@ -1,4 +1,4 @@
-/*	$OpenBSD: rfx.c,v 1.12 2014/01/22 03:03:09 jsg Exp $	*/
+/*	$OpenBSD: rfx.c,v 1.15 2022/07/15 17:57:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2004, Miodrag Vallat.
@@ -141,17 +141,13 @@ struct wsdisplay_accessops rfx_accessops = {
 int	rfxmatch(struct device *, void *, void *);
 void	rfxattach(struct device *, struct device *, void *);
 
-#if defined(OpenBSD)
-struct cfattach rfx_ca = {
+const struct cfattach rfx_ca = {
 	sizeof (struct rfx_softc), rfxmatch, rfxattach
 };
 
 struct cfdriver rfx_cd = {
 	NULL, "rfx", DV_DULL
 };
-#else
-CFATTACH_DECL(rfx, sizeof (struct rfx_softc), rfxmatch, rfxattach, NULL, NULL);
-#endif
 
 /*
  * Match a supported RasterFlex card.
@@ -325,6 +321,8 @@ rfx_ioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = 256;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

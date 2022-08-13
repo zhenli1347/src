@@ -1,4 +1,4 @@
-/*	$OpenBSD: cd9660_vnops.c,v 1.89 2021/03/24 16:17:05 semarie Exp $	*/
+/*	$OpenBSD: cd9660_vnops.c,v 1.93 2022/06/26 05:20:42 visa Exp $	*/
 /*	$NetBSD: cd9660_vnops.c,v 1.42 1997/10/16 23:56:57 christos Exp $	*/
 
 /*-
@@ -54,7 +54,6 @@
 #include <sys/dirent.h>
 #include <sys/ioctl.h>
 #include <sys/ioccom.h>
-#include <sys/poll.h>
 #include <sys/specdev.h>
 #include <sys/unistd.h>
 
@@ -288,18 +287,6 @@ int
 cd9660_ioctl(void *v)
 {
 	return (ENOTTY);
-}
-
-/* ARGSUSED */
-int
-cd9660_poll(void *v)
-{
-	struct vop_poll_args *ap = v;
-
-	/*
-	 * We should really check to see if I/O is possible.
-	 */
-	return (ap->a_events & (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM));
 }
 
 /*
@@ -746,7 +733,7 @@ cd9660_strategy(void *v)
 	}
 	vp = ip->i_devvp;
 	bp->b_dev = vp->v_rdev;
-	(vp->v_op->vop_strategy)(ap);
+	VOP_STRATEGY(vp, bp);
 	return (0);
 }
 
@@ -825,7 +812,6 @@ const struct vops cd9660_vops = {
 	.vop_read	= cd9660_read,
 	.vop_write	= eopnotsupp,
 	.vop_ioctl	= cd9660_ioctl,
-	.vop_poll	= cd9660_poll,
 	.vop_kqfilter	= cd9660_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= nullop,
@@ -865,26 +851,25 @@ const struct vops cd9660_specvops = {
 
 	/* XXX: Keep in sync with spec_vops. */
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= spec_badop,
-	.vop_mknod	= spec_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= spec_open,
 	.vop_close	= spec_close,
 	.vop_read	= spec_read,
 	.vop_write	= spec_write,
 	.vop_ioctl	= spec_ioctl,
-	.vop_poll	= spec_poll,
 	.vop_kqfilter	= spec_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= spec_fsync,
-	.vop_remove	= spec_badop,
-	.vop_link	= spec_badop,
-	.vop_rename	= spec_badop,
-	.vop_mkdir	= spec_badop,
-	.vop_rmdir	= spec_badop,
-	.vop_symlink	= spec_badop,
-	.vop_readdir	= spec_badop,
-	.vop_readlink	= spec_badop,
-	.vop_abortop	= spec_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
+	.vop_readdir	= vop_generic_badop,
+	.vop_readlink	= vop_generic_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_bmap	= vop_generic_bmap,
 	.vop_strategy	= spec_strategy,
 	.vop_pathconf	= spec_pathconf,
@@ -907,28 +892,27 @@ const struct vops cd9660_fifovops = {
 
 	/* XXX: Keep in sync with fifo_vops. */
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= fifo_badop,
-	.vop_mknod	= fifo_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= fifo_open,
 	.vop_close	= fifo_close,
 	.vop_read	= fifo_read,
 	.vop_write	= fifo_write,
 	.vop_ioctl	= fifo_ioctl,
-	.vop_poll	= fifo_poll,
 	.vop_kqfilter	= fifo_kqfilter,
 	.vop_revoke	= vop_generic_revoke,
 	.vop_fsync	= nullop,
-	.vop_remove	= fifo_badop,
-	.vop_link	= fifo_badop,
-	.vop_rename	= fifo_badop,
-	.vop_mkdir	= fifo_badop,
-	.vop_rmdir	= fifo_badop,
-	.vop_symlink	= fifo_badop,
-	.vop_readdir	= fifo_badop,
-	.vop_readlink	= fifo_badop,
-	.vop_abortop	= fifo_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
+	.vop_readdir	= vop_generic_badop,
+	.vop_readlink	= vop_generic_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_bmap	= vop_generic_bmap,
-	.vop_strategy	= fifo_badop,
+	.vop_strategy	= vop_generic_badop,
 	.vop_pathconf	= fifo_pathconf,
 	.vop_advlock	= fifo_advlock,
 };
@@ -1017,7 +1001,7 @@ filt_cd9660read(struct knote *kn, long hint)
 		return (1);
 	}
 
-	if (kn->kn_flags & __EV_POLL)
+	if (kn->kn_flags & (__EV_POLL | __EV_SELECT))
 		return (1);
 
 	return (kn->kn_data != 0);

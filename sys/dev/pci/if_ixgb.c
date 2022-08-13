@@ -31,7 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ***************************************************************************/
 
-/* $OpenBSD: if_ixgb.c,v 1.72 2020/07/10 13:26:38 patrick Exp $ */
+/* $OpenBSD: if_ixgb.c,v 1.75 2022/03/11 18:00:45 mpi Exp $ */
 
 #include <dev/pci/if_ixgb.h>
 
@@ -119,7 +119,7 @@ void ixgb_dma_free(struct ixgb_softc *, struct ixgb_dma_alloc *);
  *  OpenBSD Device Interface Entry Points
  *********************************************************************/
 
-struct cfattach ixgb_ca = {
+const struct cfattach ixgb_ca = {
 	sizeof(struct ixgb_softc), ixgb_probe, ixgb_attach
 };
 
@@ -1065,7 +1065,7 @@ ixgb_dma_malloc(struct ixgb_softc *sc, bus_size_t size,
 	r = bus_dmamem_alloc(dma->dma_tag, size, PAGE_SIZE, 0, &dma->dma_seg,
 	    1, &dma->dma_nseg, BUS_DMA_NOWAIT);
 	if (r != 0) {
-		printf("%s: ixgb_dma_malloc: bus_dmammem_alloc failed; "
+		printf("%s: ixgb_dma_malloc: bus_dmamem_alloc failed; "
 			"size %lu, error %d\n", sc->sc_dv.dv_xname,
 			(unsigned long)size, r);
 		goto fail_1;
@@ -1074,7 +1074,7 @@ ixgb_dma_malloc(struct ixgb_softc *sc, bus_size_t size,
 	r = bus_dmamem_map(dma->dma_tag, &dma->dma_seg, dma->dma_nseg, size,
 	    &dma->dma_vaddr, BUS_DMA_NOWAIT);
 	if (r != 0) {
-		printf("%s: ixgb_dma_malloc: bus_dmammem_map failed; "
+		printf("%s: ixgb_dma_malloc: bus_dmamem_map failed; "
 			"size %lu, error %d\n", sc->sc_dv.dv_xname,
 			(unsigned long)size, r);
 		goto fail_2;
@@ -1808,7 +1808,7 @@ ixgb_rxeof(struct ixgb_softc *sc, int count)
 		i = (sc->num_rx_desc - 1);
 
 	/*
-	 * 82597EX: Workaround for redundent write back in receive descriptor ring (causes
+	 * 82597EX: Workaround for redundant write back in receive descriptor ring (causes
  	 * memory corruption). Avoid using and re-submitting the most recently received RX
 	 * descriptor back to hardware.
 	 *

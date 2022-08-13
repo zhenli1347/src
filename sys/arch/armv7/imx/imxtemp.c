@@ -1,4 +1,4 @@
-/*	$OpenBSD: imxtemp.c,v 1.6 2021/03/25 04:12:01 jsg Exp $	*/
+/*	$OpenBSD: imxtemp.c,v 1.8 2022/02/21 05:54:35 jsg Exp $	*/
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -84,7 +84,7 @@ struct imxtemp_softc {
 int	imxtemp_match(struct device *, void *, void *);
 void	imxtemp_attach(struct device *, struct device *, void *);
 
-struct cfattach imxtemp_ca = {
+const struct cfattach imxtemp_ca = {
 	sizeof(struct imxtemp_softc), imxtemp_match, imxtemp_attach
 };
 
@@ -162,7 +162,7 @@ imxtemp_calc_temp(struct imxtemp_softc *sc, uint32_t temp_cnt)
 	int32_t value;
 
 	/*
-	 * Calculate the calibrated tempterature based on the equation
+	 * Calculate the calibrated temperature based on the equation
 	 * provided in the i.MX6 reference manual:
 	 *
 	 * Tmeas = HOT_TEMP - (Nmeas - HOT_COUNT) * ((HOT_TEMP - 25.0) /

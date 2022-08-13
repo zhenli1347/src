@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolve.h,v 1.98 2021/06/02 07:29:03 semarie Exp $ */
+/*	$OpenBSD: resolve.h,v 1.100 2022/01/28 05:01:28 guenther Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -47,7 +47,7 @@
 #endif
 
 /* Number of low tags that are used saved internally (0 .. DT_NUM-1) */
-#define DT_NUM	(DT_PREINIT_ARRAYSZ + 1)
+#define DT_NUM	(DT_RELR + 1)
 
 struct load_list {
 	struct load_list *next;
@@ -80,7 +80,7 @@ void	object_vec_grow(struct object_vector *_vec, int _more);
 /*
  *  Structure describing a loaded object.
  *  The head of this struct must be compatible
- *  with struct link_map in sys/link.h
+ *  with struct link_map in <link_elf.h>
  */
 struct elf_object {
 	Elf_Addr obj_base;		/* object's address '0' base */
@@ -132,6 +132,9 @@ struct elf_object {
 			Elf_Addr	encoding;
 			initarrayfunc	**preinit_array;
 			Elf_Addr	preinit_arraysz;
+			Elf_Addr	unassigned;
+			Elf_Addr	relrsz;
+			Elf_Relr	*relr;
 		} u;
 	} Dyn;
 #define dyn Dyn.u

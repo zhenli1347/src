@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.10 2021/07/24 18:15:13 kettenis Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.13 2022/08/09 04:49:08 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2019 Mike Larkin <mlarkin@openbsd.org>
@@ -92,7 +92,7 @@ struct cpu_info {
 	uint64_t		ci_lasttb;
 	uint64_t		ci_nexttimerevent;
 	uint64_t		ci_nextstatevent;
-	int			ci_statspending;
+	volatile int		ci_timer_deferred;
 
 	uint32_t		ci_cpl;
 	uint32_t		ci_ipending;
@@ -175,7 +175,8 @@ void	cpu_startclock(void);
 
 #endif /* !MULTIPROCESSOR */
 
-#define CPU_BUSY_CYCLE()	do {} while (0)
+/* Zihintpause ratified extension */
+#define CPU_BUSY_CYCLE()	__asm volatile(".long 0x0100000f" ::: "memory")
 
 #define curpcb		curcpu()->ci_curpcb
 
@@ -264,7 +265,6 @@ void	delay (unsigned);
 
 void fpu_save(struct proc *, struct trapframe *);
 void fpu_load(struct proc *);
-void fpu_discard(struct proc *p);
 
 extern int cpu_errata_sifive_cip_1200;
 

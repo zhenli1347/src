@@ -1,4 +1,4 @@
-/*	$OpenBSD: ffs_subr.c,v 1.4 2016/10/22 19:43:50 natano Exp $	*/
+/*	$OpenBSD: ffs_subr.c,v 1.6 2022/01/11 05:34:33 jsg Exp $	*/
 /*	$NetBSD: ffs_subr.c,v 1.49 2016/05/07 11:59:08 maxv Exp $	*/
 
 /*
@@ -32,11 +32,12 @@
  *	@(#)ffs_subr.c	8.5 (Berkeley) 3/21/95
  */
 
-#include <sys/param.h>
-
+#include <sys/param.h>	/* setbit clrbit NBBY */
+#include <sys/types.h>
 #include <ufs/ufs/dinode.h>
 #include <ufs/ffs/fs.h>
 
+#include <limits.h>
 #include <err.h>
 
 #include "ffs/ffs_extern.h"
@@ -46,7 +47,7 @@
  * block operations
  *
  * check if a block is available
- *  returns true if all the correponding bits in the free map are 1
+ *  returns true if all the corresponding bits in the free map are 1
  *  returns false if any corresponding bit in the free map is 0
  */
 int

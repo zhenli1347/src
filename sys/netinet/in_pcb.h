@@ -1,4 +1,4 @@
-/*	$OpenBSD: in_pcb.h,v 1.121 2021/01/25 03:40:46 dlg Exp $	*/
+/*	$OpenBSD: in_pcb.h,v 1.129 2022/05/15 09:12:20 dlg Exp $	*/
 /*	$NetBSD: in_pcb.h,v 1.14 1996/02/13 23:42:00 christos Exp $	*/
 
 /*
@@ -65,6 +65,7 @@
 #define _NETINET_IN_PCB_H_
 
 #include <sys/queue.h>
+#include <sys/mutex.h>
 #include <sys/refcnt.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
@@ -72,6 +73,13 @@
 #include <netinet/ip_ipsp.h>
 
 #include <crypto/siphash.h>
+
+/*
+ * Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	N	net lock
+ *	t	inpt_mtx		pcb table mutex
+ */
 
 struct pf_state_key;
 
@@ -91,10 +99,11 @@ union inpaddru {
  * control block.
  */
 struct inpcb {
-	LIST_ENTRY(inpcb) inp_hash;		/* local and foreign hash */
-	LIST_ENTRY(inpcb) inp_lhash;		/* local port hash */
-	TAILQ_ENTRY(inpcb) inp_queue;		/* inet PCB queue */
-	struct	  inpcbtable *inp_table;	/* inet queue/hash table */
+	LIST_ENTRY(inpcb) inp_hash;		/* [t] local and foreign hash */
+	LIST_ENTRY(inpcb) inp_lhash;		/* [t] local port hash */
+	TAILQ_ENTRY(inpcb) inp_queue;		/* [t] inet PCB queue */
+	SIMPLEQ_ENTRY(inpcb) inp_notify;	/* [N] notify or udp append */
+	struct	  inpcbtable *inp_table;	/* [I] inet queue/hash table */
 	union	  inpaddru inp_faddru;		/* Foreign address. */
 	union	  inpaddru inp_laddru;		/* Local address. */
 #define	inp_faddr	inp_faddru.iau_a4u.inaddr
@@ -154,12 +163,13 @@ struct inpcb {
 LIST_HEAD(inpcbhead, inpcb);
 
 struct inpcbtable {
-	TAILQ_HEAD(inpthead, inpcb) inpt_queue;	/* inet PCB queue */
-	struct	inpcbhead *inpt_hashtbl;	/* local and foreign hash */
-	struct	inpcbhead *inpt_lhashtbl;	/* local port hash */
-	SIPHASH_KEY inpt_key, inpt_lkey;	/* secrets for hashes */
-	u_long	inpt_mask, inpt_lmask;		/* hash masks */
-	int	inpt_count, inpt_size;		/* queue count, hash size */
+	struct mutex inpt_mtx;			/* protect queue and hash */
+	TAILQ_HEAD(inpthead, inpcb) inpt_queue;	/* [t] inet PCB queue */
+	struct	inpcbhead *inpt_hashtbl;	/* [t] local and foreign hash */
+	struct	inpcbhead *inpt_lhashtbl;	/* [t] local port hash */
+	SIPHASH_KEY inpt_key, inpt_lkey;	/* [t] secrets for hashes */
+	u_long	inpt_mask, inpt_lmask;		/* [t] hash masks */
+	int	inpt_count, inpt_size;		/* [t] queue count, hash size */
 };
 
 /* flags in inp_flags: */
@@ -226,9 +236,9 @@ struct inpcbtable {
 /* macros for handling bitmap of ports not to allocate dynamically */
 #define	DP_MAPBITS	(sizeof(u_int32_t) * NBBY)
 #define	DP_MAPSIZE	(howmany(65536, DP_MAPBITS))
-#define	DP_SET(m, p)	((m)[(p) / DP_MAPBITS] |= (1 << ((p) % DP_MAPBITS)))
-#define	DP_CLR(m, p)	((m)[(p) / DP_MAPBITS] &= ~(1 << ((p) % DP_MAPBITS)))
-#define	DP_ISSET(m, p)	((m)[(p) / DP_MAPBITS] & (1 << ((p) % DP_MAPBITS)))
+#define	DP_SET(m, p)	((m)[(p) / DP_MAPBITS] |= (1U << ((p) % DP_MAPBITS)))
+#define	DP_CLR(m, p)	((m)[(p) / DP_MAPBITS] &= ~(1U << ((p) % DP_MAPBITS)))
+#define	DP_ISSET(m, p)	((m)[(p) / DP_MAPBITS] & (1U << ((p) % DP_MAPBITS)))
 
 /* default values for baddynamicports [see ip_init()] */
 #define	DEFBADDYNAMICPORTS_TCP	{ \
@@ -305,12 +315,12 @@ void	 in_setpeeraddr(struct inpcb *, struct mbuf *);
 void	 in_setsockaddr(struct inpcb *, struct mbuf *);
 int	 in_baddynamic(u_int16_t, u_int16_t);
 int	 in_rootonly(u_int16_t, u_int16_t);
-int	 in_pcbselsrc(struct in_addr **, struct sockaddr_in *, struct inpcb *);
+int	 in_pcbselsrc(struct in_addr *, struct sockaddr_in *, struct inpcb *);
 struct rtentry *
 	in_pcbrtentry(struct inpcb *);
 
 /* INET6 stuff */
-int	in6_pcbnotify(struct inpcbtable *, struct sockaddr_in6 *,
+void	in6_pcbnotify(struct inpcbtable *, struct sockaddr_in6 *,
 	u_int, const struct sockaddr_in6 *, u_int, u_int, int, void *,
 	void (*)(struct inpcb *, int));
 int	in6_selecthlim(struct inpcb *);

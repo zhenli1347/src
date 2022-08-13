@@ -1,4 +1,4 @@
-/*	$OpenBSD: ahci_acpi.c,v 1.3 2020/05/08 11:18:01 kettenis Exp $	*/
+/*	$OpenBSD: ahci_acpi.c,v 1.5 2022/04/06 18:59:27 naddy Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -39,7 +39,7 @@ struct ahci_acpi_softc {
 int	ahci_acpi_match(struct device *, void *, void *);
 void	ahci_acpi_attach(struct device *, struct device *, void *);
 
-struct cfattach ahci_acpi_ca = {
+const struct cfattach ahci_acpi_ca = {
 	sizeof(struct ahci_acpi_softc), ahci_acpi_match, ahci_acpi_attach
 };
 
@@ -48,6 +48,8 @@ ahci_acpi_match(struct device *parent, void *match, void *aux)
 {
 	struct acpi_attach_args *aaa = aux;
 
+	if (aaa->aaa_naddr < 1 || aaa->aaa_nirq < 1)
+		return 0;
 	return acpi_matchcls(aaa, PCI_CLASS_MASS_STORAGE,
 	    PCI_SUBCLASS_MASS_STORAGE_SATA, PCI_INTERFACE_SATA_AHCI10);
 }
@@ -61,16 +63,6 @@ ahci_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
 	printf(" %s", sc->sc_node->name);
-
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
-
-	if (aaa->aaa_nirq < 1) {
-		printf(": no interrupt\n");
-		return;
-	}
 
 	printf(" addr 0x%llx/0x%llx", aaa->aaa_addr[0], aaa->aaa_size[0]);
 	printf(" irq %d", aaa->aaa_irq[0]);

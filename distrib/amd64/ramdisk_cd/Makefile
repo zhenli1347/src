@@ -1,12 +1,14 @@
-#	$OpenBSD: Makefile,v 1.31 2021/07/26 12:47:45 kn Exp $
+#	$OpenBSD: Makefile,v 1.35 2022/03/07 21:43:00 deraadt Exp $
 
 FS=		miniroot${OSrev}.img
-FSSIZE=		9920
+FSSIZE=		11392
 FSDISKTYPE=	mini34
 CDROM=		cd${OSrev}.iso
 MOUNT_POINT=	/mnt
 MTREE=		${UTILS}/mtree.conf
 RAMDISK=	RAMDISK_CD
+
+MOUNT_ARGS_msdos=-o-s
 
 LISTS=		${.CURDIR}/list
 UTILS=		${.CURDIR}/../../miniroot
@@ -21,7 +23,7 @@ ${FS}: bsd.gz
 	fdisk -yi -l ${FSSIZE} -b 960 -f ${DESTDIR}/usr/mdec/mbr `cat vnd`
 	disklabel -wAT ${.CURDIR}/template `cat vnd`
 	newfs -t msdos /dev/r`cat vnd`i
-	mount /dev/`cat vnd`i ${MOUNT_POINT}
+	mount ${MOUNT_ARGS_msdos} /dev/`cat vnd`i ${MOUNT_POINT}
 	mkdir -p ${MOUNT_POINT}/efi/boot
 	cp ${EFIBOOT} ${MOUNT_POINT}/efi/boot
 	umount ${MOUNT_POINT}
@@ -56,7 +58,7 @@ MRDISKTYPE=	rdrootb
 MRMAKEFSARGS=	-o disklabel=${MRDISKTYPE},minfree=0,density=4096
 
 bsd.gz: bsd.rd
-	objcopy -S -R .comment -R .SUNW_ctf \
+	objcopy -g -x -R .comment -R .SUNW_ctf \
 	    -K rd_root_size -K rd_root_image \
 	    bsd.rd bsd.strip
 	gzip -9cn bsd.strip > bsd.gz

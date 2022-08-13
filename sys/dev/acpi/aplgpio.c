@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplgpio.c,v 1.3 2021/05/16 08:50:59 jsg Exp $	*/
+/*	$OpenBSD: aplgpio.c,v 1.5 2022/04/06 18:59:27 naddy Exp $	*/
 /*
  * Copyright (c) 2016 Mark Kettenis
  * Copyright (c) 2019 James Hastings
@@ -60,7 +60,7 @@ struct aplgpio_softc {
 int	aplgpio_match(struct device *, void *, void *);
 void	aplgpio_attach(struct device *, struct device *, void *);
 
-struct cfattach aplgpio_ca = {
+const struct cfattach aplgpio_ca = {
 	sizeof(struct aplgpio_softc), aplgpio_match, aplgpio_attach
 };
 
@@ -84,6 +84,8 @@ aplgpio_match(struct device *parent, void *match, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct cfdata *cf = match;
 
+	if (aaa->aaa_naddr < 1 || aaa->aaa_nirq < 1)
+		return 0;
 	return acpi_matchhids(aaa, aplgpio_hids, cf->cf_driver->cd_name);
 }
 
@@ -98,16 +100,6 @@ aplgpio_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
 	printf(" %s", sc->sc_node->name);
-
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
-
-	if (aaa->aaa_nirq < 1) {
-		printf(": no interrupt\n");
-		return;
-	}
 
 	if (aml_evalinteger(sc->sc_acpi, sc->sc_node, "_UID", 0, NULL, &uid)) {
 		printf(": can't find uid\n");

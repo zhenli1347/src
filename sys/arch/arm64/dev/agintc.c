@@ -1,4 +1,4 @@
-/* $OpenBSD: agintc.c,v 1.33 2021/05/21 18:53:12 kettenis Exp $ */
+/* $OpenBSD: agintc.c,v 1.41 2022/08/03 13:36:51 kettenis Exp $ */
 /*
  * Copyright (c) 2007, 2009, 2011, 2017 Dale Rahn <drahn@dalerahn.com>
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -73,6 +73,7 @@
 #define  GICD_TYPER_LPIS		(1 << 17)
 #define  GICD_TYPER_ITLINE_M		0x1f
 #define GICD_IIDR		0x0008
+#define GICD_IGROUPR(i)		(0x0080 + (IRQ_TO_REG32(i) * 4))
 #define GICD_ISENABLER(i)	(0x0100 + (IRQ_TO_REG32(i) * 4))
 #define GICD_ICENABLER(i)	(0x0180 + (IRQ_TO_REG32(i) * 4))
 #define GICD_ISPENDR(i)		(0x0200 + (IRQ_TO_REG32(i) * 4))
@@ -84,6 +85,7 @@
 #define  GICD_ICFGR_TRIG_LEVEL(i)	(0x0 << (IRQ_TO_REG16BIT(i) * 2))
 #define  GICD_ICFGR_TRIG_EDGE(i)	(0x2 << (IRQ_TO_REG16BIT(i) * 2))
 #define  GICD_ICFGR_TRIG_MASK(i)	(0x2 << (IRQ_TO_REG16BIT(i) * 2))
+#define GICD_IGRPMODR(i)	(0x0d00 + (IRQ_TO_REG32(i) * 4))
 #define GICD_NSACR(i)		(0x0e00 + (IRQ_TO_REG16(i) * 4))
 #define GICD_IROUTER(i)		(0x6000 + ((i) * 8))
 
@@ -107,7 +109,7 @@
 #define  GICR_PENDBASER_PTZ		(1ULL << 62)
 #define  GICR_PENDBASER_ISH		(1ULL << 10)
 #define  GICR_PENDBASER_IC_NORM_NC	(1ULL << 7)
-#define GICR_IGROUP0		0x10080
+#define GICR_IGROUPR0		0x10080
 #define GICR_ISENABLE0		0x10100
 #define GICR_ICENABLE0		0x10180
 #define GICR_ISPENDR0		0x10200
@@ -117,6 +119,7 @@
 #define GICR_IPRIORITYR(i)	(0x10400 + (i))
 #define GICR_ICFGR0		0x10c00
 #define GICR_ICFGR1		0x10c04
+#define GICR_IGRPMODR0		0x10d00
 
 #define GICR_PROP_SIZE		(64 * 1024)
 #define  GICR_PROP_GROUP1	(1 << 1)
@@ -158,9 +161,9 @@ struct agintc_softc {
 	struct agintc_dmamem	*sc_prop;
 	struct agintc_dmamem	*sc_pend;
 	struct interrupt_controller sc_ic;
-	int			 sc_ipi_num[2]; /* id for NOP and DDB ipi */
-	int			 sc_ipi_reason[MAXCPUS]; /* NOP or DDB caused */
-	void			*sc_ipi_irq[2]; /* irqhandle for each ipi */
+	int			 sc_ipi_num[3]; /* id for each ipi */
+	int			 sc_ipi_reason[MAXCPUS]; /* cause of ipi */
+	void			*sc_ipi_irq[3]; /* irqhandle for each ipi */
 };
 struct agintc_softc *agintc_sc;
 
@@ -231,11 +234,12 @@ void		agintc_r_wait_rwp(struct agintc_softc *sc);
 uint32_t	agintc_r_ictlr(void);
 
 int		agintc_ipi_ddb(void *v);
+int		agintc_ipi_halt(void *v);
 int		agintc_ipi_nop(void *v);
 int		agintc_ipi_combined(void *);
 void		agintc_send_ipi(struct cpu_info *, int);
 
-struct cfattach	agintc_ca = {
+const struct cfattach	agintc_ca = {
 	sizeof (struct agintc_softc), agintc_match, agintc_attach
 };
 
@@ -284,7 +288,7 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	int			 i, nbits, nintr;
 	int			 offset, nredist;
 #ifdef MULTIPROCESSOR
-	int			 nipi, ipiirq[2];
+	int			 nipi, ipiirq[3];
 #endif
 
 	psw = intr_disable();
@@ -450,11 +454,6 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 		}
 		if (ci != NULL)
 			sc->sc_cpuremap[ci->ci_cpuid] = nredist;
-#ifdef MULTIPROCESSOR
-		else
-			panic("%s: no CPU found for affinity %08x",
-			    sc->sc_sbus.sc_dev.dv_xname, affinity);
-#endif
 
 		sc->sc_processor[nredist] = bus_space_read_8(sc->sc_iot,
 		    sc->sc_redist_base, offset + GICR_TYPER) >> 8;
@@ -483,6 +482,8 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	/* Disable all interrupts, clear all pending */
 	for (i = 1; i < nintr / 32; i++) {
 		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
+		    GICD_ICACTIVER(i * 32), ~0);
+		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
 		    GICD_ICENABLER(i * 32), ~0);
 	}
 
@@ -490,6 +491,14 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 		/* lowest priority ?? */
 		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
 		    GICD_IPRIORITYR(i), 0xffffffff);
+	}
+
+	/* Set all interrupts to G1NS */
+	for (i = 1; i < nintr / 32; i++) {
+		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
+		    GICD_IGROUPR(i * 32), ~0);
+		bus_space_write_4(sc->sc_iot, sc->sc_d_ioh,
+		    GICD_IGRPMODR(i * 32), 0);
 	}
 
 	for (i = 2; i < nintr / 16; i++) {
@@ -534,9 +543,10 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 	/* setup IPI interrupts */
 
 	/*
-	 * Ideally we want two IPI interrupts, one for NOP and one for
-	 * DDB, however we can survive if only one is available it is
-	 * possible that most are not available to the non-secure OS.
+	 * Ideally we want three IPI interrupts, one for NOP, one for
+	 * DDB and one for HALT.  However we can survive if only one
+	 * is available; it is possible that most are not available to
+	 * the non-secure OS.
 	 */
 	nipi = 0;
 	for (i = 0; i < 16; i++) {
@@ -563,7 +573,7 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 		else
 			printf(", %d", i);
 		ipiirq[nipi++] = i;
-		if (nipi == 2)
+		if (nipi == 3)
 			break;
 	}
 
@@ -577,6 +587,7 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 		    agintc_ipi_combined, sc, "ipi");
 		sc->sc_ipi_num[ARM_IPI_NOP] = ipiirq[0];
 		sc->sc_ipi_num[ARM_IPI_DDB] = ipiirq[0];
+		sc->sc_ipi_num[ARM_IPI_HALT] = ipiirq[0];
 		break;
 	case 2:
 		sc->sc_ipi_irq[0] = agintc_intr_establish(ipiirq[0],
@@ -585,8 +596,23 @@ agintc_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_ipi_num[ARM_IPI_NOP] = ipiirq[0];
 		sc->sc_ipi_irq[1] = agintc_intr_establish(ipiirq[1],
 		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_combined, sc, "ipi");
+		sc->sc_ipi_num[ARM_IPI_DDB] = ipiirq[1];
+		sc->sc_ipi_num[ARM_IPI_HALT] = ipiirq[1];
+		break;
+	case 3:
+		sc->sc_ipi_irq[0] = agintc_intr_establish(ipiirq[0],
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_nop, sc, "ipinop");
+		sc->sc_ipi_num[ARM_IPI_NOP] = ipiirq[0];
+		sc->sc_ipi_irq[1] = agintc_intr_establish(ipiirq[1],
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
 		    agintc_ipi_ddb, sc, "ipiddb");
 		sc->sc_ipi_num[ARM_IPI_DDB] = ipiirq[1];
+		sc->sc_ipi_irq[2] = agintc_intr_establish(ipiirq[2],
+		    IST_EDGE_RISING, IPL_IPI|IPL_MPSAFE, NULL,
+		    agintc_ipi_halt, sc, "ipihalt");
+		sc->sc_ipi_num[ARM_IPI_HALT] = ipiirq[2];
 		break;
 	default:
 		panic("nipi unexpected number %d", nipi);
@@ -664,11 +690,17 @@ agintc_cpuinit(void)
 		bus_space_write_4(sc->sc_iot, sc->sc_r_ioh[hwcpu],
 		    GICR_IPRIORITYR(i), ~0);
 	}
-	
+	bus_space_write_4(sc->sc_iot, sc->sc_r_ioh[hwcpu],
+	    GICR_IGROUPR0, ~0);
+	bus_space_write_4(sc->sc_iot, sc->sc_r_ioh[hwcpu],
+	    GICR_IGRPMODR0, 0);
+
 	if (sc->sc_ipi_irq[0] != NULL)
 		agintc_route_irq(sc->sc_ipi_irq[0], IRQ_ENABLE, curcpu());
 	if (sc->sc_ipi_irq[1] != NULL)
 		agintc_route_irq(sc->sc_ipi_irq[1], IRQ_ENABLE, curcpu());
+	if (sc->sc_ipi_irq[2] != NULL)
+		agintc_route_irq(sc->sc_ipi_irq[2], IRQ_ENABLE, curcpu());
 
 	__asm volatile("msr "STR(ICC_PMR)", %x0" :: "r"(0xff));
 	__asm volatile("msr "STR(ICC_BPR1)", %x0" :: "r"(0));
@@ -920,7 +952,7 @@ agintc_run_handler(struct intrhand *ih, void *frame, int s)
 		KERNEL_LOCK();
 #endif
 
-	if (ih->ih_arg != 0)
+	if (ih->ih_arg)
 		arg = ih->ih_arg;
 	else
 		arg = frame;
@@ -1158,6 +1190,13 @@ agintc_ipi_ddb(void *v)
 }
 
 int
+agintc_ipi_halt(void *v)
+{
+	cpu_halt();
+	return 1;
+}
+
+int
 agintc_ipi_nop(void *v)
 {
 	/* Nothing to do here, just enough to wake up from WFI */
@@ -1172,6 +1211,9 @@ agintc_ipi_combined(void *v)
 	if (sc->sc_ipi_reason[cpu_number()] == ARM_IPI_DDB) {
 		sc->sc_ipi_reason[cpu_number()] = ARM_IPI_NOP;
 		return agintc_ipi_ddb(v);
+	} else if (sc->sc_ipi_reason[cpu_number()] == ARM_IPI_HALT) {
+		sc->sc_ipi_reason[cpu_number()] = ARM_IPI_NOP;
+		return agintc_ipi_halt(v);
 	} else {
 		return agintc_ipi_nop(v);
 	}
@@ -1186,8 +1228,8 @@ agintc_send_ipi(struct cpu_info *ci, int id)
 	if (ci == curcpu() && id == ARM_IPI_NOP)
 		return;
 
-	/* never overwrite IPI_DDB with IPI_NOP */
-	if (id == ARM_IPI_DDB)
+	/* never overwrite IPI_DDB or IPI_HALT with IPI_NOP */
+	if (id == ARM_IPI_DDB || id == ARM_IPI_HALT)
 		sc->sc_ipi_reason[ci->ci_cpuid] = id;
 
 	/* will only send 1 cpu */
@@ -1208,6 +1250,7 @@ agintc_send_ipi(struct cpu_info *ci, int id)
 #define  GITS_CTLR_ENABLED	(1UL << 0)
 #define GITS_TYPER		0x0008
 #define  GITS_TYPER_CIL		(1ULL << 36)
+#define  GITS_TYPER_CIDBITS(x)	(((x) >> 32) & 0xf)
 #define  GITS_TYPER_HCC(x)	(((x) >> 24) & 0xff)
 #define  GITS_TYPER_PTA		(1ULL << 19)
 #define  GITS_TYPER_DEVBITS(x)	(((x) >> 13) & 0x1f)
@@ -1225,7 +1268,8 @@ agintc_send_ipi(struct cpu_info *ci, int id)
 #define  GITS_BASER_IC_NORM_NC	(1ULL << 59)
 #define  GITS_BASER_TYPE_MASK	(7ULL << 56)
 #define  GITS_BASER_TYPE_DEVICE	(1ULL << 56)
-#define  GITS_BASER_DTE_SZ(x)	(((x) >> 48) & 0x1f)
+#define  GITS_BASER_TYPE_COLL	(4ULL << 56)
+#define  GITS_BASER_TTE_SZ(x)	(((x) >> 48) & 0x1f)
 #define  GITS_BASER_PGSZ_MASK	(3ULL << 8)
 #define  GITS_BASER_PGSZ_4K	(0ULL << 8)
 #define  GITS_BASER_PGSZ_16K	(1ULL << 8)
@@ -1289,6 +1333,10 @@ struct agintc_msi_softc {
 	struct agintc_dmamem		*sc_dtt;
 	size_t				sc_dtt_pgsz;
 	uint8_t				sc_dte_sz;
+	int				sc_cidbits;
+	struct agintc_dmamem		*sc_ctt;
+	size_t				sc_ctt_pgsz;
+	uint8_t				sc_cte_sz;
 	uint8_t				sc_ite_sz;
 
 	LIST_HEAD(, agintc_msi_device)	sc_msi_devices;
@@ -1296,7 +1344,7 @@ struct agintc_msi_softc {
 	struct interrupt_controller	sc_ic;
 };
 
-struct cfattach	agintcmsi_ca = {
+const struct cfattach	agintcmsi_ca = {
 	sizeof (struct agintc_msi_softc), agintc_msi_match, agintc_msi_attach
 };
 
@@ -1346,13 +1394,16 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	typer = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_TYPER);
-	if ((typer & GITS_TYPER_PHYS) == 0 || typer & GITS_TYPER_PTA ||
-	    GITS_TYPER_HCC(typer) < ncpus || typer & GITS_TYPER_CIL) {
+	if ((typer & GITS_TYPER_PHYS) == 0 || typer & GITS_TYPER_PTA) {
 		printf(": unsupported type 0x%016llx\n", typer);
 		goto unmap;
 	}
 	sc->sc_ite_sz = GITS_TYPER_ITE_SZ(typer) + 1;
 	sc->sc_devbits = GITS_TYPER_DEVBITS(typer) + 1;
+	if (typer & GITS_TYPER_CIL)
+		sc->sc_cidbits = GITS_TYPER_CIDBITS(typer) + 1;
+	else
+		sc->sc_cidbits = 16;
 
 	sc->sc_nlpi = agintc_sc->sc_nlpi;
 	sc->sc_lpi = mallocarray(sc->sc_nlpi, sizeof(void *), M_DEVBUF,
@@ -1384,19 +1435,19 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_64K);
 		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
 		if ((baser & GITS_BASER_PGSZ_MASK) == GITS_BASER_PGSZ_64K)
-			goto found;
+			goto dfound;
 		
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
 		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_16K);
 		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
 		if ((baser & GITS_BASER_PGSZ_MASK) == GITS_BASER_PGSZ_16K)
-			goto found;
+			goto dfound;
 
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
 		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_4K);
 		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
 
-	found:
+	dfound:
 		switch (baser & GITS_BASER_PGSZ_MASK) {
 		case GITS_BASER_PGSZ_4K:
 			sc->sc_dtt_pgsz = PAGE_SIZE;
@@ -1410,7 +1461,7 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		}
 
 		/* Calculate table size. */
-		sc->sc_dte_sz = GITS_BASER_DTE_SZ(baser) + 1;
+		sc->sc_dte_sz = GITS_BASER_TTE_SZ(baser) + 1;
 		size = (1ULL << sc->sc_devbits) * sc->sc_dte_sz;
 		size = roundup(size, sc->sc_dtt_pgsz);
 
@@ -1428,6 +1479,67 @@ agintc_msi_attach(struct device *parent, struct device *self, void *aux)
 		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
 		    GITS_BASER_IC_NORM_NC | baser & GITS_BASER_PGSZ_MASK | 
 		    dtt_pa | (size / sc->sc_dtt_pgsz) - 1 | GITS_BASER_VALID);
+	}
+
+	/* Set up collection translation table. */
+	for (i = 0; i < GITS_NUM_BASER; i++) {
+		uint64_t baser;
+		paddr_t ctt_pa;
+		size_t size;
+
+		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
+		if ((baser & GITS_BASER_TYPE_MASK) != GITS_BASER_TYPE_COLL)
+			continue;
+
+		/* Determine the maximum supported page size. */
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
+		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_64K);
+		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
+		if ((baser & GITS_BASER_PGSZ_MASK) == GITS_BASER_PGSZ_64K)
+			goto cfound;
+
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
+		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_16K);
+		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
+		if ((baser & GITS_BASER_PGSZ_MASK) == GITS_BASER_PGSZ_16K)
+			goto cfound;
+
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
+		    (baser & ~GITS_BASER_PGSZ_MASK) | GITS_BASER_PGSZ_4K);
+		baser = bus_space_read_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i));
+
+	cfound:
+		switch (baser & GITS_BASER_PGSZ_MASK) {
+		case GITS_BASER_PGSZ_4K:
+			sc->sc_ctt_pgsz = PAGE_SIZE;
+			break;
+		case GITS_BASER_PGSZ_16K:
+			sc->sc_ctt_pgsz = 4 * PAGE_SIZE;
+			break;
+		case GITS_BASER_PGSZ_64K:
+			sc->sc_ctt_pgsz = 16 * PAGE_SIZE;
+			break;
+		}
+
+		/* Calculate table size. */
+		sc->sc_cte_sz = GITS_BASER_TTE_SZ(baser) + 1;
+		size = (1ULL << sc->sc_cidbits) * sc->sc_cte_sz;
+		size = roundup(size, sc->sc_ctt_pgsz);
+
+		/* Allocate table. */
+		sc->sc_ctt = agintc_dmamem_alloc(sc->sc_dmat,
+		    size, sc->sc_ctt_pgsz);
+		if (sc->sc_ctt == NULL) {
+			printf(": can't alloc translation table\n");
+			goto unmap;
+		}
+
+		/* Configure table. */
+		ctt_pa = AGINTC_DMA_DVA(sc->sc_ctt);
+		KASSERT((ctt_pa & GITS_BASER_PA_MASK) == ctt_pa);
+		bus_space_write_8(sc->sc_iot, sc->sc_ioh, GITS_BASER(i),
+		    GITS_BASER_IC_NORM_NC | baser & GITS_BASER_PGSZ_MASK | 
+		    ctt_pa | (size / sc->sc_ctt_pgsz) - 1 | GITS_BASER_VALID);
 	}
 
 	/* Enable ITS. */

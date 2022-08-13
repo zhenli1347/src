@@ -1,4 +1,4 @@
-/*	$OpenBSD: pciide.c,v 1.361 2020/07/24 12:43:31 krw Exp $	*/
+/*	$OpenBSD: pciide.c,v 1.363 2022/03/11 18:00:51 mpi Exp $	*/
 /*	$NetBSD: pciide.c,v 1.127 2001/08/03 01:31:08 tsutsui Exp $	*/
 
 /*
@@ -1403,12 +1403,12 @@ void	pciide_attach(struct device *, struct device *, void *);
 int	pciide_detach(struct device *, int);
 int	pciide_activate(struct device *, int);
 
-struct cfattach pciide_pci_ca = {
+const struct cfattach pciide_pci_ca = {
 	sizeof(struct pciide_softc), pciide_match, pciide_attach,
 	pciide_detach, pciide_activate
 };
 
-struct cfattach pciide_jmb_ca = {
+const struct cfattach pciide_jmb_ca = {
 	sizeof(struct pciide_softc), pciide_match, pciide_attach,
 	pciide_detach, pciide_activate
 };
@@ -3190,8 +3190,8 @@ piix_setup_idetim_drvs(struct ata_drive_datas *drvp)
 	u_int8_t drive = drvp->drive;
 
 	/*
-	 * If drive is using UDMA, timings setups are independant
-	 * So just check DMA and PIO here.
+	 * If drive is using UDMA, timing setup is independent
+	 * so just check DMA and PIO here.
 	 */
 	if (drvp->drive_flags & DRIVE_DMA) {
 		/* if mode = DMA mode 0, use compatible timings */
@@ -3742,7 +3742,7 @@ cmd_channel_map(struct pci_attach_args *pa, struct pciide_softc *sc,
 	cp->wdc_channel.wdc = &sc->sc_wdcdev;
 
 	/*
-	 * Older CMD64X doesn't have independant channels
+	 * Older CMD64X doesn't have independent channels
 	 */
 	switch (sc->sc_pp->ide_product) {
 	case PCI_PRODUCT_CMDTECH_649:
@@ -6122,7 +6122,7 @@ hpt_chip_map(struct pciide_softc *sc, struct pci_attach_args *pa)
 		~(HPT370_CTRL2_FASTIRQ | HPT370_CTRL2_HIRQ));
 
 		/*
-		 * HPT370 and highter has a bit to disable interrupts,
+		 * HPT370 and higher has a bit to disable interrupts,
 		 * make sure to clear it
 		 */
 		pciide_pci_write(sc->sc_pc, sc->sc_tag, HPT_CSEL,
@@ -6978,7 +6978,7 @@ pdcsata_chip_map(struct pciide_softc *sc, struct pci_attach_args *pa)
 		/*
 		 * Subregion de busmaster registers. They're spread all over
 		 * the controller's register space :(. They are also 4 bytes
-		 * sized, with some specific extentions in the extra bits.
+		 * sized, with some specific extensions in the extra bits.
 		 * It also seems that the IDEDMA_CTL register isn't available.
 		 */
 		if (bus_space_subregion(ps->ba5_st, ps->ba5_sh,

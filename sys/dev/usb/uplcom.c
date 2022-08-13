@@ -1,4 +1,4 @@
-/*	$OpenBSD: uplcom.c,v 1.77 2021/01/27 17:28:19 mglocker Exp $	*/
+/*	$OpenBSD: uplcom.c,v 1.80 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: uplcom.c,v 1.29 2002/09/23 05:51:23 simonb Exp $	*/
 /*
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
@@ -44,9 +44,7 @@
 #include <sys/ioctl.h>
 #include <sys/conf.h>
 #include <sys/tty.h>
-#include <sys/selinfo.h>
 #include <sys/device.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbcdc.h>
@@ -129,7 +127,7 @@ int  uplcom_param(void *, int, struct termios *);
 int  uplcom_open(void *, int);
 void uplcom_close(void *, int);
 
-struct	ucom_methods uplcom_methods = {
+const struct ucom_methods uplcom_methods = {
 	uplcom_get_status,
 	uplcom_set,
 	uplcom_param,
@@ -159,7 +157,12 @@ static const struct usb_devno uplcom_devs[] = {
 	{ USB_VENDOR_PLX, USB_PRODUCT_PLX_CA42 },
 	{ USB_VENDOR_PANASONIC, USB_PRODUCT_PANASONIC_TYTP50P6S },
 	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303 },
+	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GB },
 	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GC },
+	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GE },
+	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GL },
+	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GS },
+	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303GT },
 	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303X },
 	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_PL2303X2 },
 	{ USB_VENDOR_PROLIFIC, USB_PRODUCT_PROLIFIC_RSAQ2 },

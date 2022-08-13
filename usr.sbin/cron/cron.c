@@ -1,4 +1,4 @@
-/*	$OpenBSD: cron.c,v 1.79 2020/04/16 17:51:56 millert Exp $	*/
+/*	$OpenBSD: cron.c,v 1.82 2022/07/08 20:47:24 millert Exp $	*/
 
 /* Copyright 1988,1990,1993,1994 by Paul Vixie
  * Copyright (c) 2004 by Internet Systems Consortium, Inc. ("ISC")
@@ -358,6 +358,8 @@ cron_sleep(time_t target, sigset_t *mask)
 	clock_gettime(CLOCK_REALTIME, &t1);
 	t1.tv_sec += GMToff;
 	timeout.tv_sec = (target * SECONDS_PER_MINUTE - t1.tv_sec) + 1;
+	if (timeout.tv_sec < 0)
+		timeout.tv_sec = 0;
 	timeout.tv_nsec = 0;
 
 	pfd[0].fd = cronSock;
@@ -368,11 +370,23 @@ cron_sleep(time_t target, sigset_t *mask)
 
 		/* Sleep until we time out, get a poke, or get a signal. */
 		nfds = ppoll(pfd, 1, &timeout, mask);
-		if (nfds == 0)
-			break;		/* timer expired */
-		if (nfds == -1 && errno != EINTR)
-			break;		/* an error occurred */
-		if (nfds > 0) {
+		switch (nfds) {
+		case -1:
+			if (errno != EINTR && errno != EAGAIN) {
+				syslog(LOG_ERR, "(CRON) DEATH (ppoll failure: %m)");
+				exit(EXIT_FAILURE);
+			}
+			if (errno == EINTR) {
+				if (got_sigchld) {
+					got_sigchld = 0;
+					sigchld_reaper();
+				}
+			}
+			break;
+		case 0:
+			/* done sleeping */
+			return;
+		default:
 			sunlen = sizeof(s_un);
 			fd = accept4(cronSock, (struct sockaddr *)&s_un,
 			    &sunlen, SOCK_NONBLOCK);
@@ -396,12 +410,6 @@ cron_sleep(time_t target, sigset_t *mask)
 						    batch_maxload, t2.tv_sec);
 				}
 			}
-		} else {
-			/* Interrupted by a signal. */
-			if (got_sigchld) {
-				got_sigchld = 0;
-				sigchld_reaper();
-			}
 		}
 
 		/* Adjust tv and continue where we left off.  */
@@ -411,9 +419,7 @@ cron_sleep(time_t target, sigset_t *mask)
 		timespecsub(&timeout, &t1, &timeout);
 		memcpy(&t1, &t2, sizeof(t1));
 		if (timeout.tv_sec < 0)
-			timeout.tv_sec = 0;
-		if (timeout.tv_nsec < 0)
-			timeout.tv_nsec = 0;
+			timespecclear(&timeout);
 	}
 }
 

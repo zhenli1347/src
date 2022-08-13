@@ -1,4 +1,4 @@
-#   $OpenBSD: tlsfuzzer.py,v 1.43 2021/09/03 14:50:36 tb Exp $
+#   $OpenBSD: tlsfuzzer.py,v 1.47 2022/07/18 09:15:08 tb Exp $
 #
 # Copyright (c) 2020 Theo Buehler <tb@openbsd.org>
 #
@@ -49,7 +49,7 @@ class Test:
 
     def __repr__(self):
         return "<Test: %s tls12_args: %s tls13_args: %s>" % (
-                self.name, self.tls12_args, tls13_args
+                self.name, self.tls12_args, self.tls13_args
             )
 
 class TestGroup:
@@ -175,7 +175,8 @@ tls13_tests = TestGroup("TLSv1.3 tests", [
     Test("test-tls13-legacy-version.py"),
     Test("test-tls13-nociphers.py"),
     Test("test-tls13-record-padding.py"),
-    Test("test-tls13-shuffled-extentions.py"),
+    # Exclude QUIC transport parameters
+    Test("test-tls13-shuffled-extentions.py", [ "--exc", "57" ]),
     Test("test-tls13-zero-content-type.py"),
 
     # The skipped tests fail due to a bug in BIO_gets() which masks the retry
@@ -207,9 +208,10 @@ tls13_slow_tests = TestGroup("slow TLSv1.3 tests", [
     ]),
     # We don't accept an empty ECPF extension since it must advertise the
     # uncompressed point format. Exclude this extension type from the test.
+    # Also exclude QUIC transport parameters.
     Test(
         "test-tls13-large-number-of-extensions.py",
-        tls13_args = ["--exc", "11"],
+        tls13_args = ["--exc", "11", "--exc", "57"],
     ),
 ])
 
@@ -297,6 +299,9 @@ tls13_unsupported_tests = TestGroup("TLSv1.3 tests for unsupported features", [
 
     # need server to react to HTTP GET for /keyupdate
     Test("test-tls13-keyupdate-from-server.py"),
+
+    # needs an echo server
+    Test("test-tls13-lengths.py"),
 
     # Weird test: tests servers that don't support 1.3
     Test("test-tls13-non-support.py"),
@@ -410,7 +415,8 @@ tls12_slow_tests = TestGroup("slow TLSv1.2 tests", [
     Test("test-dhe-no-shared-secret-padding.py", tls12_exclude_legacy_protocols),
     Test("test-ecdhe-padded-shared-secret.py", tls12_exclude_legacy_protocols),
     Test("test-ecdhe-rsa-key-share-random.py", tls12_exclude_legacy_protocols),
-    Test("test-large-hello.py"),
+    # Start at extension number 58 to avoid QUIC transport parameters (57)
+    Test("test-large-hello.py", [ "-m", "58" ]),
 ])
 
 tls12_failing_tests = TestGroup("failing TLSv1.2 tests", [
@@ -557,6 +563,8 @@ tls12_unsupported_tests = TestGroup("TLSv1.2 for unsupported features", [
     Test("test-record-size-limit.py"),
     # expects the server to send the heartbeat extension
     Test("test-heartbeat.py"),
+    # needs an echo server
+    Test("test-lengths.py"),
 ])
 
 # These tests take a ton of time to fail against an 1.3 server,

@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.231 2017/12/12 19:49:19 bluhm Exp $
+# $OpenBSD: Makefile,v 1.236 2022/03/23 22:07:10 bluhm Exp $
 
 # TARGETS
 # pf: feed pfNN.in through pfctl and check whether the output matches pfNN.ok
@@ -12,12 +12,13 @@
 # pfopt: as target pf, but supply extra command line options
 # pfcmd: test pfctl command line parsing
 # pfloadanchors: load anchor from nested files
+# pf-changerule: covers DIOCCHANGERULE ioctl(2)
 
 PFTESTS=1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27
 PFTESTS+=28 29 30 31 32 34 35 36 38 39 40 41 44 46 47 48 49 50
 PFTESTS+=52 53 54 55 56 57 60 61 65 66 67 68 69 70 71 72 73
 PFTESTS+=74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96
-PFTESTS+=97 98 99 100 101 102 103 104 105 106 107 108 109 110 111
+PFTESTS+=97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 114
 PFFAIL=1 2 3 4 5 6 7 8 11 12 13 14 15 16 17 19 20 23 25 27
 PFFAIL+=30 37 38 39 40 41 42 43 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62
 PFFAIL+=63 64 65 66 67
@@ -25,7 +26,7 @@ PFSIMPLE=1 2
 PFSETUP=1 4
 PFLOAD=1 2 3 4 5 7 8 9 10 11 12 13 14 15 16 17 18 19 20 23 24 25 26 27 28 29
 PFLOAD+=30 31 32 34 36 38 39 40 44 46 47 48 49 54 56 60 61 65 66 67 68 69 70 71
-PFLOAD+=72 73 74 75 76 77 78 79 80 81 82 84 87 88 89 90 91 92 99 100 101
+PFLOAD+=72 73 74 75 76 77 78 79 80 81 82 84 87 88 89 90 91 92 99 100 101 114
 PFTABLE=1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 PFOPT=1 2 6
 PFIF2IP=1 2 3
@@ -35,6 +36,20 @@ PFCMDFAIL=1
 PFLOADANCHORS=112 113
 
 PFCTL ?=	/sbin/pfctl
+
+.PATH: ${.CURDIR}/../../../sbin/pfctl ${.CURDIR}/../../../sys/net
+
+PROG=	changerule
+SRCS=	changerule.c parse.y pfctl_parser.c pf_print_state.c
+SRCS+=	pfctl.c	pfctl_osfp.c pfctl_radix.c pfctl_table.c
+SRCS+=	pfctl_optimize.c pf_ruleset.c pfctl_queue.c
+CFLAGS= -Wall -Wmissing-prototypes -Wno-uninitialized -Wstrict-prototypes
+CFLAGS+= -Wno-unused-variable
+CFLAGS+= -I${.CURDIR}/../../../sbin/pfctl -DREGRESS_NOMAIN
+YFLAGS=
+
+LDADD+= -lm
+DPADD+= ${LIBM}
 
 MAKEOBJDIRPREFIX=
 
@@ -67,7 +82,7 @@ PFAIL_TARGETS+=pfail${n}
 PFAIL_UPDATES+=pfail${n}-update
 
 pfail${n}:
-	${PFCTL} -o none -nv -f - < ${.CURDIR}/pfail${n}.in 2>&1 | \
+	${SUDO} ${PFCTL} -o none -nv -f - < ${.CURDIR}/pfail${n}.in 2>&1 | \
 	    diff -u ${.CURDIR}/pfail${n}.ok /dev/stdin
 
 pfail${n}-update:
@@ -106,6 +121,7 @@ selfpf:		${SELFPF_TARGETS}
 pf-update:	${PF_UPDATES}
 REGRESS_TARGETS+=pf-include-setup pf
 REGRESS_TARGETS+=selfpf
+REGRESS_TARGETS+=pf-changerule
 UPDATE_TARGETS+=pf-update
 
 pf-include-setup:
@@ -361,6 +377,35 @@ pf-loadanchors-setup:
 .for f in pf112.one pf112.two pf113.one pf113.two
 	[ -f ${.OBJDIR}/$f ] || ln -s ${.CURDIR}/$f ${.OBJDIR}
 .endfor
+
+pf-changerule: changerule changerule-tail.ok changerule-head.ok \
+    changerule-before.ok changerule-after.ok
+	echo 'pass all' | ${SUDO} ${PFCTL} -a regress -f -
+	${SUDO} ${PFCTL} -a 'regress/*' -Fr
+	echo 'pass all' | ${SUDO} ${PFCTL} -a regress -f -
+.for i in 10 20 30 40 50
+	echo "pass in proto tcp from any to any port $i" | \
+	    ${SUDO} ./changerule -a regress -i 0
+.endfor
+	${SUDO} ${PFCTL} -a regress -sr | \
+	    diff -u ${.CURDIR}/changerule-head.ok /dev/stdin
+	${SUDO} ${PFCTL} -a 'regress/*' -Fr
+	echo 'pass all' | ${SUDO} ${PFCTL} -a regress -f -
+.for i in 10 20 30 40 50
+	echo "pass in proto tcp from any to any port $i" | \
+	    ${SUDO} ./changerule -a regress -i -1
+.endfor
+	${SUDO} ${PFCTL} -a regress -sr | \
+	    diff -u ${.CURDIR}/changerule-tail.ok /dev/stdin
+	echo 'pass in proto tcp from any to any port 15' | \
+	    ${SUDO} ./changerule -a regress -i 2
+	${SUDO} ${PFCTL} -a regress -sr | \
+	    diff -u ${.CURDIR}/changerule-before.ok /dev/stdin
+	echo 'pass in proto tcp from any to any port 25' | \
+	    ${SUDO} ./changerule -a regress -I 3
+	${SUDO} ${PFCTL} -a regress -sr | \
+	    diff -u ${.CURDIR}/changerule-after.ok /dev/stdin
+	${SUDO} ${PFCTL} -a 'regress/*' -Fr
 
 update:	${UPDATE_TARGETS}
 

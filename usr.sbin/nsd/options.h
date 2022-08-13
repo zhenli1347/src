@@ -31,6 +31,10 @@ typedef struct key_options key_options_type;
 typedef struct tls_auth_options tls_auth_options_type;
 typedef struct config_parser_state config_parser_state_type;
 
+#define VERIFY_ZONE_INHERIT (2)
+#define VERIFIER_FEED_ZONE_INHERIT (2)
+#define VERIFIER_TIMEOUT_INHERIT (-1)
+
 /*
  * Options global for nsd.
  */
@@ -112,6 +116,10 @@ struct nsd_options {
 	int minimal_responses;
 	int refuse_any;
 	int reuseport;
+	/* max number of xfrd tcp sockets */
+	int xfrd_tcp_max;
+	/* max number of simultaneous requests on xfrd tcp socket */
+	int xfrd_tcp_pipeline;
 
 	/* private key file for TLS */
 	char* tls_service_key;
@@ -175,6 +183,22 @@ struct nsd_options {
 	char *cookie_secret;
 	/** path to cookie secret store */
 	char const* cookie_secret_file;
+	/** enable verify */
+	int verify_enable;
+	/** list of ip addresses used to serve zones for verification */
+	struct ip_address_option* verify_ip_addresses;
+	/** default port 5347 */
+	char *verify_port;
+	/** verify zones by default */
+	int verify_zones;
+	/** default command to verify zones with */
+	char **verifier;
+	/** maximum number of verifiers that may run simultaneously */
+	int verifier_count;
+	/** whether or not to feed the zone to the verifier over stdin */
+	uint8_t verifier_feed_zone;
+	/** maximum number of seconds that a verifier may take */
+	uint32_t verifier_timeout;
 
 	region_type* region;
 };
@@ -254,6 +278,21 @@ struct pattern_options {
 	uint8_t min_expire_time_expr;
 	uint64_t size_limit_xfr;
 	uint8_t multi_master_check;
+	uint8_t store_ixfr;
+	uint8_t store_ixfr_is_default;
+	uint64_t ixfr_size;
+	uint8_t ixfr_size_is_default;
+	uint32_t ixfr_number;
+	uint8_t ixfr_number_is_default;
+	uint8_t create_ixfr;
+	uint8_t create_ixfr_is_default;
+	uint8_t verify_zone;
+	uint8_t verify_zone_is_default;
+	char **verifier;
+	uint8_t verifier_feed_zone;
+	uint8_t verifier_feed_zone_is_default;
+	int32_t verifier_timeout;
+	uint8_t verifier_timeout_is_default;
 } ATTR_PACKED;
 
 #define PATTERN_IMPLICIT_MARKER "_implicit_"
@@ -340,6 +379,9 @@ struct tls_auth_options {
 	rbnode_type node; /* key of tree is name */
 	char* name;
 	char* auth_domain_name;
+	char* client_cert;
+	char* client_key;
+	char* client_key_pw;
 };
 
 /** zone list free space */

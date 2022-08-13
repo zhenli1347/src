@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.15 2021/05/17 17:25:13 kettenis Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.19 2022/02/09 23:54:55 deraadt Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis
  *
@@ -40,7 +40,7 @@ int	acpi_fdt_match(struct device *, void *, void *);
 void	acpi_fdt_attach(struct device *, struct device *, void *);
 void	acpi_attach(struct device *, struct device *, void *);
 
-struct cfattach acpi_fdt_ca = {
+const struct cfattach acpi_fdt_ca = {
 	sizeof(struct acpi_softc), acpi_fdt_match, acpi_fdt_attach
 };
 
@@ -189,36 +189,6 @@ acpi_intr_disestablish(void *cookie)
 	ic->ic_disestablish(aih->ih_ih);
 	free(aih, M_DEVBUF, sizeof(*aih));
 }
-
-void
-acpi_sleep_clocks(struct acpi_softc *sc, int state)
-{
-}
-
-int
-acpi_sleep_cpu(struct acpi_softc *sc, int state)
-{
-	return 0;
-}
-
-void
-acpi_resume_cpu(struct acpi_softc *sc, int state)
-{
-}
-
-#ifdef MULTIPROCESSOR
-
-void
-acpi_sleep_mp(void)
-{
-}
-
-void
-acpi_resume_mp(void)
-{
-}
-
-#endif
 
 bus_dma_tag_t
 acpi_iommu_device_map(struct aml_node *node, bus_dma_tag_t dmat)

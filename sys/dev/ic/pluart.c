@@ -1,4 +1,4 @@
-/*	$OpenBSD: pluart.c,v 1.7 2021/09/01 09:29:31 jan Exp $	*/
+/*	$OpenBSD: pluart.c,v 1.14 2022/07/02 08:50:42 visa Exp $	*/
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2005 Dale Rahn <drahn@dalerahn.com>
@@ -27,7 +27,6 @@
 #include <sys/syslog.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
-#include <sys/select.h>
 #include <sys/kernel.h>
 
 #include <machine/bus.h>
@@ -71,9 +70,9 @@
 #define UART_ILPR		0x20		/* IrDA low-power counter register */
 #define UART_ILPR_ILPDVSR	((x) & 0xf)	/* IrDA low-power divisor */
 #define UART_IBRD		0x24		/* Integer baud rate register */
-#define UART_IBRD_DIVINT	((x) & 0xff)	/* Integer baud rate divisor */
+#define UART_IBRD_DIVINT(x)	((x) & 0xffff)	/* Integer baud rate divisor */
 #define UART_FBRD		0x28		/* Fractional baud rate register */
-#define UART_FBRD_DIVFRAC	((x) & 0x3f)	/* Fractional baud rate divisor */
+#define UART_FBRD_DIVFRAC(x)	((x) & 0x3f)	/* Fractional baud rate divisor */
 #define UART_LCR_H		0x2c		/* Line control register */
 #define UART_LCR_H_BRK		(1 << 0)	/* Send break */
 #define UART_LCR_H_PEN		(1 << 1)	/* Parity enable */
@@ -99,6 +98,13 @@
 #define UART_CR_CTSE		(1 << 14)	/* CTS hardware flow control enable */
 #define UART_CR_RTSE		(1 << 15)	/* RTS hardware flow control enable */
 #define UART_IFLS		0x34		/* Interrupt FIFO level select register */
+#define UART_IFLS_RX_SHIFT	3		/* RX level in bits [5:3] */
+#define UART_IFLS_TX_SHIFT	0		/* TX level in bits [2:0] */
+#define UART_IFLS_1_8		0		/* FIFO 1/8 full */
+#define UART_IFLS_1_4		1		/* FIFO 1/4 full */
+#define UART_IFLS_1_2		2		/* FIFO 1/2 full */
+#define UART_IFLS_3_4		3		/* FIFO 3/4 full */
+#define UART_IFLS_7_8		4		/* FIFO 7/8 full */
 #define UART_IMSC		0x38		/* Interrupt mask set/clear register */
 #define UART_IMSC_RIMIM		(1 << 0)
 #define UART_IMSC_CTSMIM	(1 << 1)
@@ -115,7 +121,15 @@
 #define UART_MIS		0x40		/* Masked interrupt status register */
 #define UART_ICR		0x44		/* Interrupt clear register */
 #define UART_DMACR		0x48		/* DMA control register */
+#define UART_PID0		0xfe0		/* Peripheral identification register 0 */
+#define UART_PID1		0xfe4		/* Peripheral identification register 1 */
+#define UART_PID2		0xfe8		/* Peripheral identification register 2 */
+#define UART_PID2_REV(x)	(((x) & 0xf0) >> 4)
+#define UART_PID3		0xfec		/* Peripheral identification register 3 */
 #define UART_SPACE		0x100
+
+#define UART_FIFO_SIZE		16
+#define UART_FIFO_SIZE_R3	32
 
 void pluartcnprobe(struct consdev *cp);
 void pluartcninit(struct consdev *cp);
@@ -138,11 +152,12 @@ struct cfdriver pluart_cd = {
 	NULL, "pluart", DV_TTY
 };
 
+int		pluartdefaultrate = B38400;
+int		pluartconsrate = B38400;
 bus_space_tag_t	pluartconsiot;
 bus_space_handle_t pluartconsioh;
 bus_addr_t	pluartconsaddr;
 tcflag_t	pluartconscflag = TTYDEF_CFLAG;
-int		pluartdefaultrate = B38400;
 
 struct cdevsw pluartdev =
 	cdev_tty_init(3/*XXX NUART */ ,pluart);		/* 12: serial port */
@@ -150,7 +165,29 @@ struct cdevsw pluartdev =
 void
 pluart_attach_common(struct pluart_softc *sc, int console)
 {
-	int maj;
+	int fifolen, fr, lcr, maj;
+
+	if ((sc->sc_hwflags & COM_HW_SBSA) == 0) {
+		if (sc->sc_hwrev == 0)
+			sc->sc_hwrev = UART_PID2_REV(bus_space_read_4(sc->sc_iot,
+			    sc->sc_ioh, UART_PID2));
+		if (sc->sc_hwrev < 3)
+			fifolen = UART_FIFO_SIZE;
+		else
+			fifolen = UART_FIFO_SIZE_R3;
+		printf(": rev %d, %d byte fifo\n", sc->sc_hwrev, fifolen);
+	} else {
+		/*
+		 * The SBSA UART is PL011 r1p5 compliant which implies revision
+		 * 3 with a 32 byte FIFO. However, we cannot expect to configure
+		 * RX/TX interrupt levels using the UARTIFLS register making it
+		 * impossible to make assumptions about the number of available
+		 * bytes in the FIFO. Therefore disable FIFO support for such
+		 * devices.
+		 */
+		fifolen = 0;
+		printf("\n");
+	}
 
 	if (console) {
 		/* Locate the major number. */
@@ -159,7 +196,7 @@ pluart_attach_common(struct pluart_softc *sc, int console)
 				break;
 		cn_tab->cn_dev = makedev(maj, sc->sc_dev.dv_unit);
 
-		printf(": console");
+		printf("%s: console\n", sc->sc_dev.dv_xname);
 		SET(sc->sc_hwflags, COM_HW_CONSOLE);
 	}
 
@@ -171,13 +208,30 @@ pluart_attach_common(struct pluart_softc *sc, int console)
 		panic("%s: can't establish soft interrupt.",
 		    sc->sc_dev.dv_xname);
 
-	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IMSC, (UART_IMSC_RXIM | UART_IMSC_TXIM));
-	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_ICR, 0x7ff);
-	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H,
-	    bus_space_read_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H) &
-	    ~UART_LCR_H_FEN);
+	/* Flush transmit before enabling FIFO. */
+	for (;;) {
+		fr = bus_space_read_4(sc->sc_iot, sc->sc_ioh, UART_FR);
+		if (fr & UART_FR_TXFE)
+			break;
+		delay(100);
+	}
 
-	printf("\n");
+	if (fifolen > 0) {
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IFLS,
+		    (UART_IFLS_3_4 << UART_IFLS_RX_SHIFT) |
+		    (UART_IFLS_1_4 << UART_IFLS_TX_SHIFT));
+	}
+	sc->sc_imsc = UART_IMSC_RXIM | UART_IMSC_RTIM;
+	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IMSC, sc->sc_imsc);
+	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_ICR, 0x7ff);
+
+
+	lcr = bus_space_read_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H);
+	if (fifolen > 0)
+		lcr |= UART_LCR_H_FEN;
+	else
+		lcr &= ~UART_LCR_H_FEN;
+	bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H, lcr);
 }
 
 int
@@ -191,13 +245,14 @@ pluart_intr(void *arg)
 	u_int16_t *p;
 	u_int16_t c;
 
-	is = bus_space_read_4(iot, ioh, UART_RIS);
-	bus_space_write_4(iot, ioh, UART_ICR, is);
+	is = bus_space_read_4(iot, ioh, UART_MIS);
+	bus_space_write_4(iot, ioh, UART_ICR, is & ~UART_IMSC_TXIM);
 
 	if (sc->sc_tty == NULL)
 		return 0;
 
-	if (!ISSET(is, UART_IMSC_RXIM) && !ISSET(is, UART_IMSC_TXIM))
+	if (!ISSET(is, UART_IMSC_RXIM) && !ISSET(is, UART_IMSC_RTIM) &&
+	    !ISSET(is, UART_IMSC_TXIM))
 		return 0;
 
 	if (ISSET(is, UART_IMSC_TXIM) && ISSET(tp->t_state, TS_BUSY)) {
@@ -209,7 +264,7 @@ pluart_intr(void *arg)
 
 	p = sc->sc_ibufp;
 
-	while (ISSET(bus_space_read_4(iot, ioh, UART_FR), UART_FR_RXFF)) {
+	while (!ISSET(bus_space_read_4(iot, ioh, UART_FR), UART_FR_RXFE)) {
 		c = bus_space_read_2(iot, ioh, UART_DR);
 		if (c & UART_DR_BE) {
 #ifdef DDB
@@ -247,12 +302,9 @@ int
 pluart_param(struct tty *tp, struct termios *t)
 {
 	struct pluart_softc *sc = pluart_cd.cd_devs[DEVUNIT(tp->t_dev)];
-	//bus_space_tag_t iot = sc->sc_iot;
-	//bus_space_handle_t ioh = sc->sc_ioh;
 	int ospeed = t->c_ospeed;
 	int error;
 	tcflag_t oldcflag;
-
 
 	if (t->c_ospeed < 0 || (t->c_ispeed && t->c_ispeed != t->c_ospeed))
 		return EINVAL;
@@ -282,7 +334,9 @@ pluart_param(struct tty *tp, struct termios *t)
 		/* lower dtr */
 	}
 
-	if (ospeed != 0) {
+	if (sc->sc_clkfreq != 0 && ospeed != 0 && ospeed != tp->t_ospeed) {
+		int cr, div, lcr;
+
 		while (ISSET(tp->t_state, TS_BUSY)) {
 			++sc->sc_halt;
 			error = ttysleep(tp, &tp->t_outq,
@@ -293,14 +347,47 @@ pluart_param(struct tty *tp, struct termios *t)
 				return (error);
 			}
 		}
-		/* set speed */
+
+		/*
+		 * Writes to IBRD and FBRD are made effective first when LCR_H
+		 * is written.
+		 */
+		lcr = bus_space_read_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H);
+
+		/* The UART must be disabled while changing the baud rate. */
+		cr = bus_space_read_4(sc->sc_iot, sc->sc_ioh, UART_CR);
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_CR,
+		    cr & ~UART_CR_UARTEN);
+
+		/*
+		 * The baud rate divisor is expressed relative to the UART clock
+		 * frequency where IBRD represents the quotient using 16 bits
+		 * and FBRD the remainder using 6 bits. The PL011 specification
+		 * provides the following formula:
+		 *
+		 *	uartclk/(16 * baudrate)
+		 *
+		 * The formula can be estimated by scaling it with the
+		 * precision 64 (2^6) and letting the resulting upper 16 bits
+		 * represents the quotient and the lower 6 bits the remainder:
+		 *
+		 *	64 * uartclk/(16 * baudrate) = 4 * uartclk/baudrate
+		 */
+		div = 4 * sc->sc_clkfreq / ospeed;
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IBRD,
+		    UART_IBRD_DIVINT(div >> 6));
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_FBRD,
+		    UART_FBRD_DIVFRAC(div));
+		/* Commit baud rate change. */
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_LCR_H, lcr);
+		/* Enable UART. */
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_CR, cr);
 	}
 
 	/* setup fifo */
 
 	/* When not using CRTSCTS, RTS follows DTR. */
 	/* sc->sc_dtr = MCR_DTR; */
-
 
 	/* and copy to tty */
 	tp->t_ispeed = t->c_ispeed;
@@ -325,23 +412,46 @@ pluart_start(struct tty *tp)
 	struct pluart_softc *sc = pluart_cd.cd_devs[DEVUNIT(tp->t_dev)];
 	bus_space_tag_t iot = sc->sc_iot;
 	bus_space_handle_t ioh = sc->sc_ioh;
-	u_int16_t fr;
 	int s;
 
 	s = spltty();
-	if (ISSET(tp->t_state, TS_BUSY | TS_TIMEOUT | TS_TTSTOP))
+	if (ISSET(tp->t_state, TS_BUSY))
 		goto out;
+	if (ISSET(tp->t_state, TS_TIMEOUT | TS_TTSTOP))
+		goto stopped;
 	ttwakeupwr(tp);
 	if (tp->t_outq.c_cc == 0)
-		goto out;
+		goto stopped;
 	SET(tp->t_state, TS_BUSY);
 
-	fr = bus_space_read_4(iot, ioh, UART_FR);
-	while (tp->t_outq.c_cc != 0 && ISSET(fr, UART_FR_TXFE)) {
-		bus_space_write_4(iot, ioh, UART_DR, getc(&tp->t_outq));
-		fr = bus_space_read_4(iot, ioh, UART_FR);
+	/* Enable transmit interrupt. */
+	if (!ISSET(sc->sc_imsc, UART_IMSC_TXIM)) {
+		sc->sc_imsc |= UART_IMSC_TXIM;
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IMSC,
+		    sc->sc_imsc);
 	}
+
+	while (tp->t_outq.c_cc > 0) {
+		uint16_t fr;
+
+		fr = bus_space_read_4(iot, ioh, UART_FR);
+		if (ISSET(fr, UART_FR_TXFF))
+			break;
+
+		bus_space_write_4(iot, ioh, UART_DR, getc(&tp->t_outq));
+	}
+
 out:
+	splx(s);
+	return;
+
+stopped:
+	/* Disable transmit interrupt. */
+	if (ISSET(sc->sc_imsc, UART_IMSC_TXIM)) {
+		sc->sc_imsc &= ~UART_IMSC_TXIM;
+		bus_space_write_4(sc->sc_iot, sc->sc_ioh, UART_IMSC,
+		    sc->sc_imsc);
+	}
 	splx(s);
 }
 
@@ -485,7 +595,10 @@ pluartopen(dev_t dev, int flag, int mode, struct proc *p)
 		if (ISSET(sc->sc_swflags, COM_SW_MDMBUF))
 			SET(tp->t_cflag, MDMBUF);
 		tp->t_lflag = TTYDEF_LFLAG;
-		tp->t_ispeed = tp->t_ospeed = pluartdefaultrate;
+		if (ISSET(sc->sc_hwflags, COM_HW_CONSOLE))
+			tp->t_ispeed = tp->t_ospeed = pluartconsrate;
+		else
+			tp->t_ispeed = tp->t_ospeed = pluartdefaultrate;
 
 		s = spltty();
 
@@ -511,13 +624,6 @@ pluartopen(dev_t dev, int flag, int mode, struct proc *p)
 		    1 << IMXUART_FCR_TXTL_SH |
 		    5 << IMXUART_FCR_RFDIV_SH |
 		    1 << IMXUART_FCR_RXTL_SH);
-
-		bus_space_write_4(iot, ioh, IMXUART_UBIR,
-		    (pluartdefaultrate / 100) - 1);
-
-		/* formula: clk / (rfdiv * 1600) */
-		bus_space_write_4(iot, ioh, IMXUART_UBMR,
-		    (clk_get_rate(sc->sc_clk) * 1000) / 1600);
 
 		SET(sc->sc_ucr1, IMXUART_CR1_EN|IMXUART_CR1_RRDYEN);
 		SET(sc->sc_ucr2, IMXUART_CR2_TXEN|IMXUART_CR2_RXEN);
@@ -759,6 +865,7 @@ pluartcnattach(bus_space_tag_t iot, bus_addr_t iobase, int rate, tcflag_t cflag)
 	pluartconsiot = iot;
 	pluartconsaddr = iobase;
 	pluartconscflag = cflag;
+	pluartconsrate = rate;
 
 	return 0;
 }
@@ -769,8 +876,8 @@ pluartcngetc(dev_t dev)
 	int c;
 	int s;
 	s = splhigh();
-	while((bus_space_read_4(pluartconsiot, pluartconsioh, UART_FR) &
-	    UART_FR_RXFF) == 0)
+	while ((bus_space_read_4(pluartconsiot, pluartconsioh, UART_FR) &
+	    UART_FR_RXFE))
 		;
 	c = bus_space_read_4(pluartconsiot, pluartconsioh, UART_DR);
 	splx(s);
@@ -782,8 +889,8 @@ pluartcnputc(dev_t dev, int c)
 {
 	int s;
 	s = splhigh();
-	while((bus_space_read_4(pluartconsiot, pluartconsioh, UART_FR) &
-	    UART_FR_TXFE) == 0)
+	while ((bus_space_read_4(pluartconsiot, pluartconsioh, UART_FR) &
+	    UART_FR_TXFF))
 		;
 	bus_space_write_4(pluartconsiot, pluartconsioh, UART_DR, (uint8_t)c);
 	splx(s);

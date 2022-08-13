@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioscsi.c,v 1.26 2020/09/22 19:32:53 krw Exp $	*/
+/*	$OpenBSD: vioscsi.c,v 1.30 2022/04/16 19:19:59 naddy Exp $	*/
 /*
  * Copyright (c) 2013 Google Inc.
  *
@@ -70,19 +70,17 @@ void		 vioscsi_req_done(struct vioscsi_softc *, struct virtio_softc *,
 void		*vioscsi_req_get(void *);
 void		 vioscsi_req_put(void *, void *);
 
-struct cfattach vioscsi_ca = {
+const struct cfattach vioscsi_ca = {
 	sizeof(struct vioscsi_softc),
 	vioscsi_match,
 	vioscsi_attach,
 };
 
 struct cfdriver vioscsi_cd = {
-	NULL,
-	"vioscsi",
-	DV_DULL,
+	NULL, "vioscsi", DV_DULL,
 };
 
-struct scsi_adapter vioscsi_switch = {
+const struct scsi_adapter vioscsi_switch = {
 	vioscsi_scsi_cmd, NULL, NULL, NULL, NULL
 };
 
@@ -371,7 +369,7 @@ vioscsi_vq_done(struct virtqueue *vq)
  * resources necessary to start an I/O on the device.
  *
  * Since the size of the I/O is unknown at this time the
- * resouces allocated (a.k.a. reserved) must be sufficient
+ * resources allocated (a.k.a. reserved) must be sufficient
  * to allow the maximum possible I/O size.
  *
  * When the I/O is actually attempted via vioscsi_scsi_cmd()

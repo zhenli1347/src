@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_ciph.c,v 1.124 2021/07/03 16:06:44 jsing Exp $ */
+/* $OpenBSD: ssl_ciph.c,v 1.129 2022/06/29 20:06:55 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -448,7 +448,7 @@ ssl_cipher_get_evp(const SSL_SESSION *ss, const EVP_CIPHER **enc,
 
 	/*
 	 * This function does not handle EVP_AEAD.
-	 * See ssl_cipher_get_aead_evp instead.
+	 * See ssl_cipher_get_evp_aead instead.
 	 */
 	if (ss->cipher->algorithm_mac & SSL_AEAD)
 		return 0;
@@ -564,10 +564,10 @@ ssl_get_handshake_evp_md(SSL *s, const EVP_MD **md)
 
 	*md = NULL;
 
-	if (S3I(s)->hs.cipher == NULL)
+	if (s->s3->hs.cipher == NULL)
 		return 0;
 
-	handshake_mac = S3I(s)->hs.cipher->algorithm2 &
+	handshake_mac = s->s3->hs.cipher->algorithm2 &
 	    SSL_HANDSHAKE_MAC_MASK;
 
 	/* For TLSv1.2 we upgrade the default MD5+SHA1 MAC to SHA256. */
@@ -681,7 +681,10 @@ ssl_cipher_collect_ciphers(const SSL_METHOD *ssl_method, int num_of_ciphers,
 	co_list_num = 0;	/* actual count of ciphers */
 	for (i = 0; i < num_of_ciphers; i++) {
 		c = ssl_method->get_cipher(i);
-		/* drop those that use any of that is not available */
+		/*
+		 * Drop any invalid ciphers and any which use unavailable
+		 * algorithms.
+		 */
 		if ((c != NULL) && c->valid &&
 		    !(c->algorithm_mkey & disabled_mkey) &&
 		    !(c->algorithm_auth & disabled_auth) &&
@@ -942,7 +945,8 @@ ssl_cipher_strength_sort(CIPHER_ORDER **head_p, CIPHER_ORDER **tail_p)
 
 static int
 ssl_cipher_process_rulestr(const char *rule_str, CIPHER_ORDER **head_p,
-    CIPHER_ORDER **tail_p, const SSL_CIPHER **ca_list, int *tls13_seen)
+    CIPHER_ORDER **tail_p, const SSL_CIPHER **ca_list, SSL_CERT *cert,
+    int *tls13_seen)
 {
 	unsigned long alg_mkey, alg_auth, alg_enc, alg_mac, alg_ssl;
 	unsigned long algo_strength;
@@ -997,7 +1001,7 @@ ssl_cipher_process_rulestr(const char *rule_str, CIPHER_ORDER **head_p,
 			    ((ch >= '0') && (ch <= '9')) ||
 			    ((ch >= 'a') && (ch <= 'z')) ||
 			    (ch == '-') || (ch == '.') ||
-			    (ch == '_')) {
+			    (ch == '_') || (ch == '=')) {
 				ch = *(++l);
 				buflen++;
 			}
@@ -1153,18 +1157,24 @@ ssl_cipher_process_rulestr(const char *rule_str, CIPHER_ORDER **head_p,
 		if (rule == CIPHER_SPECIAL) {
 			/* special command */
 			ok = 0;
-			if ((buflen == 8) && !strncmp(buf, "STRENGTH", 8))
+			if (buflen == 8 && strncmp(buf, "STRENGTH", 8) == 0) {
 				ok = ssl_cipher_strength_sort(head_p, tail_p);
-			else
+			} else if (buflen == 10 &&
+			    strncmp(buf, "SECLEVEL=", 9) == 0) {
+				int level = buf[9] - '0';
+
+				if (level >= 0 && level <= 5) {
+					cert->security_level = level;
+					ok = 1;
+				} else {
+					SSLerrorx(SSL_R_INVALID_COMMAND);
+				}
+			} else {
 				SSLerrorx(SSL_R_INVALID_COMMAND);
+			}
 			if (ok == 0)
 				retval = 0;
-			/*
-			 * We do not support any "multi" options
-			 * together with "@", so throw away the
-			 * rest of the command, if any left, until
-			 * end or ':' is found.
-			 */
+
 			while ((*l != '\0') && !ITEM_SEP(*l))
 				l++;
 		} else if (found) {
@@ -1198,7 +1208,7 @@ STACK_OF(SSL_CIPHER) *
 ssl_create_cipher_list(const SSL_METHOD *ssl_method,
     STACK_OF(SSL_CIPHER) **cipher_list,
     STACK_OF(SSL_CIPHER) *cipher_list_tls13,
-    const char *rule_str)
+    const char *rule_str, SSL_CERT *cert)
 {
 	int ok, num_of_ciphers, num_of_alias_max, num_of_group_aliases;
 	unsigned long disabled_mkey, disabled_auth, disabled_enc, disabled_mac, disabled_ssl;
@@ -1324,7 +1334,7 @@ ssl_create_cipher_list(const SSL_METHOD *ssl_method,
 	rule_p = rule_str;
 	if (strncmp(rule_str, "DEFAULT", 7) == 0) {
 		ok = ssl_cipher_process_rulestr(SSL_DEFAULT_CIPHER_LIST,
-		    &head, &tail, ca_list, &tls13_seen);
+		    &head, &tail, ca_list, cert, &tls13_seen);
 		rule_p += 7;
 		if (*rule_p == ':')
 			rule_p++;
@@ -1332,7 +1342,7 @@ ssl_create_cipher_list(const SSL_METHOD *ssl_method,
 
 	if (ok && (strlen(rule_p) > 0))
 		ok = ssl_cipher_process_rulestr(rule_p, &head, &tail, ca_list,
-		    &tls13_seen);
+		    cert, &tls13_seen);
 
 	free((void *)ca_list);	/* Not needed anymore */
 

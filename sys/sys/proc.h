@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.314 2021/07/16 07:59:38 claudio Exp $	*/
+/*	$OpenBSD: proc.h,v 1.334 2022/07/23 22:10:59 cheloha Exp $	*/
 /*	$NetBSD: proc.h,v 1.44 1996/04/22 01:23:21 christos Exp $	*/
 
 /*-
@@ -86,37 +86,6 @@ struct	pgrp {
 };
 
 /*
- * One structure allocated per emulation.
- */
-struct exec_package;
-struct proc;
-struct ps_strings;
-struct uvm_object;
-union sigval;
-
-struct	emul {
-	char	e_name[8];		/* Symbolic name */
-	int	*e_errno;		/* Errno array */
-	int	e_nosys;		/* Offset of the nosys() syscall */
-	int	e_nsysent;		/* Number of system call entries */
-	struct sysent *e_sysent;	/* System call array */
-	char	**e_syscallnames;	/* System call name array */
-	int	e_arglen;		/* Extra argument size in words */
-					/* Copy arguments on the stack */
-	void	*(*e_copyargs)(struct exec_package *, struct ps_strings *,
-				    void *, void *);
-					/* Set registers before execution */
-	void	(*e_setregs)(struct proc *, struct exec_package *,
-				  u_long, register_t *);
-	int	(*e_fixup)(struct proc *, struct exec_package *);
-	int	(*e_coredump)(struct proc *, void *cookie);
-	char	*e_sigcode;		/* Start of sigcode */
-	char	*e_esigcode;		/* End of sigcode */
-	char	*e_esigret;		/* sigaction RET position */
-	struct uvm_object *e_sigobject;	/* shared sigcode object */
-};
-
-/*
  * time usage: accumulated times in ticks
  * Once a second, each thread's immediate counts (p_[usi]ticks) are
  * accumulated into these.
@@ -143,12 +112,14 @@ struct tusage {
 #ifdef __need_process
 struct futex;
 LIST_HEAD(futex_list, futex);
+struct proc;
 struct tslpentry;
 TAILQ_HEAD(tslpqueue, tslpentry);
 struct unveil;
 
 /*
  * Locks used to protect struct members in this file:
+ *	I	immutable after creation
  *	a	atomic operations
  *	K	kernel lock
  *	m	this process' `ps_mtx'
@@ -185,7 +156,7 @@ struct process {
 	LIST_HEAD(, process) ps_orphans;/* Pointer to list of orphans. */
 
 	struct	sigiolst ps_sigiolst;	/* List of sigio structures. */
-	struct	sigacts *ps_sigacts;	/* Signal actions, state */
+	struct	sigacts *ps_sigacts;	/* [I] Signal actions, state */
 	struct	vnode *ps_textvp;	/* Vnode of executable. */
 	struct	filedesc *ps_fd;	/* Ptr to open files structure */
 	struct	vmspace *ps_vmspace;	/* Address space */
@@ -240,15 +211,14 @@ struct process {
 #define	ps_startcopy	ps_limit
 	struct	plimit *ps_limit;	/* [m,R] Process limits. */
 	struct	pgrp *ps_pgrp;		/* Pointer to process group. */
-	struct	emul *ps_emul;		/* Emulation information */
 
-	char	ps_comm[MAXCOMLEN+1];
+	char	ps_comm[_MAXCOMLEN];	/* command name, incl NUL */
 
 	vaddr_t	ps_strings;		/* User pointers to argv/env */
 	vaddr_t ps_timekeep; 		/* User pointer to timekeep */
-	vaddr_t	ps_sigcode;		/* User pointer to the signal code */
-	vaddr_t ps_sigcoderet;		/* User pointer to sigreturn retPC */
-	u_long	ps_sigcookie;
+	vaddr_t	ps_sigcode;		/* [I] User pointer to signal code */
+	vaddr_t ps_sigcoderet;		/* [I] User ptr to sigreturn retPC */
+	u_long	ps_sigcookie;		/* [I] */
 	u_int	ps_rtableid;		/* [a] Process routing table/domain. */
 	char	ps_nice;		/* Process "nice" value. */
 
@@ -259,13 +229,13 @@ struct process {
 		u_int   pr_scale;	/* pc scaling */
 	} ps_prof;
 
-	u_short	ps_acflag;		/* Accounting flags. */
+	u_int32_t	ps_acflag;	/* Accounting flags. */
 
-	uint64_t ps_pledge;
-	uint64_t ps_execpledge;
+	uint64_t ps_pledge;		/* [m] pledge promises */
+	uint64_t ps_execpledge;		/* [m] execpledge promises */
 
-	int64_t ps_kbind_cookie;
-	u_long  ps_kbind_addr;
+	int64_t ps_kbind_cookie;	/* [m] */
+	u_long  ps_kbind_addr;		/* [m] */
 
 /* End area that is copied on creation. */
 #define ps_endcopy	ps_refcnt
@@ -304,9 +274,10 @@ struct process {
 #define	PS_ZOMBIE	0x00040000	/* Dead and ready to be waited for */
 #define	PS_NOBROADCASTKILL 0x00080000	/* Process excluded from kill -1. */
 #define	PS_PLEDGE	0x00100000	/* Has called pledge(2) */
-#define	PS_WXNEEDED	0x00200000	/* Process may violate W^X */
+#define	PS_WXNEEDED	0x00200000	/* Process allowed to violate W^X */
 #define	PS_EXECPLEDGE	0x00400000	/* Has exec pledges */
 #define	PS_ORPHAN	0x00800000	/* Process is on an orphan list */
+#define	PS_CHROOT	0x01000000	/* Process is chrooted */
 
 #define	PS_BITS \
     ("\20" "\01CONTROLT" "\02EXEC" "\03INEXEC" "\04EXITING" "\05SUGID" \
@@ -314,7 +285,7 @@ struct process {
      "\013WAITED" "\014COREDUMP" "\015SINGLEEXIT" "\016SINGLEUNWIND" \
      "\017NOZOMBIE" "\020STOPPED" "\021SYSTEM" "\022EMBRYO" "\023ZOMBIE" \
      "\024NOBROADCASTKILL" "\025PLEDGE" "\026WXNEEDED" "\027EXECPLEDGE" \
-     "\030ORPHAN")
+     "\030ORPHAN" "\031CHROOT")
 
 
 struct kcov_dev;
@@ -438,7 +409,6 @@ struct proc {
 #define	P_ALRMPEND	0x00000004	/* SIGVTALRM needs to be posted */
 #define	P_SIGSUSPEND	0x00000008	/* Need to restore before-suspend mask*/
 #define	P_CANTSLEEP	0x00000010	/* insomniac thread */
-#define	P_SELECT	0x00000040	/* Selecting; wakeup/waiting danger. */
 #define	P_SINTR		0x00000080	/* Sleep is interruptible. */
 #define	P_SYSTEM	0x00000200	/* No sigs, stats or swapping. */
 #define	P_TIMEOUT	0x00000400	/* Timing out during sleep. */
@@ -453,7 +423,7 @@ struct proc {
 
 #define	P_BITS \
     ("\20" "\01INKTR" "\02PROFPEND" "\03ALRMPEND" "\04SIGSUSPEND" \
-     "\05CANTSLEEP" "\07SELECT" "\010SINTR" "\012SYSTEM" "\013TIMEOUT" \
+     "\05CANTSLEEP" "\010SINTR" "\012SYSTEM" "\013TIMEOUT" \
      "\016WEXIT" "\020OWEUPC" "\024SUSPSINGLE" "\027XX" \
      "\030CONTINUED" "\033THREAD" "\034SUSPSIG" "\035SOFTDEP" "\037CPUPEG")
 
@@ -528,7 +498,6 @@ extern struct proc proc0;		/* Process slot for swapper. */
 extern struct process process0;		/* Process slot for kernel threads. */
 extern int nprocesses, maxprocess;	/* Cur and max number of processes. */
 extern int nthreads, maxthread;		/* Cur and max number of threads. */
-extern int randompid;			/* fork() should create random pid's */
 
 LIST_HEAD(proclist, proc);
 LIST_HEAD(processlist, process);
@@ -570,7 +539,7 @@ void	endtsleep(void *);
 int	wakeup_proc(struct proc *, const volatile void *);
 void	unsleep(struct proc *);
 void	reaper(void *);
-void	exit1(struct proc *, int, int, int);
+__dead void exit1(struct proc *, int, int, int);
 void	exit2(struct proc *);
 int	dowait4(struct proc *, pid_t, int *, int, struct rusage *,
 	    register_t *);
@@ -613,15 +582,14 @@ int	proc_cansugid(struct proc *);
 struct sleep_state {
 	int sls_s;
 	int sls_catch;
-	int sls_locked;
 	int sls_timeout;
 };
 
 struct cond {
-	int	c_wait;
+	unsigned int	c_wait;		/* [a] initialized and waiting */
 };
 
-#define COND_INITIALIZER()		{ 1 }
+#define COND_INITIALIZER()		{ .c_wait = 1 }
 
 #if defined(MULTIPROCESSOR)
 void	proc_trampoline_mp(void);	/* XXX */

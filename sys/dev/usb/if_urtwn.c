@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_urtwn.c,v 1.97 2021/04/25 15:59:19 stsp Exp $	*/
+/*	$OpenBSD: if_urtwn.c,v 1.101 2022/06/26 15:38:11 jmatthew Exp $	*/
 
 /*-
  * Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -1265,9 +1265,8 @@ urtwn_rx_frame(struct urtwn_softc *sc, uint8_t *buf, int pktlen,
 #endif
 
 	ni = ieee80211_find_rxnode(ic, wh);
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = rssi;
-	rxi.rxi_tstamp = 0;	/* Unused. */
 
 	/* Handle hardware decryption. */
 	if (((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_CTL)
@@ -1281,6 +1280,7 @@ urtwn_rx_frame(struct urtwn_softc *sc, uint8_t *buf, int pktlen,
 			ifp->if_ierrors++;
 			m_freem(m);
 			ieee80211_release_node(ic, ni);
+			splx(s);
 			return;
 		}
 		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
@@ -1448,7 +1448,7 @@ urtwn_tx_fill_desc(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 {
 	struct r92c_tx_desc_usb *txd;
 	struct ieee80211com *ic = &sc->sc_sc.sc_ic;
-	uint8_t raid, type;
+	uint8_t raid, type, rtsrate;
 	uint32_t pktlen;
 
 	txd = (struct r92c_tx_desc_usb *)*txdp;
@@ -1507,16 +1507,20 @@ urtwn_tx_fill_desc(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 		}
 		txd->txdw5 |= htole32(0x0001ff00);
 
+		if (ic->ic_curmode == IEEE80211_MODE_11B)
+			rtsrate = 0; /* CCK1 */
+		else
+			rtsrate = 8; /* OFDM24 */
+
 		if (sc->sc_sc.chip & RTWN_CHIP_88E) {
 			/* Use AMRR */
 			txd->txdw4 |= htole32(R92C_TXDW4_DRVRATE);
-			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE,
-			    ni->ni_txrate));
+			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, rtsrate));
 			txd->txdw5 |= htole32(SM(R92C_TXDW5_DATARATE,
 			    ni->ni_txrate));
 		} else {
-			/* Send RTS at OFDM24 and data at OFDM54. */
-			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, 8));
+			/* Send data at OFDM54. */
+			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, rtsrate));
 			txd->txdw5 |= htole32(SM(R92C_TXDW5_DATARATE, 11));
 		}
 	} else {
@@ -1600,7 +1604,7 @@ urtwn_tx_fill_desc_gen2(struct urtwn_softc *sc, uint8_t **txdp, struct mbuf *m,
 
 		/* Use AMRR */
 		txd->txdw3 |= htole32(R92E_TXDW3_DRVRATE);
-		txd->txdw4 |= htole32(SM(R92E_TXDW4_RTSRATE, ni->ni_txrate));
+		txd->txdw4 |= htole32(SM(R92E_TXDW4_RTSRATE, 8));
 		txd->txdw4 |= htole32(SM(R92E_TXDW4_DATARATE, ni->ni_txrate));
 	} else {
 		txd->txdw1 |= htole32(
@@ -2045,14 +2049,14 @@ urtwn_load_firmware(void *cookie, u_char **fw, size_t *len)
 	int error;
 
 	if (sc->sc_sc.chip & RTWN_CHIP_92E)
-		name = "urtwn-rtl8192eu_nic";
+		name = "urtwn-rtl8192eu";
 	else if (sc->sc_sc.chip & RTWN_CHIP_88E)
-		name = "urtwn-rtl8188eufw";
+		name = "urtwn-rtl8188eu";
 	else if ((sc->sc_sc.chip & (RTWN_CHIP_UMC_A_CUT | RTWN_CHIP_92C)) ==
 		    RTWN_CHIP_UMC_A_CUT)
-		name = "urtwn-rtl8192cfwU";
+		name = "urtwn-rtl8192cU";
 	else
-		name = "urtwn-rtl8192cfwT";
+		name = "urtwn-rtl8192cT";
 
 	error = loadfirmware(name, fw, len);
 	if (error)

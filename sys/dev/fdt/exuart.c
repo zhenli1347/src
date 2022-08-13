@@ -1,4 +1,4 @@
-/* $OpenBSD: exuart.c,v 1.9 2021/09/01 09:29:31 jan Exp $ */
+/* $OpenBSD: exuart.c,v 1.11 2022/07/02 08:50:42 visa Exp $ */
 /*
  * Copyright (c) 2005 Dale Rahn <drahn@motorola.com>
  *
@@ -26,7 +26,6 @@
 #include <sys/syslog.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
-#include <sys/select.h>
 #include <sys/kernel.h>
 
 #include <machine/bus.h>
@@ -123,7 +122,7 @@ struct cfdriver exuart_cd = {
 	NULL, "exuart", DV_TTY
 };
 
-struct cfattach exuart_ca = {
+const struct cfattach exuart_ca = {
 	sizeof(struct exuart_softc), exuart_match, exuart_attach
 };
 

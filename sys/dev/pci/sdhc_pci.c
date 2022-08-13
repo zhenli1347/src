@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdhc_pci.c,v 1.21 2019/11/20 16:34:58 patrick Exp $	*/
+/*	$OpenBSD: sdhc_pci.c,v 1.24 2022/03/11 18:00:51 mpi Exp $	*/
 
 /*
  * Copyright (c) 2006 Uwe Stuehler <uwe@openbsd.org>
@@ -62,7 +62,7 @@ void	sdhc_pci_conf_write(pci_chipset_tag_t, pcitag_t, int, uint8_t);
 void	sdhc_takecontroller(struct pci_attach_args *);
 void	sdhc_ricohfix(struct sdhc_pci_softc *);
 
-struct cfattach sdhc_pci_ca = {
+const struct cfattach sdhc_pci_ca = {
 	sizeof(struct sdhc_pci_softc), sdhc_pci_match, sdhc_pci_attach,
 	NULL, sdhc_pci_activate
 };
@@ -110,7 +110,6 @@ sdhc_pci_attach(struct device *parent, struct device *self, void *aux)
 	bus_space_tag_t iot;
 	bus_space_handle_t ioh;
 	bus_size_t size;
-	u_int32_t caps = 0;
 
 	sc->sc_pc = pa->pa_pc;
 	sc->sc_tag = pa->pa_tag;
@@ -131,7 +130,8 @@ sdhc_pci_attach(struct device *parent, struct device *self, void *aux)
 	if (PCI_VENDOR(pa->pa_id) == PCI_VENDOR_INTEL &&
 	    (PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_INTEL_100SERIES_LP_EMMC ||
 	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_INTEL_APOLLOLAKE_EMMC ||
-	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_INTEL_GLK_EMMC))
+	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_INTEL_GLK_EMMC ||
+	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_INTEL_JSL_EMMC))
 		sc->sc.sc_flags |= SDHC_F_NOPWR0;
 
 	/* Some RICOH controllers need to be bumped into the right mode. */
@@ -182,7 +182,7 @@ sdhc_pci_attach(struct device *parent, struct device *self, void *aux)
 			break;
 		}
 
-		if (sdhc_host_found(&sc->sc, iot, ioh, size, usedma, caps) != 0)
+		if (sdhc_host_found(&sc->sc, iot, ioh, size, usedma, 0, 0) != 0)
 			printf("%s at 0x%x: can't initialize host\n",
 			    sc->sc.sc_dev.dv_xname, reg);
 

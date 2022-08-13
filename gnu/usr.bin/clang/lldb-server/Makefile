@@ -1,13 +1,8 @@
-# $OpenBSD: Makefile,v 1.5 2021/04/28 12:55:42 patrick Exp $
+# $OpenBSD: Makefile,v 1.9 2022/07/26 15:34:33 jca Exp $
 
 .include <bsd.own.mk>
 
-.if (${MACHINE} == "arm64") || (${MACHINE} == "amd64")
 PROG=	lldb-server
-.else
-NOPROG=	lldb-server
-.endif
-
 BINDIR=	/usr/bin
 NOMAN=
 
@@ -75,6 +70,15 @@ LLVM_LIBDEPS=	clangAST \
     lldbTarget \
     lldbUtility
 
+BUILDFIRST=	VCSVersion.inc LLGSOptions.inc
+
+VCSVersion.inc:
+	touch $@
+
+LLGSOptions.inc: ${.CURDIR}/../../../llvm/lldb/tools/lldb-server/LLGSOptions.td
+	${.OBJDIR}/../llvm-tblgen/llvm-tblgen -gen-opt-parser-defs \
+		-I ${LLVM_SRCS}/include \
+		-o ${.TARGET} ${.ALLSRC}
 
 LDADD+= -L ${.OBJDIR}/../libLLVM -lLLVM
 

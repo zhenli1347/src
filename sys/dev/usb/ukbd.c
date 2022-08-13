@@ -1,4 +1,4 @@
-/*	$OpenBSD: ukbd.c,v 1.82 2021/01/29 16:59:41 sthen Exp $	*/
+/*	$OpenBSD: ukbd.c,v 1.86 2022/01/09 05:43:00 jsg Exp $	*/
 /*      $NetBSD: ukbd.c,v 1.85 2003/03/11 16:44:00 augustss Exp $        */
 
 /*
@@ -200,6 +200,9 @@ ukbd_match(struct device *parent, void *match, void *aux)
 	struct uhidev_attach_arg *uha = (struct uhidev_attach_arg *)aux;
 	int size;
 	void *desc;
+
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
+		return (UMATCH_NONE);
 
 	uhidev_get_report_desc(uha->parent, &desc, &size);
 	if (!hid_is_collection(desc, size, uha->reportid,
@@ -492,7 +495,7 @@ ukbd_cnattach(void)
 	/*
 	 * XXX USB requires too many parts of the kernel to be running
 	 * XXX in order to work, so we can't do much for the console
-	 * XXX keyboard until autconfiguration has run its course.
+	 * XXX keyboard until autoconfiguration has run its course.
 	 */
 	hidkbd_is_console = 1;
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: menu.c,v 1.35 2021/08/13 18:54:54 nicm Exp $ */
+/* $OpenBSD: menu.c,v 1.47 2022/08/04 12:06:09 nicm Exp $ */
 
 /*
  * Copyright (c) 2019 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -55,10 +55,11 @@ menu_add_item(struct menu *menu, const struct menu_item *item,
     struct cmdq_item *qitem, struct client *c, struct cmd_find_state *fs)
 {
 	struct menu_item	*new_item;
-	const char		*key, *cmd;
-	char			*s, *name;
-	u_int			 width;
+	const char		*key = NULL, *cmd, *suffix = "";
+	char			*s, *trimmed, *name;
+	u_int			 width, max_width;
 	int			 line;
+	size_t			 keylen, slen;
 
 	line = (item == NULL || item->name == NULL || *item->name == '\0');
 	if (line && menu->count == 0)
@@ -80,11 +81,36 @@ menu_add_item(struct menu *menu, const struct menu_item *item,
 		menu->count--;
 		return;
 	}
+	max_width = c->tty.sx - 4;
+
+	slen = strlen(s);
 	if (*s != '-' && item->key != KEYC_UNKNOWN && item->key != KEYC_NONE) {
 		key = key_string_lookup_key(item->key, 0);
-		xasprintf(&name, "%s#[default] #[align=right](%s)", s, key);
+		keylen = strlen(key) + 3; /* 3 = space and two brackets */
+
+		/*
+		 * Add the key if it is shorter than a quarter of the available
+		 * space or there is space for the entire item text and the
+		 * key.
+		 */
+		if (keylen <= max_width / 4)
+			max_width -= keylen;
+		else if (keylen >= max_width || slen >= max_width - keylen)
+			key = NULL;
+	}
+
+	if (slen > max_width) {
+		max_width--;
+		suffix = ">";
+	}
+	trimmed = format_trim_right(s, max_width);
+	if (key != NULL) {
+		xasprintf(&name, "%s%s#[default] #[align=right](%s)",
+		    trimmed, suffix, key);
 	} else
-		xasprintf(&name, "%s", s);
+		xasprintf(&name, "%s%s", trimmed, suffix);
+	free(trimmed);
+
 	new_item->name = name;
 	free(s);
 
@@ -100,6 +126,8 @@ menu_add_item(struct menu *menu, const struct menu_item *item,
 	new_item->key = item->key;
 
 	width = format_width(new_item->name);
+	if (*new_item->name == '-')
+		width--;
 	if (width > menu->width)
 		menu->width = width;
 }
@@ -132,25 +160,29 @@ menu_free(struct menu *menu)
 }
 
 struct screen *
-menu_mode_cb(__unused struct client *c, void *data, __unused u_int *cx,
-    __unused u_int *cy)
+menu_mode_cb(__unused struct client *c, void *data, u_int *cx, u_int *cy)
 {
 	struct menu_data	*md = data;
+
+	*cx = md->px + 2;
+	if (md->choice == -1)
+		*cy = md->py;
+	else
+		*cy = md->py + 1 + md->choice;
 
 	return (&md->s);
 }
 
-int
-menu_check_cb(__unused struct client *c, void *data, u_int px, u_int py)
+/* Return parts of the input range which are not obstructed by the menu. */
+void
+menu_check_cb(__unused struct client *c, void *data, u_int px, u_int py,
+    u_int nx, struct overlay_ranges *r)
 {
 	struct menu_data	*md = data;
 	struct menu		*menu = md->menu;
 
-	if (px < md->px || px > md->px + menu->width + 3)
-		return (1);
-	if (py < md->py || py > md->py + menu->count + 1)
-		return (1);
-	return (0);
+	server_client_overlay_range(md->px, md->py, menu->width + 4,
+	    menu->count + 2, px, py, nx, r);
 }
 
 void
@@ -210,7 +242,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 
 	if (KEYC_IS_MOUSE(event->key)) {
 		if (md->flags & MENU_NOMOUSE) {
-			if (MOUSE_BUTTONS(m->b) != 0)
+			if (MOUSE_BUTTONS(m->b) != MOUSE_BUTTON_1)
 				return (1);
 			return (0);
 		}
@@ -223,7 +255,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 					return (1);
 			} else {
 				if (!MOUSE_RELEASE(m->b) &&
-				    MOUSE_WHEEL(m->b) == 0 &&
+				    !MOUSE_WHEEL(m->b) &&
 				    !MOUSE_DRAG(m->b))
 					return (1);
 			}
@@ -237,7 +269,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 			if (MOUSE_RELEASE(m->b))
 				goto chosen;
 		} else {
-			if (MOUSE_WHEEL(m->b) == 0 && !MOUSE_DRAG(m->b))
+			if (!MOUSE_WHEEL(m->b) && !MOUSE_DRAG(m->b))
 				goto chosen;
 		}
 		md->choice = m->y - (md->py + 1);
@@ -291,27 +323,64 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 		} while ((name == NULL || *name == '-') && md->choice != old);
 		c->flags |= CLIENT_REDRAWOVERLAY;
 		return (0);
-	case 'g':
 	case KEYC_PPAGE:
 	case '\002': /* C-b */
-		if (md->choice > 5)
-			md->choice -= 5;
-		else
+		if (md->choice < 6)
 			md->choice = 0;
-		while (md->choice != count && (name == NULL || *name == '-'))
+		else {
+			i = 5;
+			while (i > 0) {
+				md->choice--;
+				name = menu->items[md->choice].name;
+				if (md->choice != 0 &&
+				    (name != NULL && *name != '-'))
+					i--;
+				else if (md->choice == 0)
+					break;
+			}
+		}
+		c->flags |= CLIENT_REDRAWOVERLAY;
+		break;
+	case KEYC_NPAGE:
+		if (md->choice > count - 6) {
+			md->choice = count - 1;
+			name = menu->items[md->choice].name;
+		} else {
+			i = 5;
+			while (i > 0) {
+				md->choice++;
+				name = menu->items[md->choice].name;
+				if (md->choice != count - 1 &&
+				    (name != NULL && *name != '-'))
+					i++;
+				else if (md->choice == count - 1)
+					break;
+			}
+		}
+		while (name == NULL || *name == '-') {
+			md->choice--;
+			name = menu->items[md->choice].name;
+		}
+		c->flags |= CLIENT_REDRAWOVERLAY;
+		break;
+	case 'g':
+	case KEYC_HOME:
+		md->choice = 0;
+		name = menu->items[md->choice].name;
+		while (name == NULL || *name == '-') {
 			md->choice++;
-		if (md->choice == count)
-			md->choice = -1;
+			name = menu->items[md->choice].name;
+		}
 		c->flags |= CLIENT_REDRAWOVERLAY;
 		break;
 	case 'G':
-	case KEYC_NPAGE:
-		if (md->choice > count - 6)
-			md->choice = count - 1;
-		else
-			md->choice += 5;
-		while (md->choice != -1 && (name == NULL || *name == '-'))
+	case KEYC_END:
+		md->choice = count - 1;
+		name = menu->items[md->choice].name;
+		while (name == NULL || *name == '-') {
 			md->choice--;
+			name = menu->items[md->choice].name;
+		}
 		c->flags |= CLIENT_REDRAWOVERLAY;
 		break;
 	case '\006': /* C-f */
@@ -381,7 +450,7 @@ menu_prepare(struct menu *menu, int flags, struct cmdq_item *item, u_int px,
 		cmd_find_copy_state(&md->fs, fs);
 	screen_init(&md->s, menu->width + 4, menu->count + 2, 0);
 	if (~md->flags & MENU_NOMOUSE)
-		md->s.mode |= MODE_MOUSE_ALL;
+		md->s.mode |= (MODE_MOUSE_ALL|MODE_MOUSE_BUTTON);
 	md->s.mode &= ~MODE_CURSOR;
 
 	md->px = px;

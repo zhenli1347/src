@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.157 2021/05/17 09:26:52 florian Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.160 2022/03/02 11:10:43 florian Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -48,6 +48,8 @@
 #define HTTPD_USER		"www"
 #define HTTPD_SERVERNAME	"OpenBSD httpd"
 #define HTTPD_DOCROOT		"/htdocs"
+#define HTTPD_ERRDOCTEMPLATE	"err" /* 3-char name */
+#define HTTPD_ERRDOCROOT_MAX	(PATH_MAX - sizeof("000.html"))
 #define HTTPD_INDEX		"index.html"
 #define HTTPD_FCGI_SOCKET	"/run/slowcgi.sock"
 #define HTTPD_LOGROOT		"/logs"
@@ -128,10 +130,6 @@ RB_HEAD(kvtree, kv);
 struct kv {
 	char			*kv_key;
 	char			*kv_value;
-
-#define KV_FLAG_INVALID		 0x01
-#define KV_FLAG_GLOBBING	 0x02
-	uint8_t			 kv_flags;
 
 	struct kvlist		 kv_children;
 	struct kv		*kv_parent;
@@ -378,6 +376,7 @@ SPLAY_HEAD(client_tree, client);
 #define SRVFLAG_NO_FCGI		0x00000080
 #define SRVFLAG_LOG		0x00000100
 #define SRVFLAG_NO_LOG		0x00000200
+#define SRVFLAG_ERRDOCS		0x00000400
 #define SRVFLAG_SYSLOG		0x00000800
 #define SRVFLAG_NO_SYSLOG	0x00001000
 #define SRVFLAG_TLS		0x00002000
@@ -393,12 +392,13 @@ SPLAY_HEAD(client_tree, client);
 #define SRVFLAG_DEFAULT_TYPE	0x00800000
 #define SRVFLAG_PATH_REWRITE	0x01000000
 #define SRVFLAG_NO_PATH_REWRITE	0x02000000
+#define SRVFLAG_GZIP_STATIC	0x04000000
 #define SRVFLAG_LOCATION_FOUND	0x40000000
 #define SRVFLAG_LOCATION_NOT_FOUND 0x80000000
 
 #define SRVFLAG_BITS							\
 	"\10\01INDEX\02NO_INDEX\03AUTO_INDEX\04NO_AUTO_INDEX"		\
-	"\05ROOT\06LOCATION\07FCGI\10NO_FCGI\11LOG\12NO_LOG"		\
+	"\05ROOT\06LOCATION\07FCGI\10NO_FCGI\11LOG\12NO_LOG\13ERRDOCS"	\
 	"\14SYSLOG\15NO_SYSLOG\16TLS\17ACCESS_LOG\20ERROR_LOG"		\
 	"\21AUTH\22NO_AUTH\23BLOCK\24NO_BLOCK\25LOCATION_MATCH"		\
 	"\26SERVER_MATCH\27SERVER_HSTS\30DEFAULT_TYPE\31PATH\32NO_PATH" \
@@ -542,6 +542,7 @@ struct server_config {
 
 	struct server_fcgiparams fcgiparams;
 	int			 fcgistrip;
+	char			 errdocroot[HTTPD_ERRDOCROOT_MAX];
 
 	TAILQ_ENTRY(server_config) entry;
 };
@@ -600,6 +601,9 @@ struct httpd {
 
 	struct privsep		*sc_ps;
 	int			 sc_reload;
+
+	int			 sc_custom_errdocs;
+	char			 sc_errdocroot[HTTPD_ERRDOCROOT_MAX];
 };
 
 #define HTTPD_OPT_VERBOSE		0x01

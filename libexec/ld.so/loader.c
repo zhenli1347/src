@@ -1,4 +1,4 @@
-/*	$OpenBSD: loader.c,v 1.192 2021/05/25 17:01:36 kn Exp $ */
+/*	$OpenBSD: loader.c,v 1.195 2022/01/08 06:49:41 guenther Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -31,9 +31,9 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/exec.h>
-#include <sys/sysctl.h>
-#include <machine/vmparam.h>
-#include <nlist.h>
+#ifdef __i386__
+# include <machine/vmparam.h>
+#endif
 #include <string.h>
 #include <link.h>
 #include <limits.h>			/* NAME_MAX */
@@ -41,11 +41,10 @@
 #include <tib.h>
 
 #include "syscall.h"
-#include "archdep.h"
-#include "path.h"
+#include "util.h"
 #include "resolve.h"
+#include "path.h"
 #include "sod.h"
-#include "stdlib.h"
 
 /*
  * Local decls.
@@ -61,6 +60,7 @@ void _dl_call_init_recurse(elf_object_t *object, int initfirst);
 void _dl_clean_boot(void);
 static inline void unprotect_if_textrel(elf_object_t *_object);
 static inline void reprotect_if_textrel(elf_object_t *_object);
+static void _dl_rreloc(elf_object_t *_object);
 
 int _dl_pagesz __relro = 4096;
 int _dl_bindnow __relro = 0;
@@ -490,7 +490,7 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 
 	if (_dl_bindnow) {
 		/* Lazy binding disabled, so disable kbind */
-		_dl___syscall(SYS_kbind, (void *)NULL, (size_t)0, (long long)0);
+		_dl_kbind(NULL, 0, 0);
 	}
 
 	DL_DEB(("ld.so loading: '%s'\n", __progname));
@@ -721,6 +721,7 @@ _dl_rtld(elf_object_t *object)
 	 * Do relocation information first, then GOT.
 	 */
 	unprotect_if_textrel(object);
+	_dl_rreloc(object);
 	fails =_dl_md_reloc(object, DT_REL, DT_RELSZ);
 	fails += _dl_md_reloc(object, DT_RELA, DT_RELASZ);
 	reprotect_if_textrel(object);
@@ -947,3 +948,35 @@ reprotect_if_textrel(elf_object_t *object)
 		}
 	}
 }
+
+static void
+_dl_rreloc(elf_object_t *object)
+{
+	const Elf_Relr	*reloc, *rend;
+	Elf_Addr	loff = object->obj_base;
+
+	reloc = object->dyn.relr;
+	rend  = (const Elf_Relr *)((char *)reloc + object->dyn.relrsz);
+
+	while (reloc < rend) {
+		Elf_Addr *where;
+
+		where = (Elf_Addr *)(*reloc + loff);
+		*where++ += loff;
+
+		for (reloc++; reloc < rend && (*reloc & 1); reloc++) {
+			Elf_Addr bits = *reloc >> 1;
+
+			Elf_Addr *here = where;
+			while (bits != 0) {
+				if (bits & 1) {
+					*here += loff;
+				}
+				bits >>= 1;
+				here++;
+			}
+			where += (8 * sizeof *reloc) - 1;
+		}
+	}
+}
+

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cmpci.c,v 1.45 2018/09/14 08:37:34 miko Exp $	*/
+/*	$OpenBSD: cmpci.c,v 1.49 2022/03/21 19:22:41 miod Exp $	*/
 /*	$NetBSD: cmpci.c,v 1.25 2004/10/26 06:32:20 xtraeme Exp $	*/
 
 /*
@@ -105,7 +105,7 @@ struct cfdriver cmpci_cd = {
 	NULL, "cmpci", DV_DULL
 };
 
-struct cfattach cmpci_ca = {
+const struct cfattach cmpci_ca = {
 	sizeof (struct cmpci_softc), cmpci_match, cmpci_attach, NULL,
 	cmpci_activate
 };
@@ -149,7 +149,7 @@ int cmpci_trigger_input(void *, void *, void *, int,
 				    void (*)(void *), void *,
 				    struct audio_params *);
 
-struct audio_hw_if cmpci_hw_if = {
+const struct audio_hw_if cmpci_hw_if = {
 	cmpci_open,		/* open */
 	cmpci_close,		/* close */
 	cmpci_set_params,	/* set_params */
@@ -392,7 +392,7 @@ cmpci_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_dmat = pa->pa_dmat;
 
-	audio_attach_mi(&cmpci_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&cmpci_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* attach OPL device */
 	aa.type = AUDIODEV_TYPE_OPL;
@@ -412,7 +412,7 @@ cmpci_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_reg_misc = bus_space_read_4(sc->sc_iot, sc->sc_ioh,
 	    CMPCI_REG_MISC) & ~CMPCI_REG_SPDIF48K;
 
-	/* extra capabilitites check */
+	/* extra capabilities check */
 	d = bus_space_read_4(sc->sc_iot, sc->sc_ioh, CMPCI_REG_INTR_CTRL) &
 	    CMPCI_REG_CHIP_MASK2;
 	if (d) {
@@ -474,7 +474,7 @@ cmpci_attach(struct device *parent, struct device *self, void *aux)
 			v = 1;
 			break;
 
-		/* volume with inital value 0 */
+		/* volume with initial value 0 */
 		case CMPCI_CD_VOL:
 		case CMPCI_LINE_IN_VOL:
 		case CMPCI_AUX_IN_VOL:

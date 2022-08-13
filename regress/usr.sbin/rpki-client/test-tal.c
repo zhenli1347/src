@@ -1,4 +1,4 @@
-/*	$Id: test-tal.c,v 1.6 2020/11/09 16:13:02 tb Exp $ */
+/*	$Id: test-tal.c,v 1.9 2022/04/20 17:26:53 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -29,24 +29,15 @@
 
 #include "extern.h"
 
+int outformats;
 int verbose;
-
-static void
-tal_print(const struct tal *p)
-{
-	size_t	 i;
-
-	assert(p != NULL);
-
-	for (i = 0; i < p->urisz; i++)
-		printf("%5zu: URI: %s\n", i + 1, p->uri[i]);
-}
 
 int
 main(int argc, char *argv[])
 {
 	int		 c, i, verb = 0;
 	char		*buf;
+	size_t		 len;
 	struct tal	*tal;
 
 	ERR_load_crypto_strings();
@@ -69,8 +60,8 @@ main(int argc, char *argv[])
 		errx(1, "argument missing");
 
 	for (i = 0; i < argc; i++) {
-		buf = tal_read_file(argv[i]);
-		tal = tal_parse(argv[i], buf);
+		buf = load_file(argv[i], &len);
+		tal = tal_parse(argv[i], buf, len);
 		free(buf);
 		if (tal == NULL)
 			break;

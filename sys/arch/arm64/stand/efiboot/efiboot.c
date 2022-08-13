@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.34 2021/07/09 20:19:46 patrick Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.42 2022/06/28 19:55:22 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -47,6 +47,7 @@ EFI_SYSTEM_TABLE	*ST;
 EFI_BOOT_SERVICES	*BS;
 EFI_RUNTIME_SERVICES	*RS;
 EFI_HANDLE		 IH, efi_bootdp;
+void			*fdt = NULL;
 
 EFI_PHYSICAL_ADDRESS	 heap;
 UINTN			 heapsiz = 1 * 1024 * 1024;
@@ -60,6 +61,9 @@ static EFI_GUID		 imgp_guid = LOADED_IMAGE_PROTOCOL;
 static EFI_GUID		 blkio_guid = BLOCK_IO_PROTOCOL;
 static EFI_GUID		 devp_guid = DEVICE_PATH_PROTOCOL;
 static EFI_GUID		 gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+static EFI_GUID		 fdt_guid = FDT_TABLE_GUID;
+
+#define efi_guidcmp(_a, _b)	memcmp((_a), (_b), sizeof(EFI_GUID))
 
 int efi_device_path_depth(EFI_DEVICE_PATH *dp, int);
 int efi_device_path_ncmp(EFI_DEVICE_PATH *, EFI_DEVICE_PATH *, int);
@@ -67,7 +71,8 @@ static void efi_heap_init(void);
 static void efi_memprobe_internal(void);
 static void efi_timer_init(void);
 static void efi_timer_cleanup(void);
-static EFI_STATUS efi_memprobe_find(UINTN, UINTN, EFI_PHYSICAL_ADDRESS *);
+static EFI_STATUS efi_memprobe_find(UINTN, UINTN, EFI_MEMORY_TYPE,
+    EFI_PHYSICAL_ADDRESS *);
 
 EFI_STATUS
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
@@ -76,6 +81,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	EFI_LOADED_IMAGE	*imgp;
 	EFI_DEVICE_PATH		*dp = NULL;
 	EFI_STATUS		 status;
+	int			 i;
 
 	ST = systab;
 	BS = ST->BootServices;
@@ -93,6 +99,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab)
 	if (status == EFI_SUCCESS)
 		efi_bootdp = dp;
 
+	for (i = 0; i < ST->NumberOfTableEntries; i++) {
+		if (efi_guidcmp(&fdt_guid,
+		    &ST->ConfigurationTable[i].VendorGuid) == 0)
+			fdt = ST->ConfigurationTable[i].VendorTable;
+	}
+	fdt_init(fdt);
+
 	progname = "BOOTAA64";
 
 	boot(0);
@@ -108,8 +121,8 @@ static SIMPLE_INPUT_INTERFACE *conin;
  * kernel.  That's fine.  They're just used as an index into the cdevs
  * array and never passed on to the kernel.
  */
-static dev_t serial = makedev(0, 0);
-static dev_t framebuffer = makedev(1, 0);
+static dev_t serial = makedev(1, 0);
+static dev_t framebuffer = makedev(2, 0);
 
 static char framebuffer_path[128];
 
@@ -117,7 +130,7 @@ void
 efi_cons_probe(struct consdev *cn)
 {
 	cn->cn_pri = CN_MIDPRI;
-	cn->cn_dev = serial;
+	cn->cn_dev = makedev(0, 0);
 }
 
 void
@@ -176,6 +189,32 @@ efi_cons_putc(dev_t dev, int c)
 	buf[1] = 0;
 
 	conout->OutputString(conout, buf);
+}
+
+void
+efi_com_probe(struct consdev *cn)
+{
+	cn->cn_pri = CN_LOWPRI;
+	cn->cn_dev = serial;
+}
+
+void
+efi_com_init(struct consdev *cn)
+{
+	conin = ST->ConIn;
+	conout = ST->ConOut;
+}
+
+int
+efi_com_getc(dev_t dev)
+{
+	return efi_cons_getc(dev);
+}
+
+void
+efi_com_putc(dev_t dev, int c)
+{
+	efi_cons_putc(dev, c);
 }
 
 void
@@ -447,16 +486,32 @@ efi_console(void)
 {
 	void *node;
 
-	if (cn_tab->cn_dev != framebuffer)
-		return;
+	if (major(cn_tab->cn_dev) == major(serial)) {
+		char *serial_path;
+		char alias[16];
+		int len;
 
-	if (strlen(framebuffer_path) == 0)
-		return;
+		/* Construct alias and resolve it. */
+		snprintf(alias, sizeof(alias), "serial%d",
+		    minor(cn_tab->cn_dev));
+		node = fdt_find_node("/aliases");
+		len = fdt_node_property(node, alias, &serial_path);
+		if (len <= 0)
+			return;
 
-	/* Point stdout-path at the framebuffer node. */
-	node = fdt_find_node("/chosen");
-	fdt_node_add_property(node, "stdout-path",
-	    framebuffer_path, strlen(framebuffer_path) + 1);
+		/* Point stdout-path at the serial node. */
+		node = fdt_find_node("/chosen");
+		fdt_node_add_property(node, "stdout-path",
+		    serial_path, strlen(serial_path) + 1);
+	} else if (major(cn_tab->cn_dev) == major(framebuffer)) {
+		if (strlen(framebuffer_path) == 0)
+			return;
+
+		/* Point stdout-path at the framebuffer node. */
+		node = fdt_find_node("/chosen");
+		fdt_node_add_property(node, "stdout-path",
+		    framebuffer_path, strlen(framebuffer_path) + 1);
+	}
 }
 
 uint64_t dma_constraint[2] = { 0, -1 };
@@ -518,11 +573,7 @@ efi_dma_constraint(void)
 }
 
 int acpi = 0;
-void *fdt = NULL;
 char *bootmac = NULL;
-static EFI_GUID fdt_guid = FDT_TABLE_GUID;
-
-#define	efi_guidcmp(_a, _b)	memcmp((_a), (_b), sizeof(EFI_GUID))
 
 void *
 efi_makebootargs(char *bootargs, int howto)
@@ -532,20 +583,23 @@ efi_makebootargs(char *bootargs, int howto)
 	u_char zero[8] = { 0 };
 	uint64_t uefi_system_table = htobe64((uintptr_t)ST);
 	uint32_t boothowto = htobe32(howto);
+	EFI_PHYSICAL_ADDRESS addr;
 	void *node;
 	size_t len;
-	int i;
-
-	if (fdt == NULL) {
-		for (i = 0; i < ST->NumberOfTableEntries; i++) {
-			if (efi_guidcmp(&fdt_guid,
-			    &ST->ConfigurationTable[i].VendorGuid) == 0)
-				fdt = ST->ConfigurationTable[i].VendorTable;
-		}
-	}
 
 	if (fdt == NULL || acpi)
 		fdt = efi_acpi();
+
+	if (!fdt_get_size(fdt))
+		return NULL;
+
+	len = roundup(fdt_get_size(fdt) + PAGE_SIZE, PAGE_SIZE);
+	if (BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+	    EFI_SIZE_TO_PAGES(len), &addr) == EFI_SUCCESS) {
+		memcpy((void *)addr, fdt, fdt_get_size(fdt));
+		((struct fdt_head *)addr)->fh_size = htobe32(len);
+		fdt = (void *)addr;
+	}
 
 	if (!fdt_init(fdt))
 		return NULL;
@@ -646,7 +700,7 @@ machdep(void)
 	 * gives us plenty of room for growth.
 	 */
 	if (efi_memprobe_find(EFI_SIZE_TO_PAGES(64 * 1024 * 1024),
-	    0x200000, &addr) != EFI_SUCCESS)
+	    0x200000, EfiLoaderCode, &addr) != EFI_SUCCESS)
 		printf("Can't allocate memory\n");
 	efi_loadaddr = addr;
 
@@ -783,7 +837,7 @@ devboot(dev_t dev, char *p)
 	p[2] = '0' + sd_boot_vol;
 }
 
-const char cdevs[][4] = { "com", "fb" };
+const char cdevs[][4] = { "cons", "com", "fb" };
 const int ncdevs = nitems(cdevs);
 
 int
@@ -946,7 +1000,8 @@ efi_memprobe_internal(void)
  * use the memory table to find a place where we can fit.
  */
 static EFI_STATUS
-efi_memprobe_find(UINTN pages, UINTN align, EFI_PHYSICAL_ADDRESS *addr)
+efi_memprobe_find(UINTN pages, UINTN align, EFI_MEMORY_TYPE type,
+    EFI_PHYSICAL_ADDRESS *addr)
 {
 	EFI_MEMORY_DESCRIPTOR	*mm;
 	int			 i, j;
@@ -974,7 +1029,7 @@ efi_memprobe_find(UINTN pages, UINTN align, EFI_PHYSICAL_ADDRESS *addr)
 			if (paddr & (align - 1))
 				continue;
 
-			if (BS->AllocatePages(AllocateAddress, EfiLoaderData,
+			if (BS->AllocatePages(AllocateAddress, type,
 			    pages, &paddr) == EFI_SUCCESS) {
 				*addr = paddr;
 				return EFI_SUCCESS;
@@ -982,6 +1037,34 @@ efi_memprobe_find(UINTN pages, UINTN align, EFI_PHYSICAL_ADDRESS *addr)
 		}
 	}
 	return EFI_OUT_OF_RESOURCES;
+}
+
+int
+mdrandom(char *buf, size_t buflen)
+{
+	char *random;
+	void *node;
+	int i, len, ret = -1;
+
+	node = fdt_find_node("/chosen");
+	if (!node)
+		return -1;
+
+	len = fdt_node_property(node, "rng-seed", &random);
+	if (len > 0) {
+		for (i = 0; i < buflen; i++)
+			buf[i] ^= random[i % len];
+		ret = 0;
+	}
+
+	len = fdt_node_property(node, "kaslr-seed", &random);
+	if (len > 0) {
+		for (i = 0; i < buflen; i++)
+			buf[i] ^= random[i % len];
+		ret = 0;
+	}
+
+	return ret;
 }
 
 /*
@@ -1016,8 +1099,6 @@ Xdtb_efi(void)
 	struct stat sb;
 	int fd;
 
-#define O_RDONLY	0
-
 	if (cmd.argc != 2) {
 		printf("dtb file\n");
 		return (0);
@@ -1031,7 +1112,7 @@ Xdtb_efi(void)
 		return (0);
 	}
 	if (efi_memprobe_find(EFI_SIZE_TO_PAGES(sb.st_size),
-	    0x1000, &addr) != EFI_SUCCESS) {
+	    PAGE_SIZE, EfiLoaderData, &addr) != EFI_SUCCESS) {
 		printf("cannot allocate memory for %s\n", path);
 		return (0);
 	}

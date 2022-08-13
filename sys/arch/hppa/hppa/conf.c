@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.71 2021/01/23 05:08:35 thfr Exp $	*/
+/*	$OpenBSD: conf.c,v 1.73 2022/04/20 14:21:56 deraadt Exp $	*/
 
 /*-
  * Copyright (c) 1991 The Regents of the University of California.
@@ -120,7 +120,6 @@ cdev_decl(pci);
 #include "ucom.h"
 
 #include "fuse.h"
-#include "switch.h"
 
 struct cdevsw   cdevsw[] =
 {
@@ -180,7 +179,7 @@ struct cdevsw   cdevsw[] =
 	cdev_notdef(),			/* 48: */
 	cdev_notdef(),			/* 49: */
 	cdev_notdef(),			/* 50: */
-	cdev_ksyms_init(NKSTAT,kstat),	/* 51: kernel statistics */
+	cdev_kstat_init(NKSTAT,kstat),	/* 51: kernel statistics */
 	cdev_notdef(),			/* 52: */
 	cdev_notdef(),			/* 53: */
 	cdev_vscsi_init(NVSCSI,vscsi),	/* 54: vscsi */
@@ -189,7 +188,7 @@ struct cdevsw   cdevsw[] =
 	cdev_pppx_init(NPPPX,pppx),	/* 57: pppx */
 	cdev_fuse_init(NFUSE,fuse),	/* 58: fuse */
 	cdev_tun_init(NTUN,tap),	/* 59: Ethernet network tunnel */
-	cdev_switch_init(NSWITCH,switch), /* 60: switch(4) control interface */
+	cdev_notdef(),			/* 60: was switch(4) */
 	cdev_fido_init(NFIDO,fido),	/* 61: FIDO/U2F security key */
 	cdev_pppx_init(NPPPX,pppac),	/* 62: PPP Access Concentrator */
 	cdev_ujoy_init(NUJOY,ujoy),	/* 63: USB joystick/gamecontroller */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: wc.c,v 1.26 2019/06/28 13:35:05 deraadt Exp $	*/
+/*	$OpenBSD: wc.c,v 1.29 2021/11/28 19:28:42 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1980, 1987, 1991, 1993
@@ -29,7 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>	/* MAXBSIZE */
 #include <sys/stat.h>
 
 #include <fcntl.h>
@@ -43,14 +42,16 @@
 #include <wchar.h>
 #include <wctype.h>
 
+#define	_MAXBSIZE (64 * 1024)
+
 int64_t	tlinect, twordct, tcharct;
 int	doline, doword, dochar, humanchar, multibyte;
 int	rval;
 extern char *__progname;
 
-static void print_counts(int64_t, int64_t, int64_t, char *);
+static void print_counts(int64_t, int64_t, int64_t, const char *);
 static void format_and_print(int64_t);
-static void cnt(char *);
+static void cnt(const char *);
 
 int
 main(int argc, char *argv[])
@@ -115,12 +116,13 @@ main(int argc, char *argv[])
 }
 
 static void
-cnt(char *file)
+cnt(const char *path)
 {
 	static char *buf;
 	static size_t bufsz;
 
 	FILE *stream;
+	const char *file;
 	char *C;
 	wchar_t wc;
 	short gotsp;
@@ -131,19 +133,21 @@ cnt(char *file)
 
 	linect = wordct = charct = 0;
 	stream = NULL;
-	if (file) {
-		if ((fd = open(file, O_RDONLY, 0)) == -1) {
+	if (path != NULL) {
+		file = path;
+		if ((fd = open(file, O_RDONLY)) == -1) {
 			warn("%s", file);
 			rval = 1;
 			return;
 		}
 	} else  {
+		file = "(stdin)";
 		fd = STDIN_FILENO;
 	}
 
 	if (!doword && !multibyte) {
-		if (bufsz < MAXBSIZE &&
-		    (buf = realloc(buf, MAXBSIZE)) == NULL)
+		if (bufsz < _MAXBSIZE &&
+		    (buf = realloc(buf, _MAXBSIZE)) == NULL)
 			err(1, NULL);
 		/*
 		 * Line counting is split out because it's a lot
@@ -151,7 +155,7 @@ cnt(char *file)
 		 * the word count requires some logic.
 		 */
 		if (doline) {
-			while ((len = read(fd, buf, MAXBSIZE)) > 0) {
+			while ((len = read(fd, buf, _MAXBSIZE)) > 0) {
 				charct += len;
 				for (C = buf; len--; ++C)
 					if (*C == '\n')
@@ -181,7 +185,7 @@ cnt(char *file)
 				    || ifmt == S_IFDIR) {
 					charct = sbuf.st_size;
 				} else {
-					while ((len = read(fd, buf, MAXBSIZE)) > 0)
+					while ((len = read(fd, buf, _MAXBSIZE)) > 0)
 						charct += len;
 					if (len == -1) {
 						warn("%s", file);
@@ -191,7 +195,7 @@ cnt(char *file)
 			}
 		}
 	} else {
-		if (file == NULL)
+		if (path == NULL)
 			stream = stdin;
 		else if ((stream = fdopen(fd, "r")) == NULL) {
 			warn("%s", file);
@@ -249,7 +253,7 @@ cnt(char *file)
 		}
 	}
 
-	print_counts(linect, wordct, charct, file);
+	print_counts(linect, wordct, charct, path);
 
 	/*
 	 * Don't bother checking doline, doword, or dochar -- speeds
@@ -279,7 +283,7 @@ format_and_print(int64_t v)
 }
 
 static void
-print_counts(int64_t lines, int64_t words, int64_t chars, char *name)
+print_counts(int64_t lines, int64_t words, int64_t chars, const char *name)
 {
 	if (doline)
 		format_and_print(lines);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsec_output.c,v 1.86 2021/07/27 17:13:03 mvs Exp $ */
+/*	$OpenBSD: ipsec_output.c,v 1.97 2022/01/02 22:36:04 jsg Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
  *
@@ -73,7 +73,6 @@ int
 ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 {
 	int hlen, off, error;
-	struct mbuf *mp;
 #ifdef INET6
 	struct ip6_ext ip6e;
 	int nxt;
@@ -131,7 +130,7 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 		    ipsp_address(&tdb->tdb_dst, buf, sizeof(buf)),
 		    ntohl(tdb->tdb_spi), tdb->tdb_sproto,
 		    tdb->tdb_dst.sa.sa_family);
-		error = ENXIO;
+		error = EPFNOSUPPORT;
 		goto drop;
 	}
 
@@ -140,12 +139,16 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 	 */
 	if (tdb->tdb_first_use == 0) {
 		tdb->tdb_first_use = gettime();
-		if (tdb->tdb_flags & TDBF_FIRSTUSE)
-			timeout_add_sec(&tdb->tdb_first_tmo,
-			    tdb->tdb_exp_first_use);
-		if (tdb->tdb_flags & TDBF_SOFT_FIRSTUSE)
-			timeout_add_sec(&tdb->tdb_sfirst_tmo,
-			    tdb->tdb_soft_first_use);
+		if (tdb->tdb_flags & TDBF_FIRSTUSE) {
+			if (timeout_add_sec(&tdb->tdb_first_tmo,
+			    tdb->tdb_exp_first_use))
+				tdb_ref(tdb);
+		}
+		if (tdb->tdb_flags & TDBF_SOFT_FIRSTUSE) {
+			if (timeout_add_sec(&tdb->tdb_sfirst_tmo,
+			    tdb->tdb_soft_first_use))
+				tdb_ref(tdb);
+		}
 	}
 
 	/*
@@ -159,13 +162,16 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 		 * doing tunneling.
 		 */
 		if (af == tdb->tdb_dst.sa.sa_family) {
-			if (af == AF_INET)
+			switch (af) {
+			case AF_INET:
 				hlen = sizeof(struct ip);
-
+				break;
 #ifdef INET6
-			if (af == AF_INET6)
+			case AF_INET6:
 				hlen = sizeof(struct ip6_hdr);
+				break;
 #endif /* INET6 */
+			}
 
 			/* Bring the network header in the first mbuf. */
 			if (m->m_len < hlen) {
@@ -242,12 +248,10 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 			}
 #endif /* INET6 */
 
-			/* Encapsulate -- the last two arguments are unused. */
-			error = ipip_output(m, tdb, &mp, 0, 0);
-			if ((mp == NULL) && (!error))
+			/* Encapsulate -- m may be changed or set to NULL. */
+			error = ipip_output(&m, tdb);
+			if ((m == NULL) && (!error))
 				error = EFAULT;
-			m = mp;
-			mp = NULL;
 			if (error)
 				goto drop;
 
@@ -264,20 +268,18 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 			}
 
 			/* Remember that we appended a tunnel header. */
+			mtx_enter(&tdb->tdb_mtx);
 			tdb->tdb_flags |= TDBF_USEDTUNNEL;
+			mtx_leave(&tdb->tdb_mtx);
 		}
-
-		/* We may be done with this TDB */
-		if (tdb->tdb_xform->xf_type == XF_IP4)
-			return ipsp_process_done(m, tdb);
-	} else {
-		/*
-		 * If this is just an IP-IP TDB and we're told there's
-		 * already an encapsulation header, move on.
-		 */
-		if (tdb->tdb_xform->xf_type == XF_IP4)
-			return ipsp_process_done(m, tdb);
 	}
+
+	/*
+	 * If this is just an IP-IP TDB and we're told there's already an
+	 * encapsulation header or ipip_output() has encapsulated it, move on.
+	 */
+	if (tdb->tdb_xform->xf_type == XF_IP4)
+		return ipsp_process_done(m, tdb);
 
 	/* Extract some information off the headers. */
 	switch (tdb->tdb_dst.sa.sa_family) {
@@ -355,7 +357,7 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 		break;
 #endif /* INET6 */
 	default:
-		error = EINVAL;
+		error = EPFNOSUPPORT;
 		goto drop;
 	}
 
@@ -365,7 +367,7 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 	}
 
 	ipsecstat_add(ipsec_ouncompbytes, m->m_pkthdr.len);
-	tdb->tdb_ouncompbytes += m->m_pkthdr.len;
+	tdbstat_add(tdb, tdb_ouncompbytes, m->m_pkthdr.len);
 
 	/* Non expansion policy for IPCOMP */
 	if (tdb->tdb_sproto == IPPROTO_IPCOMP) {
@@ -377,91 +379,11 @@ ipsp_process_packet(struct mbuf *m, struct tdb *tdb, int af, int tunalready)
 	}
 
 	/* Invoke the IPsec transform. */
-	return (*(tdb->tdb_xform->xf_output))(m, tdb, NULL, hlen, off);
+	return (*(tdb->tdb_xform->xf_output))(m, tdb, hlen, off);
 
  drop:
 	m_freem(m);
 	return error;
-}
-
-/*
- * IPsec output callback, called directly by the crypto driver.
- */
-void
-ipsec_output_cb(struct cryptop *crp)
-{
-	struct tdb_crypto *tc = (struct tdb_crypto *) crp->crp_opaque;
-	struct mbuf *m = (struct mbuf *) crp->crp_buf;
-	struct tdb *tdb = NULL;
-	int error, ilen, olen;
-
-	NET_ASSERT_LOCKED();
-
-	if (m == NULL) {
-		DPRINTF("bogus returned buffer from crypto");
-		ipsecstat_inc(ipsec_crypto);
-		goto drop;
-	}
-
-	tdb = gettdb(tc->tc_rdomain, tc->tc_spi, &tc->tc_dst, tc->tc_proto);
-	if (tdb == NULL) {
-		DPRINTF("TDB is expired while in crypto");
-		ipsecstat_inc(ipsec_notdb);
-		goto drop;
-	}
-
-	/* Check for crypto errors. */
-	if (crp->crp_etype) {
-		if (crp->crp_etype == EAGAIN) {
-			/* Reset the session ID */
-			if (tdb->tdb_cryptoid != 0)
-				tdb->tdb_cryptoid = crp->crp_sid;
-			error = crypto_dispatch(crp);
-			if (error) {
-				DPRINTF("crypto dispatch error %d", error);
-				goto drop;
-			}
-			return;
-		}
-		DPRINTF("crypto error %d", crp->crp_etype);
-		ipsecstat_inc(ipsec_noxform);
-		goto drop;
-	}
-
-	olen = crp->crp_olen;
-	ilen = crp->crp_ilen;
-
-	/* Release crypto descriptors. */
-	crypto_freereq(crp);
-
-	switch (tdb->tdb_sproto) {
-	case IPPROTO_ESP:
-		error = esp_output_cb(tdb, tc, m, ilen, olen);
-		break;
-	case IPPROTO_AH:
-		error = ah_output_cb(tdb, tc, m, ilen, olen);
-		break;
-	case IPPROTO_IPCOMP:
-		error = ipcomp_output_cb(tdb, tc, m, ilen, olen);
-		break;
-	default:
-		panic("%s: unknown/unsupported security protocol %d",
-		    __func__, tdb->tdb_sproto);
-	}
-
-	if (error) {
-		ipsecstat_inc(ipsec_odrops);
-		tdb->tdb_odrops++;
-	}
-	return;
-
- drop:
-	if (tdb != NULL)
-		tdb->tdb_odrops++;
-	m_freem(m);
-	free(tc, M_XDATA, 0);
-	crypto_freereq(crp);
-	ipsecstat_inc(ipsec_odrops);
 }
 
 /*
@@ -475,6 +397,7 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 #ifdef INET6
 	struct ip6_hdr *ip6;
 #endif /* INET6 */
+	struct tdb *tdbo;
 	struct tdb_ident *tdbi;
 	struct m_tag *mtag;
 	int roff, error;
@@ -505,7 +428,7 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 		default:
 			DPRINTF("unknown protocol family (%d)",
 			    tdb->tdb_dst.sa.sa_family);
-			error = ENXIO;
+			error = EPFNOSUPPORT;
 			goto drop;
 		}
 
@@ -559,7 +482,7 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 	default:
 		DPRINTF("unknown protocol family (%d)",
 		    tdb->tdb_dst.sa.sa_family);
-		error = ENXIO;
+		error = EPFNOSUPPORT;
 		goto drop;
 	}
 
@@ -583,15 +506,18 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 
 	m_tag_prepend(m, mtag);
 
-	ipsecstat_inc(ipsec_opackets);
-	ipsecstat_add(ipsec_obytes, m->m_pkthdr.len);
-	tdb->tdb_opackets++;
-	tdb->tdb_obytes += m->m_pkthdr.len;
+	ipsecstat_pkt(ipsec_opackets, ipsec_obytes, m->m_pkthdr.len);
+	tdbstat_pkt(tdb, tdb_opackets, tdb_obytes, m->m_pkthdr.len);
 
 	/* If there's another (bundled) TDB to apply, do so. */
-	if (tdb->tdb_onext)
-		return ipsp_process_packet(m, tdb->tdb_onext,
+	tdbo = tdb_ref(tdb->tdb_onext);
+	if (tdbo != NULL) {
+		KERNEL_ASSERT_LOCKED();
+		error = ipsp_process_packet(m, tdbo,
 		    tdb->tdb_dst.sa.sa_family, 0);
+		tdb_unref(tdbo);
+		return error;
+	}
 
 #if NPF > 0
 	/* Add pf tag if requested. */
@@ -608,18 +534,22 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 	 */
 	switch (tdb->tdb_dst.sa.sa_family) {
 	case AF_INET:
-		return (ip_output(m, NULL, NULL, IP_RAWOUTPUT, NULL, NULL, 0));
-
+		error = ip_output(m, NULL, NULL, IP_RAWOUTPUT, NULL, NULL, 0);
+		break;
 #ifdef INET6
 	case AF_INET6:
 		/*
 		 * We don't need massage, IPv6 header fields are always in
 		 * net endian.
 		 */
-		return (ip6_output(m, NULL, NULL, 0, NULL, NULL));
+		error = ip6_output(m, NULL, NULL, 0, NULL, NULL);
+		break;
 #endif /* INET6 */
+	default:
+		error = EPFNOSUPPORT;
+		break;
 	}
-	error = EINVAL; /* Not reached. */
+	return error;
 
  drop:
 	m_freem(m);
@@ -699,13 +629,16 @@ ipsec_adjust_mtu(struct mbuf *m, u_int32_t mtu)
 		if (tdbp == NULL)
 			break;
 
-		if ((adjust = ipsec_hdrsz(tdbp)) == -1)
+		if ((adjust = ipsec_hdrsz(tdbp)) == -1) {
+			tdb_unref(tdbp);
 			break;
+		}
 
 		mtu -= adjust;
 		tdbp->tdb_mtu = mtu;
 		tdbp->tdb_mtutimeout = gettime() + ip_mtudisc_timeout;
 		DPRINTF("spi %08x mtu %d adjust %ld mbuf %p",
 		    ntohl(tdbp->tdb_spi), tdbp->tdb_mtu, adjust, m);
+		tdb_unref(tdbp);
 	}
 }

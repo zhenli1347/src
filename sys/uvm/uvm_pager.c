@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pager.c,v 1.76 2021/03/26 13:40:05 mpi Exp $	*/
+/*	$OpenBSD: uvm_pager.c,v 1.87 2022/08/07 19:40:48 miod Exp $	*/
 /*	$NetBSD: uvm_pager.c,v 1.36 2000/11/27 18:26:41 chs Exp $	*/
 
 /*
@@ -58,8 +58,8 @@ const struct uvm_pagerops *uvmpagerops[] = {
  * The number of uvm_pseg instances is dynamic using an array segs.
  * At most UVM_PSEG_COUNT instances can exist.
  *
- * psegs[0] always exists (so that the pager can always map in pages).
- * psegs[0] element 0 is always reserved for the pagedaemon.
+ * psegs[0/1] always exist (so that the pager can always map in pages).
+ * psegs[0/1] element 0 are always reserved for the pagedaemon.
  *
  * Any other pseg is automatically created when no space is available
  * and automatically destroyed when it is no longer in use.
@@ -93,6 +93,7 @@ uvm_pager_init(void)
 
 	/* init pager map */
 	uvm_pseg_init(&psegs[0]);
+	uvm_pseg_init(&psegs[1]);
 	mtx_init(&uvm_pseg_lck, IPL_VM);
 
 	/* init ASYNC I/O queue */
@@ -118,7 +119,8 @@ uvm_pseg_init(struct uvm_pseg *pseg)
 {
 	KASSERT(pseg->start == 0);
 	KASSERT(pseg->use == 0);
-	pseg->start = uvm_km_valloc_try(kernel_map, MAX_PAGER_SEGS * MAXBSIZE);
+	pseg->start = (vaddr_t)km_alloc(MAX_PAGER_SEGS * MAXBSIZE,
+	    &kv_any, &kp_none, &kd_trylock);
 }
 
 /*
@@ -134,6 +136,24 @@ uvm_pseg_get(int flags)
 	int i;
 	struct uvm_pseg *pseg;
 
+	/*
+	 * XXX Prevent lock ordering issue in uvm_unmap_detach().  A real
+	 * fix would be to move the KERNEL_LOCK() out of uvm_unmap_detach().
+	 *
+	 *  witness_checkorder() at witness_checkorder+0xba0
+	 *  __mp_lock() at __mp_lock+0x5f
+	 *  uvm_unmap_detach() at uvm_unmap_detach+0xc5
+	 *  uvm_map() at uvm_map+0x857
+	 *  uvm_km_valloc_try() at uvm_km_valloc_try+0x65
+	 *  uvm_pseg_get() at uvm_pseg_get+0x6f
+	 *  uvm_pagermapin() at uvm_pagermapin+0x45
+	 *  uvn_io() at uvn_io+0xcf
+	 *  uvn_get() at uvn_get+0x156
+	 *  uvm_fault_lower() at uvm_fault_lower+0x28a
+	 *  uvm_fault() at uvm_fault+0x1b3
+	 *  upageflttrap() at upageflttrap+0x62
+	 */
+	KERNEL_LOCK();
 	mtx_enter(&uvm_pseg_lck);
 
 pager_seg_restart:
@@ -149,9 +169,10 @@ pager_seg_restart:
 				goto pager_seg_fail;
 		}
 
-		/* Keep index 0 reserved for pagedaemon. */
-		if (pseg == &psegs[0] && curproc != uvm.pagedaemon_proc)
-			i = 1;
+		/* Keep indexes 0,1 reserved for pagedaemon. */
+		if ((pseg == &psegs[0] || pseg == &psegs[1]) &&
+		    (curproc != uvm.pagedaemon_proc))
+			i = 2;
 		else
 			i = 0;
 
@@ -159,6 +180,7 @@ pager_seg_restart:
 			if (!UVM_PSEG_INUSE(pseg, i)) {
 				pseg->use |= 1 << i;
 				mtx_leave(&uvm_pseg_lck);
+				KERNEL_UNLOCK();
 				return pseg->start + i * MAXBSIZE;
 			}
 		}
@@ -171,6 +193,7 @@ pager_seg_fail:
 	}
 
 	mtx_leave(&uvm_pseg_lck);
+	KERNEL_UNLOCK();
 	return 0;
 }
 
@@ -208,15 +231,17 @@ uvm_pseg_release(vaddr_t segaddr)
 	pseg->use &= ~(1 << id);
 	wakeup(&psegs);
 
-	if (pseg != &psegs[0] && UVM_PSEG_EMPTY(pseg)) {
+	if ((pseg != &psegs[0] && pseg != &psegs[1]) && UVM_PSEG_EMPTY(pseg)) {
 		va = pseg->start;
 		pseg->start = 0;
 	}
 
 	mtx_leave(&uvm_pseg_lck);
 
-	if (va)
-		uvm_km_free(kernel_map, va, MAX_PAGER_SEGS * MAXBSIZE);
+	if (va) {
+		km_free((void *)va, MAX_PAGER_SEGS * MAXBSIZE,
+		    &kv_any, &kp_none);
+	}
 }
 
 /*
@@ -232,6 +257,18 @@ uvm_pagermapin(struct vm_page **pps, int npages, int flags)
 	vm_prot_t prot;
 	vsize_t size;
 	struct vm_page *pp;
+
+#if defined(__HAVE_PMAP_DIRECT)
+	/*
+	 * Use direct mappings for single page, unless there is a risk
+	 * of aliasing.
+	 */
+	if (npages == 1 && PMAP_PREFER_ALIGN() == 0) {
+		KASSERT(pps[0]);
+		KASSERT(pps[0]->pg_flags & PG_BUSY);
+		return pmap_map_direct(pps[0]);
+	}
+#endif
 
 	prot = PROT_READ;
 	if (flags & UVMPAGER_MAPIN_READ)
@@ -269,6 +306,16 @@ uvm_pagermapin(struct vm_page **pps, int npages, int flags)
 void
 uvm_pagermapout(vaddr_t kva, int npages)
 {
+#if defined(__HAVE_PMAP_DIRECT)
+	/*
+	 * Use direct mappings for single page, unless there is a risk
+	 * of aliasing.
+	 */
+	if (npages == 1 && PMAP_PREFER_ALIGN() == 0) {
+		pmap_unmap_direct(kva);
+		return;
+	}
+#endif
 
 	pmap_remove(pmap_kernel(), kva, kva + ((vsize_t)npages << PAGE_SHIFT));
 	pmap_update(pmap_kernel());
@@ -543,11 +590,15 @@ ReTry:
 			/* XXX daddr_t -> int */
 			int nswblk = (result == VM_PAGER_AGAIN) ? swblk : 0;
 			if (pg->pg_flags & PQ_ANON) {
+				rw_enter(pg->uanon->an_lock, RW_WRITE);
 				pg->uanon->an_swslot = nswblk;
+				rw_exit(pg->uanon->an_lock);
 			} else {
+				rw_enter(pg->uobject->vmobjlock, RW_WRITE);
 				uao_set_swslot(pg->uobject,
 					       pg->offset >> PAGE_SHIFT,
 					       nswblk);
+				rw_exit(pg->uobject->vmobjlock);
 			}
 		}
 		if (result == VM_PAGER_AGAIN) {
@@ -612,6 +663,8 @@ uvm_pager_dropcluster(struct uvm_object *uobj, struct vm_page *pg,
 {
 	int lcv;
 
+	KASSERT(uobj == NULL || rw_write_held(uobj->vmobjlock));
+
 	/* drop all pages but "pg" */
 	for (lcv = 0 ; lcv < *npages ; lcv++) {
 		/* skip "pg" or empty slot */
@@ -625,10 +678,13 @@ uvm_pager_dropcluster(struct uvm_object *uobj, struct vm_page *pg,
 		 */
 		if (!uobj) {
 			if (ppsp[lcv]->pg_flags & PQ_ANON) {
+				rw_enter(ppsp[lcv]->uanon->an_lock, RW_WRITE);
 				if (flags & PGO_REALLOCSWAP)
 					  /* zap swap block */
 					  ppsp[lcv]->uanon->an_swslot = 0;
 			} else {
+				rw_enter(ppsp[lcv]->uobject->vmobjlock,
+				    RW_WRITE);
 				if (flags & PGO_REALLOCSWAP)
 					uao_set_swslot(ppsp[lcv]->uobject,
 					    ppsp[lcv]->offset >> PAGE_SHIFT, 0);
@@ -643,15 +699,8 @@ uvm_pager_dropcluster(struct uvm_object *uobj, struct vm_page *pg,
 		/* if page was released, release it.  otherwise un-busy it */
 		if (ppsp[lcv]->pg_flags & PG_RELEASED &&
 		    ppsp[lcv]->pg_flags & PQ_ANON) {
-				/* so that anfree will free */
-				atomic_clearbits_int(&ppsp[lcv]->pg_flags,
-				    PG_BUSY);
-				UVM_PAGE_OWN(ppsp[lcv], NULL);
-
 				/* kills anon and frees pg */
-				rw_enter(ppsp[lcv]->uanon->an_lock, RW_WRITE);
 				uvm_anon_release(ppsp[lcv]->uanon);
-
 				continue;
 		} else {
 			/*
@@ -671,6 +720,14 @@ uvm_pager_dropcluster(struct uvm_object *uobj, struct vm_page *pg,
 			pmap_clear_reference(ppsp[lcv]);
 			pmap_clear_modify(ppsp[lcv]);
 			atomic_setbits_int(&ppsp[lcv]->pg_flags, PG_CLEAN);
+		}
+
+		/* if anonymous cluster, unlock object and move on */
+		if (!uobj) {
+			if (ppsp[lcv]->pg_flags & PQ_ANON)
+				rw_exit(ppsp[lcv]->uanon->an_lock);
+			else
+				rw_exit(ppsp[lcv]->uobject->vmobjlock);
 		}
 	}
 }
@@ -696,39 +753,17 @@ uvm_aio_biodone(struct buf *bp)
 	mtx_leave(&uvm.aiodoned_lock);
 }
 
-/*
- * uvm_aio_aiodone: do iodone processing for async i/os.
- * this should be called in thread context, not interrupt context.
- */
 void
-uvm_aio_aiodone(struct buf *bp)
+uvm_aio_aiodone_pages(struct vm_page **pgs, int npages, boolean_t write,
+    int error)
 {
-	int npages = bp->b_bufsize >> PAGE_SHIFT;
-	struct vm_page *pg, *pgs[MAXPHYS >> PAGE_SHIFT];
+	struct vm_page *pg;
 	struct uvm_object *uobj;
-	int i, error;
-	boolean_t write, swap;
-
-	KASSERT(npages <= MAXPHYS >> PAGE_SHIFT);
-	splassert(IPL_BIO);
-
-	error = (bp->b_flags & B_ERROR) ? (bp->b_error ? bp->b_error : EIO) : 0;
-	write = (bp->b_flags & B_READ) == 0;
+	boolean_t swap;
+	int i;
 
 	uobj = NULL;
-	for (i = 0; i < npages; i++)
-		pgs[i] = uvm_atopg((vaddr_t)bp->b_data +
-		    ((vsize_t)i << PAGE_SHIFT));
-	uvm_pagermapout((vaddr_t)bp->b_data, npages);
-#ifdef UVM_SWAP_ENCRYPT
-	/*
-	 * XXX - assumes that we only get ASYNC writes. used to be above.
-	 */
-	if (pgs[0]->pg_flags & PQ_ENCRYPT) {
-		uvm_swap_freepages(pgs, npages);
-		goto freed;
-	}
-#endif /* UVM_SWAP_ENCRYPT */
+
 	for (i = 0; i < npages; i++) {
 		pg = pgs[i];
 
@@ -736,6 +771,7 @@ uvm_aio_aiodone(struct buf *bp)
 			swap = (pg->pg_flags & PQ_SWAPBACKED) != 0;
 			if (!swap) {
 				uobj = pg->uobject;
+				rw_enter(uobj->vmobjlock, RW_WRITE);
 			}
 		}
 		KASSERT(swap || pg->uobject == uobj);
@@ -763,6 +799,44 @@ uvm_aio_aiodone(struct buf *bp)
 		}
 	}
 	uvm_page_unbusy(pgs, npages);
+	if (!swap) {
+		rw_exit(uobj->vmobjlock);
+	}
+}
+
+/*
+ * uvm_aio_aiodone: do iodone processing for async i/os.
+ * this should be called in thread context, not interrupt context.
+ */
+void
+uvm_aio_aiodone(struct buf *bp)
+{
+	int npages = bp->b_bufsize >> PAGE_SHIFT;
+	struct vm_page *pgs[MAXPHYS >> PAGE_SHIFT];
+	int i, error;
+	boolean_t write;
+
+	KASSERT(npages <= MAXPHYS >> PAGE_SHIFT);
+	splassert(IPL_BIO);
+
+	error = (bp->b_flags & B_ERROR) ? (bp->b_error ? bp->b_error : EIO) : 0;
+	write = (bp->b_flags & B_READ) == 0;
+
+	for (i = 0; i < npages; i++)
+		pgs[i] = uvm_atopg((vaddr_t)bp->b_data +
+		    ((vsize_t)i << PAGE_SHIFT));
+	uvm_pagermapout((vaddr_t)bp->b_data, npages);
+#ifdef UVM_SWAP_ENCRYPT
+	/*
+	 * XXX - assumes that we only get ASYNC writes. used to be above.
+	 */
+	if (pgs[0]->pg_flags & PQ_ENCRYPT) {
+		uvm_swap_freepages(pgs, npages);
+		goto freed;
+	}
+#endif /* UVM_SWAP_ENCRYPT */
+
+	uvm_aio_aiodone_pages(pgs, npages, write, error);
 
 #ifdef UVM_SWAP_ENCRYPT
 freed:

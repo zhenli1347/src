@@ -1,4 +1,4 @@
-/*      $OpenBSD: glxpcib.c,v 1.14 2014/12/10 12:27:57 mikeb Exp $	*/
+/*      $OpenBSD: glxpcib.c,v 1.16 2022/03/11 18:00:45 mpi Exp $	*/
 
 /*
  * Copyright (c) 2007 Marc Balmer <mbalmer@openbsd.org>
@@ -175,7 +175,7 @@
 #define	AMD5536_PMS_SSC_SET_PI	0x00010000
 
 /*
- * MSR registers we want to preserve accross suspend/resume
+ * MSR registers we want to preserve across suspend/resume
  */
 const uint32_t glxpcib_msrlist[] = {
 	GLIU_PAE,
@@ -222,7 +222,7 @@ int	glxpcib_activate(struct device *, int);
 int	glxpcib_search(struct device *, void *, void *);
 int	glxpcib_print(void *, const char *);
 
-struct cfattach glxpcib_ca = {
+const struct cfattach glxpcib_ca = {
 	sizeof(struct glxpcib_softc), glxpcib_match, glxpcib_attach,
 	NULL, glxpcib_activate
 };

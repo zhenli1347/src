@@ -1,4 +1,4 @@
-/*	$OpenBSD: harmony.c,v 1.35 2020/05/29 04:42:23 deraadt Exp $	*/
+/*	$OpenBSD: harmony.c,v 1.38 2022/03/21 19:22:39 miod Exp $	*/
 
 /*
  * Copyright (c) 2003 Jason L. Wright (jason@thought.net)
@@ -73,7 +73,7 @@ int     harmony_trigger_output(void *, void *, void *, int,
 int     harmony_trigger_input(void *, void *, void *, int,
     void (*intr)(void *), void *, struct audio_params *);
 
-struct audio_hw_if harmony_sa_hw_if = {
+const struct audio_hw_if harmony_sa_hw_if = {
 	harmony_open,
 	harmony_close,
 	harmony_set_params,
@@ -249,7 +249,7 @@ harmony_attach(parent, self, aux)
 	if ((rev & CS4215_REV_VER) >= CS4215_REV_VER_E)
 		sc->sc_hasulinear8 = 1;
 
-	audio_attach_mi(&harmony_sa_hw_if, sc, &sc->sc_dv);
+	audio_attach_mi(&harmony_sa_hw_if, sc, NULL, &sc->sc_dv);
 
 	timeout_set(&sc->sc_acc_tmo, harmony_acc_tmo, sc);
 	sc->sc_acc_num = 0xa5a5a5a5;
@@ -1159,6 +1159,6 @@ struct cfdriver harmony_cd = {
 	NULL, "harmony", DV_DULL
 };
 
-struct cfattach harmony_ca = {
+const struct cfattach harmony_ca = {
 	sizeof(struct harmony_softc), harmony_match, harmony_attach
 };

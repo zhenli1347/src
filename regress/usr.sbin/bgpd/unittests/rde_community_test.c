@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_community_test.c,v 1.2 2019/07/04 10:20:59 claudio Exp $ */
+/*	$OpenBSD: rde_community_test.c,v 1.5 2022/05/31 09:46:54 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
@@ -73,7 +73,7 @@ test_parsing(size_t num, uint8_t *in, size_t inlen)
 		r = community_add(&comm, flags, in + skip, attr_len);
 		break;
 	case ATTR_EXT_COMMUNITIES:
-		r = community_ext_add(&comm, flags, in + skip, attr_len);
+		r = community_ext_add(&comm, flags, 0, in + skip, attr_len);
 		break;
 	case ATTR_LARGE_COMMUNITIES:
 		r = community_large_add(&comm, flags, in + skip, attr_len);
@@ -129,21 +129,50 @@ test_filter(size_t num, struct testfilter *f)
 		}
 	}
 
-	r = community_match(&comm, &filters[f->match], &peer);
-	if (r != f->mout) {
-		printf("Test %zu: community_match "
-		    "unexpected return %d != %d\n", num, r, f->mout);
-		return -1;
+	if (f->match != -1) {
+		r = community_match(&comm, &filters[f->match], &peer);
+		if (r != f->mout) {
+			printf("Test %zu: community_match "
+			    "unexpected return %d != %d\n", num, r, f->mout);
+			return -1;
+		}
 	}
 
-	if (f->delete == -1)
-		return 0;
+	if (f->delete != -1) {
+		community_delete(&comm, &filters[f->delete], &peer);
 
-	community_delete(&comm, &filters[f->delete], &peer);
+		if (community_match(&comm, &filters[f->delete], &peer) != 0) {
+			printf("Test %zu: community_delete still around\n",
+			    num);
+			return -1;
+		}
+	}
 
-	if (community_match(&comm, &filters[f->delete], &peer) != 0) {
-		printf("Test %zu: community_delete still around\n", num);
-		return -1;
+	if (f->ncomm != 0) {
+		if (community_count(&comm, COMMUNITY_TYPE_BASIC) !=
+		    f->ncomm - 1) {
+			printf("Test %zu: community_count unexpected "
+			    "return %d != %d\n", num, r, f->ncomm - 1);
+			return -1;
+		}
+	}
+
+	if (f->next != 0) {
+		if (community_count(&comm, COMMUNITY_TYPE_EXT) !=
+		    f->next - 1) {
+			printf("Test %zu: community_count unexpected "
+			    "return %d != %d\n", num, r, f->next - 1);
+			return -1;
+		}
+	}
+
+	if (f->nlarge != 0) {
+		if (community_count(&comm, COMMUNITY_TYPE_LARGE) !=
+		    f->nlarge - 1) {
+			printf("Test %zu: community_count unexpected "
+			    "return %d != %d\n", num, r, f->nlarge - 1);
+			return -1;
+		}
 	}
 
 	return 0;
@@ -196,11 +225,11 @@ log_warnx(const char *emsg, ...)
 }
 
 int
-attr_write(void *p, u_int16_t p_len, u_int8_t flags, u_int8_t type,
-    void *data, u_int16_t data_len)
+attr_write(void *p, uint16_t p_len, uint8_t flags, uint8_t type,
+    void *data, uint16_t data_len)
 {
 	u_char		*b = p;
-	u_int16_t	 tmp, tot_len = 2; /* attribute header (without len) */
+	uint16_t	 tmp, tot_len = 2; /* attribute header (without len) */
 
 	flags &= ~ATTR_DEFMASK;
 	if (data_len > 255) {
@@ -232,8 +261,8 @@ attr_write(void *p, u_int16_t p_len, u_int8_t flags, u_int8_t type,
 }
 
 int
-attr_writebuf(struct ibuf *buf, u_int8_t flags, u_int8_t type, void *data,
-    u_int16_t data_len)
+attr_writebuf(struct ibuf *buf, uint8_t flags, uint8_t type, void *data,
+    uint16_t data_len)
 {
 	return (-1);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6_proto.c,v 1.105 2021/05/25 22:45:10 bluhm Exp $	*/
+/*	$OpenBSD: in6_proto.c,v 1.109 2022/02/25 23:51:04 guenther Exp $	*/
 /*	$KAME: in6_proto.c,v 1.66 2000/10/10 15:35:47 itojun Exp $	*/
 
 /*
@@ -93,7 +93,6 @@
 
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
-#include <netinet6/ip6protosw.h>
 
 #include "gif.h"
 #if NGIF > 0
@@ -214,7 +213,7 @@ const struct protosw inet6sw[] = {
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_AH,
   .pr_flags	= PR_ATOMIC|PR_ADDR,
-  .pr_input	= ah6_input,
+  .pr_input	= ah46_input,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreq	= rip6_usrreq,
   .pr_attach	= rip6_attach,
@@ -226,7 +225,7 @@ const struct protosw inet6sw[] = {
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_ESP,
   .pr_flags	= PR_ATOMIC|PR_ADDR,
-  .pr_input	= esp6_input,
+  .pr_input	= esp46_input,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreq	= rip6_usrreq,
   .pr_attach	= rip6_attach,
@@ -238,7 +237,7 @@ const struct protosw inet6sw[] = {
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_IPCOMP,
   .pr_flags	= PR_ATOMIC|PR_ADDR,
-  .pr_input	= ipcomp6_input,
+  .pr_input	= ipcomp46_input,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreq	= rip6_usrreq,
   .pr_attach	= rip6_attach,

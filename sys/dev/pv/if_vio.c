@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vio.c,v 1.19 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_vio.c,v 1.22 2022/03/07 18:52:16 dv Exp $	*/
 
 /*
  * Copyright (c) 2012 Stefan Fritsch, Alexander Fiveg.
@@ -315,7 +315,7 @@ vio_match(struct device *parent, void *match, void *aux)
 	return 0;
 }
 
-struct cfattach vio_ca = {
+const struct cfattach vio_ca = {
 	sizeof(struct vio_softc), vio_match, vio_attach, NULL
 };
 
@@ -895,7 +895,7 @@ vio_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 }
 
 /*
- * Recieve implementation
+ * Receive implementation
  */
 /* allocate and initialize a mbuf for receive */
 int
@@ -913,7 +913,7 @@ vio_add_rx_mbuf(struct vio_softc *sc, int i)
 	    m, BUS_DMA_READ|BUS_DMA_NOWAIT);
 	if (r) {
 		m_freem(m);
-		sc->sc_rx_mbufs[i] = 0;
+		sc->sc_rx_mbufs[i] = NULL;
 		return r;
 	}
 
@@ -1095,7 +1095,7 @@ vio_rx_drain(struct vio_softc *sc)
 }
 
 /*
- * Transmition implementation
+ * Transmission implementation
  */
 /* actual transmission is done in if_start */
 /* tx interrupt; dequeue and free mbufs */
@@ -1146,7 +1146,7 @@ vio_txeof(struct virtqueue *vq)
 		    BUS_DMASYNC_POSTWRITE);
 		m = sc->sc_tx_mbufs[slot];
 		bus_dmamap_unload(vsc->sc_dmat, sc->sc_tx_dmamaps[slot]);
-		sc->sc_tx_mbufs[slot] = 0;
+		sc->sc_tx_mbufs[slot] = NULL;
 		virtio_dequeue_commit(vq, slot);
 		m_freem(m);
 	}

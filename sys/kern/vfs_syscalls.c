@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_syscalls.c,v 1.352 2021/07/16 07:59:38 claudio Exp $	*/
+/*	$OpenBSD: vfs_syscalls.c,v 1.359 2022/08/01 14:56:59 deraadt Exp $	*/
 /*	$NetBSD: vfs_syscalls.c,v 1.71 1996/04/23 10:29:02 mycroft Exp $	*/
 
 /*
@@ -60,6 +60,8 @@
 #include <sys/ktrace.h>
 #include <sys/unistd.h>
 #include <sys/specdev.h>
+#include <sys/resourcevar.h>
+#include <sys/signalvar.h>
 
 #include <sys/syscallargs.h>
 
@@ -829,6 +831,7 @@ sys_chroot(struct proc *p, void *v, register_t *retval)
 		vrele(old_cdir);
 	} else
 		fdp->fd_rdir = nd.ni_vp;
+	atomic_setbits_int(&p->p_p->ps_flags, PS_CHROOT);
 	return (0);
 }
 
@@ -862,7 +865,7 @@ sys___realpath(struct proc *p, void *v, register_t *retval)
 		syscallarg(const char *) pathname;
 		syscallarg(char *) resolved;
 	} */ *uap = v;
-	char *pathname, *c;
+	char *pathname;
 	char *rpbuf;
 	struct nameidata nd;
 	size_t pathlen;
@@ -916,11 +919,6 @@ sys___realpath(struct proc *p, void *v, register_t *retval)
 		free(cwdbuf, M_TEMP, cwdlen);
 	}
 
-	/* find root "/" or "//" */
-	for (c = pathname; *c != '\0'; c++) {
-		if (*c != '/')
-			break;
-	}
 	NDINIT(&nd, LOOKUP, FOLLOW | SAVENAME | REALPATH, UIO_SYSSPACE,
 	    pathname, p);
 
@@ -1908,7 +1906,6 @@ sys_lseek(struct proc *p, void *v, register_t *retval)
 {
 	struct sys_lseek_args /* {
 		syscallarg(int) fd;
-		syscallarg(int) pad;
 		syscallarg(off_t) offset;
 		syscallarg(int) whence;
 	} */ *uap = v;
@@ -1938,6 +1935,20 @@ sys_lseek(struct proc *p, void *v, register_t *retval)
 	FRELE(fp, p);
 	return (error);
 }
+
+#if 1
+int
+sys_pad_lseek(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_lseek_args *uap = v;
+	struct sys_lseek_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, offset) = SCARG(uap, offset);
+	SCARG(&unpad, whence) = SCARG(uap, whence);
+	return sys_lseek(p, &unpad, retval);
+}
+#endif
 
 /*
  * Check access permissions.
@@ -2800,6 +2811,35 @@ dofutimens(struct proc *p, int fd, struct timespec ts[2])
 }
 
 /*
+ * Truncate a file given a vnode.
+ */
+int
+dotruncate(struct proc *p, struct vnode *vp, off_t len)
+{
+	struct vattr vattr;
+	int error;
+
+	if (len < 0)
+		return EINVAL;
+	if (vp->v_type == VDIR)
+		return EISDIR;
+	if ((error = vn_writechk(vp)) != 0)
+		return error;
+	if (vp->v_type == VREG && len > lim_cur_proc(p, RLIMIT_FSIZE)) {
+		if ((error = VOP_GETATTR(vp, &vattr, p->p_ucred, p)) != 0)
+			return error;
+		if (len > vattr.va_size) {
+			/* if extending over the limit, send signal and fail */
+			psignal(p, SIGXFSZ);
+			return EFBIG;
+		}
+	}
+	VATTR_NULL(&vattr);
+	vattr.va_size = len;
+	return VOP_SETATTR(vp, &vattr, p->p_ucred, p);
+}
+
+/*
  * Truncate a file given its path name.
  */
 int
@@ -2807,11 +2847,9 @@ sys_truncate(struct proc *p, void *v, register_t *retval)
 {
 	struct sys_truncate_args /* {
 		syscallarg(const char *) path;
-		syscallarg(int) pad;
 		syscallarg(off_t) length;
 	} */ *uap = v;
 	struct vnode *vp;
-	struct vattr vattr;
 	int error;
 	struct nameidata nd;
 
@@ -2822,14 +2860,8 @@ sys_truncate(struct proc *p, void *v, register_t *retval)
 		return (error);
 	vp = nd.ni_vp;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_type == VDIR)
-		error = EISDIR;
-	else if ((error = VOP_ACCESS(vp, VWRITE, p->p_ucred, p)) == 0 &&
-	    (error = vn_writechk(vp)) == 0) {
-		VATTR_NULL(&vattr);
-		vattr.va_size = SCARG(uap, length);
-		error = VOP_SETATTR(vp, &vattr, p->p_ucred, p);
-	}
+	if ((error = VOP_ACCESS(vp, VWRITE, p->p_ucred, p)) == 0)
+		error = dotruncate(p, vp, SCARG(uap, length));
 	vput(vp);
 	return (error);
 }
@@ -2842,36 +2874,50 @@ sys_ftruncate(struct proc *p, void *v, register_t *retval)
 {
 	struct sys_ftruncate_args /* {
 		syscallarg(int) fd;
-		syscallarg(int) pad;
 		syscallarg(off_t) length;
 	} */ *uap = v;
-	struct vattr vattr;
 	struct vnode *vp;
 	struct file *fp;
-	off_t len;
 	int error;
 
 	if ((error = getvnode(p, SCARG(uap, fd), &fp)) != 0)
 		return (error);
-	len = SCARG(uap, length);
-	if ((fp->f_flag & FWRITE) == 0 || len < 0) {
+	if ((fp->f_flag & FWRITE) == 0) {
 		error = EINVAL;
 		goto bad;
 	}
 	vp = fp->f_data;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
-	if (vp->v_type == VDIR)
-		error = EISDIR;
-	else if ((error = vn_writechk(vp)) == 0) {
-		VATTR_NULL(&vattr);
-		vattr.va_size = len;
-		error = VOP_SETATTR(vp, &vattr, fp->f_cred, p);
-	}
+	error = dotruncate(p, vp, SCARG(uap, length));
 	VOP_UNLOCK(vp);
 bad:
 	FRELE(fp, p);
 	return (error);
 }
+
+#if 1
+int
+sys_pad_truncate(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_truncate_args *uap = v;
+	struct sys_truncate_args unpad;
+
+	SCARG(&unpad, path) = SCARG(uap, path);
+	SCARG(&unpad, length) = SCARG(uap, length);
+	return sys_truncate(p, &unpad, retval);
+}
+
+int
+sys_pad_ftruncate(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_ftruncate_args *uap = v;
+	struct sys_ftruncate_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, length) = SCARG(uap, length);
+	return sys_ftruncate(p, &unpad, retval);
+}
+#endif
 
 /*
  * Sync an open file.
@@ -3246,7 +3292,6 @@ sys_pread(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) fd;
 		syscallarg(void *) buf;
 		syscallarg(size_t) nbyte;
-		syscallarg(int) pad;
 		syscallarg(off_t) offset;
 	} */ *uap = v;
 	struct iovec iov;
@@ -3275,7 +3320,6 @@ sys_preadv(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) fd;
 		syscallarg(const struct iovec *) iovp;
 		syscallarg(int) iovcnt;
-		syscallarg(int) pad;
 		syscallarg(off_t) offset;
 	} */ *uap = v;
 	struct iovec aiov[UIO_SMALLIOV], *iov = NULL;
@@ -3308,7 +3352,6 @@ sys_pwrite(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) fd;
 		syscallarg(const void *) buf;
 		syscallarg(size_t) nbyte;
-		syscallarg(int) pad;
 		syscallarg(off_t) offset;
 	} */ *uap = v;
 	struct iovec iov;
@@ -3337,7 +3380,6 @@ sys_pwritev(struct proc *p, void *v, register_t *retval)
 		syscallarg(int) fd;
 		syscallarg(const struct iovec *) iovp;
 		syscallarg(int) iovcnt;
-		syscallarg(int) pad;
 		syscallarg(off_t) offset;
 	} */ *uap = v;
 	struct iovec aiov[UIO_SMALLIOV], *iov = NULL;
@@ -3359,3 +3401,57 @@ sys_pwritev(struct proc *p, void *v, register_t *retval)
 	iovec_free(iov, iovcnt);
 	return (error);
 }
+
+#if 1
+int
+sys_pad_pread(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_pread_args *uap = v;
+	struct sys_pread_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, buf) = SCARG(uap, buf);
+	SCARG(&unpad, nbyte) = SCARG(uap, nbyte);
+	SCARG(&unpad, offset) = SCARG(uap, offset);
+	return sys_pread(p, &unpad, retval);
+}
+
+int
+sys_pad_preadv(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_preadv_args *uap = v;
+	struct sys_preadv_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, iovp) = SCARG(uap, iovp);
+	SCARG(&unpad, iovcnt) = SCARG(uap, iovcnt);
+	SCARG(&unpad, offset) = SCARG(uap, offset);
+	return sys_preadv(p, &unpad, retval);
+}
+
+int
+sys_pad_pwrite(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_pwrite_args *uap = v;
+	struct sys_pwrite_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, buf) = SCARG(uap, buf);
+	SCARG(&unpad, nbyte) = SCARG(uap, nbyte);
+	SCARG(&unpad, offset) = SCARG(uap, offset);
+	return sys_pwrite(p, &unpad, retval);
+}
+
+int
+sys_pad_pwritev(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pad_pwritev_args *uap = v;
+	struct sys_pwritev_args unpad;
+
+	SCARG(&unpad, fd) = SCARG(uap, fd);
+	SCARG(&unpad, iovp) = SCARG(uap, iovp);
+	SCARG(&unpad, iovcnt) = SCARG(uap, iovcnt);
+	SCARG(&unpad, offset) = SCARG(uap, offset);
+	return sys_pwritev(p, &unpad, retval);
+}
+#endif

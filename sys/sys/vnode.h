@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnode.h,v 1.157 2021/04/28 09:53:53 claudio Exp $	*/
+/*	$OpenBSD: vnode.h,v 1.167 2022/08/12 14:30:53 visa Exp $	*/
 /*	$NetBSD: vnode.h,v 1.38 1996/02/29 20:59:05 cgd Exp $	*/
 
 /*
@@ -89,6 +89,7 @@ RBT_HEAD(namecache_rb_cache, namecache);
  * Locks used to protect struct members in struct vnode:
  *	a	atomic
  *	V	vnode_mtx
+ *	B	IPL_BIO
  */
 struct uvm_vnode;
 struct vnode {
@@ -103,19 +104,17 @@ struct vnode {
 	u_int   v_writecount;		/* reference count of writers */
 	u_int	v_lockcount;		/* [V] # threads waiting on lock */
 
-	/* Flags that can be read/written in interrupts */
-	u_int   v_bioflag;
-	u_int   v_holdcnt;			/* buffer references */
+	u_int   v_bioflag;		/* [B] flags accessed in interrupts */
+	u_int   v_holdcnt;		/* [B] buffer references */
 	u_int   v_id;				/* capability identifier */
-	u_int	v_inflight;
 	struct	mount *v_mount;			/* ptr to vfs we are in */
-	TAILQ_ENTRY(vnode) v_freelist;		/* vnode freelist */
+	TAILQ_ENTRY(vnode) v_freelist;	/* [B] vnode freelist */
 	TAILQ_ENTRY(vnode) v_mntvnodes;		/* vnodes for mount point */
-	struct	buf_rb_bufs v_bufs_tree;	/* lookup of all bufs */
-	struct	buflists v_cleanblkhd;		/* clean blocklist head */
-	struct	buflists v_dirtyblkhd;		/* dirty blocklist head */
-	u_int   v_numoutput;			/* num of writes in progress */
-	LIST_ENTRY(vnode) v_synclist;		/* vnode with dirty buffers */
+	struct	buf_rb_bufs v_bufs_tree;/* [B] lookup of all bufs */
+	struct	buflists v_cleanblkhd;	/* [B] clean blocklist head */
+	struct	buflists v_dirtyblkhd;	/* [B] dirty blocklist head */
+	u_int   v_numoutput;		/* [B] num of writes in progress */
+	LIST_ENTRY(vnode) v_synclist;	/* [B] vnode with dirty buffers */
 	union {
 		struct mount	*vu_mountedhere;/* ptr to mounted vfs (VDIR) */
 		struct socket	*vu_socket;	/* unix ipc (VSOCK) */
@@ -244,10 +243,6 @@ extern int		vttoif_tab[];
 #define REVOKEALL	0x0001		/* vop_revoke: revoke all aliases */
 
 
-TAILQ_HEAD(freelst, vnode);
-extern struct freelst vnode_hold_list;	/* free vnodes referencing buffers */
-extern struct freelst vnode_free_list;	/* vnode free list */
-
 #define	VATTR_NULL(vap)	vattr_null(vap)
 #define	NULLVP	((struct vnode *)NULL)
 #define	VN_KNOTE(vp, b)					\
@@ -286,7 +281,6 @@ struct vops {
 	int	(*vop_mknod)(void *);
 	int	(*vop_open)(void *);
 	int	(*vop_pathconf)(void *);
-	int	(*vop_poll)(void *);
 	int	(*vop_print)(void *);
 	int	(*vop_read)(void *);
 	int	(*vop_readdir)(void *);
@@ -408,14 +402,6 @@ struct vop_ioctl_args {
 };
 int VOP_IOCTL(struct vnode *, u_long, void *, int, struct ucred *,
     struct proc *);
-
-struct vop_poll_args {
-	struct vnode *a_vp;
-	int a_fflag;
-	int a_events;
-	struct proc *a_p;
-};
-int VOP_POLL(struct vnode *, int, int, struct proc *);
 
 struct vop_kqfilter_args {
 	struct vnode *a_vp;
@@ -563,12 +549,13 @@ struct vop_advlock_args {
 };
 int VOP_ADVLOCK(struct vnode *, void *, int, struct flock *, int);
 
-/* Special cases: */
 struct vop_strategy_args {
+	struct vnode *a_vp;
 	struct buf *a_bp;
 };
-int VOP_STRATEGY(struct buf *);
+int VOP_STRATEGY(struct vnode *, struct buf *);
 
+/* Special cases: */
 struct vop_bwrite_args {
 	struct buf *a_bp;
 };
@@ -628,11 +615,9 @@ int vfs_getcwd_getcache(struct vnode **, struct vnode **, char **, char *);
 
 /* vfs_default.c */
 int	vop_generic_abortop(void *);
+int	vop_generic_badop(void *);
 int	vop_generic_bmap(void *);
 int	vop_generic_bwrite(void *);
-int	vop_generic_islocked(void *);
-int	vop_generic_lock(void *);
-int	vop_generic_unlock(void *);
 int	vop_generic_revoke(void *);
 int	vop_generic_kqfilter(void *);
 int	vop_generic_lookup(void *);

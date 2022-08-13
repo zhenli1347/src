@@ -1,5 +1,5 @@
 #! /bin/sh -
-#	$OpenBSD: makesyscalls.sh,v 1.13 2016/09/26 16:42:34 jca Exp $
+#	$OpenBSD: makesyscalls.sh,v 1.16 2022/05/01 22:59:49 tedu Exp $
 #	$NetBSD: makesyscalls.sh,v 1.26 1998/01/09 06:17:51 thorpej Exp $
 #
 # Copyright (c) 1994,1996 Christopher G. Demetriou
@@ -56,8 +56,8 @@ esac
 #	syssw		the syscall switch file
 #	sysarghdr	the syscall argument struct definitions
 #	compatopts	those syscall types that are for 'compat' syscalls
-#	switchname	the name for the 'struct sysent' we define
-#	namesname	the name for the 'char *[]' we define
+#	switchname	the name for the 'const struct sysent' we define
+#	namesname	the name for the 'const char *const[]' we define
 #	constprefix	the prefix for the system call constants
 #
 # NOTE THAT THIS makesyscalls.sh DOES NOT SUPPORT 'LIBCOMPAT'.
@@ -69,28 +69,6 @@ syscompat_pref="sysent."
 sysent="sysent.switch"
 
 trap "rm $sysdcl $sysprotos $sysent" 0
-
-# Awk program (must support nawk extensions)
-# Use "awk" at Berkeley, "nawk" or "gawk" elsewhere.
-awk=${AWK:-awk}
-
-# Does this awk have a "toupper" function? (i.e. is it GNU awk)
-isgawk=`$awk 'BEGIN { print toupper("true"); exit; }' 2>/dev/null`
-
-# If this awk does not define "toupper" then define our own.
-if [ "$isgawk" = TRUE ] ; then
-	# GNU awk provides it.
-	toupper=
-else
-	# Provide our own toupper()
-	toupper='
-function toupper(str) {
-	_toupper_cmd = "echo "str" |tr a-z A-Z"
-	_toupper_cmd | getline _toupper_str;
-	close(_toupper_cmd);
-	return _toupper_str;
-}'
-fi
 
 # before handing it off to awk, make a few adjustments:
 #	(1) insert spaces around {, }, (, ), *, and commas.
@@ -111,8 +89,7 @@ s/\$//g
 2,${
 	/^#/!s/\([{}()*,]\)/ \1 /g
 }
-' < $2 | $awk "
-$toupper
+' < $2 | awk "
 BEGIN {
 	# to allow nested #if/#else/#endif sets
 	savedepth = 0
@@ -150,7 +127,7 @@ BEGIN {
 	}
 
 	printf "\n#define\ts(type)\tsizeof(type)\n\n" > sysent
-	printf "struct sysent %s[] = {\n",switchname > sysent
+	printf "const struct sysent %s[] = {\n",switchname > sysent
 
 	printf "/*\t\$OpenBSD\$\t*/\n\n" > sysnames
 	printf "/*\n * System call names.\n *\n" > sysnames
@@ -170,7 +147,7 @@ NR == 1 {
 	printf " * created from%s\n */\n\n", $0 > sysdcl
 
 	printf " * created from%s\n */\n\n", $0 > sysnames
-	printf "char *%s[] = {\n",namesname > sysnames
+	printf "const char *const %s[] = {\n",namesname > sysnames
 
 	printf " * created from%s\n */\n\n", $0 > sysnumhdr
 

@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rpki-client.8,v 1.47 2021/09/01 08:17:37 claudio Exp $
+.\"	$OpenBSD: rpki-client.8,v 1.68 2022/06/30 10:27:52 job Exp $
 .\"
 .\" Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: September 1 2021 $
+.Dd $Mdocdate: June 30 2022 $
 .Dt RPKI-CLIENT 8
 .Os
 .Sh NAME
@@ -26,10 +26,17 @@
 .Op Fl b Ar sourceaddr
 .Op Fl d Ar cachedir
 .Op Fl e Ar rsync_prog
+.Op Fl S Ar skiplist
 .Op Fl s Ar timeout
 .Op Fl T Ar table
 .Op Fl t Ar tal
 .Op Ar outputdir
+.Nm
+.Op Fl Vv
+.Op Fl d Ar cachedir
+.Op Fl t Ar tal
+.Fl f
+.Ar
 .Sh DESCRIPTION
 The
 .Nm
@@ -40,12 +47,14 @@ to fetch all X.509 certificates, manifests, and revocation lists under a given
 .Em Trust Anchor .
 .Nm
 subsequently validates each
-.Em Route Origin Authorization Pq ROA
+.Em Signed Object
 by constructing and verifying a certification path for the certificate
-associated with the ROA (including checking relevant CRLs).
+associated with the Object (including checking relevant CRLs).
 .Nm
 produces lists of the
 .Em Validated ROA Payloads Pq VRPs
+and
+.Em BGPsec Router Keys Pq BRKs
 in various formats.
 .Pp
 The options are as follows:
@@ -90,6 +99,25 @@ It must accept the
 and
 .Fl -address
 flags and connect with rsync-protocol locations.
+.It Fl f Ar
+Decode the
+.Em TAL
+or validate the
+.Em Signed Object
+in
+.Ar file
+against the RPKI cache stored in
+.Ar cachedir
+and print human-readable information about the object.
+If
+.Ar file
+is an rsync:// URI, the corresponding file from the cache will be used.
+This option implies
+.Fl n ,
+and can be combined with
+.Fl j
+to emit a stream of
+.Em Concatenated JSON .
 .It Fl j
 Create output in the file
 .Pa json
@@ -124,6 +152,23 @@ If RRDP fails, RSYNC will be used.
 This is the default.
 Mutually exclusive with
 .Fl n .
+.It Fl S Ar skiplist
+Do not connect to hosts listed in the
+.Ar skiplist
+file.
+Entries in the
+.Ar skiplist
+are newline separated
+.Em Fully Qualified Domain Names Pq FQDNs .
+A
+.Ql #
+indicates the beginning of a comment; characters up to the end of the line are
+not interpreted.
+The skip filter is enforced during processing of the
+.Em Subject Information Access Pq SIA
+extension in CA certificates, thus applies to both RSYNC and RRDP connections.
+By default load entries from
+.Pa /etc/rpki/skiplist .
 .It Fl s Ar timeout
 Terminate after
 .Ar timeout
@@ -131,6 +176,8 @@ seconds of runtime, because normal practice will restart from
 .Xr cron 8 .
 Disable by specifying 0.
 Defaults to 1 hour.
+Individual Publication Points are timed out after one fourth of
+.Em timeout .
 .It Fl T Ar table
 For BIRD output generated with the
 .Fl B
@@ -186,6 +233,10 @@ URL of HTTP proxy to use.
 default TAL files used unless
 .Fl t Ar tal
 is specified.
+.It Pa /etc/rpki/skiplist
+default skiplist file, unless
+.Fl S Ar skiplist
+is specified.
 .It Pa /var/cache/rpki-client
 cached repository data.
 .It Pa /var/db/rpki-client/openbgpd
@@ -233,12 +284,22 @@ A Profile for X.509 PKIX Resource Certificates.
 Signed Object Template for the Resource Public Key Infrastructure (RPKI).
 .It RFC 6493
 The Resource Public Key Infrastructure (RPKI) Ghostbusters Record.
-.It RFC 7730
-Resource Public Key Infrastructure (RPKI) Trust Anchor Locator.
+.It RFC 7318
+Policy Qualifiers in Resource Public Key Infrastructure (RPKI) Certificates.
 .It RFC 8182
 The RPKI Repository Delta Protocol (RRDP).
+.It RFC 8209
+A Profile for BGPsec Router Certificates, Certificate Revocation Lists, and
+Certification Requests.
+.It RFC 8630
+Resource Public Key Infrastructure (RPKI) Trust Anchor Locator.
+.It draft-ietf-sidrops-rpki-rsc-08
+A profile for Resource Public Key Infrastructure (RPKI) Signed Checklists (RSC).
 .El
-.\" .Sh HISTORY
+.Sh HISTORY
+.Nm
+first appeared in
+.Ox 6.7 .
 .Sh AUTHORS
 The
 .Nm

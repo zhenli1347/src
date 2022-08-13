@@ -1,4 +1,4 @@
-/* $OpenBSD: amdisplay.c,v 1.15 2021/03/25 04:12:01 jsg Exp $ */
+/* $OpenBSD: amdisplay.c,v 1.17 2022/07/15 17:57:25 kettenis Exp $ */
 /*
  * Copyright (c) 2016 Ian Sutton <ians@openbsd.org>
  *
@@ -114,7 +114,7 @@ struct wsdisplay_accessops amdisplay_accessops = {
 	.list_font = rasops_list_font,
 };
 
-struct cfattach amdisplay_ca = {
+const struct cfattach amdisplay_ca = {
 	sizeof(struct amdisplay_softc), amdisplay_match, amdisplay_attach,
 	amdisplay_detach
 };
@@ -595,6 +595,8 @@ amdisplay_ioctl(void *sconf, u_long cmd, caddr_t data, int flat, struct proc *p)
 		wdf->width = ri->ri_width;
 		wdf->height = ri->ri_height;
 		wdf->depth = ri->ri_depth;
+		wdf->stride = ri->ri_stride;
+		wdf->offset = 0;
 		wdf->cmsize = 0;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

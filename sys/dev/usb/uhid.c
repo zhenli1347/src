@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhid.c,v 1.84 2021/03/08 14:35:57 jcs Exp $ */
+/*	$OpenBSD: uhid.c,v 1.89 2022/07/02 08:50:42 visa Exp $ */
 /*	$NetBSD: uhid.c,v 1.57 2003/03/11 16:44:00 augustss Exp $	*/
 
 /*
@@ -50,7 +50,6 @@
 #include <sys/selinfo.h>
 #include <sys/proc.h>
 #include <sys/vnode.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbhid.h>
@@ -115,7 +114,7 @@ uhid_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	return (UMATCH_IFACECLASS_GENERIC);
@@ -392,7 +391,7 @@ uhid_do_ioctl(struct uhid_softc *sc, u_long cmd, caddr_t addr,
 	default:
 		rc = uhidev_ioctl(&sc->sc_hdev, cmd, addr, flag, p);
 		if (rc == -1)
-			rc = EINVAL;
+			rc = ENOTTY;
 		return rc;
 	}
 	return (0);
@@ -412,33 +411,6 @@ uhidioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 	if (--sc->sc_refcnt < 0)
 		usb_detach_wakeup(&sc->sc_hdev.sc_dev);
 	return (error);
-}
-
-int
-uhidpoll(dev_t dev, int events, struct proc *p)
-{
-	struct uhid_softc *sc;
-	int revents = 0;
-	int s;
-
-	if ((sc = uhid_lookup(dev)) == NULL)
-		return (POLLERR);
-
-	if (usbd_is_dying(sc->sc_hdev.sc_udev))
-		return (POLLHUP);
-
-	s = splusb();
-	if (events & (POLLOUT | POLLWRNORM))
-		revents |= events & (POLLOUT | POLLWRNORM);
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (sc->sc_q.c_cc > 0)
-			revents |= events & (POLLIN | POLLRDNORM);
-		else
-			selrecord(p, &sc->sc_rsel);
-	}
-
-	splx(s);
-	return (revents);
 }
 
 void filt_uhidrdetach(struct knote *);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: getpwent.c,v 1.63 2019/07/02 15:54:05 deraadt Exp $ */
+/*	$OpenBSD: getpwent.c,v 1.66 2022/08/02 17:00:15 deraadt Exp $ */
 /*
  * Copyright (c) 2008 Theo de Raadt
  * Copyright (c) 1988, 1993
@@ -30,7 +30,7 @@
  * SUCH DAMAGE.
  */
 
-#include <sys/param.h>	/* ALIGN */
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <db.h>
@@ -90,13 +90,11 @@ static enum	_ypmode __ypmode;
 static char	*__ypcurrent;
 static int	__ypcurrentlen;
 static int	__yp_pw_flags;
-static struct passwd *__ypproto;
 static int	__getpwent_has_yppw = -1;
 static struct _ypexclude *__ypexhead;
 
 static int __has_yppw(void);
 static int __has_ypmaster(void);
-static void __ypproto_set(struct passwd *, long long *, int, int *);
 static int __ypparse(struct passwd *pw, char *s, int);
 
 #define LOOKUP_BYNAME 0
@@ -110,21 +108,19 @@ static struct passwd *__yppwlookup(int, char *, uid_t, struct passwd *,
 #define PASSWD_BYUID \
 	(__has_ypmaster() ? "master.passwd.byuid" : "passwd.byuid")
 
+static struct passwd *__ypproto;
+
+static void __ypproto_set(struct passwd *, struct pw_storage *, int, int *);
+
 static void
-__ypproto_set(struct passwd *pw, long long *buf, int flags, int *yp_pw_flagsp)
+__ypproto_set(struct passwd *pw, struct pw_storage *buf, int flags,
+    int *yp_pw_flagsp)
 {
-	char *ptr;
-
-	/* make this the new prototype */
-	ptr = (char *)buf;
-
-	/* first allocate the struct. */
-	__ypproto = (struct passwd *)ptr;
-	ptr += sizeof(struct passwd);
+	char *ptr = buf->pwbuf;
+	__ypproto = &buf->pw;
 
 	/* name */
 	if (pw->pw_name && (pw->pw_name)[0]) {
-		ptr = (char *)ALIGN(ptr);
 		bcopy(pw->pw_name, ptr, strlen(pw->pw_name) + 1);
 		__ypproto->pw_name = ptr;
 		ptr += (strlen(pw->pw_name) + 1);
@@ -133,7 +129,6 @@ __ypproto_set(struct passwd *pw, long long *buf, int flags, int *yp_pw_flagsp)
 
 	/* password */
 	if (pw->pw_passwd && (pw->pw_passwd)[0]) {
-		ptr = (char *)ALIGN(ptr);
 		bcopy(pw->pw_passwd, ptr, strlen(pw->pw_passwd) + 1);
 		__ypproto->pw_passwd = ptr;
 		ptr += (strlen(pw->pw_passwd) + 1);
@@ -154,7 +149,6 @@ __ypproto_set(struct passwd *pw, long long *buf, int flags, int *yp_pw_flagsp)
 
 	/* gecos */
 	if (pw->pw_gecos && (pw->pw_gecos)[0]) {
-		ptr = (char *)ALIGN(ptr);
 		bcopy(pw->pw_gecos, ptr, strlen(pw->pw_gecos) + 1);
 		__ypproto->pw_gecos = ptr;
 		ptr += (strlen(pw->pw_gecos) + 1);
@@ -163,7 +157,6 @@ __ypproto_set(struct passwd *pw, long long *buf, int flags, int *yp_pw_flagsp)
 
 	/* dir */
 	if (pw->pw_dir && (pw->pw_dir)[0]) {
-		ptr = (char *)ALIGN(ptr);
 		bcopy(pw->pw_dir, ptr, strlen(pw->pw_dir) + 1);
 		__ypproto->pw_dir = ptr;
 		ptr += (strlen(pw->pw_dir) + 1);
@@ -172,7 +165,6 @@ __ypproto_set(struct passwd *pw, long long *buf, int flags, int *yp_pw_flagsp)
 
 	/* shell */
 	if (pw->pw_shell && (pw->pw_shell)[0]) {
-		ptr = (char *)ALIGN(ptr);
 		bcopy(pw->pw_shell, ptr, strlen(pw->pw_shell) + 1);
 		__ypproto->pw_shell = ptr;
 		ptr += (strlen(pw->pw_shell) + 1);
@@ -340,12 +332,8 @@ again:
 		int keylen, datalen, r, s;
 		char *key, *data = NULL;
 
-		if (!__ypdomain) {
-			if (_yp_check(&__ypdomain) == 0) {
-				__ypmode = YPMODE_NONE;
-				goto again;
-			}
-		}
+		if (!__ypdomain)
+			yp_get_default_domain(&__ypdomain);
 		switch (__ypmode) {
 		case YPMODE_FULL:
 			if (__ypcurrent) {
@@ -438,7 +426,7 @@ again:
 	key.size = 1 + sizeof(_pw_keynum);
 	if (__hashpw(&key, pwbuf, buflen, pw, &_pw_flags)) {
 #ifdef YP
-		static long long __yppbuf[_PW_BUF_LEN / sizeof(long long)];
+		static struct pw_storage __yppbuf;
 		const char *user, *host, *dom;
 
 		/* if we don't have YP at all, don't bother. */
@@ -459,7 +447,7 @@ again:
 					break;
 				}
 
-				__ypproto_set(pw, __yppbuf, _pw_flags,
+				__ypproto_set(pw, &__yppbuf, _pw_flags,
 				    &__yp_pw_flags);
 				goto again;
 			} else if (pw->pw_name[0] == '-') {
@@ -546,14 +534,8 @@ __has_ypmaster(void)
 		return (checked);
 	}
 
-	if (!__ypdomain) {
-		if (_yp_check(&__ypdomain) == 0) {
-			saved_uid = uid;
-			saved_euid = euid;
-			checked = 0;
-			return (checked);	/* No domain. */
-		}
-	}
+	if (!__ypdomain)
+		yp_get_default_domain(&__ypdomain);
 
 	if (yp_first(__ypdomain, "master.passwd.byname",
 	    &key, &keylen, &result, &resultlen)) {
@@ -577,7 +559,7 @@ __yppwlookup(int lookup, char *name, uid_t uid, struct passwd *pw,
 {
 	char bf[1 + _PW_NAME_LEN], *ypcurrent = NULL, *map = NULL;
 	int yp_pw_flags = 0, ypcurrentlen, r, s = -1, pw_keynum;
-	static long long yppbuf[_PW_BUF_LEN / sizeof(long long)];
+	static struct pw_storage __yppbuf;
 	struct _ypexclude *ypexhead = NULL;
 	const char *host, *user, *dom;
 	DBT key;
@@ -591,11 +573,9 @@ __yppwlookup(int lookup, char *name, uid_t uid, struct passwd *pw,
 			break;
 		switch (pw->pw_name[0]) {
 		case '+':
-			if (!__ypdomain) {
-				if (_yp_check(&__ypdomain) == 0)
-					continue;
-			}
-			__ypproto_set(pw, yppbuf, *flagsp, &yp_pw_flags);
+			if (!__ypdomain)
+				yp_get_default_domain(&__ypdomain);
+			__ypproto_set(pw, &__yppbuf, *flagsp, &yp_pw_flags);
 			if (!map) {
 				if (lookup == LOOKUP_BYNAME) {
 					if ((name = strdup(name)) == NULL) {
@@ -977,12 +957,6 @@ __initdb(int shadow)
 	int saved_errno = errno;
 
 #ifdef YP
-	/*
-	 * Hint to the kernel that a passwd database operation is happening.
-	 */
-	(void)access("/var/run/ypbind.lock", R_OK);
-	errno = saved_errno;
-
 	__ypmode = YPMODE_NONE;
 	__getpwent_has_yppw = -1;
 #endif

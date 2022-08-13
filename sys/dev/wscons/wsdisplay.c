@@ -1,4 +1,4 @@
-/* $OpenBSD: wsdisplay.c,v 1.143 2021/02/09 14:37:13 jcs Exp $ */
+/* $OpenBSD: wsdisplay.c,v 1.149 2022/07/15 17:57:27 kettenis Exp $ */
 /* $NetBSD: wsdisplay.c,v 1.82 2005/02/27 00:27:52 perry Exp $ */
 
 /*
@@ -45,7 +45,6 @@
 #include <sys/fcntl.h>
 #include <sys/vnode.h>
 #include <sys/timeout.h>
-#include <sys/poll.h>
 
 #include <dev/wscons/wscons_features.h>
 #include <dev/wscons/wsconsio.h>
@@ -148,6 +147,8 @@ void	wsdisplay_suspend_device(struct device *);
 void	wsdisplay_addscreen_print(struct wsdisplay_softc *, int, int);
 void	wsdisplay_closescreen(struct wsdisplay_softc *, struct wsscreen *);
 int	wsdisplay_delscreen(struct wsdisplay_softc *, int, int);
+int	wsdisplay_driver_ioctl(struct wsdisplay_softc *, u_long, caddr_t,
+	    int, struct proc *);
 
 void	wsdisplay_burner_setup(struct wsdisplay_softc *, struct wsscreen *);
 void	wsdisplay_burner(void *v);
@@ -207,7 +208,7 @@ struct cfdriver wsdisplay_cd = {
 	NULL, "wsdisplay", DV_TTY
 };
 
-struct cfattach wsdisplay_emul_ca = {
+const struct cfattach wsdisplay_emul_ca = {
 	sizeof(struct wsdisplay_softc), wsdisplay_emul_match,
 	wsdisplay_emul_attach, wsdisplay_emul_detach, wsdisplay_activate
 };
@@ -1101,9 +1102,7 @@ int
 wsdisplay_param(struct device *dev, u_long cmd, struct wsdisplay_param *dp)
 {
 	struct wsdisplay_softc *sc = (struct wsdisplay_softc *)dev;
-
-	return ((*sc->sc_accessops->ioctl)(sc->sc_accesscookie, cmd,
-	    (caddr_t)dp, 0, NULL));
+	return wsdisplay_driver_ioctl(sc, cmd, (caddr_t)dp, 0, NULL);
 }
 
 int
@@ -1233,7 +1232,7 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 		error = 0;
 		sc->sc_burnflags = d->flags;
 		/* disable timeout if necessary */
-		if ((sc->sc_burnflags & (WSDISPLAY_BURN_OUTPUT |
+		if (d->off==0 || (sc->sc_burnflags & (WSDISPLAY_BURN_OUTPUT |
 		    WSDISPLAY_BURN_KBD | WSDISPLAY_BURN_MOUSE)) == 0) {
 			if (sc->sc_burnout)
 				timeout_del(&sc->sc_burner);
@@ -1252,14 +1251,12 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
 					wsdisplay_burn(sc, sc->sc_burnflags);
 			}
 		}
-		if (d->off) {
-			sc->sc_burnoutintvl = d->off;
-			if (!sc->sc_burnman) {
-				sc->sc_burnout = sc->sc_burnoutintvl;
-				/* reinit timeout if changed */
-				if ((active->scr_flags & SCR_GRAPHICS) == 0)
-					wsdisplay_burn(sc, sc->sc_burnflags);
-			}
+		sc->sc_burnoutintvl = d->off;
+		if (!sc->sc_burnman) {
+			sc->sc_burnout = sc->sc_burnoutintvl;
+			/* reinit timeout if changed */
+			if ((active->scr_flags & SCR_GRAPHICS) == 0)
+				wsdisplay_burn(sc, sc->sc_burnflags);
 		}
 		return (error);
 	    }
@@ -1296,8 +1293,50 @@ wsdisplay_internal_ioctl(struct wsdisplay_softc *sc, struct wsscreen *scr,
         }
 
 	/* check ioctls for display */
-	return ((*sc->sc_accessops->ioctl)(sc->sc_accesscookie, cmd, data,
+	return wsdisplay_driver_ioctl(sc, cmd, data, flag, p);
+}
+
+int
+wsdisplay_driver_ioctl(struct wsdisplay_softc *sc, u_long cmd, caddr_t data,
+    int flag, struct proc *p)
+{
+	int error;
+
+#if defined(OpenBSD7_1) || defined(OpenBSD7_2) || defined(OpenBSD7_3)
+	if (cmd == WSDISPLAYIO_OGINFO) {
+		struct wsdisplay_ofbinfo *oinfo =
+			(struct wsdisplay_ofbinfo *)data;
+		struct wsdisplay_fbinfo info;
+
+		error = (*sc->sc_accessops->ioctl)(sc->sc_accesscookie,
+		    WSDISPLAYIO_GINFO, (caddr_t)&info, flag, p);
+		if (error)
+			return error;
+
+		oinfo->height = info.height;
+		oinfo->width = info.width;
+		oinfo->depth = info.depth;
+		oinfo->cmsize = info.cmsize;
+		return (0);
+	}
+#endif
+
+	error = ((*sc->sc_accessops->ioctl)(sc->sc_accesscookie, cmd, data,
 	    flag, p));
+	/* Do not report parameters with empty ranges to userland. */
+	if (error == 0 && cmd == WSDISPLAYIO_GETPARAM) {
+		struct wsdisplay_param *dp = (struct wsdisplay_param *)data;
+		switch (dp->param) {
+		case WSDISPLAYIO_PARAM_BACKLIGHT:
+		case WSDISPLAYIO_PARAM_BRIGHTNESS:
+		case WSDISPLAYIO_PARAM_CONTRAST:
+			if (dp->min == dp->max)
+				error = ENOTTY;
+			break;
+		}
+	}
+
+	return error;
 }
 
 int
@@ -1409,24 +1448,6 @@ wsdisplaymmap(dev_t dev, off_t offset, int prot)
 }
 
 int
-wsdisplaypoll(dev_t dev, int events, struct proc *p)
-{
-	struct wsdisplay_softc *sc = wsdisplay_cd.cd_devs[WSDISPLAYUNIT(dev)];
-	struct wsscreen *scr;
-
-	if (ISWSDISPLAYCTL(dev))
-		return (0);
-
-	if ((scr = sc->sc_scr[WSDISPLAYSCREEN(dev)]) == NULL)
-		return (POLLERR);
-
-	if (!WSSCREEN_HAS_TTY(scr))
-		return (POLLERR);
-
-	return (ttpoll(dev, events, p));
-}
-
-int
 wsdisplaykqfilter(dev_t dev, struct knote *kn)
 {
 	struct wsdisplay_softc *sc = wsdisplay_cd.cd_devs[WSDISPLAYUNIT(dev)];
@@ -1462,7 +1483,7 @@ wsdisplaystart(struct tty *tp)
 		splx(s);
 		return;
 	}
-	if (tp->t_outq.c_cc == 0 && tp->t_wsel.si_seltid == 0)
+	if (tp->t_outq.c_cc == 0)
 		goto low;
 
 	if ((scr = sc->sc_scr[WSDISPLAYSCREEN(tp->t_dev)]) == NULL) {

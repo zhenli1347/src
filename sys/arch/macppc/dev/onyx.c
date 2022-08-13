@@ -1,4 +1,4 @@
-/*	$OpenBSD: onyx.c,v 1.12 2016/09/19 06:46:43 ratchov Exp $	*/
+/*	$OpenBSD: onyx.c,v 1.15 2022/03/21 19:22:39 miod Exp $	*/
 
 /*-
  * Copyright (c) 2005 Tsubai Masanari.  All rights reserved.
@@ -72,7 +72,7 @@ void onyx_attach(struct device *, struct device *, void *);
 void onyx_defer(struct device *);
 void onyx_set_volume(struct onyx_softc *, int, int);
 
-struct cfattach onyx_ca = {
+const struct cfattach onyx_ca = {
 	sizeof(struct onyx_softc), onyx_match, onyx_attach
 };
 
@@ -80,7 +80,7 @@ struct cfdriver onyx_cd = {
 	NULL, "onyx", DV_DULL
 };
 
-struct audio_hw_if onyx_hw_if = {
+const struct audio_hw_if onyx_hw_if = {
 	i2s_open,
 	i2s_close,
 	i2s_set_params,
@@ -165,7 +165,7 @@ onyx_defer(struct device *dev)
 
 	/* XXX If i2c has failed to attach, what should we do? */
 
-	audio_attach_mi(&onyx_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&onyx_hw_if, sc, NULL, &sc->sc_dev);
 
 	deq_reset(sc);
 	onyx_set_volume(sc, 192, 192);

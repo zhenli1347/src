@@ -1,4 +1,4 @@
-/* $OpenBSD: bcm2836_intr.c,v 1.12 2021/07/02 19:55:00 kettenis Exp $ */
+/* $OpenBSD: bcm2836_intr.c,v 1.14 2022/01/02 20:00:21 kettenis Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2015 Patrick Wildt <patrick@blueri.se>
@@ -126,7 +126,7 @@ void	 bcm_intc_intr_route(void *, int , struct cpu_info *);
 void	 bcm_intc_handle_ipi(void);
 void	 bcm_intc_send_ipi(struct cpu_info *, int);
 
-struct cfattach	bcmintc_ca = {
+const struct cfattach	bcmintc_ca = {
 	sizeof (struct bcm_intc_softc), bcm_intc_match, bcm_intc_attach
 };
 
@@ -459,7 +459,7 @@ bcm_intc_run_handler(struct intrhand *ih, void *frame, int s)
 		KERNEL_LOCK();
 #endif
 
-	if (ih->ih_arg != 0)
+	if (ih->ih_arg)
 		arg = ih->ih_arg;
 	else
 		arg = frame;

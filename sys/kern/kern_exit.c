@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exit.c,v 1.199 2021/03/12 10:13:28 mpi Exp $	*/
+/*	$OpenBSD: kern_exit.c,v 1.203 2022/03/31 01:41:22 millert Exp $	*/
 /*	$NetBSD: kern_exit.c,v 1.39 1996/04/22 01:38:25 christos Exp $	*/
 
 /*
@@ -266,7 +266,7 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 		qr = LIST_FIRST(&pr->ps_children);
 		if (qr)		/* only need this if any child is S_ZOMB */
 			wakeup(initprocess);
-		for (; qr != 0; qr = nqr) {
+		for (; qr != NULL; qr = nqr) {
 			nqr = LIST_NEXT(qr, ps_sibling);
 			/*
 			 * Traced processes are killed since their
@@ -318,9 +318,6 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 		calcru(&pr->ps_tu, &rup->ru_utime, &rup->ru_stime, NULL);
 		ruadd(rup, &pr->ps_cru);
 
-		/* notify interested parties of our demise and clean up */
-		knote_processexit(p);
-
 		/*
 		 * Notify parent that we're gone.  If we're not going to
 		 * become a zombie, reparent to process 1 (init) so that
@@ -332,11 +329,6 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 			process_reparent(pr, initprocess);
 			wakeup(ppr);
 		}
-
-		/*
-		 * Release the process's signal state.
-		 */
-		sigactsfree(pr);
 	}
 
 	/* just a thread? detach it from its process */
@@ -462,12 +454,17 @@ reaper(void *arg)
 			if ((pr->ps_flags & PS_NOZOMBIE) == 0) {
 				/* Process is now a true zombie. */
 				atomic_setbits_int(&pr->ps_flags, PS_ZOMBIE);
-				prsignal(pr->ps_pptr, SIGCHLD);
+			}
 
-				/* Wake up the parent so it can get exit status. */
+			/* Notify listeners of our demise and clean up. */
+			knote_processexit(pr);
+
+			if (pr->ps_flags & PS_ZOMBIE) {
+				/* Post SIGCHLD and wake up parent. */
+				prsignal(pr->ps_pptr, SIGCHLD);
 				wakeup(pr->ps_pptr);
 			} else {
-				/* No one will wait for us. Just zap the process now */
+				/* No one will wait for us, just zap it. */
 				process_zap(pr);
 			}
 		}
@@ -584,7 +581,7 @@ loop:
 	}
 	/*
 	 * Look in the orphans list too, to allow the parent to
-	 * collect it's child exit status even if child is being
+	 * collect its child's exit status even if child is being
 	 * debugged.
 	 *
 	 * Debugger detaches from the parent upon successful
@@ -731,6 +728,7 @@ process_zap(struct process *pr)
 		free(pr->ps_ptstat, M_SUBPROC, sizeof(*pr->ps_ptstat));
 	pool_put(&rusage_pool, pr->ps_ru);
 	KASSERT(TAILQ_EMPTY(&pr->ps_threads));
+	sigactsfree(pr->ps_sigacts);
 	lim_free(pr->ps_limit);
 	crfree(pr->ps_ucred);
 	pool_put(&process_pool, pr);

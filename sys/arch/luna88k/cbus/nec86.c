@@ -1,4 +1,4 @@
-/*	$OpenBSD: nec86.c,v 1.3 2016/09/19 06:46:43 ratchov Exp $	*/
+/*	$OpenBSD: nec86.c,v 1.5 2022/03/21 19:22:39 miod Exp $	*/
 /*	$NecBSD: nec86.c,v 1.11 1999/07/23 11:04:39 honda Exp $	*/
 /*	$NetBSD$	*/
 
@@ -67,7 +67,7 @@
  * Define our interface to the higher level audio driver.
  */
 
-struct audio_hw_if nec86_hw_if = {
+const struct audio_hw_if nec86_hw_if = {
 	.open		= nec86hw_open,
 	.close		= nec86hw_close,
 	.set_params	= nec86hw_set_params,
@@ -237,7 +237,7 @@ nec86_attachsubr(struct nec86_softc *sc)
 
 	if (sc->sc_attached == 0) {
 		printf(": %s\n", boardname[ysc->model]);
-		audio_attach_mi(&nec86_hw_if, ysc, &ysc->sc_dev);
+		audio_attach_mi(&nec86_hw_if, ysc, NULL, &ysc->sc_dev);
 		sc->sc_attached = 1;
 	}
 }

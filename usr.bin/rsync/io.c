@@ -1,4 +1,4 @@
-/*	$OpenBSD: io.c,v 1.20 2021/06/30 13:10:04 claudio Exp $ */
+/*	$OpenBSD: io.c,v 1.22 2022/04/12 14:51:04 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -143,7 +143,7 @@ io_write_buf(struct sess *sess, int fd, const void *buf, size_t sz)
 	}
 
 	while (sz > 0) {
-		wsz = sz & 0xFFFFFF;
+		wsz = (sz < 0xFFFFFF) ? sz : 0xFFFFFF;
 		tag = (7 << 24) + wsz;
 		tagbuf = htole32(tag);
 		if (!io_write_blocking(fd, &tagbuf, sizeof(tagbuf))) {
@@ -585,8 +585,9 @@ io_read_ulong(struct sess *sess, int fd, uint64_t *val)
 	if (!io_read_int(sess, fd, &sval)) {
 		ERRX1("io_read_int");
 		return 0;
-	} else if (sval != -1) {
-		*val = (uint64_t)le32toh(sval);
+	}
+	if (sval != -1) {
+		*val = sval;
 		return 1;
 	}
 

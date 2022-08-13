@@ -1,4 +1,4 @@
-#	$OpenBSD: 4.4BSD.dist,v 1.318 2021/05/01 16:11:07 visa Exp $
+#	$OpenBSD: 4.4BSD.dist,v 1.321 2022/02/13 00:02:16 ajacoutot Exp $
 
 /set type=dir uname=root gname=wheel mode=0755
 
@@ -77,6 +77,8 @@ etc
     ldap
         certs			mode=0700
         ..
+    ..
+    login.conf.d		mode=0755
     ..
     acme			mode=0700
     ..
@@ -308,6 +310,8 @@ usr
                 ..
             ..
             examples
+                login.conf.d
+                ..
             ..
             misc
             ..
@@ -412,6 +416,11 @@ usr
 
     # ./usr/share
     share
+        # ./usr/share/btrace
+	btrace
+	..
+
+        # ./usr/share/calendar
         calendar
         ..
 

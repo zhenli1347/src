@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_node.c,v 1.71 2020/01/20 23:21:56 claudio Exp $	*/
+/*	$OpenBSD: nfs_node.c,v 1.75 2022/06/27 13:39:58 visa Exp $	*/
 /*	$NetBSD: nfs_node.c,v 1.16 1996/02/18 11:53:42 fvdl Exp $	*/
 
 /*
@@ -146,7 +146,7 @@ loop:
 	bcopy(fh, np->n_fhp, fhsize);
 	np->n_fhsize = fhsize;
 	/* lock the nfsnode, then put it on the rbtree */
-	rrw_enter(&np->n_lock, RW_WRITE);
+	VOP_LOCK(vp, LK_EXCLUSIVE);
 	np2 = RBT_INSERT(nfs_nodetree, &nmp->nm_ntree, np);
 	KASSERT(np2 == NULL);
 	np->n_accstamp = -1;
@@ -183,20 +183,23 @@ nfs_inactive(void *v)
 		np->n_sillyrename = NULL;
 	} else
 		sp = NULL;
-	if (sp) {
+	if (sp != NULL)
+		nfs_vinvalbuf(ap->a_vp, 0, sp->s_cred, curproc);
+	np->n_flag &= (NMODIFIED | NFLUSHINPROG | NFLUSHWANT);
+
+	VOP_UNLOCK(ap->a_vp);
+
+	if (sp != NULL) {
 		/*
 		 * Remove the silly file that was rename'd earlier
 		 */
-		nfs_vinvalbuf(ap->a_vp, 0, sp->s_cred, curproc);
 		vn_lock(sp->s_dvp, LK_EXCLUSIVE | LK_RETRY);
 		nfs_removeit(sp);
 		crfree(sp->s_cred);
 		vput(sp->s_dvp);
 		free(sp, M_NFSREQ, sizeof(*sp));
 	}
-	np->n_flag &= (NMODIFIED | NFLUSHINPROG | NFLUSHWANT);
 
-	VOP_UNLOCK(ap->a_vp);
 	return (0);
 }
 

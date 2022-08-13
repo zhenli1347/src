@@ -1,4 +1,4 @@
-/*	$OpenBSD: gdiumiic.c,v 1.7 2020/09/30 22:23:41 patrick Exp $	*/
+/*	$OpenBSD: gdiumiic.c,v 1.9 2022/08/10 15:00:58 miod Exp $	*/
 
 /*
  * Copyright (c) 2010 Miodrag Vallat.
@@ -78,7 +78,7 @@ int		gdiumiic_bustype(struct gpio_attach_args *);
 void		gdiumiic_sensors_scan(struct device *,
 		    struct i2cbus_attach_args *, void *);
 
-struct cfattach gdiumiic_ca = {
+const struct cfattach gdiumiic_ca = {
 	sizeof(struct gdiumiic_softc),
 	gdiumiic_match,
 	gdiumiic_attach,
@@ -368,6 +368,13 @@ gdiumiic_sensors_scan(struct device *iicdev, struct i2cbus_attach_args *iba,
 	ia.ia_addr = 0x48;
 	ia.ia_size = 1;
 	ia.ia_name = "lm75";
+	config_found(iicdev, &ia, iic_print);
+
+	bzero(&ia, sizeof ia);
+	ia.ia_tag = iba->iba_tag;
+	ia.ia_addr = 0x51;
+	ia.ia_size = 1;
+	ia.ia_name = "spd";
 	config_found(iicdev, &ia, iic_print);
 
 	bzero(&ia, sizeof ia);

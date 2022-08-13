@@ -1,4 +1,4 @@
-/*	$OpenBSD: magma.c,v 1.33 2021/09/01 16:10:39 jan Exp $	*/
+/*	$OpenBSD: magma.c,v 1.35 2022/07/02 08:50:42 visa Exp $	*/
 
 /*-
  * Copyright (c) 1998 Iain Hibbert
@@ -157,7 +157,7 @@ static const struct magma_board_info supported_cards[] = {
  *  Autoconfig Stuff
  */
 
-struct cfattach magma_ca = {
+const struct cfattach magma_ca = {
 	sizeof(struct magma_softc), magma_match, magma_attach
 };
 
@@ -165,7 +165,7 @@ struct cfdriver magma_cd = {
 	NULL, "magma", DV_DULL
 };
 
-struct cfattach mtty_ca = {
+const struct cfattach mtty_ca = {
 	sizeof(struct mtty_softc), mtty_match, mtty_attach
 };
 
@@ -173,7 +173,7 @@ struct cfdriver mtty_cd = {
 	NULL, "mtty", DV_TTY
 };
 
-struct cfattach mbpp_ca = {
+const struct cfattach mbpp_ca = {
 	sizeof(struct mbpp_softc), mbpp_match, mbpp_attach
 };
 
@@ -1340,7 +1340,6 @@ mtty_param(struct tty *tp, struct termios *t)
  *	mbppread	read from mbpp
  *	mbppwrite	write to mbpp
  *	mbppioctl	do ioctl on mbpp
- *	mbpppoll	do poll on mbpp
  *	mbppkqfilter	kqueue on mbpp
  *	mbpp_rw		general rw routine
  *	mbpp_timeout	rw timeout
@@ -1506,15 +1505,6 @@ mbppioctl(dev_t dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 	}
 
 	return (error);
-}
-
-/*
- * poll routine
- */
-int
-mbpppoll(dev_t dev, int events, struct proc *p)
-{
-	return (seltrue(dev, events, p));
 }
 
 int

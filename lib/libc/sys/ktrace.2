@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ktrace.2,v 1.38 2021/09/01 15:51:45 deraadt Exp $
+.\"	$OpenBSD: ktrace.2,v 1.41 2022/07/30 07:19:30 jsg Exp $
 .\"	$NetBSD: ktrace.2,v 1.2 1995/02/27 12:33:58 cgd Exp $
 .\"
 .\" Copyright (c) 1993
@@ -30,7 +30,7 @@
 .\"
 .\"     @(#)ktrace.2	8.1 (Berkeley) 6/4/93
 .\"
-.Dd $Mdocdate: September 1 2021 $
+.Dd $Mdocdate: July 30 2022 $
 .Dt KTRACE 2
 .Os
 .Sh NAME
@@ -38,6 +38,7 @@
 .Nd process tracing
 .Sh SYNOPSIS
 .In sys/types.h
+.In sys/time.h
 .In sys/uio.h
 .In sys/ktrace.h
 .Ft int
@@ -136,12 +137,12 @@ followed by a trace point specific structure.
 The generic header is:
 .Bd -literal
 struct ktr_header {
-	uint	ktr_type;		/* trace record type */
-	pid_t	ktr_pid;		/* process id */
-	pid_t	ktr_tid;		/* thread id */
-	struct	timespec ktr_time;	/* timestamp */
-	char	ktr_comm[MAXCOMLEN+1];	/* command name */
-	size_t	ktr_len;		/* length of buf */
+	uint		ktr_type;		/* trace record type */
+	pid_t		ktr_pid;		/* process id */
+	pid_t		ktr_tid;		/* thread id */
+	struct timespec	ktr_time;		/* timestamp */
+	char		ktr_comm[MAXCOMLEN+1];	/* command name */
+	size_t		ktr_len;		/* length of buf */
 };
 .Ed
 .Pp
@@ -230,4 +231,4 @@ points outside the process's allocated address space.
 A
 .Fn ktrace
 function call first appeared in
-.Bx 4.4 .
+.Bx 4.3 Reno .

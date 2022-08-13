@@ -1,4 +1,4 @@
-/*	$OpenBSD: agten.c,v 1.11 2018/12/27 11:09:17 claudio Exp $	*/
+/*	$OpenBSD: agten.c,v 1.13 2022/07/15 17:57:26 kettenis Exp $	*/
 /*
  * Copyright (c) 2002, 2003, Miodrag Vallat.
  * All rights reserved.
@@ -122,7 +122,7 @@ struct wsdisplay_accessops agten_accessops = {
 int agtenmatch(struct device *, void *, void *);
 void agtenattach(struct device *, struct device *, void *);
 
-struct cfattach agten_ca = {
+const struct cfattach agten_ca = {
 	sizeof(struct agten_softc), agtenmatch, agtenattach
 };
 
@@ -237,6 +237,8 @@ agten_ioctl(void *dev, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width = sc->sc_sunfb.sf_width;
 		wdf->depth = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		wdf->cmsize = (sc->sc_sunfb.sf_depth == 8) ? 256 : 0;
 		break;
 	case WSDISPLAYIO_LINEBYTES:

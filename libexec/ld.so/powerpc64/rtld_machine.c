@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtld_machine.c,v 1.5 2020/07/18 16:41:43 kettenis Exp $ */
+/*	$OpenBSD: rtld_machine.c,v 1.7 2022/01/08 06:49:42 guenther Exp $ */
 
 /*
  * Copyright (c) 1999 Dale Rahn
@@ -29,15 +29,13 @@
 #define _DYN_LOADER
 
 #include <sys/types.h>
-#include <sys/mman.h>
+#include <sys/exec_elf.h>
 #include <sys/syscall.h>
 #include <sys/unistd.h>
 
-#include <nlist.h>
-#include <link.h>
+#include <machine/reloc.h>
 
-#include "syscall.h"
-#include "archdep.h"
+#include "util.h"
 #include "resolve.h"
 
 #define	DT_PROC(n)	((n) - DT_LOPROC + DT_NUM)
@@ -282,9 +280,6 @@ _dl_md_reloc_got(elf_object_t *object, int lazy)
 
 		/* Relocate processor-specific tags. */
 		object->Dyn.info[DT_PROC(DT_PPC64_GLINK)] += object->obj_base;
-
-		if (object->Dyn.info[DT_PLTREL] != DT_RELA)
-			_dl_die(" bad relocation type PLTREL not RELA");
 
 		plt = (Elf_Addr *)
 		   (Elf_RelA *)(object->Dyn.info[DT_PLTGOT]);

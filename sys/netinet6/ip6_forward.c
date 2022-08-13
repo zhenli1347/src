@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_forward.c,v 1.100 2021/01/11 13:28:54 bluhm Exp $	*/
+/*	$OpenBSD: ip6_forward.c,v 1.108 2022/08/09 21:10:02 kn Exp $	*/
 /*	$KAME: ip6_forward.c,v 1.75 2001/06/29 12:42:13 jinmei Exp $	*/
 
 /*
@@ -35,8 +35,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/domain.h>
-#include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/errno.h>
 #include <sys/time.h>
@@ -88,7 +86,7 @@ ip6_forward(struct mbuf *m, struct rtentry *rt, int srcrt)
 	struct sockaddr_in6 *sin6;
 	struct route_in6 ro;
 	struct ifnet *ifp = NULL;
-	int error = 0, type = 0, code = 0;
+	int error = 0, type = 0, code = 0, destmtu = 0;
 	struct mbuf *mcopy = NULL;
 #ifdef IPSEC
 	struct tdb *tdb = NULL;
@@ -145,8 +143,8 @@ reroute:
 
 #ifdef IPSEC
 	if (ipsec_in_use) {
-		tdb = ip6_output_ipsec_lookup(m, &error, NULL);
-		if (error != 0) {
+		error = ip6_output_ipsec_lookup(m, NULL, &tdb);
+		if (error) {
 			/*
 			 * -EINVAL is used to indicate that the packet should
 			 * be silently dropped, typically because we've asked
@@ -222,6 +220,7 @@ reroute:
 		ro.ro_rt = rt;
 		ro.ro_tableid = m->m_pkthdr.ph_rtableid;
 		error = ip6_output_ipsec_send(tdb, m, &ro, 0, 1);
+		rt = ro.ro_rt;
 		if (error)
 			goto senderr;
 		goto freecopy;
@@ -276,7 +275,7 @@ reroute:
 
 	/*
 	 * Fake scoped addresses. Note that even link-local source or
-	 * destinaion can appear, if the originating node just sends the
+	 * destination can appear, if the originating node just sends the
 	 * packet to us (without address resolution for the destination).
 	 * Since both icmp6_error and icmp6_redirect_output fill the embedded
 	 * link identifiers, we can do this stuff after making a copy for
@@ -339,6 +338,7 @@ senderr:
 #endif
 	if (mcopy == NULL)
 		goto out;
+
 	switch (error) {
 	case 0:
 		if (type == ND_REDIRECT) {
@@ -348,7 +348,30 @@ senderr:
 		goto freecopy;
 
 	case EMSGSIZE:
-		/* xxx MTU is constant in PPP? */
+		type = ICMP6_PACKET_TOO_BIG;
+		code = 0;
+		if (rt != NULL) {
+			if (rt->rt_mtu) {
+				destmtu = rt->rt_mtu;
+			} else {
+				struct ifnet *destifp;
+
+				destifp = if_get(rt->rt_ifidx);
+				if (destifp != NULL)
+					destmtu = destifp->if_mtu;
+				if_put(destifp);
+			}
+		}
+		ip6stat_inc(ip6s_cantfrag);
+		if (destmtu == 0)
+			goto freecopy;
+		break;
+
+	case EACCES:
+		/*
+		 * pf(4) blocked the packet. There is no need to send an ICMP
+		 * packet back since pf(4) takes care of it.
+		 */
 		goto freecopy;
 
 	case ENOBUFS:
@@ -364,7 +387,7 @@ senderr:
 		code = ICMP6_DST_UNREACH_ADDR;
 		break;
 	}
-	icmp6_error(mcopy, type, code, 0);
+	icmp6_error(mcopy, type, code, destmtu);
 	goto out;
 
 freecopy:
@@ -372,4 +395,7 @@ freecopy:
 out:
 	rtfree(rt);
 	if_put(ifp);
+#ifdef IPSEC
+	tdb_unref(tdb);
+#endif /* IPSEC */
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: btrace.c,v 1.47 2021/09/03 16:45:44 jasper Exp $ */
+/*	$OpenBSD: btrace.c,v 1.63 2022/06/02 21:38:46 jca Exp $ */
 
 /*
  * Copyright (c) 2019 - 2021 Martin Pieuchot <mpi@openbsd.org>
@@ -18,6 +18,7 @@
 
 #include <sys/ioctl.h>
 #include <sys/exec_elf.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/queue.h>
 
@@ -27,6 +28,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <locale.h>
+#include <paths.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -53,14 +55,14 @@
 #define __PATH_DEVDT "/dev/dt"
 
 __dead void		 usage(void);
-char			*read_btfile(const char *);
+char			*read_btfile(const char *, size_t *);
 
 /*
  * Retrieve & parse probe information.
  */
 void			 dtpi_cache(int);
 void			 dtpi_print_list(void);
-char			*dtpi_func(struct dtioc_probe_info *);
+const char		*dtpi_func(struct dtioc_probe_info *);
 int			 dtpi_is_unit(const char *);
 struct dtioc_probe_info	*dtpi_get_by_value(const char *, const char *,
 			     const char *);
@@ -81,6 +83,7 @@ void			 rule_printmaps(struct bt_rule *);
 uint64_t		 builtin_nsecs(struct dt_evt *);
 const char		*builtin_kstack(struct dt_evt *);
 const char		*builtin_arg(struct dt_evt *, enum bt_argtype);
+struct bt_arg		*fn_str(struct bt_arg *, struct dt_evt *, char *);
 void			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
@@ -104,7 +107,7 @@ int			 ba2dtflags(struct bt_arg *);
 __dead void		 xabort(const char *, ...);
 void			 debug(const char *, ...);
 void			 debugx(const char *, ...);
-const char		*debug_rule_name(struct bt_rule *);
+const char		*debug_probe_name(struct bt_probe *);
 void			 debug_dump_term(struct bt_arg *);
 void			 debug_dump_expr(struct bt_arg *);
 void			 debug_dump_filter(struct bt_rule *);
@@ -115,7 +118,8 @@ size_t			 dt_ndtpi;	/* # of elements in the array */
 struct dt_evt		 bt_devt;	/* fake event for BEGIN/END */
 uint64_t		 bt_filtered;	/* # of events filtered out */
 
-int			 vargs[1];
+char			**vargs;
+int			 nargs = 0;
 int			 verbose = 0;
 volatile sig_atomic_t	 quit_pending;
 
@@ -131,20 +135,16 @@ main(int argc, char *argv[])
 {
 	int fd = -1, ch, error = 0;
 	const char *filename = NULL, *btscript = NULL;
-	const char *errstr;
 	int showprobes = 0, noaction = 0;
+	size_t btslen = 0;
 
 	setlocale(LC_ALL, "");
-
-#if notyet
-	if (pledge("stdio rpath", NULL) == -1)
-		err(1, "pledge");
-#endif
 
 	while ((ch = getopt(argc, argv, "e:lnp:v")) != -1) {
 		switch (ch) {
 		case 'e':
 			btscript = optarg;
+			btslen = strlen(btscript);
 			break;
 		case 'l':
 			showprobes = 1;
@@ -163,29 +163,35 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc > 0) {
-		if (btscript != NULL)
-			usage();
-
+	if (argc > 0 && btscript == NULL)
 		filename = argv[0];
-		btscript = read_btfile(filename);
+
+	 /* Cannot pledge due to special ioctl()s */
+	if (unveil(__PATH_DEVDT, "r") == -1)
+		err(1, "unveil %s", __PATH_DEVDT);
+	if (unveil(_PATH_KSYMS, "r") == -1)
+		err(1, "unveil %s", _PATH_KSYMS);
+	if (filename != NULL) {
+		if (unveil(filename, "r") == -1)
+			err(1, "unveil %s", filename);
+	}
+	if (unveil(NULL, NULL) == -1)
+		err(1, "unveil");
+
+	if (filename != NULL) {
+		btscript = read_btfile(filename, &btslen);
 		argc--;
 		argv++;
 	}
 
-	if (argc == 1) {
-		vargs[0] = strtonum(*argv, 1, INT_MAX, &errstr);
-		if (errstr != NULL)
-			errx(1, "invalid argument %s: %s", *argv, errstr);
-		argc--;
-		argv++;
-	}
+	nargs = argc;
+	vargs = argv;
 
-	if (argc != 0 || (btscript == NULL && !showprobes))
+	if (btscript == NULL && !showprobes)
 		usage();
 
 	if (btscript != NULL) {
-		error = btparse(btscript, strlen(btscript), filename, 1);
+		error = btparse(btscript, btslen, filename, 1);
 		if (error)
 			return error;
 	}
@@ -216,32 +222,50 @@ main(int argc, char *argv[])
 __dead void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-lnv] [-e program | file]\n",
+	fprintf(stderr, "usage: %s [-lnv] [-e program | file] [argument ...]\n",
 	    getprogname());
 	exit(1);
 }
 
 char *
-read_btfile(const char *filename)
+read_btfile(const char *filename, size_t *len)
 {
-	static char fcontent[BUFSIZ];
-	long offset;
 	FILE *fp;
+	char *fcontent;
+	struct stat st;
+	size_t fsize;
+
+	if (stat(filename, &st))
+		err(1, "can't stat '%s'", filename);
+
+	fsize = st.st_size;
+	fcontent = malloc(fsize + 1);
+	if (fcontent == NULL)
+		err(1, "malloc");
 
 	fp = fopen(filename, "r");
 	if (fp == NULL)
 		err(1, "can't open '%s'", filename);
 
-	if (fread(fcontent, sizeof(fcontent) - 1, 1, fp) == 0 && errno != 0)
+	if (fread(fcontent, 1, fsize, fp) != fsize)
 		err(1, "can't read '%s'", filename);
-
-	fseek(fp, 0, SEEK_END);
-	offset = ftell(fp);
-	if ((size_t)offset >= sizeof(fcontent))
-		errx(1, "couldn't read all of '%s'", filename);
+	fcontent[fsize] = '\0';
 
 	fclose(fp);
+	*len = fsize;
 	return fcontent;
+}
+
+static int
+dtpi_cmp(const void *a, const void *b)
+{
+	const struct dtioc_probe_info *ai = a, *bi = b;
+
+	if (ai->dtpi_pbn > bi->dtpi_pbn)
+		return 1;
+	if (ai->dtpi_pbn < bi->dtpi_pbn)
+		return -1;
+	return 0;
 }
 
 void
@@ -264,6 +288,8 @@ dtpi_cache(int fd)
 	dtpr.dtpr_probes = dt_dtpis;
 	if (ioctl(fd, DTIOCGPLIST, &dtpr))
 		err(1, "DTIOCGPLIST");
+
+	qsort(dt_dtpis, dt_ndtpi, sizeof(*dt_dtpis), dtpi_cmp);
 }
 
 void
@@ -279,7 +305,7 @@ dtpi_print_list(void)
 	}
 }
 
-char *
+const char *
 dtpi_func(struct dtioc_probe_info *dtpi)
 {
 	char *sysnb, func[DTNAMESIZE];
@@ -339,6 +365,15 @@ dtpi_get_by_value(const char *prov, const char *func, const char *name)
 	return NULL;
 }
 
+static struct dtioc_probe_info *
+dtpi_get_by_id(unsigned int pbn)
+{
+	struct dtioc_probe_info d;
+
+	d.dtpi_pbn = pbn;
+	return bsearch(&d, dt_dtpis, dt_ndtpi, sizeof(*dt_dtpis), dtpi_cmp);
+}
+
 void
 rules_do(int fd)
 {
@@ -349,6 +384,8 @@ rules_do(int fd)
 	sa.sa_flags = 0;
 	sa.sa_handler = signal_handler;
 	if (sigaction(SIGINT, &sa, NULL))
+		err(1, "sigaction");
+	if (sigaction(SIGTERM, &sa, NULL))
 		err(1, "sigaction");
 
 	rules_setup(fd);
@@ -398,54 +435,58 @@ rules_setup(int fd)
 	struct bt_probe *bp;
 	struct bt_stmt *bs;
 	int dokstack = 0, on = 1;
+	uint64_t evtflags;
 
 	TAILQ_FOREACH(r, &g_rules, br_next) {
-		debug("parsed probe '%s'", debug_rule_name(r));
-		debug_dump_filter(r);
-
-		if (r->br_type != B_RT_PROBE) {
-			if (r->br_type == B_RT_BEGIN)
-				rbegin = r;
-			continue;
-		}
-
-		bp = r->br_probe;
-		dtpi_cache(fd);
-		dtpi = dtpi_get_by_value(bp->bp_prov, bp->bp_func, bp->bp_name);
-		if (dtpi == NULL) {
-			errx(1, "probe '%s:%s:%s' not found", bp->bp_prov,
-			    bp->bp_func, bp->bp_name);
-		}
-
-		dtrq = calloc(1, sizeof(*dtrq));
-		if (dtrq == NULL)
-			err(1, "dtrq: 1alloc");
-
-		r->br_pbn = dtpi->dtpi_pbn;
-		dtrq->dtrq_pbn = dtpi->dtpi_pbn;
-		dtrq->dtrq_rate = r->br_probe->bp_rate;
-
+		evtflags = 0;
 		SLIST_FOREACH(bs, &r->br_action, bs_next) {
 			struct bt_arg *ba;
 
 			SLIST_FOREACH(ba, &bs->bs_args, ba_next)
-				dtrq->dtrq_evtflags |= ba2dtflags(ba);
+				evtflags |= ba2dtflags(ba);
 
 			/* Also check the value for map/hist insertion */
 			switch (bs->bs_act) {
 			case B_AC_BUCKETIZE:
 			case B_AC_INSERT:
 				ba = (struct bt_arg *)bs->bs_var;
-				dtrq->dtrq_evtflags |= ba2dtflags(ba);
+				evtflags |= ba2dtflags(ba);
 				break;
 			default:
 				break;
 			}
 		}
 
-		if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
-			dokstack = 1;
-		r->br_cookie = dtrq;
+		SLIST_FOREACH(bp, &r->br_probes, bp_next) {
+			debug("parsed probe '%s'", debug_probe_name(bp));
+			debug_dump_filter(r);
+
+			if (bp->bp_type != B_PT_PROBE) {
+				if (bp->bp_type == B_PT_BEGIN)
+					rbegin = r;
+				continue;
+			}
+
+			dtpi_cache(fd);
+			dtpi = dtpi_get_by_value(bp->bp_prov, bp->bp_func,
+			    bp->bp_name);
+			if (dtpi == NULL) {
+				errx(1, "probe '%s:%s:%s' not found",
+				    bp->bp_prov, bp->bp_func, bp->bp_name);
+			}
+
+			dtrq = calloc(1, sizeof(*dtrq));
+			if (dtrq == NULL)
+				err(1, "dtrq: 1alloc");
+
+			bp->bp_pbn = dtpi->dtpi_pbn;
+			dtrq->dtrq_pbn = dtpi->dtpi_pbn;
+			dtrq->dtrq_rate = bp->bp_rate;
+			dtrq->dtrq_evtflags = evtflags;
+			if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
+				dokstack = 1;
+			bp->bp_cookie = dtrq;
+		}
 	}
 
 	if (dokstack)
@@ -453,7 +494,7 @@ rules_setup(int fd)
 
 	/* Initialize "fake" event for BEGIN/END */
 	bt_devt.dtev_pbn = -1;
-	memcpy(&bt_devt.dtev_comm, getprogname(), sizeof(bt_devt.dtev_comm));
+	strlcpy(bt_devt.dtev_comm, getprogname(), sizeof(bt_devt.dtev_comm));
 	bt_devt.dtev_pid = getpid();
 	bt_devt.dtev_tid = getthrid();
 	clock_gettime(CLOCK_REALTIME, &bt_devt.dtev_tsp);
@@ -463,12 +504,14 @@ rules_setup(int fd)
 
 	/* Enable all probes */
 	TAILQ_FOREACH(r, &g_rules, br_next) {
-		if (r->br_type != B_RT_PROBE)
-			continue;
+		SLIST_FOREACH(bp, &r->br_probes, bp_next) {
+			if (bp->bp_type != B_PT_PROBE)
+				continue;
 
-		dtrq = r->br_cookie;
-		if (ioctl(fd, DTIOCPRBENABLE, dtrq))
-			err(1, "DTIOCPRBENABLE");
+			dtrq = bp->bp_cookie;
+			if (ioctl(fd, DTIOCPRBENABLE, dtrq))
+				err(1, "DTIOCPRBENABLE");
+		}
 	}
 
 	if (g_nprobes > 0) {
@@ -481,12 +524,16 @@ void
 rules_apply(struct dt_evt *dtev)
 {
 	struct bt_rule *r;
+	struct bt_probe *bp;
 
 	TAILQ_FOREACH(r, &g_rules, br_next) {
-		if (r->br_type != B_RT_PROBE || r->br_pbn != dtev->dtev_pbn)
-			continue;
+		SLIST_FOREACH(bp, &r->br_probes, bp_next) {
+			if (bp->bp_type != B_PT_PROBE ||
+			    bp->bp_pbn != dtev->dtev_pbn)
+				continue;
 
-		rule_eval(r, dtev);
+			rule_eval(r, dtev);
+		}
 	}
 }
 
@@ -494,6 +541,7 @@ void
 rules_teardown(int fd)
 {
 	struct dtioc_req *dtrq;
+	struct bt_probe *bp;
 	struct bt_rule *r, *rend = NULL;
 	int dokstack = 0, off = 0;
 
@@ -503,18 +551,19 @@ rules_teardown(int fd)
 	}
 
 	TAILQ_FOREACH(r, &g_rules, br_next) {
-		dtrq = r->br_cookie;
-		if (r->br_type != B_RT_PROBE) {
-			if (r->br_type == B_RT_END)
-				rend = r;
-			continue;
-        } else {
-            if (ioctl(fd, DTIOCPRBDISABLE, dtrq))
-                err(1, "DTIOCPRBDISABLE");
-        }
+		SLIST_FOREACH(bp, &r->br_probes, bp_next) {
+			if (bp->bp_type != B_PT_PROBE) {
+				if (bp->bp_type == B_PT_END)
+					rend = r;
+				continue;
+			}
 
-	if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
-		dokstack = 1;
+			dtrq = bp->bp_cookie;
+			if (ioctl(fd, DTIOCPRBDISABLE, dtrq))
+				err(1, "DTIOCPRBDISABLE");
+			if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
+				dokstack = 1;
+		}
 	}
 
 	if (dokstack)
@@ -535,9 +584,12 @@ void
 rule_eval(struct bt_rule *r, struct dt_evt *dtev)
 {
 	struct bt_stmt *bs;
+	struct bt_probe *bp;
 
-	debug("eval rule '%s'", debug_rule_name(r));
-	debug_dump_filter(r);
+	SLIST_FOREACH(bp, &r->br_probes, bp_next) {
+		debug("eval rule '%s'", debug_probe_name(bp));
+		debug_dump_filter(r);
+	}
 
 	if (r->br_filter != NULL && r->br_filter->bf_condition != NULL) {
 		if (stmt_test(r->br_filter->bf_condition, dtev) == false) {
@@ -744,14 +796,22 @@ stmt_clear(struct bt_stmt *bs)
 {
 	struct bt_arg *ba = SLIST_FIRST(&bs->bs_args);
 	struct bt_var *bv = ba->ba_value;
+	struct map *map;
 
 	assert(bs->bs_var == NULL);
 	assert(ba->ba_type == B_AT_VAR);
 
-	map_clear((struct map *)bv->bv_value);
+	map = (struct map *)bv->bv_value;
+	if (map == NULL)
+		return;
+
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+		errx(1, "invalid variable type for clear(%s)", ba_name(ba));
+
+	map_clear(map);
 	bv->bv_value = NULL;
 
-	debug("map=%p '%s' clear\n", bv->bv_value, bv_name(bv));
+	debug("map=%p '%s' clear\n", map, bv_name(bv));
 }
 
 /*
@@ -764,17 +824,21 @@ stmt_delete(struct bt_stmt *bs, struct dt_evt *dtev)
 {
 	struct bt_arg *bkey, *bmap = SLIST_FIRST(&bs->bs_args);
 	struct bt_var *bv = bmap->ba_value;
+	struct map *map;
 	const char *hash;
 
 	assert(bmap->ba_type == B_AT_MAP);
 	assert(bs->bs_var == NULL);
 
+	map = (struct map *)bv->bv_value;
+	if (map == NULL)
+		return;
+
 	bkey = bmap->ba_key;
 	hash = ba2hash(bkey, dtev);
-	debug("map=%p '%s' delete key=%p '%s'\n", bv->bv_value, bv_name(bv),
-	    bkey, hash);
+	debug("map=%p '%s' delete key=%p '%s'\n", map, bv_name(bv), bkey, hash);
 
-	map_delete((struct map *)bv->bv_value, hash);
+	map_delete(map, hash);
 }
 
 /*
@@ -789,6 +853,7 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 	struct bt_arg *bkey, *bmap = SLIST_FIRST(&bs->bs_args);
 	struct bt_arg *bval = (struct bt_arg *)bs->bs_var;
 	struct bt_var *bv = bmap->ba_value;
+	struct map *map;
 	const char *hash;
 
 	assert(bmap->ba_type == B_AT_MAP);
@@ -796,11 +861,15 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	bkey = bmap->ba_key;
 	hash = ba2hash(bkey, dtev);
-	debug("map=%p '%s' insert key=%p '%s' bval=%p\n", bv->bv_value,
+
+	/* map is NULL before first insert or after clear() */
+	map = (struct map *)bv->bv_value;
+	map = map_insert(map, hash, bval, dtev);
+
+	debug("map=%p '%s' insert key=%p '%s' bval=%p\n", map,
 	    bv_name(bv), bkey, hash, bval);
 
-	bv->bv_value = (struct bt_arg *)map_insert((struct map *)bv->bv_value,
-	    hash, bval, dtev);
+	bv->bv_value = (struct bt_arg *)map;
 	bv->bv_type = B_VT_MAP;
 }
 
@@ -815,6 +884,7 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 {
 	struct bt_arg *btop, *ba = SLIST_FIRST(&bs->bs_args);
 	struct bt_var *bv = ba->ba_value;
+	struct map *map;
 	size_t top = SIZE_T_MAX;
 
 	assert(bs->bs_var == NULL);
@@ -833,16 +903,16 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 		return;
 	}
 
-	debug("map=%p '%s' print (top=%d)\n", bv->bv_value, bv_name(bv), top);
-
-	/* Empty? */
-	if (bv->bv_value == NULL)
+	map = (struct map *)bv->bv_value;
+	if (map == NULL)
 		return;
 
+	debug("map=%p '%s' print (top=%d)\n", bv->bv_value, bv_name(bv), top);
+
 	if (bv->bv_type == B_VT_MAP)
-		map_print((struct map *)bv->bv_value, top, bv_name(bv));
+		map_print(map, top, bv_name(bv));
 	else if (bv->bv_type == B_VT_HIST)
-		hist_print((struct hist *)bv->bv_value, bv_name(bv));
+		hist_print((struct hist *)map, bv_name(bv));
 	else
 		printf("%s\n", ba2str(ba, dtev));
 }
@@ -881,11 +951,47 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_value = ba_new(ba2long(ba, dtev), B_AT_LONG);
 		bv->bv_type = B_VT_LONG;
 		break;
+	case B_AT_FN_STR:
+		bv->bv_value = ba_new(ba2str(ba, dtev), B_AT_STR);
+		bv->bv_type = B_VT_STR;
+		break;
 	default:
 		xabort("store not implemented for type %d", ba->ba_type);
 	}
 
 	debug("bv=%p var '%s' store (%p)\n", bv, bv_name(bv), bv->bv_value);
+}
+
+/*
+ * String conversion	{ str($1); string($1, 3); }
+ *
+ * Since fn_str is currently only called in ba2str, *buf should be a pointer
+ * to the static buffer provided by ba2str.
+ */
+struct bt_arg *
+fn_str(struct bt_arg *ba, struct dt_evt *dtev, char *buf)
+{
+	struct bt_arg *arg, *index;
+	ssize_t len = STRLEN;
+
+	assert(ba->ba_type == B_AT_FN_STR);
+
+	arg = (struct bt_arg*)ba->ba_value;
+	assert(arg != NULL);
+
+	index = SLIST_NEXT(arg, ba_next);
+	if (index != NULL) {
+		/* Should have only 1 optional argument. */
+		assert(SLIST_NEXT(index, ba_next) == NULL);
+		len = MINIMUM(ba2long(index, dtev) + 1, STRLEN);
+	}
+
+	/* All negative lengths behave the same as a zero length. */
+	if (len < 1)
+		return ba_new("", B_AT_STR);
+
+	strlcpy(buf, ba2str(arg, dtev), len);
+	return ba_new(buf, B_AT_STR);
 }
 
 /*
@@ -933,13 +1039,21 @@ stmt_zero(struct bt_stmt *bs)
 {
 	struct bt_arg *ba = SLIST_FIRST(&bs->bs_args);
 	struct bt_var *bv = ba->ba_value;
+	struct map *map;
 
 	assert(bs->bs_var == NULL);
 	assert(ba->ba_type == B_AT_VAR);
 
-	map_zero((struct map *)bv->bv_value);
+	map = (struct map *)bv->bv_value;
+	if (map == NULL)
+		return;
 
-	debug("map=%p '%s' zero\n", bv->bv_value, bv_name(bv));
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+		errx(1, "invalid variable type for zero(%s)", ba_name(ba));
+
+	map_zero(map);
+
+	debug("map=%p '%s' zero\n", map, bv_name(bv));
 }
 
 struct bt_arg *
@@ -1131,6 +1245,8 @@ const char *
 ba_name(struct bt_arg *ba)
 {
 	switch (ba->ba_type) {
+	case B_AT_NIL:
+		return "0";
 	case B_AT_VAR:
 	case B_AT_MAP:
 		break;
@@ -1172,6 +1288,10 @@ ba_name(struct bt_arg *ba)
 		return "args";
 	case B_AT_BI_RETVAL:
 		return "retval";
+	case B_AT_BI_PROBE:
+		return "probe";
+	case B_AT_FN_STR:
+		return "str";
 	case B_AT_OP_PLUS:
 		return "+";
 	case B_AT_OP_MINUS:
@@ -1258,6 +1378,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		val = ba2long(map_get((struct map *)bv->bv_value,
 		    ba2str(ba->ba_key, dtev)), dtev);
 		break;
+	case B_AT_NIL:
+		val = 0L;
+		break;
 	case B_AT_BI_PID:
 		val = dtev->dtev_pid;
 		break;
@@ -1276,6 +1399,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_RETVAL:
 		val = dtev->dtev_retval[0];
 		break;
+	case B_AT_BI_PROBE:
+		val = dtev->dtev_pbn;
+		break;
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		val = baexpr2long(ba, dtev);
 		break;
@@ -1292,8 +1418,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 const char *
 ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 {
-	static char buf[sizeof("18446744073709551615")]; /* UINT64_MAX */
+	static char buf[STRLEN];
 	struct bt_var *bv;
+	struct dtioc_probe_info *dtpi;
 	const char *str;
 
 	buf[0] = '\0';
@@ -1304,6 +1431,9 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_LONG:
 		snprintf(buf, sizeof(buf), "%ld",(long)ba->ba_value);
 		str = buf;
+		break;
+	case B_AT_NIL:
+		str = "";
 		break;
 	case B_AT_BI_KSTACK:
 		str = builtin_stack(dtev, 1);
@@ -1337,13 +1467,30 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		snprintf(buf, sizeof(buf), "%ld", (long)dtev->dtev_retval[0]);
 		str = buf;
 		break;
+	case B_AT_BI_PROBE:
+		dtpi = dtpi_get_by_id(dtev->dtev_pbn);
+		if (dtpi != NULL)
+			snprintf(buf, sizeof(buf), "%s:%s:%s",
+			    dtpi->dtpi_prov, dtpi_func(dtpi), dtpi->dtpi_name);
+		else
+			snprintf(buf, sizeof(buf), "%u", dtev->dtev_pbn);
+		str = buf;
+		break;
 	case B_AT_MAP:
 		bv = ba->ba_value;
+		/* Unitialized map */
+		if (bv->bv_value == NULL) {
+			str = buf;
+			break;
+		}
 		str = ba2str(map_get((struct map *)bv->bv_value,
 		    ba2str(ba->ba_key, dtev)), dtev);
 		break;
 	case B_AT_VAR:
 		str = ba2str(ba_read(ba), dtev);
+		break;
+	case B_AT_FN_STR:
+		str = (const char*)(fn_str(ba, dtev, buf))->ba_value;
 		break;
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
@@ -1383,6 +1530,7 @@ ba2dtflags(struct bt_arg *ba)
 		case B_AT_LONG:
 		case B_AT_VAR:
 	    	case B_AT_HIST:
+		case B_AT_NIL:
 			break;
 		case B_AT_BI_KSTACK:
 			flags |= DTEVT_KSTACK;
@@ -1402,11 +1550,13 @@ ba2dtflags(struct bt_arg *ba)
 			flags |= DTEVT_FUNCARGS;
 			break;
 		case B_AT_BI_RETVAL:
+		case B_AT_BI_PROBE:
 			break;
 		case B_AT_MF_COUNT:
 		case B_AT_MF_MAX:
 		case B_AT_MF_MIN:
 		case B_AT_MF_SUM:
+		case B_AT_FN_STR:
 		case B_AT_OP_PLUS ... B_AT_OP_LOR:
 			break;
 		default:
@@ -1508,6 +1658,9 @@ debug_dump_filter(struct bt_rule *r)
 {
 	struct bt_stmt *bs;
 
+	if (verbose < 2)
+		return;
+
 	if (r->br_filter == NULL) {
 		debugx("\n");
 		return;
@@ -1521,20 +1674,22 @@ debug_dump_filter(struct bt_rule *r)
 }
 
 const char *
-debug_rule_name(struct bt_rule *r)
+debug_probe_name(struct bt_probe *bp)
 {
-	struct bt_probe *bp = r->br_probe;
 	static char buf[64];
 
-	if (r->br_type == B_RT_BEGIN)
+	if (verbose < 2)
+		return "";
+
+	if (bp->bp_type == B_PT_BEGIN)
 		return "BEGIN";
 
-	if (r->br_type == B_RT_END)
+	if (bp->bp_type == B_PT_END)
 		return "END";
 
-	assert(r->br_type == B_RT_PROBE);
+	assert(bp->bp_type == B_PT_PROBE);
 
-	if (r->br_probe->bp_rate) {
+	if (bp->bp_rate) {
 		snprintf(buf, sizeof(buf), "%s:%s:%u", bp->bp_prov,
 		    bp->bp_unit, bp->bp_rate);
 	} else {

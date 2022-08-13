@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfctl.c,v 1.383 2020/10/14 19:30:37 naddy Exp $ */
+/*	$OpenBSD: pfctl.c,v 1.388 2022/07/27 12:28:27 mbuhl Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -158,6 +158,7 @@ static const struct {
 	{ "tables",		PF_LIMIT_TABLES },
 	{ "table-entries",	PF_LIMIT_TABLE_ENTRIES },
 	{ "pktdelay-pkts",	PF_LIMIT_PKTDELAY_PKTS },
+	{ "anchors",		PF_LIMIT_ANCHORS },
 	{ NULL,			0 }
 };
 
@@ -1425,6 +1426,7 @@ pfctl_load_ruleset(struct pfctl *pf, char *path, struct pf_ruleset *rs,
 	struct pf_rule *r;
 	int		error, len = strlen(path);
 	int		brace = 0;
+	unsigned int	rno = 0;
 
 	pf->anchor = rs->anchor;
 
@@ -1454,6 +1456,8 @@ pfctl_load_ruleset(struct pfctl *pf, char *path, struct pf_ruleset *rs,
 
 	while ((r = TAILQ_FIRST(rs->rules.active.ptr)) != NULL) {
 		TAILQ_REMOVE(rs->rules.active.ptr, r, entries);
+		pfctl_expand_label_nr(r, rno);
+		rno++;
 		if ((error = pfctl_load_rule(pf, path, r, depth)))
 			goto error;
 		if (r->anchor) {
@@ -1537,7 +1541,6 @@ pfctl_rules(int dev, char *filename, int opts, int optimize,
 	int			 osize;
 	char			*p;
 
-	bzero(&pf, sizeof(pf));
 	RB_INIT(&pf_anchors);
 	memset(&pf_main_anchor, 0, sizeof(pf_main_anchor));
 	pf_init_ruleset(&pf_main_anchor.ruleset);
@@ -1723,6 +1726,7 @@ pfctl_init_options(struct pfctl *pf)
 	pf->limit[PF_LIMIT_TABLES] = PFR_KTABLE_HIWAT;
 	pf->limit[PF_LIMIT_TABLE_ENTRIES] = PFR_KENTRY_HIWAT;
 	pf->limit[PF_LIMIT_PKTDELAY_PKTS] = PF_PKTDELAY_MAXPKTS;
+	pf->limit[PF_LIMIT_ANCHORS] = PF_ANCHOR_HIWAT;
 
 	mib[0] = CTL_HW;
 	mib[1] = HW_PHYSMEM64;
@@ -2424,6 +2428,7 @@ pfctl_reset(int dev, int opts)
 	struct pfr_buffer t;
 	int		i;
 
+	memset(&pf, 0, sizeof(pf));
 	pf.dev = dev;
 	pfctl_init_options(&pf);
 
@@ -2456,6 +2461,7 @@ pfctl_reset(int dev, int opts)
 	pfctl_clear_interface_flags(dev, opts);
 }
 
+#ifndef	REGRESS_NOMAIN
 int
 main(int argc, char *argv[])
 {
@@ -2886,6 +2892,7 @@ main(int argc, char *argv[])
 
 	exit(exit_val);
 }
+#endif	/* REGRESS_NOMAIN */
 
 char *
 pf_strerror(int errnum)

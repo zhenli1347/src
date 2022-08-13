@@ -1,4 +1,4 @@
-/*	$OpenBSD: uslhcom.c,v 1.7 2021/03/08 14:35:57 jcs Exp $	*/
+/*	$OpenBSD: uslhcom.c,v 1.9 2022/04/09 20:07:44 naddy Exp $	*/
 
 /*
  * Copyright (c) 2015 SASANO Takayoshi <uaa@openbsd.org>
@@ -81,7 +81,7 @@ void		uslhcom_set_baud_rate(struct uslhcom_uart_config *, u_int32_t);
 int		uslhcom_create_config(struct uslhcom_uart_config *, struct termios *);
 int		uslhcom_setup(struct uslhcom_softc *, struct uslhcom_uart_config *);
 
-struct ucom_methods uslhcom_methods = {
+const struct ucom_methods uslhcom_methods = {
 	uslhcom_get_status,
 	uslhcom_set,
 	uslhcom_param,
@@ -115,7 +115,7 @@ uslhcom_match(struct device *parent, void *match, void *aux)
 	struct uhidev_attach_arg *uha = aux;
 
 	/* use all report IDs */
-	if (uha->reportid != UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (!UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return UMATCH_NONE;
 
 	return (usb_lookup(uslhcom_devs,

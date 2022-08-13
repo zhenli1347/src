@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_dev.c,v 1.15 2021/09/03 16:45:45 jasper Exp $ */
+/*	$OpenBSD: dt_dev.c,v 1.22 2022/02/27 10:14:01 bluhm Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -55,6 +55,9 @@
  */
 #if defined(__amd64__)
 #define DT_FA_PROFILE	5
+#define DT_FA_STATIC	2
+#elif defined(__octeon__)
+#define DT_FA_PROFILE	6
 #define DT_FA_STATIC	2
 #elif defined(__powerpc64__)
 #define DT_FA_PROFILE	6
@@ -141,8 +144,6 @@ dtattach(struct device *parent, struct device *self, void *aux)
 #ifdef DDBPROF
 	dt_nprobes += dt_prov_kprobe_init();
 #endif
-
-	printf("dt: %u probes\n", dt_nprobes);
 }
 
 int
@@ -244,7 +245,7 @@ dtread(dev_t dev, struct uio *uio, int flags)
 	TAILQ_FOREACH(dp, &sc->ds_pcbs, dp_snext) {
 		count = dt_pcb_ring_copy(dp, estq, qlen, &dropped);
 		read += count;
-		estq += count; /* pointer aritmetic */
+		estq += count; /* pointer arithmetic */
 		qlen -= count;
 		if (qlen == 0)
 			break;
@@ -404,7 +405,7 @@ dt_ioctl_record_start(struct dt_softc *sc)
 		return EBUSY;
 
 	KERNEL_ASSERT_LOCKED();
- 	if (TAILQ_EMPTY(&sc->ds_pcbs))
+	if (TAILQ_EMPTY(&sc->ds_pcbs))
 		return ENOENT;
 
 	rw_enter_write(&dt_lock);
@@ -427,8 +428,6 @@ void
 dt_ioctl_record_stop(struct dt_softc *sc)
 {
 	struct dt_pcb *dp;
-
-	KASSERT(suser(curproc) == 0);
 
 	if (!sc->ds_recording)
 		return;
@@ -458,8 +457,6 @@ dt_ioctl_probe_enable(struct dt_softc *sc, struct dtioc_req *dtrq)
 	struct dt_pcb_list plist;
 	struct dt_probe *dtp;
 	int error;
-
-	KASSERT(suser(curproc) == 0);
 
 	if (!dtioc_req_isvalid(dtrq))
 		return EINVAL;
@@ -491,7 +488,6 @@ dt_ioctl_probe_disable(struct dt_softc *sc, struct dtioc_req *dtrq)
 	struct dt_probe *dtp;
 	int error;
 
-	KASSERT(suser(curproc) == 0);
 	if (!dtioc_req_isvalid(dtrq))
 		return EINVAL;
 
@@ -529,8 +525,6 @@ dt_dev_alloc_probe(const char *func, const char *name, struct dt_provider *dtpv)
 	dtp->dtp_name = name;
 	dtp->dtp_sysnum = -1;
 	dtp->dtp_ref = 0;
-
-	mtx_init(&dtp->dtp_mtx, IPL_HIGH);
 
 	return dtp;
 }
@@ -592,7 +586,7 @@ dt_pcb_filter(struct dt_pcb *dp)
 {
 	struct dt_filter *dtf = &dp->dp_filter;
 	struct proc *p = curproc;
-	unsigned int var;
+	unsigned int var = 0;
 	int match = 1;
 
 	/* Filter out tracing program. */
@@ -664,7 +658,7 @@ dt_pcb_ring_get(struct dt_pcb *dp, int profiling)
 	nanotime(&dtev->dtev_tsp);
 
 	if (ISSET(dp->dp_evtflags, DTEVT_EXECNAME))
-		memcpy(dtev->dtev_comm, p->p_p->ps_comm, DTMAXCOMLEN - 1);
+		strlcpy(dtev->dtev_comm, p->p_p->ps_comm, sizeof(dtev->dtev_comm));
 
 	if (ISSET(dp->dp_evtflags, DTEVT_KSTACK|DTEVT_USTACK)) {
 		if (profiling)

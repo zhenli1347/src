@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip.c,v 1.17 2021/04/19 17:04:35 deraadt Exp $ */
+/*	$OpenBSD: ip.c,v 1.25 2022/05/15 16:43:34 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -27,7 +27,7 @@
 
 #include "extern.h"
 
-#define   PREFIX_SIZE(x)  (((x) + 7) / 8)
+#define	PREFIX_SIZE(x)	(((x) + 7) / 8)
 
 /*
  * Parse an IP address family.
@@ -129,7 +129,7 @@ ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
 				has_v6 = 1;
 		}
 
-	/* Disallow multiple inheritence per type. */
+	/* Disallow multiple inheritance per type. */
 
 	if ((inherit_v4 && ip->afi == AFI_IPV4) ||
 	    (inherit_v6 && ip->afi == AFI_IPV6) ||
@@ -138,7 +138,7 @@ ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
 	    (has_v6 && ip->afi == AFI_IPV6 &&
 	     ip->type == CERT_IP_INHERIT)) {
 		warnx("%s: RFC 3779 section 2.2.3.5: "
-		    "cannot have multiple inheritence or inheritence and "
+		    "cannot have multiple inheritance or inheritance and "
 		    "addresses of the same class", fn);
 		return 0;
 	}
@@ -154,7 +154,7 @@ ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
 		    memcmp(ips[i].min, ip->max, sz) >= 0)
 			continue;
 		socktype = (ips[i].afi == AFI_IPV4) ? AF_INET : AF_INET6,
-		warnx("%s: RFC 3779 section 2.2.3.5: "
+		    warnx("%s: RFC 3779 section 2.2.3.5: "
 		    "cannot have overlapping IP addresses", fn);
 		ip_addr_print(&ip->ip, ip->afi, buf, sizeof(buf));
 		warnx("%s: certificate IP: %s", fn, buf);
@@ -189,17 +189,9 @@ ip_addr_parse(const ASN1_BIT_STRING *p,
 	/* Weird OpenSSL-ism to get unused bit count. */
 
 	if ((p->flags & ASN1_STRING_FLAG_BITS_LEFT))
-		unused = p->flags & ~ASN1_STRING_FLAG_BITS_LEFT;
+		unused = p->flags & 0x07;
 
-	if (unused < 0) {
-		warnx("%s: RFC 3779 section 2.2.3.8: "
-		    "unused bit count must be non-negative", fn);
-		return 0;
-	} else if (unused >= 8) {
-		warnx("%s: RFC 3779 section 2.2.3.8: "
-		    "unused bit count must mask an unsigned char", fn);
-		return 0;
-	} else if (p->length == 0 && unused != 0) {
+	if (p->length == 0 && unused != 0) {
 		warnx("%s: RFC 3779 section 2.2.3.8: "
 		    "unused bit count must be zero if length is zero", fn);
 		return 0;
@@ -227,45 +219,10 @@ ip_addr_parse(const ASN1_BIT_STRING *p,
 		return 0;
 	}
 
-	memset (addr, 0, sizeof(struct ip_addr));
+	memset(addr, 0, sizeof(struct ip_addr));
 	addr->prefixlen = p->length * 8 - unused;
 	memcpy(addr->addr, p->data, p->length);
 	return 1;
-}
-
-/*
- * Convert the IPv4 address into CIDR notation conforming to RFC 4632.
- * Buffer should be able to hold xxx.yyy.zzz.www/nn.
- */
-static void
-ip4_addr2str(const struct ip_addr *addr, char *b, size_t bsz)
-{
-	char buf[16];
-	int ret;
-
-	if (inet_ntop(AF_INET, addr->addr, buf, sizeof(buf)) == NULL)
-		err(1, "inet_ntop");
-	ret = snprintf(b, bsz, "%s/%hhu", buf, addr->prefixlen);
-	if (ret < 0 || (size_t)ret >= bsz)
-		err(1, "malformed IPV4 address");
-}
-
-/*
- * Convert the IPv6 address into CIDR notation conforming to RFC 4291.
- * See also RFC 5952.
- * Must hold 0000:0000:0000:0000:0000:0000:0000:0000/nn.
- */
-static void
-ip6_addr2str(const struct ip_addr *addr, char *b, size_t bsz)
-{
-	char buf[44];
-	int ret;
-
-	if (inet_ntop(AF_INET6, addr->addr, buf, sizeof(buf)) == NULL)
-		err(1, "inet_ntop");
-	ret = snprintf(b, bsz, "%s/%hhu", buf, addr->prefixlen);
-	if (ret < 0 || (size_t)ret >= bsz)
-		err(1, "malformed IPV6 address");
 }
 
 /*
@@ -277,63 +234,25 @@ void
 ip_addr_print(const struct ip_addr *addr,
     enum afi afi, char *buf, size_t bufsz)
 {
+	char ipbuf[INET6_ADDRSTRLEN];
+	int ret, af;
 
-	if (afi == AFI_IPV4)
-		ip4_addr2str(addr, buf, bufsz);
-	else
-		ip6_addr2str(addr, buf, bufsz);
-}
+	switch (afi) {
+	case AFI_IPV4:
+		af = AF_INET;
+		break;
+	case AFI_IPV6:
+		af = AF_INET6;
+		break;
+	default:
+		errx(1, "unsupported address family identifier");
+	}
 
-/*
- * Serialise an ip_addr for sending over the wire.
- * Matched with ip_addr_read().
- */
-void
-ip_addr_buffer(struct ibuf *b, const struct ip_addr *p)
-{
-	size_t sz = PREFIX_SIZE(p->prefixlen);
-
-	assert(sz <= 16);
-	io_simple_buffer(b, &p->prefixlen, sizeof(unsigned char));
-	io_simple_buffer(b, p->addr, sz);
-}
-
-/*
- * Serialise an ip_addr_range for sending over the wire.
- * Matched with ip_addr_range_read().
- */
-void
-ip_addr_range_buffer(struct ibuf *b, const struct ip_addr_range *p)
-{
-	ip_addr_buffer(b, &p->min);
-	ip_addr_buffer(b, &p->max);
-}
-
-/*
- * Read an ip_addr from the wire.
- * Matched with ip_addr_buffer().
- */
-void
-ip_addr_read(int fd, struct ip_addr *p)
-{
-	size_t sz;
-
-	io_simple_read(fd, &p->prefixlen, sizeof(unsigned char));
-	sz = PREFIX_SIZE(p->prefixlen);
-	assert(sz <= 16);
-	io_simple_read(fd, p->addr, sz);
-}
-
-/*
- * Read an ip_addr_range from the wire.
- * Matched with ip_addr_range_buffer().
- */
-void
-ip_addr_range_read(int fd, struct ip_addr_range *p)
-{
-
-	ip_addr_read(fd, &p->min);
-	ip_addr_read(fd, &p->max);
+	if (inet_ntop(af, addr->addr, ipbuf, sizeof(ipbuf)) == NULL)
+		err(1, "inet_ntop");
+	ret = snprintf(buf, bufsz, "%s/%hhu", ipbuf, addr->prefixlen);
+	if (ret < 0 || (size_t)ret >= bufsz)
+		err(1, "malformed IP address");
 }
 
 /*

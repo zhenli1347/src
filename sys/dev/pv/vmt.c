@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmt.c,v 1.23 2021/02/11 11:57:32 mestre Exp $ */
+/*	$OpenBSD: vmt.c,v 1.25 2022/01/09 05:42:58 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 David Crawshaw <david@zentus.com>
@@ -370,7 +370,7 @@ struct vmt_tclo_rpc {
 #endif
 };
 
-struct cfattach vmt_ca = {
+const struct cfattach vmt_ca = {
 	sizeof(struct vmt_softc),
 	vmt_match,
 	vmt_attach,
@@ -536,7 +536,7 @@ vmt_kvop(void *arg, int op, char *key, char *value, size_t valuelen)
 	/* skip response that was tested in vm_rpci_response_successful() */
 	ptr = sc->sc_rpc_buf + 2;
 
-	/* might truncat, copy anyway but return error */
+	/* might truncate, copy anyway but return error */
 	if (strlcpy(value, ptr, valuelen) >= valuelen)
 		error = ENOMEM;
 

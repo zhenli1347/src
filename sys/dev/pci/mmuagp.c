@@ -117,7 +117,7 @@ struct mmuagp_softc {
 	int			 n_mctrl;
 };
 
-struct cfattach mmuagp_ca = {
+const struct cfattach mmuagp_ca = {
         sizeof(struct mmuagp_softc), mmuagp_probe, mmuagp_attach
 };
 
@@ -275,7 +275,7 @@ mmuagp_attach(struct device *parent, struct device *self, void *aux)
 			break;
 
 		/*
-		 * Probably failed to alloc contigious memory. Try reducing the
+		 * Probably failed to alloc contiguous memory. Try reducing the
 		 * aperture so that the gatt size reduces.
 		 */
 		msc->msc_apsize /= 2;

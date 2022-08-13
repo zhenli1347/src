@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.274 2021/08/20 05:23:18 anton Exp $g
+#	$OpenBSD: GENERIC,v 1.277 2022/03/26 14:25:14 stsp Exp $g
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -127,10 +127,6 @@ ciphy*		at mii?		# Cicada CS8201 10/100/1000 copper PHY
 ipgphy*		at mii?		# IC Plus IP1000A PHYs
 ukphy*		at mii?		# generic unknown PHYs
 
-# crypto
-hifn*		at pci?		# Hifn7751/7811/7951
-ubsec*		at pci?		# Broadcom 58xx
-safe*		at pci?		# SafeNet SafeXcel 1141/1741
 pwdog0		at pci?		# Quancom PWDOG1 watchdog timer
 
 macintr0	at macobio?	# old interrupt controller
@@ -290,6 +286,7 @@ uath*	at uhub?		# Atheros AR5005UG/AR5005UX
 ural*	at uhub?		# Ralink RT2500USB
 rum*	at uhub?		# Ralink RT2501USB/RT2601USB
 run*	at uhub?		# Ralink RT2700U/RT2800U/RT3000U
+mtw*	at uhub?		# MediaTek MT7601U
 rsu*	at uhub?		# Realtek RTL8188SU/RTL8191SU/RTL8192SU
 urtwn*	at uhub?		# Realtek RTL8188CU/RTL8192CU
 otus*	at uhub?		# Atheros AR9001U
@@ -410,4 +407,5 @@ owtemp* at onewire?		# Temperature
 owctr*	at onewire?			# Counter device
 
 pseudo-device	hotplug	1	# devices hot plugging
+pseudo-device	dt
 pseudo-device	wsmux	2	# mouse & keyboard multiplexor

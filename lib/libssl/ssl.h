@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl.h,v 1.196 2021/06/30 18:07:50 jsing Exp $ */
+/* $OpenBSD: ssl.h,v 1.222 2022/07/24 14:16:29 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -357,7 +357,6 @@ extern "C" {
  * in SSL_CTX. */
 typedef struct ssl_st *ssl_crock_st;
 
-typedef struct tls_session_ticket_ext_st TLS_SESSION_TICKET_EXT;
 typedef struct ssl_method_st SSL_METHOD;
 typedef struct ssl_cipher_st SSL_CIPHER;
 typedef struct ssl_session_st SSL_SESSION;
@@ -506,6 +505,14 @@ void SSL_set_msg_callback(SSL *ssl, void (*cb)(int write_p, int version,
     int content_type, const void *buf, size_t len, SSL *ssl, void *arg));
 #define SSL_CTX_set_msg_callback_arg(ctx, arg) SSL_CTX_ctrl((ctx), SSL_CTRL_SET_MSG_CALLBACK_ARG, 0, (arg))
 #define SSL_set_msg_callback_arg(ssl, arg) SSL_ctrl((ssl), SSL_CTRL_SET_MSG_CALLBACK_ARG, 0, (arg))
+typedef void (*SSL_CTX_keylog_cb_func)(const SSL *ssl, const char *line);
+void SSL_CTX_set_keylog_callback(SSL_CTX *ctx, SSL_CTX_keylog_cb_func cb);
+SSL_CTX_keylog_cb_func SSL_CTX_get_keylog_callback(const SSL_CTX *ctx);
+int SSL_set_num_tickets(SSL *s, size_t num_tickets);
+size_t SSL_get_num_tickets(const SSL *s);
+int SSL_CTX_set_num_tickets(SSL_CTX *ctx, size_t num_tickets);
+size_t SSL_CTX_get_num_tickets(const SSL_CTX *ctx);
+STACK_OF(X509) *SSL_get0_verified_chain(const SSL *s);
 
 #ifndef LIBRESSL_INTERNAL
 struct ssl_aead_ctx_st;
@@ -535,57 +542,10 @@ typedef int (*GEN_SESSION_CB)(const SSL *ssl, unsigned char *id,
 typedef struct ssl_comp_st SSL_COMP;
 
 #ifdef LIBRESSL_INTERNAL
-
-struct ssl_comp_st {
-	int id;
-	const char *name;
-};
-
 DECLARE_STACK_OF(SSL_COMP)
 struct lhash_st_SSL_SESSION {
 	int dummy;
 };
-
-struct ssl_ctx_internal_st;
-
-struct ssl_ctx_st {
-	const SSL_METHOD *method;
-
-	STACK_OF(SSL_CIPHER) *cipher_list;
-
-	struct x509_store_st /* X509_STORE */ *cert_store;
-
-	/* If timeout is not 0, it is the default timeout value set
-	 * when SSL_new() is called.  This has been put in to make
-	 * life easier to set things up */
-	long session_timeout;
-
-	int references;
-
-	/* Default values to use in SSL structures follow (these are copied by SSL_new) */
-
-	STACK_OF(X509) *extra_certs;
-
-	int verify_mode;
-	unsigned int sid_ctx_length;
-	unsigned char sid_ctx[SSL_MAX_SID_CTX_LENGTH];
-
-	X509_VERIFY_PARAM *param;
-
-	/*
-	 * XXX
-	 * default_passwd_cb used by python and openvpn, need to keep it until we
-	 * add an accessor
-	 */
-	/* Default password callback. */
-	pem_password_cb *default_passwd_callback;
-
-	/* Default password callback user data. */
-	void *default_passwd_callback_userdata;
-
-	struct ssl_ctx_internal_st *internal;
-};
-
 #endif
 
 #define SSL_SESS_CACHE_OFF			0x0000
@@ -681,6 +641,12 @@ void SSL_CTX_set_alpn_select_cb(SSL_CTX *ctx,
 void SSL_get0_alpn_selected(const SSL *ssl, const unsigned char **data,
     unsigned int *len);
 
+#if defined(LIBRESSL_HAS_TLS1_3) || defined(LIBRESSL_INTERNAL)
+typedef int (*SSL_psk_use_session_cb_func)(SSL *ssl, const EVP_MD *md,
+    const unsigned char **id, size_t *idlen, SSL_SESSION **sess);
+void SSL_set_psk_use_session_callback(SSL *s, SSL_psk_use_session_cb_func cb);
+#endif
+
 #define SSL_NOTHING	1
 #define SSL_WRITING	2
 #define SSL_READING	3
@@ -694,85 +660,6 @@ void SSL_get0_alpn_selected(const SSL *ssl, const unsigned char **data,
 
 #define SSL_MAC_FLAG_READ_MAC_STREAM 1
 #define SSL_MAC_FLAG_WRITE_MAC_STREAM 2
-
-#ifndef OPENSSL_NO_SSL_INTERN
-struct ssl_internal_st;
-
-struct ssl_st {
-	/* protocol version
-	 * (one of SSL2_VERSION, SSL3_VERSION, TLS1_VERSION, DTLS1_VERSION)
-	 */
-	int version;
-
-	const SSL_METHOD *method; /* SSLv3 */
-
-	/* There are 2 BIO's even though they are normally both the
-	 * same.  This is so data can be read and written to different
-	 * handlers */
-
-	BIO *rbio; /* used by SSL_read */
-	BIO *wbio; /* used by SSL_write */
-	BIO *bbio; /* used during session-id reuse to concatenate
-		    * messages */
-	int server;	/* are we the server side? - mostly used by SSL_clear*/
-
-	struct ssl3_state_st *s3; /* SSLv3 variables */
-	struct dtls1_state_st *d1; /* DTLSv1 variables */
-
-	X509_VERIFY_PARAM *param;
-
-	/* crypto */
-	STACK_OF(SSL_CIPHER) *cipher_list;
-
-	/* This is used to hold the server certificate used */
-	struct cert_st /* CERT */ *cert;
-
-	/* the session_id_context is used to ensure sessions are only reused
-	 * in the appropriate context */
-	unsigned int sid_ctx_length;
-	unsigned char sid_ctx[SSL_MAX_SID_CTX_LENGTH];
-
-	/* This can also be in the session once a session is established */
-	SSL_SESSION *session;
-
-	/* Used in SSL2 and SSL3 */
-	int verify_mode;	/* 0 don't care about verify failure.
-				 * 1 fail if verify fails */
-	int error;		/* error bytes to be written */
-	int error_code;		/* actual code */
-
-	SSL_CTX *ctx;
-
-	long verify_result;
-
-	int references;
-
-	int client_version;	/* what was passed, used for
-				 * SSLv3/TLS rollback check */
-
-	unsigned int max_send_fragment;
-
-	char *tlsext_hostname;
-
-	/* certificate status request info */
-	/* Status type or -1 if no status type */
-	int tlsext_status_type;
-
-	SSL_CTX * initial_ctx; /* initial ctx, used to store sessions */
-#define session_ctx initial_ctx
-
-	/*
-	 * XXX really should be internal, but is
-	 * touched unnaturally by wpa-supplicant
-	 * and freeradius and other perversions
-	 */
-	EVP_CIPHER_CTX *enc_read_ctx;		/* cryptographic state */
-	EVP_MD_CTX *read_hash;			/* used for mac generation */
-
-	struct ssl_internal_st *internal;
-};
-
-#endif
 
 #ifdef __cplusplus
 }
@@ -853,6 +740,13 @@ size_t SSL_get_peer_finished(const SSL *s, void *buf, size_t count);
 #define SSL_VERIFY_PEER			0x01
 #define SSL_VERIFY_FAIL_IF_NO_PEER_CERT	0x02
 #define SSL_VERIFY_CLIENT_ONCE		0x04
+#if defined(LIBRESSL_HAS_TLS1_3) || defined(LIBRESSL_INTERNAL)
+#define SSL_VERIFY_POST_HANDSHAKE	0x08
+
+int SSL_verify_client_post_handshake(SSL *s);
+void SSL_CTX_set_post_handshake_auth(SSL_CTX *ctx, int val);
+void SSL_set_post_handshake_auth(SSL *s, int val);
+#endif
 
 #define OpenSSL_add_ssl_algorithms()	SSL_library_init()
 #define SSLeay_add_ssl_algorithms()	SSL_library_init()
@@ -1000,6 +894,7 @@ int PEM_write_SSL_SESSION(FILE *fp, SSL_SESSION *x);
 #define SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB	63
 #define SSL_CTRL_GET_TLSEXT_STATUS_REQ_CB_ARG	129
 #define SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB_ARG	64
+#define SSL_CTRL_GET_TLSEXT_STATUS_REQ_TYPE	127
 #define SSL_CTRL_SET_TLSEXT_STATUS_REQ_TYPE	65
 #define SSL_CTRL_GET_TLSEXT_STATUS_REQ_EXTS	66
 #define SSL_CTRL_SET_TLSEXT_STATUS_REQ_EXTS	67
@@ -1224,6 +1119,7 @@ long SSL_CTX_get_timeout(const SSL_CTX *ctx);
 X509_STORE *SSL_CTX_get_cert_store(const SSL_CTX *);
 void SSL_CTX_set_cert_store(SSL_CTX *, X509_STORE *);
 X509 *SSL_CTX_get0_certificate(const SSL_CTX *ctx);
+EVP_PKEY *SSL_CTX_get0_privatekey(const SSL_CTX *ctx);
 int SSL_want(const SSL *s);
 int	SSL_clear(SSL *s);
 
@@ -1256,6 +1152,7 @@ int	SSL_set_rfd(SSL *s, int fd);
 int	SSL_set_wfd(SSL *s, int fd);
 void	SSL_set_bio(SSL *s, BIO *rbio, BIO *wbio);
 BIO *	SSL_get_rbio(const SSL *s);
+void	SSL_set0_rbio(SSL *s, BIO *rbio);
 BIO *	SSL_get_wbio(const SSL *s);
 int	SSL_set_cipher_list(SSL *s, const char *str);
 #if defined(LIBRESSL_HAS_TLS1_3) || defined(LIBRESSL_INTERNAL)
@@ -1309,6 +1206,9 @@ int	SSL_SESSION_set1_id(SSL_SESSION *s, const unsigned char *sid,
 	    unsigned int sid_len);
 int	SSL_SESSION_set1_id_context(SSL_SESSION *s,
 	    const unsigned char *sid_ctx, unsigned int sid_ctx_len);
+#if defined(LIBRESSL_HAS_TLS1_3) || defined(LIBRESSL_INTERNAL)
+int SSL_SESSION_is_resumable(const SSL_SESSION *s);
+#endif
 
 SSL_SESSION *SSL_SESSION_new(void);
 void	SSL_SESSION_free(SSL_SESSION *ses);
@@ -1392,6 +1292,9 @@ int	SSL_is_server(const SSL *s);
 int 	SSL_read(SSL *ssl, void *buf, int num);
 int 	SSL_peek(SSL *ssl, void *buf, int num);
 int 	SSL_write(SSL *ssl, const void *buf, int num);
+int 	SSL_read_ex(SSL *ssl, void *buf, size_t num, size_t *bytes_read);
+int 	SSL_peek_ex(SSL *ssl, void *buf, size_t num, size_t *bytes_peeked);
+int 	SSL_write_ex(SSL *ssl, const void *buf, size_t num, size_t *bytes_written);
 
 #if defined(LIBRESSL_HAS_TLS1_3) || defined(LIBRESSL_INTERNAL)
 uint32_t SSL_CTX_get_max_early_data(const SSL_CTX *ctx);
@@ -1604,10 +1507,112 @@ int SSL_set_session_secret_cb(SSL *s,
 void SSL_set_debug(SSL *s, int debug);
 int SSL_cache_hit(SSL *s);
 
-/* BEGIN ERROR CODES */
-/* The following lines are auto generated by the script mkerr.pl. Any changes
- * made after this point may be overwritten when the script is next run.
+/* What the "other" parameter contains in security callback */
+/* Mask for type */
+#define SSL_SECOP_OTHER_TYPE		0xffff0000
+#define SSL_SECOP_OTHER_NONE		0
+#define SSL_SECOP_OTHER_CIPHER		(1 << 16)
+#define SSL_SECOP_OTHER_CURVE		(2 << 16)
+#define SSL_SECOP_OTHER_DH		(3 << 16)
+#define SSL_SECOP_OTHER_PKEY		(4 << 16)
+#define SSL_SECOP_OTHER_SIGALG		(5 << 16)
+#define SSL_SECOP_OTHER_CERT		(6 << 16)
+
+/* Indicated operation refers to peer key or certificate */
+#define SSL_SECOP_PEER			0x1000
+
+/* Values for "op" parameter in security callback */
+
+/* Called to filter ciphers */
+/* Ciphers client supports */
+#define SSL_SECOP_CIPHER_SUPPORTED	(1 | SSL_SECOP_OTHER_CIPHER)
+/* Cipher shared by client/server */
+#define SSL_SECOP_CIPHER_SHARED		(2 | SSL_SECOP_OTHER_CIPHER)
+/* Sanity check of cipher server selects */
+#define SSL_SECOP_CIPHER_CHECK		(3 | SSL_SECOP_OTHER_CIPHER)
+/* Curves supported by client */
+#define SSL_SECOP_CURVE_SUPPORTED	(4 | SSL_SECOP_OTHER_CURVE)
+/* Curves shared by client/server */
+#define SSL_SECOP_CURVE_SHARED		(5 | SSL_SECOP_OTHER_CURVE)
+/* Sanity check of curve server selects */
+#define SSL_SECOP_CURVE_CHECK		(6 | SSL_SECOP_OTHER_CURVE)
+/* Temporary DH key */
+/*
+ * XXX: changed in OpenSSL e2b420fdd70 to (7 | SSL_SECOP_OTHER_PKEY)
+ * Needs switching internal use of DH to EVP_PKEY. The code is not reachable
+ * from outside the library as long as we do not expose the callback in the API.
  */
+#define SSL_SECOP_TMP_DH		(7 | SSL_SECOP_OTHER_DH)
+/* SSL/TLS version */
+#define SSL_SECOP_VERSION		(9 | SSL_SECOP_OTHER_NONE)
+/* Session tickets */
+#define SSL_SECOP_TICKET		(10 | SSL_SECOP_OTHER_NONE)
+/* Supported signature algorithms sent to peer */
+#define SSL_SECOP_SIGALG_SUPPORTED	(11 | SSL_SECOP_OTHER_SIGALG)
+/* Shared signature algorithm */
+#define SSL_SECOP_SIGALG_SHARED		(12 | SSL_SECOP_OTHER_SIGALG)
+/* Sanity check signature algorithm allowed */
+#define SSL_SECOP_SIGALG_CHECK		(13 | SSL_SECOP_OTHER_SIGALG)
+/* Used to get mask of supported public key signature algorithms */
+#define SSL_SECOP_SIGALG_MASK		(14 | SSL_SECOP_OTHER_SIGALG)
+/* Use to see if compression is allowed */
+#define SSL_SECOP_COMPRESSION		(15 | SSL_SECOP_OTHER_NONE)
+/* EE key in certificate */
+#define SSL_SECOP_EE_KEY		(16 | SSL_SECOP_OTHER_CERT)
+/* CA key in certificate */
+#define SSL_SECOP_CA_KEY		(17 | SSL_SECOP_OTHER_CERT)
+/* CA digest algorithm in certificate */
+#define SSL_SECOP_CA_MD			(18 | SSL_SECOP_OTHER_CERT)
+/* Peer EE key in certificate */
+#define SSL_SECOP_PEER_EE_KEY		(SSL_SECOP_EE_KEY | SSL_SECOP_PEER)
+/* Peer CA key in certificate */
+#define SSL_SECOP_PEER_CA_KEY		(SSL_SECOP_CA_KEY | SSL_SECOP_PEER)
+/* Peer CA digest algorithm in certificate */
+#define SSL_SECOP_PEER_CA_MD		(SSL_SECOP_CA_MD | SSL_SECOP_PEER)
+
+void SSL_set_security_level(SSL *ssl, int level);
+int SSL_get_security_level(const SSL *ssl);
+
+void SSL_CTX_set_security_level(SSL_CTX *ctx, int level);
+int SSL_CTX_get_security_level(const SSL_CTX *ctx);
+
+#if defined(LIBRESSL_HAS_QUIC) || defined(LIBRESSL_INTERNAL)
+/*
+ * ssl_encryption_level_t specifies the QUIC encryption level used to transmit
+ * handshake messages.
+ */
+typedef enum ssl_encryption_level_t {
+	ssl_encryption_initial = 0,
+	ssl_encryption_early_data,
+	ssl_encryption_handshake,
+	ssl_encryption_application,
+} OSSL_ENCRYPTION_LEVEL;
+
+int SSL_is_quic(const SSL *ssl);
+
+/*
+ * SSL_set_quic_transport_params configures |ssl| to send |params| (of length
+ * |params_len|) in the quic_transport_parameters extension in either the
+ * ClientHello or EncryptedExtensions handshake message. This extension will
+ * only be sent if the TLS version is at least 1.3, and for a server, only if
+ * the client sent the extension. The buffer pointed to by |params| only need be
+ * valid for the duration of the call to this function. This function returns 1
+ *on success and 0 on failure.
+ */
+int SSL_set_quic_transport_params(SSL *ssl, const uint8_t *params,
+    size_t params_len);
+
+/*
+ * SSL_get_peer_quic_transport_params provides the caller with the value of the
+ * quic_transport_parameters extension sent by the peer. A pointer to the buffer
+ * containing the TransportParameters will be put in |*out_params|, and its
+ * length in |*params_len|. This buffer will be valid for the lifetime of the
+ * |SSL|. If no params were received from the peer, |*out_params_len| will be 0.
+ */
+void SSL_get_peer_quic_transport_params(const SSL *ssl,
+    const uint8_t **out_params, size_t *out_params_len);
+#endif
+
 void ERR_load_SSL_strings(void);
 
 /* Error codes for the SSL functions. */
@@ -1884,6 +1889,8 @@ void ERR_load_SSL_strings(void);
 #define SSL_R_BN_LIB					 130
 #define SSL_R_CA_DN_LENGTH_MISMATCH			 131
 #define SSL_R_CA_DN_TOO_LONG				 132
+#define SSL_R_CA_KEY_TOO_SMALL				 397
+#define SSL_R_CA_MD_TOO_WEAK				 398
 #define SSL_R_CCS_RECEIVED_EARLY			 133
 #define SSL_R_CERTIFICATE_VERIFY_FAILED			 134
 #define SSL_R_CERT_LENGTH_MISMATCH			 135
@@ -1905,6 +1912,7 @@ void ERR_load_SSL_strings(void);
 #define SSL_R_DATA_LENGTH_TOO_LONG			 146
 #define SSL_R_DECRYPTION_FAILED				 147
 #define SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC	 281
+#define SSL_R_DH_KEY_TOO_SMALL				 394
 #define SSL_R_DH_PUBLIC_VALUE_LENGTH_IS_WRONG		 148
 #define SSL_R_DIGEST_CHECK_FAILED			 149
 #define SSL_R_DTLS_MESSAGE_TOO_BIG			 334
@@ -1914,6 +1922,7 @@ void ERR_load_SSL_strings(void);
 #define SSL_R_ECC_CERT_SHOULD_HAVE_RSA_SIGNATURE	 322
 #define SSL_R_ECC_CERT_SHOULD_HAVE_SHA1_SIGNATURE	 323
 #define SSL_R_ECGROUP_TOO_LARGE_FOR_CIPHER		 310
+#define SSL_R_EE_KEY_TOO_SMALL				 399
 #define SSL_R_EMPTY_SRTP_PROTECTION_PROFILE_LIST	 354
 #define SSL_R_ENCRYPTED_LENGTH_TOO_LONG			 150
 #define SSL_R_ERROR_GENERATING_TMP_RSA_KEY		 282
@@ -1970,6 +1979,7 @@ void ERR_load_SSL_strings(void);
 #define SSL_R_MISSING_VERIFY_MESSAGE			 174
 #define SSL_R_MULTIPLE_SGC_RESTARTS			 346
 #define SSL_R_NON_SSLV2_INITIAL_PACKET			 175
+#define SSL_R_NO_APPLICATION_PROTOCOL			 235
 #define SSL_R_NO_CERTIFICATES_RETURNED			 176
 #define SSL_R_NO_CERTIFICATE_ASSIGNED			 177
 #define SSL_R_NO_CERTIFICATE_RETURNED			 178
@@ -2127,6 +2137,7 @@ void ERR_load_SSL_strings(void);
 #define SSL_R_UNSUPPORTED_SSL_VERSION			 259
 #define SSL_R_UNSUPPORTED_STATUS_TYPE			 329
 #define SSL_R_USE_SRTP_NOT_NEGOTIATED			 369
+#define SSL_R_VERSION_TOO_LOW				 396
 #define SSL_R_WRITE_BIO_NOT_SET				 260
 #define SSL_R_WRONG_CIPHER_RETURNED			 261
 #define SSL_R_WRONG_CURVE				 378

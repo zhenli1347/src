@@ -1,4 +1,4 @@
-/*	$OpenBSD: snapper.c,v 1.39 2020/08/26 03:29:06 visa Exp $	*/
+/*	$OpenBSD: snapper.c,v 1.42 2022/03/21 19:22:39 miod Exp $	*/
 /*	$NetBSD: snapper.c,v 1.1 2003/12/27 02:19:34 grant Exp $	*/
 
 /*-
@@ -70,14 +70,14 @@ void snapper_set_input(struct snapper_softc *, int);
 int tas3004_write(struct snapper_softc *, u_int, const void *);
 int tas3004_init(struct snapper_softc *);
 
-struct cfattach snapper_ca = {
+const struct cfattach snapper_ca = {
 	sizeof(struct snapper_softc), snapper_match, snapper_attach
 };
 struct cfdriver snapper_cd = {
 	NULL, "snapper", DV_DULL
 };
 
-struct audio_hw_if snapper_hw_if = {
+const struct audio_hw_if snapper_hw_if = {
 	i2s_open,
 	i2s_close,
 	i2s_set_params,
@@ -486,7 +486,7 @@ snapper_defer(struct device *dev)
 
 	/* XXX If i2c has failed to attach, what should we do? */
 
-	audio_attach_mi(&snapper_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&snapper_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* kiic_setmode(sc->sc_i2c, I2C_STDSUBMODE); */
 	snapper_init(sc);

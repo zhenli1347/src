@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnet.c,v 1.63 2020/12/12 11:48:52 jan Exp $	*/
+/*	$OpenBSD: vnet.c,v 1.66 2022/07/25 14:48:24 kn Exp $	*/
 /*
  * Copyright (c) 2009, 2015 Mark Kettenis
  *
@@ -184,7 +184,7 @@ struct vnet_softc {
 int	vnet_match(struct device *, void *, void *);
 void	vnet_attach(struct device *, struct device *, void *);
 
-struct cfattach vnet_ca = {
+const struct cfattach vnet_ca = {
 	sizeof(struct vnet_softc), vnet_match, vnet_attach
 };
 
@@ -768,7 +768,7 @@ vnet_rx_vio_desc_data(struct vnet_softc *sc, struct vio_msg_tag *tag)
 		DPRINTF(("DATA/ACK/DESC_DATA\n"));
 
 		if (dm->desc_handle != sc->sc_tx_cons) {
-			printf("out of order\n");
+			printf("%s: out of order\n", __func__);
 			return;
 		}
 
@@ -1535,5 +1535,5 @@ vnet_dring_free(bus_dma_tag_t t, struct vnet_dring *vd)
 	bus_dmamem_unmap(t, (caddr_t)vd->vd_desc, size);
 	bus_dmamem_free(t, &vd->vd_seg, 1);
 	bus_dmamap_destroy(t, vd->vd_map);
-	free(vd, M_DEVBUF, 0);
+	free(vd, M_DEVBUF, sizeof(*vd));
 }

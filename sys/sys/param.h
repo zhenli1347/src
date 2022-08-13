@@ -1,4 +1,4 @@
-/*	$OpenBSD: param.h,v 1.133 2021/03/10 10:21:47 jsg Exp $	*/
+/*	$OpenBSD: param.h,v 1.139 2022/07/20 15:12:39 deraadt Exp $	*/
 
 /*-
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -41,8 +41,8 @@
 #define BSD4_3	1
 #define BSD4_4	1
 
-#define OpenBSD	202105		/* OpenBSD version (year & month). */
-#define OpenBSD6_9 1		/* OpenBSD 6.9 */
+#define OpenBSD	202210		/* OpenBSD version (year & month). */
+#define OpenBSD7_2 1		/* OpenBSD 7.2 */
 
 #include <sys/_null.h>
 
@@ -59,7 +59,7 @@
  */
 #include <sys/syslimits.h>
 
-#define	MAXCOMLEN	16		/* max command name remembered */
+#define	MAXCOMLEN	_MAXCOMLEN-1	/* max command name remembered, without NUL */
 #define	MAXINTERP	128		/* max interpreter file name length */
 #define	MAXLOGNAME	LOGIN_NAME_MAX	/* max login name length w/ NUL */
 #define	MAXUPRC		CHILD_MAX	/* max simultaneous processes */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: radeonfb.c,v 1.6 2020/05/25 09:55:48 jsg Exp $	*/
+/*	$OpenBSD: radeonfb.c,v 1.8 2022/07/15 17:57:26 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Mark Kettenis.
@@ -128,7 +128,7 @@ struct wsdisplay_accessops radeonfb_accessops = {
 int	radeonfb_match(struct device *, void *, void *);
 void	radeonfb_attach(struct device *, struct device *, void *);
 
-struct cfattach radeonfb_ca = {
+const struct cfattach radeonfb_ca = {
 	sizeof(struct radeonfb_softc), radeonfb_match, radeonfb_attach
 };
 
@@ -268,6 +268,8 @@ radeonfb_ioctl(void *v, u_long cmd, caddr_t data, int flags, struct proc *p)
 		wdf->height = sc->sc_sunfb.sf_height;
 		wdf->width  = sc->sc_sunfb.sf_width;
 		wdf->depth  = sc->sc_sunfb.sf_depth;
+		wdf->stride = sc->sc_sunfb.sf_linebytes;
+		wdf->offset = 0;
 		if (sc->sc_sunfb.sf_depth == 32)
 			wdf->cmsize = 0;
 		else

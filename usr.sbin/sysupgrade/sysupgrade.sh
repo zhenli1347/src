@@ -1,6 +1,6 @@
 #!/bin/ksh
 #
-# $OpenBSD: sysupgrade.sh,v 1.44 2020/10/22 07:19:42 tb Exp $
+# $OpenBSD: sysupgrade.sh,v 1.48 2022/06/08 09:03:11 mglocker Exp $
 #
 # Copyright (c) 1997-2015 Todd Miller, Theo de Raadt, Ken Westerback
 # Copyright (c) 2015 Robert Peichaer <rpe@openbsd.org>
@@ -35,7 +35,7 @@ err()
 
 usage()
 {
-	echo "usage: ${0##*/} [-fkn] [-r | -s] [installurl]" 1>&2
+	echo "usage: ${0##*/} [-fkn] [-r | -s] [-b base-directory] [installurl]" 1>&2
 	return 1
 }
 
@@ -78,8 +78,9 @@ FORCE=false
 KEEP=false
 REBOOT=true
 
-while getopts fknrs arg; do
+while getopts b:fknrs arg; do
 	case ${arg} in
+	b)	SETSDIR=${OPTARG}/_sysupgrade;;
 	f)	FORCE=true;;
 	k)	KEEP=true;;
 	n)	REBOOT=false;;
@@ -112,7 +113,9 @@ esac
 	err "invalid installurl: $MIRROR"
 
 if ! $RELEASE && [[ ${#_KERNV[*]} == 2 ]]; then
-	SNAP=true
+	if [[ ${_KERNV[1]} != '-stable' ]]; then
+		SNAP=true
+	fi
 fi
 
 if $RELEASE && [[ ${_KERNV[1]} == '-beta' ]]; then
@@ -123,10 +126,8 @@ fi
 
 if $SNAP; then
 	URL=${MIRROR}/snapshots/${ARCH}/
-	FW_URL=http://firmware.openbsd.org/firmware/snapshots/
 else
 	URL=${MIRROR}/${NEXT_VERSION}/${ARCH}/
-	FW_URL=http://firmware.openbsd.org/firmware/${NEXT_VERSION}/
 fi
 
 install -d -o 0 -g 0 -m 0755 ${SETSDIR}
@@ -196,7 +197,15 @@ __EOT
 fi
 
 echo Fetching updated firmware.
-fw_update -p ${FW_URL} || echo "Warning: firmware not updated."
+set -A _NEXTKERNV -- $(what bsd |
+	sed -n '2s/^[[:blank:]]OpenBSD \([1-9][0-9]*\.[0-9]\)\([^ ]*\).*/\1 \2/p')
+
+if [[ ${_NEXTKERNV[1]} == '-current' ]]; then
+	FW_URL=http://firmware.openbsd.org/firmware/snapshots/
+else
+	FW_URL=http://firmware.openbsd.org/firmware/${_NEXTKERNV[0]}/
+fi
+VNAME="${_NEXTKERNV[0]}" fw_update -p ${FW_URL} || true
 
 install -F -m 700 bsd.rd /bsd.upgrade
 logger -t sysupgrade -p kern.info "installed new /bsd.upgrade. Old kernel version: $(sysctl -n kern.version)"

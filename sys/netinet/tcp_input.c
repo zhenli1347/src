@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_input.c,v 1.370 2021/08/09 17:03:08 bluhm Exp $	*/
+/*	$OpenBSD: tcp_input.c,v 1.377 2022/08/11 09:13:21 claudio Exp $	*/
 /*	$NetBSD: tcp_input.c,v 1.23 1996/02/13 23:43:44 christos Exp $	*/
 
 /*
@@ -275,6 +275,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, struct mbuf *m, int *tlen)
 		}
 	}
 	tcpstat_pkt(tcps_rcvoopack, tcps_rcvoobyte, *tlen);
+	tp->t_rcvoopack++;
 
 	/*
 	 * While we overlap succeeding segments trim them or,
@@ -380,12 +381,6 @@ tcp_input(struct mbuf **mp, int *offp, int proto, int af)
 #ifdef INET6
 	struct ip6_hdr *ip6 = NULL;
 #endif /* INET6 */
-#ifdef IPSEC
-	struct m_tag *mtag;
-	struct tdb_ident *tdbi;
-	struct tdb *tdb;
-	int error;
-#endif /* IPSEC */
 #ifdef TCP_ECN
 	u_char iptos;
 #endif
@@ -571,16 +566,22 @@ findpcb:
 	}
 #ifdef IPSEC
 	if (ipsec_in_use) {
+		struct m_tag *mtag;
+		struct tdb *tdb = NULL;
+		int error;
+
 		/* Find most recent IPsec tag */
 		mtag = m_tag_find(m, PACKET_TAG_IPSEC_IN_DONE, NULL);
 		if (mtag != NULL) {
+			struct tdb_ident *tdbi;
+
 			tdbi = (struct tdb_ident *)(mtag + 1);
 			tdb = gettdb(tdbi->rdomain, tdbi->spi,
 			    &tdbi->dst, tdbi->proto);
-		} else
-			tdb = NULL;
-		ipsp_spd_lookup(m, af, iphlen, &error, IPSP_DIRECTION_IN,
-		    tdb, inp, 0);
+		}
+		error = ipsp_spd_lookup(m, af, iphlen, IPSP_DIRECTION_IN,
+		    tdb, inp, NULL, NULL);
+		tdb_unref(tdb);
 		if (error) {
 			tcpstat_inc(tcps_rcvnosec);
 			goto drop;
@@ -723,7 +724,8 @@ findpcb:
 					 * full-blown connection.
 					 */
 					tp = NULL;
-					inp = sotoinpcb(so);
+					in_pcbunref(inp);
+					inp = in_pcbref(sotoinpcb(so));
 					tp = intotcpcb(inp);
 					if (tp == NULL)
 						goto badsyn;	/*XXX*/
@@ -832,6 +834,7 @@ findpcb:
 					tcpstat_inc(tcps_dropsyn);
 					goto drop;
 				}
+				in_pcbunref(inp);
 				return IPPROTO_DONE;
 			}
 		}
@@ -945,6 +948,7 @@ findpcb:
 				acked = th->th_ack - tp->snd_una;
 				tcpstat_pkt(tcps_rcvackpack, tcps_rcvackbyte,
 				    acked);
+				tp->t_rcvacktime = tcp_now;
 				ND6_HINT(tp);
 				sbdrop(so, &so->so_snd, acked);
 
@@ -1002,6 +1006,7 @@ findpcb:
 				if (so->so_snd.sb_cc ||
 				    tp->t_flags & TF_NEEDOUTPUT)
 					(void) tcp_output(tp);
+				in_pcbunref(inp);
 				return IPPROTO_DONE;
 			}
 		} else if (th->th_ack == tp->snd_una &&
@@ -1050,6 +1055,7 @@ findpcb:
 			tp->t_flags &= ~TF_BLOCKOUTPUT;
 			if (tp->t_flags & (TF_ACKNOW|TF_NEEDOUTPUT))
 				(void) tcp_output(tp);
+			in_pcbunref(inp);
 			return IPPROTO_DONE;
 		}
 	}
@@ -1244,6 +1250,7 @@ trimthenstep6:
 			    ((arc4random() & 0x7fffffff) | 0x8000);
 			reuse = &iss;
 			tp = tcp_close(tp);
+			in_pcbunref(inp);
 			inp = NULL;
 			goto findpcb;
 		}
@@ -1676,6 +1683,7 @@ trimthenstep6:
 		}
 		acked = th->th_ack - tp->snd_una;
 		tcpstat_pkt(tcps_rcvackpack, tcps_rcvackbyte, acked);
+		tp->t_rcvacktime = tcp_now;
 
 		/*
 		 * If we have a timestamp reply, update smoothed
@@ -2028,6 +2036,7 @@ dodata:							/* XXX */
 	 */
 	if (tp->t_flags & (TF_ACKNOW|TF_NEEDOUTPUT))
 		(void) tcp_output(tp);
+	in_pcbunref(inp);
 	return IPPROTO_DONE;
 
 badsyn:
@@ -2056,6 +2065,7 @@ dropafterack:
 	m_freem(m);
 	tp->t_flags |= TF_ACKNOW;
 	(void) tcp_output(tp);
+	in_pcbunref(inp);
 	return IPPROTO_DONE;
 
 dropwithreset_ratelim:
@@ -2090,6 +2100,7 @@ dropwithreset:
 		    (tcp_seq)0, TH_RST|TH_ACK, m->m_pkthdr.ph_rtableid);
 	}
 	m_freem(m);
+	in_pcbunref(inp);
 	return IPPROTO_DONE;
 
 drop:
@@ -2100,6 +2111,7 @@ drop:
 		tcp_trace(TA_DROP, ostate, tp, otp, saveti, 0, tlen);
 
 	m_freem(m);
+	in_pcbunref(inp);
 	return IPPROTO_DONE;
 }
 
@@ -2197,7 +2209,7 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcphdr *th,
 				continue;
 
 			if (sigp && timingsafe_bcmp(sigp, cp + 2, 16))
-				return (-1);
+				goto bad;
 
 			sigp = cp + 2;
 			break;
@@ -2248,7 +2260,7 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcphdr *th,
 
 	if ((sigp ? TF_SIGNATURE : 0) ^ (tp->t_flags & TF_SIGNATURE)) {
 		tcpstat_inc(tcps_rcvbadsig);
-		return (-1);
+		goto bad;
 	}
 
 	if (sigp) {
@@ -2256,22 +2268,30 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcphdr *th,
 
 		if (tdb == NULL) {
 			tcpstat_inc(tcps_rcvbadsig);
-			return (-1);
+			goto bad;
 		}
 
 		if (tcp_signature(tdb, tp->pf, m, th, iphlen, 1, sig) < 0)
-			return (-1);
+			goto bad;
 
 		if (timingsafe_bcmp(sig, sigp, 16)) {
 			tcpstat_inc(tcps_rcvbadsig);
-			return (-1);
+			goto bad;
 		}
 
 		tcpstat_inc(tcps_rcvgoodsig);
 	}
+
+	tdb_unref(tdb);
 #endif /* TCP_SIGNATURE */
 
 	return (0);
+
+#ifdef TCP_SIGNATURE
+ bad:
+	tdb_unref(tdb);
+#endif /* TCP_SIGNATURE */
+	return (-1);
 }
 
 u_long
@@ -3436,7 +3456,7 @@ syn_cache_lookup(struct sockaddr *src, struct sockaddr *dst,
  *
  *	-1	We were unable to create the new connection, and are
  *		aborting it.  An ACK,RST is being sent to the peer
- *		(unless we got screwey sequence numbners; see below),
+ *		(unless we got screwy sequence numbers; see below),
  *		because the 3-way handshake has been completed.  Caller
  *		should not free the mbuf, since we may be using it.  If
  *		we are not, we will free it.
@@ -3603,6 +3623,9 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	tcp_rcvseqinit(tp);
 	tp->t_state = TCPS_SYN_RECEIVED;
 	tp->t_rcvtime = tcp_now;
+	tp->t_sndtime = tcp_now;
+	tp->t_rcvacktime = tcp_now;
+	tp->t_sndacktime = tcp_now;
 	TCP_TIMER_ARM(tp, TCPT_KEEP, tcptv_keep_init);
 	tcpstat_inc(tcps_accepts);
 
@@ -4056,8 +4079,10 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 		if (tcp_signature(tdb, sc->sc_src.sa.sa_family, m, th,
 		    hlen, 0, optp) < 0) {
 			m_freem(m);
+			tdb_unref(tdb);
 			return (EINVAL);
 		}
+		tdb_unref(tdb);
 		optp += 16;
 
 		/* Pad options list to the next 32 bit boundary and

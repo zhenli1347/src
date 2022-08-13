@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcic2_isa.c,v 1.9 2021/03/07 06:17:04 jsg Exp $	*/
+/*	$OpenBSD: tcic2_isa.c,v 1.11 2022/04/06 18:59:29 naddy Exp $	*/
 /*	$NetBSD: tcic2_isa.c,v 1.2 1999/04/08 16:14:29 bad Exp $	*/
 
 #undef	TCICISADEBUG
@@ -113,7 +113,7 @@ void	*tcic_isa_chip_intr_establish(pcmcia_chipset_handle_t,
 void	tcic_isa_chip_intr_disestablish(pcmcia_chipset_handle_t, void *);
 const char *tcic_isa_chip_intr_string(pcmcia_chipset_handle_t, void *);
 
-struct cfattach tcic_isa_ca = {
+const struct cfattach tcic_isa_ca = {
 	sizeof(struct tcic_softc), tcic_isa_probe, tcic_isa_attach
 };
 
@@ -222,7 +222,7 @@ tcic_isa_attach(struct device *parent, struct device *self, void *aux)
 	sc->memh = memh;
 
 	/*
-	 * determine chip type and initialise some chip type dependend
+	 * determine chip type and initialise some chip type dependent
 	 * parameters in softc.
 	 */
 	sc->chipid = tcic_chipid(iot, ioh);

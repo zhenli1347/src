@@ -1,4 +1,4 @@
-/* $OpenBSD: err.h,v 1.25 2017/02/20 23:21:19 beck Exp $ */
+/* $OpenBSD: err.h,v 1.27 2022/05/05 08:48:05 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -196,6 +196,8 @@ typedef struct err_state_st {
 #define ERR_LIB_HMAC		48
 #define ERR_LIB_JPAKE		49
 #define ERR_LIB_GOST		50
+#define ERR_LIB_CT		51
+#define ERR_LIB_KDF		52
 
 #define ERR_LIB_USER		128
 
@@ -234,6 +236,8 @@ typedef struct err_state_st {
 #define JPAKEerr(f,r) ERR_PUT_error(ERR_LIB_JPAKE,(f),(r),__FILE__,__LINE__)
 #define GOSTerr(f,r) ERR_PUT_error(ERR_LIB_GOST,(f),(r),__FILE__,__LINE__)
 #define SSLerr(f,r)  ERR_PUT_error(ERR_LIB_SSL,(f),(r),__FILE__,__LINE__)
+#define CTerr(f, r) ERR_PUT_error(ERR_LIB_CT,(f),(r),__FILE__,__LINE__)
+#define KDFerr(f, r) ERR_PUT_error(ERR_LIB_KDF,(f),(r),__FILE__,__LINE__)
 #endif
 
 #ifdef LIBRESSL_INTERNAL
@@ -270,6 +274,8 @@ typedef struct err_state_st {
 #define HMACerror(r) ERR_PUT_error(ERR_LIB_HMAC,(0xfff),(r),__FILE__,__LINE__)
 #define JPAKEerror(r) ERR_PUT_error(ERR_LIB_JPAKE,(0xfff),(r),__FILE__,__LINE__)
 #define GOSTerror(r) ERR_PUT_error(ERR_LIB_GOST,(0xfff),(r),__FILE__,__LINE__)
+#define CTerror(r) ERR_PUT_error(ERR_LIB_CT,(0xfff),(r),__FILE__,__LINE__)
+#define KDFerror(r) ERR_PUT_error(ERR_LIB_KDF,(0xfff),(r),__FILE__,__LINE__)
 #endif
 
 #define ERR_PACK(l,f,r)		(((((unsigned long)l)&0xffL)<<24L)| \

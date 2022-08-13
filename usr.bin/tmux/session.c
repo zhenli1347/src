@@ -1,4 +1,4 @@
-/* $OpenBSD: session.c,v 1.89 2021/08/13 06:52:51 nicm Exp $ */
+/* $OpenBSD: session.c,v 1.92 2022/02/22 13:31:18 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -29,7 +29,7 @@
 #include "tmux.h"
 
 struct sessions		sessions;
-static u_int		next_session_id;
+u_int			next_session_id;
 struct session_groups	session_groups = RB_INITIALIZER(&session_groups);
 
 static void	session_free(int, short, void *);
@@ -205,6 +205,9 @@ session_destroy(struct session *s, int notify, const char *from)
 	struct winlink	*wl;
 
 	log_debug("session %s destroyed (%s)", s->name, from);
+
+	if (s->curw == NULL)
+		return;
 	s->curw = NULL;
 
 	RB_REMOVE(sessions, &sessions, s);
@@ -500,7 +503,8 @@ session_set_current(struct session *s, struct winlink *wl)
 	winlink_stack_push(&s->lastw, s->curw);
 	s->curw = wl;
 	if (options_get_number(global_options, "focus-events")) {
-		window_update_focus(old->window);
+		if (old != NULL)
+			window_update_focus(old->window);
 		window_update_focus(wl->window);
 	}
 	winlink_clear_flags(wl);

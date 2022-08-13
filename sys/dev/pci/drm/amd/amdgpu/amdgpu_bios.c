@@ -104,6 +104,10 @@ static bool igp_read_bios_from_vram(struct amdgpu_device *adev)
 		if (amdgpu_device_need_post(adev))
 			return false;
 
+	/* FB BAR not enabled */
+	if (pci_resource_len(adev->pdev, 0) == 0)
+		return false;
+
 	adev->bios = NULL;
 	vram_base = pci_resource_start(adev->pdev, 0);
 	bios = ioremap_wc(vram_base, size);
@@ -200,7 +204,6 @@ bool amdgpu_read_bios(struct amdgpu_device *adev)
 #else
 bool amdgpu_read_bios(struct amdgpu_device *adev)
 {
-	uint8_t __iomem *bios;
 	size_t size;
 	pcireg_t address, mask;
 	bus_space_handle_t romh;
@@ -218,25 +221,15 @@ bool amdgpu_read_bios(struct amdgpu_device *adev)
 	size = PCI_ROM_SIZE(mask);
 	if (size == 0)
 		return false;
-	rc = bus_space_map(adev->memt, PCI_ROM_ADDR(address), size,
-	    BUS_SPACE_MAP_LINEAR, &romh);
+	rc = bus_space_map(adev->memt, PCI_ROM_ADDR(address), size, 0, &romh);
 	if (rc != 0) {
 		printf(": can't map PCI ROM (%d)\n", rc);
 		return false;
 	}
-	bios = (uint8_t *)bus_space_vaddr(adev->memt, romh);
-	if (!bios) {
-		printf(": bus_space_vaddr failed\n");
-		return false;
-	}
 
 	adev->bios = kzalloc(size, GFP_KERNEL);
-	if (adev->bios == NULL) {
-		bus_space_unmap(adev->memt, romh, size);
-		return false;
-	}
 	adev->bios_size = size;
-	memcpy_fromio(adev->bios, bios, size);
+	bus_space_read_region_1(adev->memt, romh, 0, adev->bios, size);
 	bus_space_unmap(adev->memt, romh, size);
 
 	if (!check_atom_bios(adev->bios, size)) {
@@ -253,7 +246,7 @@ static bool amdgpu_read_bios_from_rom(struct amdgpu_device *adev)
 	u8 header[AMD_VBIOS_SIGNATURE_END+1] = {0};
 	int len;
 
-	if (!adev->asic_funcs->read_bios_from_rom)
+	if (!adev->asic_funcs || !adev->asic_funcs->read_bios_from_rom)
 		return false;
 
 	/* validate VBIOS signature */
@@ -413,13 +406,14 @@ static bool amdgpu_atrm_get_bios(struct amdgpu_device *adev)
 	if (adev->flags & AMD_IS_APU)
 		return false;
 
+#ifdef notyet
 	while ((pdev = pci_get_class(PCI_CLASS_DISPLAY_VGA << 8, pdev)) != NULL) {
 		dhandle = ACPI_HANDLE(&pdev->dev);
 		if (!dhandle)
 			continue;
 
 		status = acpi_get_handle(dhandle, "ATRM", &atrm_handle);
-		if (!ACPI_FAILURE(status)) {
+		if (ACPI_SUCCESS(status)) {
 			found = true;
 			break;
 		}
@@ -432,19 +426,32 @@ static bool amdgpu_atrm_get_bios(struct amdgpu_device *adev)
 				continue;
 
 			status = acpi_get_handle(dhandle, "ATRM", &atrm_handle);
-			if (!ACPI_FAILURE(status)) {
+			if (ACPI_SUCCESS(status)) {
 				found = true;
 				break;
 			}
 		}
 	}
+#else
+	{
+		pdev = adev->pdev;
+		dhandle = ACPI_HANDLE(&pdev->dev);
+
+		if (dhandle) {
+			status = acpi_get_handle(dhandle, "ATRM", &atrm_handle);
+			if (ACPI_SUCCESS(status)) {
+				found = true;
+			}
+		}
+	}
+#endif
 
 	if (!found)
 		return false;
 
 	adev->bios = kmalloc(size, GFP_KERNEL);
 	if (!adev->bios) {
-		DRM_ERROR("Unable to allocate bios\n");
+		dev_err(adev->dev, "Unable to allocate bios\n");
 		return false;
 	}
 
@@ -476,7 +483,8 @@ static bool amdgpu_read_disabled_bios(struct amdgpu_device *adev)
 	if (adev->flags & AMD_IS_APU)
 		return igp_read_bios_from_vram(adev);
 	else
-		return amdgpu_asic_read_disabled_bios(adev);
+		return (!adev->asic_funcs || !adev->asic_funcs->read_disabled_bios) ?
+			false : amdgpu_asic_read_disabled_bios(adev);
 }
 
 #ifdef CONFIG_ACPI
@@ -491,7 +499,7 @@ static bool amdgpu_acpi_vfct_bios(struct amdgpu_device *adev)
 		return false;
 	tbl_size = hdr->length;
 	if (tbl_size < sizeof(UEFI_ACPI_VFCT)) {
-		DRM_ERROR("ACPI VFCT table present but broken (too short #1)\n");
+		dev_info(adev->dev, "ACPI VFCT table present but broken (too short #1),skipping\n");
 		return false;
 	}
 
@@ -504,13 +512,13 @@ static bool amdgpu_acpi_vfct_bios(struct amdgpu_device *adev)
 
 		offset += sizeof(VFCT_IMAGE_HEADER);
 		if (offset > tbl_size) {
-			DRM_ERROR("ACPI VFCT image header truncated\n");
+			dev_info(adev->dev, "ACPI VFCT image header truncated,skipping\n");
 			return false;
 		}
 
 		offset += vhdr->ImageLength;
 		if (offset > tbl_size) {
-			DRM_ERROR("ACPI VFCT image truncated\n");
+			dev_info(adev->dev, "ACPI VFCT image truncated,skipping\n");
 			return false;
 		}
 
@@ -533,7 +541,7 @@ static bool amdgpu_acpi_vfct_bios(struct amdgpu_device *adev)
 		}
 	}
 
-	DRM_ERROR("ACPI VFCT table present but broken (too short #2)\n");
+	dev_info(adev->dev, "ACPI VFCT table present but broken (too short #2),skipping\n");
 	return false;
 }
 #else
@@ -580,7 +588,7 @@ bool amdgpu_get_bios(struct amdgpu_device *adev)
 		goto success;
 	}
 
-	DRM_ERROR("Unable to locate a BIOS ROM\n");
+	dev_err(adev->dev, "Unable to locate a BIOS ROM\n");
 	return false;
 
 success:

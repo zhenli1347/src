@@ -1,7 +1,7 @@
-/* $OpenBSD: wycheproof.go,v 1.121 2021/04/03 13:34:45 tb Exp $ */
+/* $OpenBSD: wycheproof.go,v 1.128 2022/07/13 06:40:24 tb Exp $ */
 /*
  * Copyright (c) 2018 Joel Sing <jsing@openbsd.org>
- * Copyright (c) 2018, 2019 Theo Buehler <tb@openbsd.org>
+ * Copyright (c) 2018,2019,2022 Theo Buehler <tb@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,6 +22,7 @@ package main
 /*
 #cgo LDFLAGS: -lcrypto
 
+#include <limits.h>
 #include <string.h>
 
 #include <openssl/aes.h>
@@ -33,7 +34,7 @@ package main
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
-#include <openssl/hkdf.h>
+#include <openssl/kdf.h>
 #include <openssl/hmac.h>
 #include <openssl/objects.h>
 #include <openssl/pem.h>
@@ -41,9 +42,33 @@ package main
 #include <openssl/rsa.h>
 
 int
-evpDigestSignUpdate(EVP_MD_CTX *ctx, const void *d, size_t cnt)
+wp_EVP_PKEY_CTX_set_hkdf_md(EVP_PKEY_CTX *pctx, const EVP_MD *md)
 {
-	return EVP_DigestSignUpdate(ctx, d, cnt);
+	return EVP_PKEY_CTX_set_hkdf_md(pctx, md);
+}
+
+int
+wp_EVP_PKEY_CTX_set1_hkdf_salt(EVP_PKEY_CTX *pctx, const unsigned char *salt, size_t salt_len)
+{
+	if (salt_len > INT_MAX)
+		return 0;
+	return EVP_PKEY_CTX_set1_hkdf_salt(pctx, salt, salt_len);
+}
+
+int
+wp_EVP_PKEY_CTX_set1_hkdf_key(EVP_PKEY_CTX *pctx, const unsigned char *ikm, size_t ikm_len)
+{
+	if (ikm_len > INT_MAX)
+		return 0;
+	return EVP_PKEY_CTX_set1_hkdf_key(pctx, ikm, ikm_len);
+}
+
+int
+wp_EVP_PKEY_CTX_add1_hkdf_info(EVP_PKEY_CTX *pctx, const unsigned char *info, size_t info_len)
+{
+	if (info_len > INT_MAX)
+		return 0;
+	return EVP_PKEY_CTX_add1_hkdf_info(pctx, info, info_len);
 }
 */
 import "C"
@@ -322,6 +347,19 @@ type wycheproofTestGroupKW struct {
 	KeySize int                 `json:"keySize"`
 	Type    string              `json:"type"`
 	Tests   []*wycheproofTestKW `json:"tests"`
+}
+
+type wycheproofTestPrimality struct {
+	TCID    int      `json:"tcId"`
+	Comment string   `json:"comment"`
+	Value   string   `json:"value"`
+	Result  string   `json:"result"`
+	Flags   []string `json:"flags"`
+}
+
+type wycheproofTestGroupPrimality struct {
+	Type  string                     `json:"type"`
+	Tests []*wycheproofTestPrimality `json:"tests"`
 }
 
 type wycheproofTestRSA struct {
@@ -914,19 +952,23 @@ func runAesAeadTest(algorithm string, ctx *C.EVP_CIPHER_CTX, aead *C.EVP_AEAD, w
 
 	openAead, sealAead := true, true
 	if aead != nil {
-		var ctx C.EVP_AEAD_CTX
-		if C.EVP_AEAD_CTX_init(&ctx, aead, (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(keyLen), C.size_t(tagLen), nil) != 1 {
+		ctx := C.EVP_AEAD_CTX_new()
+		if ctx == nil {
+			log.Fatal("EVP_AEAD_CTX_new() failed")
+		}
+		defer C.EVP_AEAD_CTX_free(ctx)
+
+		if C.EVP_AEAD_CTX_init(ctx, aead, (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(keyLen), C.size_t(tagLen), nil) != 1 {
 			log.Fatal("Failed to initialize AEAD context")
 		}
-		defer C.EVP_AEAD_CTX_cleanup(&ctx)
 
 		// Make sure we don't accidentally prepend or compare against a 0.
 		if ctLen == 0 {
 			ct = nil
 		}
 
-		openAead = checkAeadOpen(&ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
-		sealAead = checkAeadSeal(&ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
+		openAead = checkAeadOpen(ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
+		sealAead = checkAeadSeal(ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
 	}
 
 	return openEvp && sealEvp && openAead && sealAead
@@ -1033,19 +1075,12 @@ func runAesCmacTest(cipher *C.EVP_CIPHER, wt *wycheproofTestAesCmac) bool {
 		return false
 	}
 
-	ret = C.evpDigestSignUpdate(mdctx, unsafe.Pointer(&msg[0]), C.size_t(msgLen))
-	if ret != 1 {
-		fmt.Printf("FAIL: Test case %d (%q) %v - EVP_DigestSignUpdate() = %d, want %v\n",
-			wt.TCID, wt.Comment, wt.Flags, ret, wt.Result)
-		return false
-	}
-
 	var outLen C.size_t
 	outTag := make([]byte, 16)
 
-	ret = C.EVP_DigestSignFinal(mdctx, (*C.uchar)(unsafe.Pointer(&outTag[0])), &outLen)
+	ret = C.EVP_DigestSign(mdctx, (*C.uchar)(unsafe.Pointer(&outTag[0])), &outLen, (*C.uchar)(unsafe.Pointer(&msg[0])), C.size_t(msgLen))
 	if ret != 1 {
-		fmt.Printf("FAIL: Test case %d (%q) %v - EVP_DigestSignFinal() = %d, want %v\n",
+		fmt.Printf("FAIL: Test case %d (%q) %v - EVP_DigestSign() = %d, want %v\n",
 			wt.TCID, wt.Comment, wt.Flags, ret, wt.Result)
 		return false
 	}
@@ -1240,14 +1275,17 @@ func runChaCha20Poly1305Test(algorithm string, wt *wycheproofTestAead) bool {
 		msg = append(tag, 0)
 	}
 
-	var ctx C.EVP_AEAD_CTX
-	if C.EVP_AEAD_CTX_init(&ctx, aead, (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(keyLen), C.size_t(tagLen), nil) != 1 {
+	ctx := C.EVP_AEAD_CTX_new()
+	if ctx == nil {
+		log.Fatal("EVP_AEAD_CTX_new() failed")
+	}
+	defer C.EVP_AEAD_CTX_free(ctx)
+	if C.EVP_AEAD_CTX_init(ctx, aead, (*C.uchar)(unsafe.Pointer(&key[0])), C.size_t(keyLen), C.size_t(tagLen), nil) != 1 {
 		log.Fatal("Failed to initialize AEAD context")
 	}
-	defer C.EVP_AEAD_CTX_cleanup(&ctx)
 
-	openSuccess := checkAeadOpen(&ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
-	sealSuccess := checkAeadSeal(&ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
+	openSuccess := checkAeadOpen(ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
+	sealSuccess := checkAeadSeal(ctx, iv, ivLen, aad, aadLen, msg, msgLen, ct, ctLen, tag, tagLen, wt)
 
 	return openSuccess && sealSuccess
 }
@@ -1283,12 +1321,21 @@ func encodeDSAP1363Sig(wtSig string) (*C.uchar, C.int) {
 	s := C.CString(wtSig[sigLen/2:])
 	defer C.free(unsafe.Pointer(r))
 	defer C.free(unsafe.Pointer(s))
-	if C.BN_hex2bn(&cSig.r, r) == 0 {
+	var sigR *C.BIGNUM
+	var sigS *C.BIGNUM
+	defer C.BN_free(sigR)
+	defer C.BN_free(sigS)
+	if C.BN_hex2bn(&sigR, r) == 0 {
 		return nil, 0
 	}
-	if C.BN_hex2bn(&cSig.s, s) == 0 {
+	if C.BN_hex2bn(&sigS, s) == 0 {
 		return nil, 0
 	}
+	if C.DSA_SIG_set0(cSig, sigR, sigS) == 0 {
+		return nil, 0
+	}
+	sigR = nil
+	sigS = nil
 
 	derLen := C.i2d_DSA_SIG(cSig, nil)
 	if derLen == 0 {
@@ -1818,12 +1865,21 @@ func encodeECDSAWebCryptoSig(wtSig string) (*C.uchar, C.int) {
 	s := C.CString(wtSig[sigLen/2:])
 	defer C.free(unsafe.Pointer(r))
 	defer C.free(unsafe.Pointer(s))
-	if C.BN_hex2bn(&cSig.r, r) == 0 {
+	var sigR *C.BIGNUM
+	var sigS *C.BIGNUM
+	defer C.BN_free(sigR)
+	defer C.BN_free(sigS)
+	if C.BN_hex2bn(&sigR, r) == 0 {
 		return nil, 0
 	}
-	if C.BN_hex2bn(&cSig.s, s) == 0 {
+	if C.BN_hex2bn(&sigS, s) == 0 {
 		return nil, 0
 	}
+	if C.ECDSA_SIG_set0(cSig, sigR, sigS) == 0 {
+		return nil, 0
+	}
+	sigR = nil
+	sigS = nil
 
 	derLen := C.i2d_ECDSA_SIG(cSig, nil)
 	if derLen == 0 {
@@ -1931,9 +1987,39 @@ func runHkdfTest(md *C.EVP_MD, wt *wycheproofTestHkdf) bool {
 		out = append(out, 0)
 	}
 
-	ret := C.HKDF((*C.uchar)(unsafe.Pointer(&out[0])), C.size_t(outLen), md, (*C.uchar)(unsafe.Pointer(&ikm[0])), C.size_t(ikmLen), (*C.uchar)(&salt[0]), C.size_t(saltLen), (*C.uchar)(unsafe.Pointer(&info[0])), C.size_t(infoLen))
+	pctx := C.EVP_PKEY_CTX_new_id(C.EVP_PKEY_HKDF, nil)
+	if pctx == nil {
+		log.Fatalf("EVP_PKEY_CTX_new_id failed")
+	}
+	defer C.EVP_PKEY_CTX_free(pctx)
 
-	if ret != 1 {
+	ret := C.EVP_PKEY_derive_init(pctx)
+	if ret <= 0 {
+		log.Fatalf("EVP_PKEY_derive_init failed, want 1, got %d", ret)
+	}
+
+	ret = C.wp_EVP_PKEY_CTX_set_hkdf_md(pctx, md)
+	if ret <= 0 {
+		log.Fatalf("EVP_PKEY_CTX_set_hkdf_md failed, want 1, got %d", ret)
+	}
+
+	ret = C.wp_EVP_PKEY_CTX_set1_hkdf_salt(pctx, (*C.uchar)(&salt[0]), C.size_t(saltLen))
+	if ret <= 0 {
+		log.Fatalf("EVP_PKEY_CTX_set1_hkdf_salt failed, want 1, got %d", ret)
+	}
+
+	ret = C.wp_EVP_PKEY_CTX_set1_hkdf_key(pctx, (*C.uchar)(&ikm[0]), C.size_t(ikmLen))
+	if ret <= 0 {
+		log.Fatalf("EVP_PKEY_CTX_set1_hkdf_key failed, want 1, got %d", ret)
+	}
+
+	ret = C.wp_EVP_PKEY_CTX_add1_hkdf_info(pctx, (*C.uchar)(&info[0]), C.size_t(infoLen))
+	if ret <= 0 {
+		log.Fatalf("EVP_PKEY_CTX_add1_hkdf_info failed, want 1, got %d", ret)
+	}
+
+	ret = C.EVP_PKEY_derive(pctx, (*C.uchar)(unsafe.Pointer(&out[0])), (*C.size_t)(unsafe.Pointer(&outLen)))
+	if ret <= 0 {
 		success := wt.Result == "invalid"
 		if !success {
 			fmt.Printf("FAIL: Test case %d (%q) %v - got %d, want %v\n", wt.TCID, wt.Comment, wt.Flags, ret, wt.Result)
@@ -1946,7 +2032,7 @@ func runHkdfTest(md *C.EVP_MD, wt *wycheproofTestHkdf) bool {
 		log.Fatalf("Failed to decode okm %q: %v", wt.Okm, err)
 	}
 	if !bytes.Equal(out[:outLen], okm) {
-		fmt.Printf("FAIL: Test case %d (%q) %v - expected and computed output don't match: %v", wt.TCID, wt.Comment, wt.Flags, wt.Result)
+		fmt.Printf("FAIL: Test case %d (%q) %v - expected and computed output don't match: %v\n", wt.TCID, wt.Comment, wt.Flags, wt.Result)
 	}
 
 	return wt.Result == "valid"
@@ -2150,6 +2236,35 @@ func runKWTestGroup(algorithm string, wtg *wycheproofTestGroupKW) bool {
 	return success
 }
 
+func runPrimalityTest(wt *wycheproofTestPrimality) bool {
+	var bnValue *C.BIGNUM
+	value := C.CString(wt.Value)
+	if C.BN_hex2bn(&bnValue, value) == 0 {
+		log.Fatal("Failed to set bnValue")
+	}
+	C.free(unsafe.Pointer(value))
+	defer C.BN_free(bnValue)
+
+	ret := C.BN_is_prime_ex(bnValue, C.BN_prime_checks, (*C.BN_CTX)(unsafe.Pointer(nil)), (*C.BN_GENCB)(unsafe.Pointer(nil)))
+	success := wt.Result == "acceptable" || (ret == 0 && wt.Result == "invalid") || (ret == 1 && wt.Result == "valid")
+	if !success {
+		fmt.Printf("FAIL: Test case %d (%q) %v failed - got %d, want %v\n", wt.TCID, wt.Comment, wt.Flags, ret, wt.Result)
+	}
+	return success
+}
+
+func runPrimalityTestGroup(algorithm string, wtg *wycheproofTestGroupPrimality) bool {
+	fmt.Printf("Running %v test group...\n", algorithm)
+
+	success := true
+	for _, wt := range wtg.Tests {
+		if !runPrimalityTest(wt) {
+			success = false
+		}
+	}
+	return success
+}
+
 func runRsaesOaepTest(rsa *C.RSA, sha *C.EVP_MD, mgfSha *C.EVP_MD, wt *wycheproofTestRsaes) bool {
 	ct, err := hex.DecodeString(wt.CT)
 	if err != nil {
@@ -2224,22 +2339,35 @@ func runRsaesOaepTestGroup(algorithm string, wtg *wycheproofTestGroupRsaesOaep) 
 	defer C.RSA_free(rsa)
 
 	d := C.CString(wtg.D)
-	if C.BN_hex2bn(&rsa.d, d) == 0 {
+	var rsaD *C.BIGNUM
+	defer C.BN_free(rsaD)
+	if C.BN_hex2bn(&rsaD, d) == 0 {
 		log.Fatal("Failed to set RSA d")
 	}
 	C.free(unsafe.Pointer(d))
 
 	e := C.CString(wtg.E)
-	if C.BN_hex2bn(&rsa.e, e) == 0 {
+	var rsaE *C.BIGNUM
+	defer C.BN_free(rsaE)
+	if C.BN_hex2bn(&rsaE, e) == 0 {
 		log.Fatal("Failed to set RSA e")
 	}
 	C.free(unsafe.Pointer(e))
 
 	n := C.CString(wtg.N)
-	if C.BN_hex2bn(&rsa.n, n) == 0 {
+	var rsaN *C.BIGNUM
+	defer C.BN_free(rsaN)
+	if C.BN_hex2bn(&rsaN, n) == 0 {
 		log.Fatal("Failed to set RSA n")
 	}
 	C.free(unsafe.Pointer(n))
+
+	if C.RSA_set0_key(rsa, rsaN, rsaE, rsaD) == 0 {
+		log.Fatal("RSA_set0_key failed")
+	}
+	rsaN = nil
+	rsaE = nil
+	rsaD = nil
 
 	sha, err := hashEvpMdFromString(wtg.SHA)
 	if err != nil {
@@ -2311,22 +2439,35 @@ func runRsaesPkcs1TestGroup(algorithm string, wtg *wycheproofTestGroupRsaesPkcs1
 	defer C.RSA_free(rsa)
 
 	d := C.CString(wtg.D)
-	if C.BN_hex2bn(&rsa.d, d) == 0 {
+	var rsaD *C.BIGNUM
+	defer C.BN_free(rsaD)
+	if C.BN_hex2bn(&rsaD, d) == 0 {
 		log.Fatal("Failed to set RSA d")
 	}
 	C.free(unsafe.Pointer(d))
 
 	e := C.CString(wtg.E)
-	if C.BN_hex2bn(&rsa.e, e) == 0 {
+	var rsaE *C.BIGNUM
+	defer C.BN_free(rsaE)
+	if C.BN_hex2bn(&rsaE, e) == 0 {
 		log.Fatal("Failed to set RSA e")
 	}
 	C.free(unsafe.Pointer(e))
 
 	n := C.CString(wtg.N)
-	if C.BN_hex2bn(&rsa.n, n) == 0 {
+	var rsaN *C.BIGNUM
+	defer C.BN_free(rsaN)
+	if C.BN_hex2bn(&rsaN, n) == 0 {
 		log.Fatal("Failed to set RSA n")
 	}
 	C.free(unsafe.Pointer(n))
+
+	if C.RSA_set0_key(rsa, rsaN, rsaE, rsaD) == 0 {
+		log.Fatal("RSA_set0_key failed")
+	}
+	rsaN = nil
+	rsaE = nil
+	rsaD = nil
 
 	success := true
 	for _, wt := range wtg.Tests {
@@ -2406,16 +2547,26 @@ func runRsassaTestGroup(algorithm string, wtg *wycheproofTestGroupRsassa) bool {
 	defer C.RSA_free(rsa)
 
 	e := C.CString(wtg.E)
-	if C.BN_hex2bn(&rsa.e, e) == 0 {
+	var rsaE *C.BIGNUM
+	defer C.BN_free(rsaE)
+	if C.BN_hex2bn(&rsaE, e) == 0 {
 		log.Fatal("Failed to set RSA e")
 	}
 	C.free(unsafe.Pointer(e))
 
 	n := C.CString(wtg.N)
-	if C.BN_hex2bn(&rsa.n, n) == 0 {
+	var rsaN *C.BIGNUM
+	defer C.BN_free(rsaN)
+	if C.BN_hex2bn(&rsaN, n) == 0 {
 		log.Fatal("Failed to set RSA n")
 	}
 	C.free(unsafe.Pointer(n))
+
+	if C.RSA_set0_key(rsa, rsaN, rsaE, nil) == 0 {
+		log.Fatal("RSA_set0_key failed")
+	}
+	rsaN = nil
+	rsaE = nil
 
 	h, err := hashFromString(wtg.SHA)
 	if err != nil {
@@ -2491,16 +2642,26 @@ func runRSATestGroup(algorithm string, wtg *wycheproofTestGroupRSA) bool {
 	defer C.RSA_free(rsa)
 
 	e := C.CString(wtg.E)
-	if C.BN_hex2bn(&rsa.e, e) == 0 {
+	var rsaE *C.BIGNUM
+	defer C.BN_free(rsaE)
+	if C.BN_hex2bn(&rsaE, e) == 0 {
 		log.Fatal("Failed to set RSA e")
 	}
 	C.free(unsafe.Pointer(e))
 
 	n := C.CString(wtg.N)
-	if C.BN_hex2bn(&rsa.n, n) == 0 {
+	var rsaN *C.BIGNUM
+	defer C.BN_free(rsaN)
+	if C.BN_hex2bn(&rsaN, n) == 0 {
 		log.Fatal("Failed to set RSA n")
 	}
 	C.free(unsafe.Pointer(n))
+
+	if C.RSA_set0_key(rsa, rsaN, rsaE, nil) == 0 {
+		log.Fatal("RSA_set0_key failed")
+	}
+	rsaN = nil
+	rsaE = nil
 
 	nid, err := nidFromString(wtg.SHA)
 	if err != nil {
@@ -2614,6 +2775,8 @@ func runTestVectors(path string, variant testVariant) bool {
 		wtg = &wycheproofTestGroupHmac{}
 	case "KW":
 		wtg = &wycheproofTestGroupKW{}
+	case "PrimalityTest":
+		wtg = &wycheproofTestGroupPrimality{}
 	case "RSAES-OAEP":
 		wtg = &wycheproofTestGroupRsaesOaep{}
 	case "RSAES-PKCS1-v1_5":
@@ -2693,6 +2856,10 @@ func runTestVectors(path string, variant testVariant) bool {
 			if !runKWTestGroup(wtv.Algorithm, wtg.(*wycheproofTestGroupKW)) {
 				success = false
 			}
+		case "PrimalityTest":
+			if !runPrimalityTestGroup(wtv.Algorithm, wtg.(*wycheproofTestGroupPrimality)) {
+				success = false
+			}
 		case "RSAES-OAEP":
 			if !runRsaesOaepTestGroup(wtv.Algorithm, wtg.(*wycheproofTestGroupRsaesOaep)) {
 				success = false
@@ -2756,6 +2923,7 @@ func main() {
 		{"HKDF", "hkdf_sha*_test.json", Normal},
 		{"HMAC", "hmac_sha*_test.json", Normal},
 		{"KW", "kw_test.json", Normal},
+		{"Primality test", "primality_test.json", Normal},
 		{"RSA", "rsa_*test.json", Normal},
 		{"X25519", "x25519_test.json", Normal},
 		{"X25519 ASN", "x25519_asn_test.json", Skip},

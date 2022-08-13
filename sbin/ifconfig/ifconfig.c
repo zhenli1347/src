@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifconfig.c,v 1.444 2021/07/12 15:09:18 beck Exp $	*/
+/*	$OpenBSD: ifconfig.c,v 1.456 2022/07/08 07:04:54 jsg Exp $	*/
 /*	$NetBSD: ifconfig.c,v 1.40 1997/10/01 02:19:43 enami Exp $	*/
 
 /*
@@ -116,13 +116,17 @@
 
 #include "ifconfig.h"
 
+#ifndef nitems
+#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
+#endif
+
 #define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
 #define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
 
 #define HWFEATURESBITS							\
 	"\024\1CSUM_IPv4\2CSUM_TCPv4\3CSUM_UDPv4"			\
 	"\5VLAN_MTU\6VLAN_HWTAGGING\10CSUM_TCPv6"			\
-	"\11CSUM_UDPv6\20WOL"
+	"\11CSUM_UDPv6\17TSO\20WOL"
 
 struct ifencap {
 	unsigned int	 ife_flags;
@@ -154,10 +158,6 @@ struct	in6_aliasreq	in6_addreq;
 struct	sockaddr_in	netmask;
 
 #ifndef SMALL
-struct	ifaliasreq	addreq;
-
-int	wconfig = 0;
-int	wcwconfig = 0;
 int	rdomainid;
 #endif /* SMALL */
 
@@ -246,7 +246,6 @@ void	setgroupattribs(char *, int, char *[]);
 int	printgroup(char *, int);
 void	setautoconf(const char *, int);
 void	settemporary(const char *, int);
-void	setprivacy(const char *, int);
 void	settrunkport(const char *, int);
 void	unsettrunkport(const char *, int);
 void	settrunkproto(const char *, int);
@@ -412,11 +411,6 @@ const struct	cmd {
 	{ "alias",	IFF_UP,		0,		notealias },
 	{ "-alias",	-IFF_UP,	0,		notealias },
 	{ "delete",	-IFF_UP,	0,		notealias },
-#ifdef notdef
-#define	EN_SWABIPS	0x1000
-	{ "swabips",	EN_SWABIPS,	0,		setifflags },
-	{ "-swabips",	-EN_SWABIPS,	0,		setifflags },
-#endif /* notdef */
 	{ "netmask",	NEXTARG,	0,		setifnetmask },
 	{ "mtu",	NEXTARG,	0,		setifmtu },
 	{ "nwid",	NEXTARG,	0,		setifnwid },
@@ -466,14 +460,14 @@ const struct	cmd {
 	{ "pltime",	NEXTARG,	0,		setia6pltime },
 	{ "vltime",	NEXTARG,	0,		setia6vltime },
 	{ "eui64",	0,		0,		setia6eui64 },
-	{ "autoconfprivacy",	1,		0,	setprivacy },
-	{ "-autoconfprivacy",	-1,		0,	setprivacy },
 	{ "temporary",	1,		0,		settemporary },
 	{ "-temporary",	-1,		0,		settemporary },
 	{ "soii",	-IFXF_INET6_NOSOII,	0,	setifxflags },
 	{ "-soii",	IFXF_INET6_NOSOII,	0,	setifxflags },
 	{ "monitor",	IFXF_MONITOR,	0,		setifxflags },
 	{ "-monitor",	-IFXF_MONITOR,	0,		setifxflags },
+	{ "tso",	IFXF_TSO,	0,		setifxflags },
+	{ "-tso",	-IFXF_TSO,	0,		setifxflags },
 #ifndef SMALL
 	{ "hwfeatures", NEXTARG0,	0,		printifhwfeatures },
 	{ "metric",	NEXTARG,	0,		setifmetric },
@@ -616,8 +610,6 @@ const struct	cmd {
 	{ "-roaming",	0,		0,		umb_roaming },
 	{ "patch",	NEXTARG,	0,		setpair },
 	{ "-patch",	1,		0,		unsetpair },
-	{ "datapath",	NEXTARG,	0,		switch_datapathid },
-	{ "portno",	NEXTARG2,	0,		NULL, switch_portno },
 	{ "addlocal",	NEXTARG,	0,		addlocal },
 	{ "transceiver", NEXTARG0,	0,		transceiver },
 	{ "sff",	NEXTARG0,	0,		transceiver },
@@ -679,7 +671,7 @@ const struct	cmd {
 	"\7RUNNING\10NOARP\11PROMISC\12ALLMULTI\13OACTIVE\14SIMPLEX"	\
 	"\15LINK0\16LINK1\17LINK2\20MULTICAST"				\
 	"\23AUTOCONF6TEMP\24MPLS\25WOL\26AUTOCONF6\27INET6_NOSOII"	\
-	"\30AUTOCONF4" "\31MONITOR"
+	"\30AUTOCONF4" "\31MONITOR" "\32TSO"
 
 int	getinfo(struct ifreq *, int);
 void	getsock(int);
@@ -728,6 +720,7 @@ u_int	getwpacipher(const char *);
 void	print_cipherset(u_int32_t);
 
 void	spppauthinfo(struct sauthreq *, int);
+void	spppdnsinfo(struct sdnsreq *);
 
 /* Known address families */
 const struct afswtch {
@@ -1036,11 +1029,7 @@ getinfo(struct ifreq *ifr, int create)
 		metric = 0;
 	else
 		metric = ifr->ifr_metric;
-#ifdef SMALL
 	if (ioctl(sock, SIOCGIFMTU, (caddr_t)ifr) == -1)
-#else
-	if (is_bridge() || ioctl(sock, SIOCGIFMTU, (caddr_t)ifr) == -1)
-#endif
 		mtu = 0;
 	else
 		mtu = ifr->ifr_mtu;
@@ -1602,14 +1591,6 @@ settemporary(const char *cmd, int val)
 	}
 }
 
-/* XXX remove after 7.0 */
-void
-setprivacy(const char *cmd, int val)
-{
-	warnx("The 'autoconfprivacy' option is deprecated, use 'temporary'");
-	settemporary(cmd, val);
-}
-
 #ifndef SMALL
 /* ARGSUSED */
 void
@@ -1906,10 +1887,8 @@ void
 delifjoinlist(const char *val, int d)
 {
 	struct ieee80211_join join;
-	int len;
 
 	memset(&join, 0, sizeof(join));
-	len = 0;
 	join.i_flags |= (IEEE80211_JOIN_DEL | IEEE80211_JOIN_DEL_ALL);
 
 	if (d == -1) {
@@ -2044,7 +2023,7 @@ setifnwkey(const char *val, int d)
 	}
 
 	if (ioctl(sock, SIOCS80211NWKEY, (caddr_t)&nwkey) == -1)
-		warn("SIOCS80211NWKEY");
+		err(1, "SIOCS80211NWKEY");
 }
 
 /* ARGSUSED */
@@ -2691,7 +2670,7 @@ join_status(void)
 void
 ieee80211_listchans(void)
 {
-	static struct ieee80211_channel chans[256+1];
+	static struct ieee80211_chaninfo chans[256];
 	struct ieee80211_chanreq_all ca;
 	int i;
 
@@ -2705,11 +2684,11 @@ ieee80211_listchans(void)
 		return;
 	}
 	printf("\t\t%4s  %-8s  %s\n", "chan", "freq", "properties");
-	for (i = 1; i <= 256; i++) {
-		if (chans[i].ic_flags == 0)
+	for (i = 1; i < nitems(chans); i++) {
+		if (chans[i].ic_freq == 0)
 			continue;
 		printf("\t\t%4d  %4d MHz  ", i, chans[i].ic_freq);
-		if (chans[i].ic_flags & IEEE80211_CHAN_PASSIVE)
+		if (chans[i].ic_flags & IEEE80211_CHANINFO_PASSIVE)
 			printf("passive scan");
 		else
 			putchar('-');
@@ -3079,7 +3058,7 @@ const struct ifmedia_description ifm_type_descriptions[] =
 const struct ifmedia_description ifm_subtype_descriptions[] =
     IFM_SUBTYPE_DESCRIPTIONS;
 
-struct ifmedia_description ifm_mode_descriptions[] =
+const struct ifmedia_description ifm_mode_descriptions[] =
     IFM_MODE_DESCRIPTIONS;
 
 const struct ifmedia_description ifm_option_descriptions[] =
@@ -5379,12 +5358,13 @@ pppoe_status(void)
 	printf(" PADR retries: %d", state.padr_retry_no);
 
 	if (state.state == PPPOE_STATE_SESSION) {
-		struct timeval temp_time;
+		struct timespec temp_time;
 		time_t diff_time, day = 0;
 		unsigned int hour = 0, min = 0, sec = 0;
 
 		if (state.session_time.tv_sec != 0) {
-			gettimeofday(&temp_time, NULL);
+			if (clock_gettime(CLOCK_BOOTTIME, &temp_time) == -1)
+				goto notime;
 			diff_time = temp_time.tv_sec -
 			    state.session_time.tv_sec;
 
@@ -5404,6 +5384,7 @@ pppoe_status(void)
 			printf("%lldd ", (long long)day);
 		printf("%02u:%02u:%02u", hour, min, sec);
 	}
+notime:
 	putchar('\n');
 }
 
@@ -5470,6 +5451,17 @@ spppauthinfo(struct sauthreq *spa, int d)
 	spa->cmd = d == 0 ? SPPPIOGMAUTH : SPPPIOGHAUTH;
 	if (ioctl(sock, SIOCGSPPPPARAMS, &ifr) == -1)
 		err(1, "SIOCGSPPPPARAMS(SPPPIOGXAUTH)");
+}
+
+void
+spppdnsinfo(struct sdnsreq *spd)
+{
+	memset(spd, 0, sizeof(*spd));
+
+	ifr.ifr_data = (caddr_t)spd;
+	spd->cmd = SPPPIOGDNS;
+	if (ioctl(sock, SIOCGSPPPPARAMS, &ifr) == -1)
+		err(1, "SIOCGSPPPPARAMS(SPPPIOGDNS)");
 }
 
 void
@@ -5606,6 +5598,9 @@ sppp_status(void)
 {
 	struct spppreq spr;
 	struct sauthreq spa;
+	struct sdnsreq spd;
+	char astr[INET_ADDRSTRLEN];
+	int i, n;
 
 	bzero(&spr, sizeof(spr));
 
@@ -5645,6 +5640,16 @@ sppp_status(void)
 	if (spa.flags & AUTHFLAG_NORECHALLENGE)
 		printf("norechallenge ");
 	putchar('\n');
+
+	spppdnsinfo(&spd);
+	for (i = 0, n = 0; i < IPCP_MAX_DNSSRV; i++) {
+		if (spd.dns[i].s_addr == INADDR_ANY)
+			break;
+		printf("%s %s", n++ ? "" : "\tdns:",
+		    inet_ntop(AF_INET, &spd.dns[i], astr, sizeof(astr)));
+	}
+	if (n)
+		printf("\n");
 }
 
 void
@@ -5985,8 +5990,6 @@ const struct umb_valdescr umb_regstate[] = MBIM_REGSTATE_DESCRIPTIONS;
 const struct umb_valdescr umb_dataclass[] = MBIM_DATACLASS_DESCRIPTIONS;
 const struct umb_valdescr umb_simstate[] = MBIM_SIMSTATE_DESCRIPTIONS;
 const struct umb_valdescr umb_istate[] = UMB_INTERNAL_STATE_DESCRIPTIONS;
-const struct umb_valdescr umb_pktstate[] = MBIM_PKTSRV_STATE_DESCRIPTIONS;
-const struct umb_valdescr umb_actstate[] = MBIM_ACTIVATION_STATE_DESCRIPTIONS;
 
 const struct umb_valdescr umb_classalias[] = {
 	{ MBIM_DATACLASS_GPRS | MBIM_DATACLASS_EDGE, "2g" },

@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.153 2021/03/11 11:16:56 jsg Exp $	*/
+/*	$OpenBSD: trap.c,v 1.158 2022/08/12 17:19:52 miod Exp $	*/
 
 /*
  * Copyright (c) 1998-2004 Michael Shalayeff
@@ -264,15 +264,16 @@ trap(int type, struct trapframe *frame)
 	case T_DBREAK | T_USER: {
 		int code = TRAP_BRKPT;
 
-		KERNEL_LOCK();
 #ifdef PTRACE
+		KERNEL_LOCK();
 		ss_clear_breakpoints(p);
 		if (opcode == SSBREAKPOINT)
 			code = TRAP_TRACE;
+		KERNEL_UNLOCK();
 #endif
 		/* pass to user debugger */
+		sv.sival_int = va;
 		trapsignal(p, SIGTRAP, type & ~T_USER, code, sv);
-		KERNEL_UNLOCK();
 		}
 		break;
 
@@ -280,9 +281,10 @@ trap(int type, struct trapframe *frame)
 	case T_TAKENBR | T_USER:
 		KERNEL_LOCK();
 		ss_clear_breakpoints(p);
-		/* pass to user debugger */
-		trapsignal(p, SIGTRAP, type & ~T_USER, TRAP_TRACE, sv);
 		KERNEL_UNLOCK();
+		/* pass to user debugger */
+		sv.sival_int = va;
+		trapsignal(p, SIGTRAP, type & ~T_USER, TRAP_TRACE, sv);
 		break;
 #endif
 
@@ -762,9 +764,9 @@ void	syscall(struct trapframe *frame);
 void
 syscall(struct trapframe *frame)
 {
-	register struct proc *p = curproc;
-	register const struct sysent *callp;
-	int retq, nsys, code, argsize, argoff, error;
+	struct proc *p = curproc;
+	const struct sysent *callp;
+	int retq, code, argsize, argoff, error;
 	register_t args[8], rval[2];
 #ifdef DIAGNOSTIC
 	int oldcpl = curcpu()->ci_cpl;
@@ -776,8 +778,6 @@ syscall(struct trapframe *frame)
 		panic("syscall");
 
 	p->p_md.md_regs = frame;
-	nsys = p->p_p->ps_emul->e_nsysent;
-	callp = p->p_p->ps_emul->e_sysent;
 
 	argoff = 4; retq = 0;
 	switch (code = frame->tf_t1) {
@@ -789,8 +789,6 @@ syscall(struct trapframe *frame)
 		argoff = 3;
 		break;
 	case SYS___syscall:
-		if (callp != sysent)
-			break;
 		/*
 		 * this works, because quads get magically swapped
 		 * due to the args being laid backwards on the stack
@@ -810,8 +808,9 @@ syscall(struct trapframe *frame)
 		break;
 	}
 
-	if (code < 0 || code >= nsys)
-		callp += p->p_p->ps_emul->e_nosys;	/* bad syscall # */
+	callp = sysent;
+	if (code < 0 || code >= SYS_MAXSYSCALL)
+		callp += SYS_syscall;
 	else
 		callp += code;
 

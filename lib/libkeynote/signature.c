@@ -1,4 +1,4 @@
-/* $OpenBSD: signature.c,v 1.26 2017/05/09 13:52:45 mestre Exp $ */
+/* $OpenBSD: signature.c,v 1.29 2022/01/14 09:08:03 tb Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@dsl.cis.upenn.edu)
  *
@@ -522,7 +522,7 @@ kn_decode_key(struct keynote_deckey *dc, char *key, int keytype)
 	    return -1;
 	}
 
-	if ((pPublicKey = X509_get_pubkey(px509Cert)) == NULL) {
+	if ((pPublicKey = X509_get0_pubkey(px509Cert)) == NULL) {
 	    free(ptr);
 	    X509_free(px509Cert);
 	    keynote_errno = ERROR_SYNTAX;
@@ -530,9 +530,11 @@ kn_decode_key(struct keynote_deckey *dc, char *key, int keytype)
 	}
 
 	/* RSA-specific */
-	dc->dec_key = pPublicKey->pkey.rsa;
+	dc->dec_key = EVP_PKEY_get0_RSA(pPublicKey);
+	RSA_up_ref(dc->dec_key);
 
 	free(ptr);
+	X509_free(px509Cert);
 	return 0;
     }    
 
@@ -586,10 +588,10 @@ kn_keycompare(void *key1, void *key2, int algorithm)
 	case KEYNOTE_ALGORITHM_DSA:
 	    p1 = (DSA *) key1;
 	    p2 = (DSA *) key2;
-	    if (!BN_cmp(p1->p, p2->p) &&
-		!BN_cmp(p1->q, p2->q) &&
-		!BN_cmp(p1->g, p2->g) &&
-		!BN_cmp(p1->pub_key, p2->pub_key))
+	    if (!BN_cmp(DSA_get0_p(p1), DSA_get0_p(p2)) &&
+		!BN_cmp(DSA_get0_q(p1), DSA_get0_q(p2)) &&
+		!BN_cmp(DSA_get0_g(p1), DSA_get0_g(p2)) &&
+		!BN_cmp(DSA_get0_pub_key(p1), DSA_get0_pub_key(p2)))
 	      return RESULT_TRUE;
 	    else
 	      return RESULT_FALSE;
@@ -597,8 +599,8 @@ kn_keycompare(void *key1, void *key2, int algorithm)
 	case KEYNOTE_ALGORITHM_X509:
             p3 = (RSA *) key1;
             p4 = (RSA *) key2;
-            if (!BN_cmp(p3->n, p4->n) &&
-                !BN_cmp(p3->e, p4->e))
+            if (!BN_cmp(RSA_get0_n(p3), RSA_get0_n(p4)) &&
+                !BN_cmp(RSA_get0_e(p3), RSA_get0_e(p4)))
               return RESULT_TRUE;
             else
 	      return RESULT_FALSE;
@@ -606,8 +608,8 @@ kn_keycompare(void *key1, void *key2, int algorithm)
 	case KEYNOTE_ALGORITHM_RSA:
             p3 = (RSA *) key1;
             p4 = (RSA *) key2;
-            if (!BN_cmp(p3->n, p4->n) &&
-                !BN_cmp(p3->e, p4->e))
+            if (!BN_cmp(RSA_get0_n(p3), RSA_get0_n(p4)) &&
+                !BN_cmp(RSA_get0_e(p3), RSA_get0_e(p4)))
               return RESULT_TRUE;
             else
 	      return RESULT_FALSE;
@@ -1174,7 +1176,6 @@ kn_encode_key(struct keynote_deckey *dc, int iencoding,
 	    return NULL;
 	}
 
-	dsa->write_params = 1;
 	if (keytype == KEYNOTE_PUBLIC_KEY)
 	  i2d_DSAPublicKey(dsa, (unsigned char **) &foo);
 	else

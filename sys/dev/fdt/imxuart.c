@@ -1,4 +1,4 @@
-/* $OpenBSD: imxuart.c,v 1.11 2021/09/01 09:29:31 jan Exp $ */
+/* $OpenBSD: imxuart.c,v 1.13 2022/07/02 08:50:42 visa Exp $ */
 /*
  * Copyright (c) 2005 Dale Rahn <drahn@motorola.com>
  *
@@ -26,7 +26,6 @@
 #include <sys/syslog.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
-#include <sys/select.h>
 #include <sys/kernel.h>
 
 #include <machine/bus.h>
@@ -114,7 +113,7 @@ struct cfdriver imxuart_cd = {
 	NULL, "imxuart", DV_TTY
 };
 
-struct cfattach imxuart_ca = {
+const struct cfattach imxuart_ca = {
 	sizeof(struct imxuart_softc), imxuart_match, imxuart_attach
 };
 

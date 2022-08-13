@@ -1,6 +1,6 @@
 define(MACHINE,powerpc64)dnl
 vers(__file__,
-	{-$OpenBSD: MAKEDEV.md,v 1.8 2021/02/12 10:26:34 jsg Exp $-},
+	{-$OpenBSD: MAKEDEV.md,v 1.11 2022/01/07 01:13:15 jsg Exp $-},
 etc.MACHINE)dnl
 dnl
 dnl Copyright (c) 2001-2006 Todd T. Fries <todd@OpenBSD.org>
@@ -29,6 +29,7 @@ _DEV(vnd, 24, 1)
 _DEV(rd, 25, 2)
 _DEV(sd, 26, 3)
 _DEV(cd, 27, 4)
+_DEV(wd, 17, 5)
 _TITLE(tap)
 _DEV(ch, 68)
 _DEV(st, 69)
@@ -61,7 +62,6 @@ _DEV(bio, 80)
 _DEV(bpf, 9)
 _DEV(diskmap, 10)
 _DEV(dri, 87)
-_DEV(drm, 87)
 _DEV(dt, 13)
 _DEV(fdesc, 8)
 _DEV(fuse, 81)
@@ -79,7 +79,6 @@ _DEV(tap, 75)
 _DEV(tun, 76)
 _DEV(uk, 70)
 _DEV(vscsi, 83)
-_DEV(switch, 74)
 _DEV(kstat, 15)
 dnl
 divert(__mddivert)dnl
@@ -105,12 +104,10 @@ target(all, bio)dnl
 target(all, cd, 0, 1)dnl
 target(all, diskmap)dnl
 target(all, dri)dnl
-target(all, drm, 0, 1, 2, 3)dnl
 target(all, ipmi, 0)dnl
 target(all, pty, 0)dnl
 target(all, rd, 0)dnl
 target(all, sd, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)dnl
-target(all, switch, 0, 1, 2, 3)dnl
 target(all, tap, 0, 1, 2, 3)dnl
 target(all, tun, 0, 1, 2, 3)dnl
 target(all, vnd, 0, 1, 2, 3)dnl

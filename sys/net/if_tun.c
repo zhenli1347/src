@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tun.c,v 1.231 2021/03/09 20:05:14 anton Exp $	*/
+/*	$OpenBSD: if_tun.c,v 1.237 2022/07/02 08:50:42 visa Exp $	*/
 /*	$NetBSD: if_tun.c,v 1.24 1996/05/07 02:40:48 thorpej Exp $	*/
 
 /*
@@ -42,7 +42,6 @@
 #include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
 #include <sys/sigio.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -54,7 +53,6 @@
 #include <sys/device.h>
 #include <sys/vnode.h>
 #include <sys/signalvar.h>
-#include <sys/poll.h>
 #include <sys/conf.h>
 #include <sys/smr.h>
 
@@ -111,7 +109,6 @@ int	tun_dev_close(dev_t, struct proc *);
 int	tun_dev_ioctl(dev_t, u_long, void *);
 int	tun_dev_read(dev_t, struct uio *, int);
 int	tun_dev_write(dev_t, struct uio *, int, int);
-int	tun_dev_poll(dev_t, int, struct proc *);
 int	tun_dev_kqfilter(dev_t, struct knote *);
 
 int	tun_ioctl(struct ifnet *, u_long, caddr_t);
@@ -130,7 +127,7 @@ int	filt_tunread(struct knote *, long);
 int	filt_tunwrite(struct knote *, long);
 void	filt_tunrdetach(struct knote *);
 void	filt_tunwdetach(struct knote *);
-void	tun_link_state(struct tun_softc *, int);
+void	tun_link_state(struct ifnet *, int);
 
 const struct filterops tunread_filtops = {
 	.f_flags	= FILTEROP_ISFD,
@@ -218,6 +215,8 @@ tun_create(struct if_clone *ifc, int unit, int flags)
 	KERNEL_ASSERT_LOCKED();
 
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK|M_ZERO);
+	refcnt_init(&sc->sc_refs);
+
 	ifp = &sc->sc_if;
 	snprintf(ifp->if_xname, sizeof(ifp->if_xname),
 	    "%s%d", ifc->ifc_name, unit);
@@ -267,7 +266,6 @@ tun_create(struct if_clone *ifc, int unit, int flags)
 	}
 
 	sigio_init(&sc->sc_sigio);
-	refcnt_init(&sc->sc_refs);
 
 	/* tell tun_dev_open we're initialised */
 
@@ -373,15 +371,24 @@ tun_dev_open(dev_t dev, const struct if_clone *ifc, int mode, struct proc *p)
 	struct ifnet *ifp;
 	int error;
 	u_short stayup = 0;
+	struct vnode *vp;
 
 	char name[IFNAMSIZ];
 	unsigned int rdomain;
+
+	/*
+	 * Find the vnode associated with this open before we sleep
+	 * and let something else revoke it. Our caller has a reference
+	 * to it so we don't need to account for it.
+	 */
+	if (!vfinddev(dev, VCHR, &vp))
+		panic("%s vfinddev failed", __func__);
 
 	snprintf(name, sizeof(name), "%s%u", ifc->ifc_name, minor(dev));
 	rdomain = rtable_l2(p->p_p->ps_rtableid);
 
 	/* let's find or make an interface to work with */
-	while ((ifp = if_unit(name)) == NULL) {
+	while ((sc = tun_name_lookup(name)) == NULL) {
 		error = if_clone_create(name, rdomain);
 		switch (error) {
 		case 0: /* it's probably ours */
@@ -394,32 +401,51 @@ tun_dev_open(dev_t dev, const struct if_clone *ifc, int mode, struct proc *p)
 		}
 	}
 
-	sc = ifp->if_softc;
+	refcnt_take(&sc->sc_refs);
+
 	/* wait for it to be fully constructed before we use it */
-	while (!ISSET(sc->sc_flags, TUN_INITED)) {
+	for (;;) {
+		if (ISSET(sc->sc_flags, TUN_DEAD)) {
+			error = ENXIO;
+			goto done;
+		}
+
+		if (ISSET(sc->sc_flags, TUN_INITED))
+			break;
+
 		error = tsleep_nsec(sc, PCATCH, "tuninit", INFSLP);
 		if (error != 0) {
 			/* XXX if_clone_destroy if stayup? */
-			if_put(ifp);
-			return (error);
+			goto done;
 		}
+	}
+
+	/* Has tun_clone_destroy torn the rug out under us? */
+	if (vp->v_type == VBAD) {
+		error = ENXIO;
+		goto done;
 	}
 
 	if (sc->sc_dev != 0) {
 		/* aww, we lost */
-		if_put(ifp);
-		return (EBUSY);
+		error = EBUSY;
+		goto done;
 	}
 	/* it's ours now */
 	sc->sc_dev = dev;
 	CLR(sc->sc_flags, stayup);
 
 	/* automatically mark the interface running on open */
+	ifp = &sc->sc_if;
+	NET_LOCK();
 	SET(ifp->if_flags, IFF_UP | IFF_RUNNING);
-	if_put(ifp);
-	tun_link_state(sc, LINK_STATE_FULL_DUPLEX);
+	NET_UNLOCK();
+	tun_link_state(ifp, LINK_STATE_FULL_DUPLEX);
+	error = 0;
 
-	return (0);
+done:
+	tun_put(sc);
+	return (error);
 }
 
 /*
@@ -456,7 +482,9 @@ tun_dev_close(dev_t dev, struct proc *p)
 	/*
 	 * junk all pending output
 	 */
+	NET_LOCK();
 	CLR(ifp->if_flags, IFF_UP | IFF_RUNNING);
+	NET_UNLOCK();
 	ifq_purge(&ifp->if_snd);
 
 	CLR(sc->sc_flags, TUN_ASYNC);
@@ -469,8 +497,7 @@ tun_dev_close(dev_t dev, struct proc *p)
 			destroy = 1;
 			strlcpy(name, ifp->if_xname, sizeof(name));
 		} else {
-			CLR(ifp->if_flags, IFF_UP | IFF_RUNNING);
-			tun_link_state(sc, LINK_STATE_DOWN);
+			tun_link_state(ifp, LINK_STATE_DOWN);
 		}
 	}
 
@@ -914,50 +941,6 @@ tun_input(struct ifnet *ifp, struct mbuf *m0)
 	}
 }
 
-/*
- * tunpoll - the poll interface, this is only useful on reads
- * really. The write detect always returns true, write never blocks
- * anyway, it either accepts the packet or drops it.
- */
-int
-tunpoll(dev_t dev, int events, struct proc *p)
-{
-	return (tun_dev_poll(dev, events, p));
-}
-
-int
-tappoll(dev_t dev, int events, struct proc *p)
-{
-	return (tun_dev_poll(dev, events, p));
-}
-
-int
-tun_dev_poll(dev_t dev, int events, struct proc *p)
-{
-	struct tun_softc	*sc;
-	struct ifnet		*ifp;
-	int			 revents;
-
-	sc = tun_get(dev);
-	if (sc == NULL)
-		return (POLLERR);
-
-	ifp = &sc->sc_if;
-	revents = 0;
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		if (!ifq_empty(&ifp->if_snd))
-			revents |= events & (POLLIN | POLLRDNORM);
-		else
-			selrecord(p, &sc->sc_rsel);
-	}
-	if (events & (POLLOUT | POLLWRNORM))
-		revents |= events & (POLLOUT | POLLWRNORM);
-
-	tun_put(sc);
-	return (revents);
-}
-
 int
 tunkqfilter(dev_t dev, struct knote *kn)
 {
@@ -1066,10 +1049,8 @@ tun_start(struct ifnet *ifp)
 }
 
 void
-tun_link_state(struct tun_softc *sc, int link_state)
+tun_link_state(struct ifnet *ifp, int link_state)
 {
-	struct ifnet *ifp = &sc->sc_if;
-
 	if (ifp->if_link_state != link_state) {
 		ifp->if_link_state = link_state;
 		if_link_state_change(ifp);

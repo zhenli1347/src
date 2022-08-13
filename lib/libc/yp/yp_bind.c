@@ -1,4 +1,4 @@
-/*	$OpenBSD: yp_bind.c,v 1.28 2016/05/30 02:53:29 guenther Exp $ */
+/*	$OpenBSD: yp_bind.c,v 1.32 2022/08/02 16:59:29 deraadt Exp $ */
 /*
  * Copyright (c) 1992, 1993, 1996 Theo de Raadt <deraadt@theos.com>
  * All rights reserved.
@@ -43,243 +43,76 @@
 #include <rpcsvc/ypclnt.h>
 #include "ypinternal.h"
 
-struct dom_binding *_ypbindlist;
 char _yp_domain[HOST_NAME_MAX+1];
 int _yplib_timeout = 10;
 
 int
 _yp_dobind(const char *dom, struct dom_binding **ypdb)
 {
-	static pid_t	pid = -1;
-	char            path[PATH_MAX];
-	struct dom_binding *ysd, *ysd2;
-	struct ypbind_resp ypbr;
-	struct timeval  tv;
-	struct sockaddr_in clnt_sin;
-	struct ypbind_binding *bn;
-	int             clnt_sock, fd;
-	pid_t		gpid;
-	CLIENT         *client;
-	int             new = 0, r;
-	u_short		port;
-
-	/*
-	 * test if YP is running or not
-	 */
-	if ((fd = open(YPBINDLOCK, O_RDONLY)) == -1)
-		return YPERR_YPBIND;
-	if (!(flock(fd, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK)) {
-		(void)close(fd);
-		return YPERR_YPBIND;
-	}
-	(void)close(fd);
-
-	gpid = getpid();
-	if (!(pid == -1 || pid == gpid)) {
-		ysd = _ypbindlist;
-		while (ysd) {
-			if (ysd->dom_client)
-				clnt_destroy(ysd->dom_client);
-			ysd2 = ysd->dom_pnext;
-			free(ysd);
-			ysd = ysd2;
-		}
-		_ypbindlist = NULL;
-	}
-	pid = gpid;
-
-	if (ypdb != NULL)
-		*ypdb = NULL;
+	struct dom_binding *ypbinding;
+	struct timeval tv;
+	int connected = 1;
+	int s;
 
 	if (dom == NULL || strlen(dom) == 0)
 		return YPERR_BADARGS;
 
-	for (ysd = _ypbindlist; ysd; ysd = ysd->dom_pnext)
-		if (strcmp(dom, ysd->dom_domain) == 0)
-			break;
-	if (ysd == NULL) {
-		if ((ysd = calloc(1, sizeof *ysd)) == NULL)
-			return YPERR_RESRC;
-		ysd->dom_socket = -1;
-		ysd->dom_vers = 0;
-		new = 1;
-	}
+	ypbinding = calloc(1, sizeof (*ypbinding));
+	if (ypbinding == NULL)
+		return YPERR_RESRC;
+
 again:
-	if (ysd->dom_vers == 0) {
-		r = snprintf(path, sizeof(path), "%s/%s.%d",
-		    BINDINGDIR, dom, 2);
-		if (r < 0 || r >= sizeof(path)) {
-			if (new)
-				free(ysd);
-			return YPERR_BADARGS;
-		}
-		if ((fd = open(path, O_RDONLY)) == -1) {
-			/*
-			 * no binding file, YP is dead, or not yet fully
-			 * alive.
-			 */
-			goto trynet;
-		}
-		if (flock(fd, LOCK_EX | LOCK_NB) == -1 &&
-		    errno == EWOULDBLOCK) {
-			struct iovec    iov[2];
-			u_short         ypb_port;
-
-			/*
-			 * we fetch the ypbind port number, but do
-			 * nothing with it.
-			 */
-			iov[0].iov_base = (caddr_t) &ypb_port;
-			iov[0].iov_len = sizeof ypb_port;
-			iov[1].iov_base = (caddr_t) &ypbr;
-			iov[1].iov_len = sizeof ypbr;
-
-			r = readv(fd, iov, 2);
-			if (r != iov[0].iov_len + iov[1].iov_len) {
-				(void)close(fd);
-				ysd->dom_vers = -1;
-				goto again;
-			}
-			(void)close(fd);
-			goto gotdata;
-		} else {
-			/* no lock on binding file, YP is dead. */
-			(void)close(fd);
-			if (new)
-				free(ysd);
-			return YPERR_YPBIND;
-		}
+	s = ypconnect(SOCK_DGRAM);
+	if (s == -1) {
+		free(ypbinding);
+		return YPERR_YPBIND;	/* YP not running */
 	}
-trynet:
-	if (ysd->dom_vers == -1 || ysd->dom_vers == 0) {
-		(void)memset(&clnt_sin, 0, sizeof clnt_sin);
-		clnt_sin.sin_len = sizeof(struct sockaddr_in);
-		clnt_sin.sin_family = AF_INET;
-		clnt_sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ypbinding->dom_socket = s;
+	ypbinding->dom_server_addr.sin_port = -1; /* don't consult portmap */
 
-		clnt_sock = RPC_ANYSOCK;
-		client = clnttcp_create(&clnt_sin, YPBINDPROG, YPBINDVERS,
-		    &clnt_sock, 0, 0);
-		if (client == NULL) {
-			clnt_pcreateerror("clnttcp_create");
-			if (new)
-				free(ysd);
-			switch (rpc_createerr.cf_error.re_errno) {
-			case ECONNREFUSED:
-				return YPERR_YPBIND;
-			case ENOMEM:
-				return YPERR_RESRC;
-			default:
-				return YPERR_YPERR;
-			}
-		}
-		if (ntohs(clnt_sin.sin_port) >= IPPORT_RESERVED ||
-		    ntohs(clnt_sin.sin_port) == 20) {
-			/*
-			 * YP was not running, but someone has registered
-			 * ypbind with portmap -- this simply means YP is
-			 * not running.
-			 */
-			clnt_destroy(client);
-			if (new)
-				free(ysd);
-			return YPERR_YPBIND;
-		}
-		tv.tv_sec = _yplib_timeout;
-		tv.tv_usec = 0;
-		r = clnt_call(client, YPBINDPROC_DOMAIN, xdr_domainname,
-		    &dom, xdr_ypbind_resp, &ypbr, tv);
-		if (r != RPC_SUCCESS) {
-			clnt_destroy(client);
-			ysd->dom_vers = -1;
-			goto again;
-		}
-		clnt_destroy(client);
-gotdata:
-		bn = &ypbr.ypbind_resp_u.ypbind_bindinfo;
-		memcpy(&port, &bn->ypbind_binding_port, sizeof port);
-		if (ntohs(port) >= IPPORT_RESERVED ||
-		    ntohs(port) == 20) {
-			/*
-			 * This is bullshit -- the ypbind wants me to
-			 * communicate to an insecure ypserv.  We are
-			 * within rights to syslog this as an attack,
-			 * but for now we'll simply ignore it; real YP
-			 * is obviously not running.
-			 */
-			if (new)
-				free(ysd);
-			return YPERR_YPBIND;
-		}
-		(void)memset(&ysd->dom_server_addr, 0,
-		    sizeof ysd->dom_server_addr);
-		ysd->dom_server_addr.sin_len = sizeof(struct sockaddr_in);
-		ysd->dom_server_addr.sin_family = AF_INET;
-		memcpy(&ysd->dom_server_addr.sin_port,
-		    &bn->ypbind_binding_port,
-		    sizeof(ysd->dom_server_addr.sin_port));
-		memcpy(&ysd->dom_server_addr.sin_addr.s_addr,
-		    &bn->ypbind_binding_addr,
-		    sizeof(ysd->dom_server_addr.sin_addr.s_addr));
-		ysd->dom_server_port = ysd->dom_server_addr.sin_port;
-		ysd->dom_vers = YPVERS;
-		strlcpy(ysd->dom_domain, dom, sizeof ysd->dom_domain);
-	}
 	tv.tv_sec = _yplib_timeout / 2;
 	tv.tv_usec = 0;
-	if (ysd->dom_client)
-		clnt_destroy(ysd->dom_client);
-	ysd->dom_socket = RPC_ANYSOCK;
-	ysd->dom_client = clntudp_create(&ysd->dom_server_addr,
-	    YPPROG, YPVERS, tv, &ysd->dom_socket);
-	if (ysd->dom_client == NULL) {
+	ypbinding->dom_client = clntudp_create(&ypbinding->dom_server_addr,
+	    YPPROG, YPVERS, tv, &ypbinding->dom_socket);
+	if (ypbinding->dom_client == NULL) {
+		close(ypbinding->dom_socket);
+		ypbinding->dom_socket = -1;
 		clnt_pcreateerror("clntudp_create");
-		ysd->dom_vers = -1;
 		goto again;
 	}
-	if (fcntl(ysd->dom_socket, F_SETFD, FD_CLOEXEC) == -1)
-		perror("fcntl: F_SETFD");
-
-	if (new) {
-		ysd->dom_pnext = _ypbindlist;
-		_ypbindlist = ysd;
-	}
-	if (ypdb != NULL)
-		*ypdb = ysd;
+	clnt_control(ypbinding->dom_client, CLSET_CONNECTED, &connected);
+	*ypdb = ypbinding;
 	return 0;
 }
 
 void
 _yp_unbind(struct dom_binding *ypb)
 {
-	clnt_destroy(ypb->dom_client);
-	ypb->dom_client = NULL;
-	ypb->dom_socket = -1;
+	close(ypb->dom_socket);
+	if (ypb->dom_client)
+		clnt_destroy(ypb->dom_client);
+	free(ypb);
 }
 
+/*
+ * Check if YP is running.  But do not leave it active, because we
+ * may not return from libc with a fd active.
+ */
 int
 yp_bind(const char *dom)
 {
-	return _yp_dobind(dom, NULL);
+	struct dom_binding *ysd;
+	int r;
+
+	r = _yp_dobind(dom, &ysd);
+	if (r == 0)
+		_yp_unbind(ysd);
+	return r;
 }
 DEF_WEAK(yp_bind);
 
 void
 yp_unbind(const char *dom)
 {
-	struct dom_binding *ypb, *ypbp;
-
-	ypbp = NULL;
-	for (ypb = _ypbindlist; ypb; ypb = ypb->dom_pnext) {
-		if (strcmp(dom, ypb->dom_domain) == 0) {
-			clnt_destroy(ypb->dom_client);
-			if (ypbp)
-				ypbp->dom_pnext = ypb->dom_pnext;
-			else
-				_ypbindlist = ypb->dom_pnext;
-			free(ypb);
-			return;
-		}
-		ypbp = ypb;
-	}
+	/* do nothing */
 }

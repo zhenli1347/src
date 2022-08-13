@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmm.c,v 1.290 2021/09/03 11:47:05 dv Exp $	*/
+/*	$OpenBSD: vmm.c,v 1.319 2022/08/07 23:56:06 guenther Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -25,6 +25,7 @@
 #include <sys/user.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
+#include <sys/refcnt.h>
 #include <sys/rwlock.h>
 #include <sys/pledge.h>
 #include <sys/memrange.h>
@@ -41,6 +42,11 @@
 
 #include <dev/isa/isareg.h>
 #include <dev/pv/pvreg.h>
+
+#ifdef MP_LOCKDEBUG
+#include <ddb/db_output.h>
+extern int __mp_lock_spinout;
+#endif /* MP_LOCKDEBUG */
 
 /* #define VMM_DEBUG */
 
@@ -65,56 +71,90 @@ void *l1tf_flush_region;
 #define VMX_EXIT_INFO_COMPLETE				\
     (VMX_EXIT_INFO_HAVE_RIP | VMX_EXIT_INFO_HAVE_REASON)
 
+/*
+ * Virtual Machine
+ *
+ * Methods used to protect vm struct members:
+ *	a	atomic operations
+ *	I	immutable after create
+ *	K	kernel lock
+ *	r	reference count
+ *	v	vcpu list rwlock (vm_vcpu_list)
+ *	V	vmm_softc's vm_lock
+ */
 struct vm {
-	struct vmspace		 *vm_vmspace;
-	vm_map_t		 vm_map;
-	uint32_t		 vm_id;
-	pid_t			 vm_creator_pid;
-	size_t			 vm_nmemranges;
-	size_t			 vm_memory_size;
+	struct vmspace		 *vm_vmspace;		/* [K] */
+	vm_map_t		 vm_map;		/* [K] */
+	uint32_t		 vm_id;			/* [I] */
+	pid_t			 vm_creator_pid;	/* [I] */
+	size_t			 vm_nmemranges;		/* [I] */
+	size_t			 vm_memory_size;	/* [I] */
 	char			 vm_name[VMM_MAX_NAME_LEN];
 	struct vm_mem_range	 vm_memranges[VMM_MAX_MEM_RANGES];
+	struct refcnt		 vm_refcnt;		/* [a] */
 
-	struct vcpu_head	 vm_vcpu_list;
-	uint32_t		 vm_vcpu_ct;
-	u_int			 vm_vcpus_running;
+	struct vcpu_head	 vm_vcpu_list;		/* [v] */
+	uint32_t		 vm_vcpu_ct;		/* [v] */
+	u_int			 vm_vcpus_running;	/* [a] */
 	struct rwlock		 vm_vcpu_lock;
 
-	SLIST_ENTRY(vm)		 vm_link;
+	SLIST_ENTRY(vm)		 vm_link;		/* [V] */
 };
 
 SLIST_HEAD(vmlist_head, vm);
 
+/*
+ * Virtual Machine Monitor
+ *
+ * Methods used to protect struct members in the global vmm device:
+ *	a	atomic opererations
+ *	I	immutable operations
+ *	K	kernel lock
+ *	p	virtual process id (vpid/asid) rwlock
+ *	r	reference count
+ *	v	vm list rwlock (vm_lock)
+ */
 struct vmm_softc {
-	struct device		sc_dev;
+	struct device		sc_dev;		/* [r] */
+
+	/* Suspend/Resume Synchronization */
+	struct refcnt		sc_refcnt;
+	volatile unsigned int	sc_status;	/* [a] */
+#define VMM_SUSPENDED		(unsigned int) 0
+#define VMM_ACTIVE		(unsigned int) 1
 
 	/* Capabilities */
-	uint32_t		nr_vmx_cpus;
-	uint32_t		nr_svm_cpus;
-	uint32_t		nr_rvi_cpus;
-	uint32_t		nr_ept_cpus;
+	uint32_t		nr_vmx_cpus;	/* [I] */
+	uint32_t		nr_svm_cpus;	/* [I] */
+	uint32_t		nr_rvi_cpus;	/* [I] */
+	uint32_t		nr_ept_cpus;	/* [I] */
 
 	/* Managed VMs */
-	struct vmlist_head	vm_list;
+	struct vmlist_head	vm_list;	/* [v] */
 
-	int			mode;
+	int			mode;		/* [I] */
+
+	size_t			vcpu_ct;	/* [v] */
+	size_t			vcpu_max;	/* [I] */
 
 	struct rwlock		vm_lock;
-	size_t			vm_ct;		/* number of in-memory VMs */
-	size_t			vm_idx;		/* next unique VM index */
+	size_t			vm_ct;		/* [v] no. of in-memory VMs */
+	size_t			vm_idx;		/* [a] next unique VM index */
 
 	struct rwlock		vpid_lock;
-	uint16_t		max_vpid;
-	uint8_t			vpids[512];	/* bitmap of used VPID/ASIDs */
+	uint16_t		max_vpid;	/* [I] */
+	uint8_t			vpids[512];	/* [p] bitmap of VPID/ASIDs */
 };
 
 void vmx_dump_vmcs_field(uint16_t, const char *);
 int vmm_enabled(void);
 int vmm_probe(struct device *, void *, void *);
 void vmm_attach(struct device *, struct device *, void *);
+int vmm_activate(struct device *, int);
 int vmmopen(dev_t, int, int, struct proc *);
 int vmmioctl(dev_t, u_long, caddr_t, int, struct proc *);
 int vmmclose(dev_t, int, int, struct proc *);
+int vmm_quiesce_vmx(void);
 int vmm_start(void);
 int vmm_stop(void);
 size_t vm_create_check_mem_ranges(struct vm_create_params *);
@@ -128,7 +168,7 @@ int vm_rwregs(struct vm_rwregs_params *, int);
 int vm_mprotect_ept(struct vm_mprotect_ept_params *);
 int vm_rwvmparams(struct vm_rwvmparams_params *, int);
 int vm_find(uint32_t, struct vm **);
-int vcpu_readregs_vmx(struct vcpu *, uint64_t, struct vcpu_reg_state *);
+int vcpu_readregs_vmx(struct vcpu *, uint64_t, int, struct vcpu_reg_state *);
 int vcpu_readregs_svm(struct vcpu *, uint64_t, struct vcpu_reg_state *);
 int vcpu_writeregs_vmx(struct vcpu *, uint64_t, int, struct vcpu_reg_state *);
 int vcpu_writeregs_svm(struct vcpu *, uint64_t, struct vcpu_reg_state *);
@@ -151,7 +191,7 @@ int vm_impl_init_svm(struct vm *, struct proc *);
 void vm_impl_deinit(struct vm *);
 void vm_impl_deinit_vmx(struct vm *);
 void vm_impl_deinit_svm(struct vm *);
-void vm_teardown(struct vm *);
+void vm_teardown(struct vm **);
 int vcpu_vmx_check_cap(struct vcpu *, uint32_t, uint32_t, int);
 int vcpu_vmx_compute_ctrl(uint64_t, uint16_t, uint32_t, uint32_t, uint32_t *);
 int vmx_get_exit_info(uint64_t *, uint64_t *);
@@ -257,11 +297,11 @@ const struct kmem_pa_mode vmm_kp_contig = {
 };
 
 struct cfdriver vmm_cd = {
-	NULL, "vmm", DV_DULL
+	NULL, "vmm", DV_DULL, CD_SKIPHIBERNATE
 };
 
 const struct cfattach vmm_ca = {
-	sizeof(struct vmm_softc), vmm_probe, vmm_attach, NULL, NULL
+	sizeof(struct vmm_softc), vmm_probe, vmm_attach, NULL, vmm_activate
 };
 
 /*
@@ -364,10 +404,17 @@ vmm_attach(struct device *parent, struct device *self, void *aux)
 	struct cpu_info *ci;
 	CPU_INFO_ITERATOR cii;
 
+	sc->sc_status = VMM_ACTIVE;
+
+	refcnt_init(&sc->sc_refcnt);
+	refcnt_rele(&sc->sc_refcnt);
+
 	sc->nr_vmx_cpus = 0;
 	sc->nr_svm_cpus = 0;
 	sc->nr_rvi_cpus = 0;
 	sc->nr_ept_cpus = 0;
+	sc->vcpu_ct = 0;
+	sc->vcpu_max = VMM_MAX_VCPUS;
 	sc->vm_ct = 0;
 	sc->vm_idx = 0;
 
@@ -428,12 +475,146 @@ vmm_attach(struct device *parent, struct device *self, void *aux)
 	bzero(&sc->vpids, sizeof(sc->vpids));
 	rw_init(&sc->vpid_lock, "vpid");
 
-	pool_init(&vm_pool, sizeof(struct vm), 0, IPL_NONE, PR_WAITOK,
+	pool_init(&vm_pool, sizeof(struct vm), 0, IPL_MPFLOOR, PR_WAITOK,
 	    "vmpool", NULL);
 	pool_init(&vcpu_pool, sizeof(struct vcpu), 64, IPL_MPFLOOR, PR_WAITOK,
 	    "vcpupl", NULL);
 
 	vmm_softc = sc;
+}
+
+/*
+ * vmm_quiesce_vmx
+ *
+ * Prepare the host for suspend by flushing all VMCS states.
+ */
+int
+vmm_quiesce_vmx(void)
+{
+	struct vm		*vm;
+	struct vcpu		*vcpu;
+	int			 err;
+
+	/*
+	 * We should be only called from a quiescing device state so we
+	 * don't expect to sleep here. If we can't get all our locks,
+	 * something is wrong.
+	 */
+	if ((err = rw_enter(&vmm_softc->vm_lock, RW_WRITE | RW_NOSLEEP)))
+		return (err);
+
+	/* Iterate over each vm... */
+	SLIST_FOREACH(vm, &vmm_softc->vm_list, vm_link) {
+		if ((err = rw_enter(&vm->vm_vcpu_lock, RW_READ | RW_NOSLEEP)))
+			break;
+
+		/* Iterate over each vcpu... */
+		SLIST_FOREACH(vcpu, &vm->vm_vcpu_list, vc_vcpu_link) {
+			err = rw_enter(&vcpu->vc_lock, RW_WRITE | RW_NOSLEEP);
+			if (err)
+				break;
+
+			/* We can skip unlaunched VMCS. Nothing to flush. */
+			if (atomic_load_int(&vcpu->vc_vmx_vmcs_state)
+			    != VMCS_LAUNCHED) {
+				DPRINTF("%s: skipping vcpu %d for vm %d\n",
+				    __func__, vcpu->vc_id, vm->vm_id);
+				rw_exit_write(&vcpu->vc_lock);
+				continue;
+			}
+
+#ifdef MULTIPROCESSOR
+			if (vcpu->vc_last_pcpu != curcpu()) {
+				/* Remote cpu vmclear via ipi. */
+				err = vmx_remote_vmclear(vcpu->vc_last_pcpu,
+				    vcpu);
+				if (err)
+					printf("%s: failed to remote vmclear "
+					    "vcpu %d of vm %d\n", __func__,
+					    vcpu->vc_id, vm->vm_id);
+			} else
+#endif
+			{
+				/* Local cpu vmclear instruction. */
+				if ((err = vmclear(&vcpu->vc_control_pa)))
+					printf("%s: failed to locally vmclear "
+					    "vcpu %d of vm %d\n", __func__,
+					    vcpu->vc_id, vm->vm_id);
+				atomic_swap_uint(&vcpu->vc_vmx_vmcs_state,
+				    VMCS_CLEARED);
+			}
+
+			rw_exit_write(&vcpu->vc_lock);
+			if (err)
+				break;
+			DPRINTF("%s: cleared vcpu %d for vm %d\n", __func__,
+			    vcpu->vc_id, vm->vm_id);
+		}
+		rw_exit_read(&vm->vm_vcpu_lock);
+		if (err)
+			break;
+	}
+	rw_exit_write(&vmm_softc->vm_lock);
+
+	if (err)
+		return (err);
+	return (0);
+}
+
+/*
+ * vmm_activate
+ */
+int
+vmm_activate(struct device *self, int act)
+{
+	struct cpu_info		*ci = curcpu();
+	unsigned int		 old_state;
+
+	switch (act) {
+	case DVACT_QUIESCE:
+		/* Block device users as we're suspending operation. */
+		old_state = atomic_cas_uint(&vmm_softc->sc_status, VMM_ACTIVE,
+		    VMM_SUSPENDED);
+		if (old_state != VMM_ACTIVE)
+			DPRINTF("%s: invalid device state on quiesce (%d)\n",
+			    __func__, old_state);
+
+		/* Wait for any device users to finish. */
+		while (refcnt_read(&vmm_softc->sc_refcnt) > 0)
+			tsleep_nsec(&vmm_softc, PPAUSE, "vmm", MSEC_TO_NSEC(1));
+
+		/* If we're not in vmm mode, nothing to do. */
+		if ((ci->ci_flags & CPUF_VMM) == 0)
+			break;
+
+		/* Intel systems need extra steps to sync vcpu state. */
+		if (vmm_softc->mode == VMM_MODE_EPT ||
+		    vmm_softc->mode == VMM_MODE_VMX)
+			if (vmm_quiesce_vmx())
+				DPRINTF("%s: vmx quiesce failed\n", __func__);
+
+		/* Stop virtualization mode on all cpus. */
+		vmm_stop();
+		break;
+
+	case DVACT_WAKEUP:
+		/* Restart virtualization mode on all cpu's. */
+		if (vmm_softc->vm_ct > 0)
+			vmm_start();
+
+		/* Set the device back to active. */
+		old_state = atomic_cas_uint(&vmm_softc->sc_status,
+		    VMM_SUSPENDED, VMM_ACTIVE);
+		if (old_state != VMM_SUSPENDED)
+			DPRINTF("%s: invalid device state on wakeup (%d)\n",
+			    __func__, old_state);
+
+		/* Notify any waiting device users. */
+		wakeup(&vmm_softc);
+		break;
+	}
+
+	return (0);
 }
 
 /*
@@ -475,6 +656,22 @@ vmmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 	int ret;
 
 	KERNEL_UNLOCK();
+
+	refcnt_take(&vmm_softc->sc_refcnt);
+	while (atomic_load_int(&vmm_softc->sc_status) != VMM_ACTIVE) {
+		refcnt_rele(&vmm_softc->sc_refcnt);
+		/* Wait for the signal that we're running again. */
+		ret = tsleep_nsec(&vmm_softc, PWAIT | PCATCH, "vmm",
+		    MSEC_TO_NSEC(1));
+		if (ret != ERESTART && ret != EINTR && ret != EWOULDBLOCK
+		    && ret != 0) {
+			printf("%s: unhandled wakeup (%d) for device\n",
+			    __func__, ret);
+			ret = EBUSY;
+			goto out;
+		}
+		refcnt_take(&vmm_softc->sc_refcnt);
+	}
 
 	switch (cmd) {
 	case VMM_IOC_CREATE:
@@ -520,6 +717,8 @@ vmmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 		ret = ENOTTY;
 	}
 
+	refcnt_rele(&vmm_softc->sc_refcnt);
+out:
 	KERNEL_LOCK();
 
 	return (ret);
@@ -586,12 +785,16 @@ vm_find_vcpu(struct vm *vm, uint32_t id)
 
 	if (vm == NULL)
 		return NULL;
+
 	rw_enter_read(&vm->vm_vcpu_lock);
 	SLIST_FOREACH(vcpu, &vm->vm_vcpu_list, vc_vcpu_link) {
+		refcnt_take(&vcpu->vc_refcnt);
 		if (vcpu->vc_id == id)
 			break;
+		refcnt_rele_wake(&vcpu->vc_refcnt);
 	}
 	rw_exit_read(&vm->vm_vcpu_lock);
+
 	return vcpu;
 }
 
@@ -615,12 +818,10 @@ vm_resetcpu(struct vm_resetcpu_params *vrp)
 {
 	struct vm *vm;
 	struct vcpu *vcpu;
-	int error;
+	int error, ret = 0;
 
 	/* Find the desired VM */
-	rw_enter_read(&vmm_softc->vm_lock);
 	error = vm_find(vrp->vrp_vm_id, &vm);
-	rw_exit_read(&vmm_softc->vm_lock);
 
 	/* Not found? exit. */
 	if (error != 0) {
@@ -634,35 +835,31 @@ vm_resetcpu(struct vm_resetcpu_params *vrp)
 	if (vcpu == NULL) {
 		DPRINTF("%s: vcpu id %u of vm %u not found\n", __func__,
 		    vrp->vrp_vcpu_id, vrp->vrp_vm_id);
-		return (ENOENT);
+		ret = ENOENT;
+		goto out;
 	}
 
 	rw_enter_write(&vcpu->vc_lock);
 
-	if (vcpu->vc_state != VCPU_STATE_STOPPED) {
-		DPRINTF("%s: reset of vcpu %u on vm %u attempted "
-		    "while vcpu was in state %u (%s)\n", __func__,
-		    vrp->vrp_vcpu_id, vrp->vrp_vm_id, vcpu->vc_state,
-		    vcpu_state_decode(vcpu->vc_state));
-
-		rw_exit_write(&vcpu->vc_lock);
-		return (EBUSY);
-	}
-
-	DPRINTF("%s: resetting vm %d vcpu %d to power on defaults\n", __func__,
-	    vm->vm_id, vcpu->vc_id);
-
-	if (vcpu_reset_regs(vcpu, &vrp->vrp_init_state)) {
-		printf("%s: failed\n", __func__);
+	if (vcpu->vc_state != VCPU_STATE_STOPPED ||
+	    refcnt_shared(&vcpu->vc_refcnt)) {
+		ret = EBUSY;
+	} else {
+		if (vcpu_reset_regs(vcpu, &vrp->vrp_init_state)) {
+			printf("%s: failed\n", __func__);
 #ifdef VMM_DEBUG
-		dump_vcpu(vcpu);
+			dump_vcpu(vcpu);
 #endif /* VMM_DEBUG */
-		rw_exit_write(&vcpu->vc_lock);
-		return (EIO);
+			ret = EIO;
+		}
 	}
-
 	rw_exit_write(&vcpu->vc_lock);
-	return (0);
+out:
+	if (vcpu != NULL)
+		refcnt_rele_wake(&vcpu->vc_refcnt);
+	refcnt_rele_wake(&vm->vm_refcnt);
+
+	return (ret);
 }
 
 /*
@@ -683,29 +880,30 @@ vm_intr_pending(struct vm_intr_params *vip)
 {
 	struct vm *vm;
 	struct vcpu *vcpu;
-	int error;
+	int error, ret = 0;
 
 	/* Find the desired VM */
-	rw_enter_read(&vmm_softc->vm_lock);
 	error = vm_find(vip->vip_vm_id, &vm);
 
 	/* Not found? exit. */
-	if (error != 0) {
-		rw_exit_read(&vmm_softc->vm_lock);
+	if (error != 0)
 		return (error);
-	}
 
 	vcpu = vm_find_vcpu(vm, vip->vip_vcpu_id);
-	rw_exit_read(&vmm_softc->vm_lock);
 
-	if (vcpu == NULL)
-		return (ENOENT);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
 
 	rw_enter_write(&vcpu->vc_lock);
 	vcpu->vc_intr = vip->vip_intr;
 	rw_exit_write(&vcpu->vc_lock);
 
-	return (0);
+	refcnt_rele_wake(&vcpu->vc_refcnt);
+out:
+	refcnt_rele_wake(&vm->vm_refcnt);
+	return (ret);
 }
 
 /*
@@ -727,23 +925,21 @@ int
 vm_rwvmparams(struct vm_rwvmparams_params *vpp, int dir) {
 	struct vm *vm;
 	struct vcpu *vcpu;
-	int error;
+	int error, ret = 0;
 
 	/* Find the desired VM */
-	rw_enter_read(&vmm_softc->vm_lock);
 	error = vm_find(vpp->vpp_vm_id, &vm);
 
 	/* Not found? exit. */
-	if (error != 0) {
-		rw_exit_read(&vmm_softc->vm_lock);
+	if (error != 0)
 		return (error);
-	}
 
 	vcpu = vm_find_vcpu(vm, vpp->vpp_vcpu_id);
-	rw_exit_read(&vmm_softc->vm_lock);
 
-	if (vcpu == NULL)
-		return (ENOENT);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
 
 	if (dir == 0) {
 		if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_VERSION)
@@ -751,16 +947,17 @@ vm_rwvmparams(struct vm_rwvmparams_params *vpp, int dir) {
 		if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_SYSTEM_GPA)
 			vpp->vpp_pvclock_system_gpa = \
 			    vcpu->vc_pvclock_system_gpa;
-		return (0);
+	} else {
+		if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_VERSION)
+			vcpu->vc_pvclock_version = vpp->vpp_pvclock_version;
+		if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_SYSTEM_GPA) {
+			vmm_init_pvclock(vcpu, vpp->vpp_pvclock_system_gpa);
+		}
 	}
-
-	if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_VERSION)
-		vcpu->vc_pvclock_version = vpp->vpp_pvclock_version;
-	if (vpp->vpp_mask & VM_RWVMPARAMS_PVCLOCK_SYSTEM_GPA) {
-		vmm_init_pvclock(vcpu, vpp->vpp_pvclock_system_gpa);
-	}
-	return (0);
-
+	refcnt_rele_wake(&vcpu->vc_refcnt);
+out:
+	refcnt_rele_wake(&vm->vm_refcnt);
+	return (ret);
 }
 
 /*
@@ -786,38 +983,42 @@ vm_rwregs(struct vm_rwregs_params *vrwp, int dir)
 	struct vm *vm;
 	struct vcpu *vcpu;
 	struct vcpu_reg_state *vrs = &vrwp->vrwp_regs;
-	int error;
+	int error, ret = 0;
 
 	/* Find the desired VM */
-	rw_enter_read(&vmm_softc->vm_lock);
 	error = vm_find(vrwp->vrwp_vm_id, &vm);
 
 	/* Not found? exit. */
-	if (error != 0) {
-		rw_exit_read(&vmm_softc->vm_lock);
+	if (error != 0)
 		return (error);
-	}
 
 	vcpu = vm_find_vcpu(vm, vrwp->vrwp_vcpu_id);
-	rw_exit_read(&vmm_softc->vm_lock);
 
-	if (vcpu == NULL)
-		return (ENOENT);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
 
+	rw_enter_write(&vcpu->vc_lock);
 	if (vmm_softc->mode == VMM_MODE_VMX ||
 	    vmm_softc->mode == VMM_MODE_EPT)
-		return (dir == 0) ?
-		    vcpu_readregs_vmx(vcpu, vrwp->vrwp_mask, vrs) :
+		ret = (dir == 0) ?
+		    vcpu_readregs_vmx(vcpu, vrwp->vrwp_mask, 1, vrs) :
 		    vcpu_writeregs_vmx(vcpu, vrwp->vrwp_mask, 1, vrs);
 	else if (vmm_softc->mode == VMM_MODE_SVM ||
 	    vmm_softc->mode == VMM_MODE_RVI)
-		return (dir == 0) ?
+		ret = (dir == 0) ?
 		    vcpu_readregs_svm(vcpu, vrwp->vrwp_mask, vrs) :
 		    vcpu_writeregs_svm(vcpu, vrwp->vrwp_mask, vrs);
 	else {
 		DPRINTF("%s: unknown vmm mode", __func__);
-		return (EINVAL);
+		ret = EINVAL;
 	}
+	rw_exit_write(&vcpu->vc_lock);
+	refcnt_rele_wake(&vcpu->vc_refcnt);
+out:
+	refcnt_rele_wake(&vm->vm_refcnt);
+	return (ret);
 }
 
 /*
@@ -846,7 +1047,7 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 	size_t size;
 	vm_prot_t prot;
 	uint64_t msr;
-	int ret, memtype;
+	int ret = 0, memtype;
 
 	/* If not EPT or RVI, nothing to do here */
 	if (!(vmm_softc->mode == VMM_MODE_EPT
@@ -854,9 +1055,7 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 		return (0);
 
 	/* Find the desired VM */
-	rw_enter_read(&vmm_softc->vm_lock);
 	ret = vm_find(vmep->vmep_vm_id, &vm);
-	rw_exit_read(&vmm_softc->vm_lock);
 
 	/* Not found? exit. */
 	if (ret != 0) {
@@ -870,16 +1069,19 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 	if (vcpu == NULL) {
 		DPRINTF("%s: vcpu id %u of vm %u not found\n", __func__,
 		    vmep->vmep_vcpu_id, vmep->vmep_vm_id);
-		return (ENOENT);
+		ret = ENOENT;
+		goto out_nolock;
 	}
+
+	rw_enter_write(&vcpu->vc_lock);
 
 	if (vcpu->vc_state != VCPU_STATE_STOPPED) {
 		DPRINTF("%s: mprotect_ept %u on vm %u attempted "
 		    "while vcpu was in state %u (%s)\n", __func__,
 		    vmep->vmep_vcpu_id, vmep->vmep_vm_id, vcpu->vc_state,
 		    vcpu_state_decode(vcpu->vc_state));
-
-		return (EBUSY);
+		ret = EBUSY;
+		goto out;
 	}
 
 	/* Only proceed if the pmap is in the correct mode */
@@ -896,19 +1098,22 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 	if ((prot & PROT_MASK) != prot &&
 	    (prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) {
 		DPRINTF("%s: W+X permission requested\n", __func__);
-		return (EINVAL);
+		ret = EINVAL;
+		goto out;
 	}
 
 	/* No Write only permissions */
 	if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == PROT_WRITE) {
 		DPRINTF("%s: No Write only permissions\n", __func__);
-		return (EINVAL);
+		ret = EINVAL;
+		goto out;
 	}
 
 	/* No empty permissions */
 	if (prot == 0) {
 		DPRINTF("%s: No empty permissions\n", __func__);
-		return (EINVAL);
+		ret = EINVAL;
+		goto out;
 	}
 
 	/* No execute only on EPT CPUs that don't have that capability */
@@ -924,36 +1129,48 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 	}
 
 	/* Must be page aligned */
-	if ((sgpa & PAGE_MASK) || (size & PAGE_MASK) || size == 0)
-		return (EINVAL);
+	if ((sgpa & PAGE_MASK) || (size & PAGE_MASK) || size == 0) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	/* size must be less then 512GB */
-	if (size >= NBPD_L4)
-		return (EINVAL);
+	if (size >= NBPD_L4) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	/* no wraparound */
-	if (sgpa + size < sgpa)
-		return (EINVAL);
+	if (sgpa + size < sgpa) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	/*
 	 * Specifying addresses within the PCI MMIO space is forbidden.
 	 * Disallow addresses that start inside the MMIO space:
 	 * [VMM_PCI_MMIO_BAR_BASE .. VMM_PCI_MMIO_BAR_END]
 	 */
-	if (sgpa >= VMM_PCI_MMIO_BAR_BASE && sgpa <= VMM_PCI_MMIO_BAR_END)
-		return (EINVAL);
+	if (sgpa >= VMM_PCI_MMIO_BAR_BASE && sgpa <= VMM_PCI_MMIO_BAR_END) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	/*
 	 * ... and disallow addresses that end inside the MMIO space:
 	 * (VMM_PCI_MMIO_BAR_BASE .. VMM_PCI_MMIO_BAR_END]
 	 */
 	if (sgpa + size > VMM_PCI_MMIO_BAR_BASE &&
-	    sgpa + size <= VMM_PCI_MMIO_BAR_END)
-		return (EINVAL);
+	    sgpa + size <= VMM_PCI_MMIO_BAR_END) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	memtype = vmm_get_guest_memtype(vm, sgpa);
-	if (memtype == VMM_MEM_TYPE_UNKNOWN)
-		return (EINVAL);
+	if (memtype == VMM_MEM_TYPE_UNKNOWN) {
+		ret = EINVAL;
+		goto out;
+	}
 
 	if (vmm_softc->mode == VMM_MODE_EPT)
 		ret = vmx_mprotect_ept(vm->vm_map, sgpa, sgpa + size, prot);
@@ -962,8 +1179,14 @@ vm_mprotect_ept(struct vm_mprotect_ept_params *vmep)
 		/* XXX requires a invlpga */
 		ret = 0;
 	} else
-		return (EINVAL);
-
+		ret = EINVAL;
+out:
+	if (vcpu != NULL) {
+		rw_exit_write(&vcpu->vc_lock);
+		refcnt_rele_wake(&vcpu->vc_refcnt);
+	}
+out_nolock:
+	refcnt_rele_wake(&vm->vm_refcnt);
 	return (ret);
 }
 
@@ -996,8 +1219,10 @@ vmx_mprotect_ept(vm_map_t vm_map, paddr_t sgpa, paddr_t egpa, int prot)
 				    __func__, ret, (uint64_t)addr);
 
 			pte = vmx_pmap_find_pte_ept(pmap, addr);
-			if (pte == NULL)
+			if (pte == NULL) {
+				KERNEL_UNLOCK();
 				return EFAULT;
+			}
 		}
 
 		if (prot & PROT_READ)
@@ -1121,9 +1346,13 @@ vm_find(uint32_t id, struct vm **res)
 {
 	struct proc *p = curproc;
 	struct vm *vm;
+	int ret = ENOENT;
 
 	*res = NULL;
+
+	rw_enter_read(&vmm_softc->vm_lock);
 	SLIST_FOREACH(vm, &vmm_softc->vm_list, vm_link) {
+		refcnt_take(&vm->vm_refcnt);
 		if (vm->vm_id == id) {
 			/*
 			 * In the pledged VM process, only allow to find
@@ -1134,13 +1363,20 @@ vm_find(uint32_t id, struct vm **res)
 			if (((p->p_p->ps_pledge &
 			    (PLEDGE_VMM | PLEDGE_PROC)) == PLEDGE_VMM) &&
 			    (vm->vm_creator_pid != p->p_p->ps_pid))
-				return (pledge_fail(p, EPERM, PLEDGE_VMM));
-			*res = vm;
-			return (0);
+				ret = EPERM;
+			else {
+				*res = vm;
+				ret = 0;
+			}
+			break;
 		}
+		refcnt_rele_wake(&vm->vm_refcnt);
 	}
+	rw_exit_read(&vmm_softc->vm_lock);
 
-	return (ENOENT);
+	if (ret == EPERM)
+		return (pledge_fail(p, EPERM, PLEDGE_VMM));
+	return (ret);
 }
 
 /*
@@ -1152,16 +1388,25 @@ int
 vmm_start(void)
 {
 	struct cpu_info *self = curcpu();
-	int ret = 0;
 #ifdef MULTIPROCESSOR
 	struct cpu_info *ci;
 	CPU_INFO_ITERATOR cii;
-	int i;
-#endif
+#ifdef MP_LOCKDEBUG
+	int nticks;
+#endif /* MP_LOCKDEBUG */
+#endif /* MULTIPROCESSOR */
 
 	/* VMM is already running */
 	if (self->ci_flags & CPUF_VMM)
 		return (0);
+
+	/* Start VMM on this CPU */
+	start_vmm_on_cpu(self);
+	if (!(self->ci_flags & CPUF_VMM)) {
+		printf("%s: failed to enter VMM mode\n",
+			self->ci_dev->dv_xname);
+		return (EIO);
+	}
 
 #ifdef MULTIPROCESSOR
 	/* Broadcast start VMM IPI */
@@ -1170,25 +1415,23 @@ vmm_start(void)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self)
 			continue;
-		for (i = 100000; (!(ci->ci_flags & CPUF_VMM)) && i>0;i--)
-			delay(10);
-		if (!(ci->ci_flags & CPUF_VMM)) {
-			printf("%s: failed to enter VMM mode\n",
-				ci->ci_dev->dv_xname);
-			ret = EIO;
+#ifdef MP_LOCKDEBUG
+		nticks = __mp_lock_spinout;
+#endif /* MP_LOCKDEBUG */
+		while (!(ci->ci_flags & CPUF_VMM)) {
+			CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
+			if (--nticks <= 0) {
+				db_printf("%s: spun out", __func__);
+				db_enter();
+				nticks = __mp_lock_spinout;
+			}
+#endif /* MP_LOCKDEBUG */
 		}
 	}
 #endif /* MULTIPROCESSOR */
 
-	/* Start VMM on this CPU */
-	start_vmm_on_cpu(self);
-	if (!(self->ci_flags & CPUF_VMM)) {
-		printf("%s: failed to enter VMM mode\n",
-			self->ci_dev->dv_xname);
-		ret = EIO;
-	}
-
-	return (ret);
+	return (0);
 }
 
 /*
@@ -1200,16 +1443,25 @@ int
 vmm_stop(void)
 {
 	struct cpu_info *self = curcpu();
-	int ret = 0;
 #ifdef MULTIPROCESSOR
 	struct cpu_info *ci;
 	CPU_INFO_ITERATOR cii;
-	int i;
-#endif
+#ifdef MP_LOCKDEBUG
+	int nticks;
+#endif /* MP_LOCKDEBUG */
+#endif /* MULTIPROCESSOR */
 
 	/* VMM is not running */
 	if (!(self->ci_flags & CPUF_VMM))
 		return (0);
+
+	/* Stop VMM on this CPU */
+	stop_vmm_on_cpu(self);
+	if (self->ci_flags & CPUF_VMM) {
+		printf("%s: failed to exit VMM mode\n",
+			self->ci_dev->dv_xname);
+		return (EIO);
+	}
 
 #ifdef MULTIPROCESSOR
 	/* Stop VMM on other CPUs */
@@ -1218,25 +1470,23 @@ vmm_stop(void)
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self)
 			continue;
-		for (i = 100000; (ci->ci_flags & CPUF_VMM) && i>0 ;i--)
-			delay(10);
-		if (ci->ci_flags & CPUF_VMM) {
-			printf("%s: failed to exit VMM mode\n",
-				ci->ci_dev->dv_xname);
-			ret = EIO;
+#ifdef MP_LOCKDEBUG
+		nticks = __mp_lock_spinout;
+#endif /* MP_LOCKDEBUG */
+		while ((ci->ci_flags & CPUF_VMM)) {
+			CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
+			if (--nticks <= 0) {
+				db_printf("%s: spunout", __func__);
+				db_enter();
+				nticks = __mp_lock_spinout;
+			}
+#endif /* MP_LOCKDEBUG */
 		}
 	}
 #endif /* MULTIPROCESSOR */
 
-	/* Stop VMM on this CPU */
-	stop_vmm_on_cpu(self);
-	if (self->ci_flags & CPUF_VMM) {
-		printf("%s: failed to exit VMM mode\n",
-			self->ci_dev->dv_xname);
-		ret = EIO;
-	}
-
-	return (ret);
+	return (0);
 }
 
 /*
@@ -1298,7 +1548,7 @@ start_vmm_on_cpu(struct cpu_info *ci)
 		}
 	}
 
-	ci->ci_flags |= CPUF_VMM;
+	atomic_setbits_int(&ci->ci_flags, CPUF_VMM);
 }
 
 /*
@@ -1337,7 +1587,7 @@ stop_vmm_on_cpu(struct cpu_info *ci)
 		lcr4(cr4);
 	}
 
-	ci->ci_flags &= ~CPUF_VMM;
+	atomic_clearbits_int(&ci->ci_flags, CPUF_VMM);
 }
 
 /*
@@ -1360,7 +1610,9 @@ vmclear_on_cpu(struct cpu_info *ci)
 static int
 vmx_remote_vmclear(struct cpu_info *ci, struct vcpu *vcpu)
 {
-	int ret = 0, nticks = 100000;
+#ifdef MP_LOCKDEBUG
+	int nticks = __mp_lock_spinout;
+#endif /* MP_LOCKDEBUG */
 
 	rw_enter_write(&ci->ci_vmcs_lock);
 	atomic_swap_ulong(&ci->ci_vmcs_pa, vcpu->vc_control_pa);
@@ -1368,16 +1620,18 @@ vmx_remote_vmclear(struct cpu_info *ci, struct vcpu *vcpu)
 
 	while (ci->ci_vmcs_pa != VMX_VMCS_PA_CLEAR) {
 		CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
 		if (--nticks <= 0) {
-			printf("%s: spun out\n", __func__);
-			ret = 1;
-			break;
+			db_printf("%s: spun out\n", __func__);
+			db_enter();
+			nticks = __mp_lock_spinout;
 		}
+#endif /* MP_LOCKDEBUG */
 	}
 	atomic_swap_uint(&vcpu->vc_vmx_vmcs_state, VMCS_CLEARED);
 	rw_exit_write(&ci->ci_vmcs_lock);
 
-	return (ret);
+	return (0);
 }
 #endif /* MULTIPROCESSOR */
 
@@ -1399,7 +1653,7 @@ vm_create_check_mem_ranges(struct vm_create_params *vcp)
 {
 	size_t i, memsize = 0;
 	struct vm_mem_range *vmr, *pvmr;
-	const paddr_t maxgpa = (uint64_t)VMM_MAX_VM_MEM_SIZE * 1024 * 1024;
+	const paddr_t maxgpa = VMM_MAX_VM_MEM_SIZE;
 
 	if (vcp->vcp_nmemranges == 0 ||
 	    vcp->vcp_nmemranges > VMM_MAX_MEM_RANGES)
@@ -1447,7 +1701,7 @@ vm_create_check_mem_ranges(struct vm_create_params *vcp)
 			return (0);
 
 		/*
-		 * Make sure that guest physcal memory ranges do not overlap
+		 * Make sure that guest physical memory ranges do not overlap
 		 * and that they are ascending.
 		 */
 		if (i > 0 && pvmr->vmr_gpa + pvmr->vmr_size > vmr->vmr_gpa)
@@ -1459,7 +1713,6 @@ vm_create_check_mem_ranges(struct vm_create_params *vcp)
 
 	if (memsize % (1024 * 1024) != 0)
 		return (0);
-	memsize /= 1024 * 1024;
 	return (memsize);
 }
 
@@ -1494,7 +1747,20 @@ vm_create(struct vm_create_params *vcp, struct proc *p)
 	if (vcp->vcp_ncpus != 1)
 		return (EINVAL);
 
+	/* Bail early if we're already at vcpu capacity. */
+	rw_enter_read(&vmm_softc->vm_lock);
+	if (vmm_softc->vcpu_ct + vcp->vcp_ncpus > vmm_softc->vcpu_max) {
+		DPRINTF("%s: maximum vcpus (%lu) reached\n", __func__,
+		    vmm_softc->vcpu_max);
+		rw_exit_read(&vmm_softc->vm_lock);
+		return (ENOMEM);
+	}
+	rw_exit_read(&vmm_softc->vm_lock);
+
+	/* Instantiate and configure the new vm. */
 	vm = pool_get(&vm_pool, PR_WAITOK | PR_ZERO);
+	refcnt_init(&vm->vm_refcnt);	/* Do not release yet. */
+
 	SLIST_INIT(&vm->vm_vcpu_list);
 	rw_init(&vm->vm_vcpu_lock, "vcpu_list");
 
@@ -1505,46 +1771,58 @@ vm_create(struct vm_create_params *vcp, struct proc *p)
 	vm->vm_memory_size = memsize;
 	strncpy(vm->vm_name, vcp->vcp_name, VMM_MAX_NAME_LEN - 1);
 
-	rw_enter_write(&vmm_softc->vm_lock);
-
 	if (vm_impl_init(vm, p)) {
 		printf("failed to init arch-specific features for vm %p\n", vm);
-		vm_teardown(vm);
-		rw_exit_write(&vmm_softc->vm_lock);
+		vm_teardown(&vm);
 		return (ENOMEM);
 	}
 
-	vmm_softc->vm_ct++;
-	vmm_softc->vm_idx++;
-
-	vm->vm_id = vmm_softc->vm_idx;
 	vm->vm_vcpu_ct = 0;
 	vm->vm_vcpus_running = 0;
 
 	/* Initialize each VCPU defined in 'vcp' */
 	for (i = 0; i < vcp->vcp_ncpus; i++) {
 		vcpu = pool_get(&vcpu_pool, PR_WAITOK | PR_ZERO);
+		refcnt_init(&vcpu->vc_refcnt);
+		refcnt_rele(&vcpu->vc_refcnt);
+
 		vcpu->vc_parent = vm;
 		if ((ret = vcpu_init(vcpu)) != 0) {
 			printf("failed to init vcpu %d for vm %p\n", i, vm);
-			vm_teardown(vm);
-			vmm_softc->vm_idx--;
-			rw_exit_write(&vmm_softc->vm_lock);
+			vm_teardown(&vm);
 			return (ret);
 		}
-		rw_enter_write(&vm->vm_vcpu_lock);
 		vcpu->vc_id = vm->vm_vcpu_ct;
 		vm->vm_vcpu_ct++;
 		SLIST_INSERT_HEAD(&vm->vm_vcpu_list, vcpu, vc_vcpu_link);
-		rw_exit_write(&vm->vm_vcpu_lock);
 	}
 
 	/* XXX init various other hardware parts (vlapic, vioapic, etc) */
 
-	SLIST_INSERT_HEAD(&vmm_softc->vm_list, vm, vm_link);
-	rw_exit_write(&vmm_softc->vm_lock);
+	/* Attempt to register the vm now that it's configured. */
+	rw_enter_write(&vmm_softc->vm_lock);
 
+	if (vmm_softc->vcpu_ct + vm->vm_vcpu_ct > vmm_softc->vcpu_max) {
+		/* Someone already took our capacity. */
+		printf("%s: maximum vcpus (%lu) reached\n", __func__,
+		    vmm_softc->vcpu_max);
+		rw_exit_write(&vmm_softc->vm_lock);
+		vm_teardown(&vm);
+		return (ENOMEM);
+	}
+
+	/* Update the global index and identify the vm. */
+	vmm_softc->vm_idx++;
+	vm->vm_id = vmm_softc->vm_idx;
 	vcp->vcp_id = vm->vm_id;
+
+	/* Publish the vm into the list and update list count. */
+	SLIST_INSERT_HEAD(&vmm_softc->vm_list, vm, vm_link);
+	vmm_softc->vm_ct++;
+	vmm_softc->vcpu_ct += vm->vm_vcpu_ct;
+
+	refcnt_rele(&vm->vm_refcnt);		/* No need for wake. */
+	rw_exit_write(&vmm_softc->vm_lock);
 
 	return (0);
 }
@@ -1600,14 +1878,7 @@ vm_impl_init_vmx(struct vm *vm, struct proc *p)
 		}
 	}
 
-	ret = pmap_convert(vm->vm_map->pmap, PMAP_TYPE_EPT);
-	if (ret) {
-		printf("%s: pmap_convert failed\n", __func__);
-		/* uvmspace_free calls pmap_destroy for us */
-		uvmspace_free(vm->vm_vmspace);
-		vm->vm_vmspace = NULL;
-		return (ENOMEM);
-	}
+	pmap_convert(vm->vm_map->pmap, PMAP_TYPE_EPT);
 
 	return (0);
 }
@@ -1664,9 +1935,9 @@ vm_impl_init_svm(struct vm *vm, struct proc *p)
 	}
 
 	/* Convert pmap to RVI */
-	ret = pmap_convert(vm->vm_map->pmap, PMAP_TYPE_RVI);
+	pmap_convert(vm->vm_map->pmap, PMAP_TYPE_RVI);
 
-	return (ret);
+	return (0);
 }
 
 /*
@@ -1804,6 +2075,7 @@ vcpu_reload_vmcs_vmx(struct vcpu *vcpu)
  * Parameters:
  *  vcpu: the vcpu to read register values from
  *  regmask: the types of registers to read
+ *  loadvmcs: bit to indicate whether the VMCS has to be loaded first
  *  vrs: output parameter where register values are stored
  *
  * Return values:
@@ -1811,7 +2083,7 @@ vcpu_reload_vmcs_vmx(struct vcpu *vcpu)
  *  EINVAL: an error reading registers occurred
  */
 int
-vcpu_readregs_vmx(struct vcpu *vcpu, uint64_t regmask,
+vcpu_readregs_vmx(struct vcpu *vcpu, uint64_t regmask, int loadvmcs,
     struct vcpu_reg_state *vrs)
 {
 	int i, ret = 0;
@@ -1822,6 +2094,11 @@ vcpu_readregs_vmx(struct vcpu *vcpu, uint64_t regmask,
 	uint64_t *drs = vrs->vrs_drs;
 	struct vcpu_segment_info *sregs = vrs->vrs_sregs;
 	struct vmx_msr_store *msr_store;
+
+	if (loadvmcs) {
+		if (vcpu_reload_vmcs_vmx(vcpu))
+			return (EINVAL);
+	}
 
 #ifdef VMM_DEBUG
 	/* VMCS should be loaded... */
@@ -2211,6 +2488,7 @@ out:
 	if (loadvmcs) {
 		if (vmclear(&vcpu->vc_control_pa))
 			ret = EINVAL;
+		atomic_swap_uint(&vcpu->vc_vmx_vmcs_state, VMCS_CLEARED);
 	}
 	return (ret);
 }
@@ -2724,7 +3002,7 @@ vcpu_reset_regs_vmx(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 	uint32_t cr0, cr4;
 	uint32_t pinbased, procbased, procbased2, exit, entry;
 	uint32_t want1, want0;
-	uint64_t msr, ctrlval, eptp, cr3;
+	uint64_t ctrlval, cr3;
 	uint16_t ctrl, vpid;
 	struct vmx_msr_store *msr_store;
 
@@ -2980,45 +3258,26 @@ vcpu_reset_regs_vmx(struct vcpu *vcpu, struct vcpu_reg_state *vrs)
 		goto exit;
 	}
 
-	if (vmm_softc->mode == VMM_MODE_EPT) {
-		eptp = vcpu->vc_parent->vm_map->pmap->pm_pdirpa;
-		msr = rdmsr(IA32_VMX_EPT_VPID_CAP);
-		if (msr & IA32_EPT_VPID_CAP_PAGE_WALK_4) {
-			/* Page walk length 4 supported */
-			eptp |= ((IA32_EPT_PAGE_WALK_LENGTH - 1) << 3);
-		} else {
-			DPRINTF("EPT page walk length 4 not supported\n");
-			ret = EINVAL;
-			goto exit;
-		}
-
-		if (msr & IA32_EPT_VPID_CAP_WB) {
-			/* WB cache type supported */
-			eptp |= IA32_EPT_PAGING_CACHE_TYPE_WB;
-		} else
-			DPRINTF("%s: no WB cache type available, guest VM "
-			    "will run uncached\n", __func__);
-
-		DPRINTF("Guest EPTP = 0x%llx\n", eptp);
-		if (vmwrite(VMCS_GUEST_IA32_EPTP, eptp)) {
-			DPRINTF("%s: error setting guest EPTP\n", __func__);
-			ret = EINVAL;
-			goto exit;
-		}
-
-		vcpu->vc_parent->vm_map->pmap->eptp = eptp;
-	}
-
 	if (vcpu_vmx_check_cap(vcpu, IA32_VMX_PROCBASED_CTLS,
 	    IA32_VMX_ACTIVATE_SECONDARY_CONTROLS, 1)) {
 		if (vcpu_vmx_check_cap(vcpu, IA32_VMX_PROCBASED2_CTLS,
 		    IA32_VMX_ENABLE_VPID, 1)) {
-			if (vmm_alloc_vpid(&vpid)) {
+
+			/* We may sleep during allocation, so reload VMCS. */
+			vcpu->vc_last_pcpu = curcpu();
+			ret = vmm_alloc_vpid(&vpid);
+			if (vcpu_reload_vmcs_vmx(vcpu)) {
+				printf("%s: failed to reload vmcs\n", __func__);
+				ret = EINVAL;
+				goto exit;
+			}
+			if (ret) {
 				DPRINTF("%s: could not allocate VPID\n",
 				    __func__);
 				ret = EINVAL;
 				goto exit;
 			}
+
 			if (vmwrite(VMCS_GUEST_VPID, vpid)) {
 				DPRINTF("%s: error setting guest VPID\n",
 				    __func__);
@@ -3305,6 +3564,7 @@ int
 vcpu_init_vmx(struct vcpu *vcpu)
 {
 	struct vmcs *vmcs;
+	uint64_t msr, eptp;
 	uint32_t cr0, cr4;
 	int ret = 0;
 
@@ -3398,6 +3658,34 @@ vcpu_init_vmx(struct vcpu *vcpu)
 		goto exit;
 	}
 
+	/* Configure EPT Pointer */
+	eptp = vcpu->vc_parent->vm_map->pmap->pm_pdirpa;
+	msr = rdmsr(IA32_VMX_EPT_VPID_CAP);
+	if (msr & IA32_EPT_VPID_CAP_PAGE_WALK_4) {
+		/* Page walk length 4 supported */
+		eptp |= ((IA32_EPT_PAGE_WALK_LENGTH - 1) << 3);
+	} else {
+		DPRINTF("EPT page walk length 4 not supported\n");
+		ret = EINVAL;
+		goto exit;
+	}
+
+	if (msr & IA32_EPT_VPID_CAP_WB) {
+		/* WB cache type supported */
+		eptp |= IA32_EPT_PAGING_CACHE_TYPE_WB;
+	} else
+		DPRINTF("%s: no WB cache type available, guest VM will run "
+		    "uncached\n", __func__);
+
+	DPRINTF("Guest EPTP = 0x%llx\n", eptp);
+	if (vmwrite(VMCS_GUEST_IA32_EPTP, eptp)) {
+		DPRINTF("%s: error setting guest EPTP\n", __func__);
+		ret = EINVAL;
+		goto exit;
+	}
+
+	vcpu->vc_parent->vm_map->pmap->eptp = eptp;
+
 	/* Host CR0 */
 	cr0 = rcr0() & ~CR0_TS;
 	if (vmwrite(VMCS_HOST_IA32_CR0, cr0)) {
@@ -3478,23 +3766,8 @@ vcpu_init_vmx(struct vcpu *vcpu)
 	}
 
 exit:
-	if (ret) {
-		if (vcpu->vc_control_va)
-			km_free((void *)vcpu->vc_control_va, PAGE_SIZE,
-			    &kv_page, &kp_zero);
-		if (vcpu->vc_msr_bitmap_va)
-			km_free((void *)vcpu->vc_msr_bitmap_va, PAGE_SIZE,
-			    &kv_page, &kp_zero);
-		if (vcpu->vc_vmx_msr_exit_save_va)
-			km_free((void *)vcpu->vc_vmx_msr_exit_save_va,
-			    PAGE_SIZE, &kv_page, &kp_zero);
-		if (vcpu->vc_vmx_msr_exit_load_va)
-			km_free((void *)vcpu->vc_vmx_msr_exit_load_va,
-			    PAGE_SIZE, &kv_page, &kp_zero);
-		if (vcpu->vc_vmx_msr_entry_load_va)
-			km_free((void *)vcpu->vc_vmx_msr_entry_load_va,
-			    PAGE_SIZE, &kv_page, &kp_zero);
-	}
+	if (ret)
+		vcpu_deinit_vmx(vcpu);
 
 	return (ret);
 }
@@ -3631,20 +3904,8 @@ vcpu_init_svm(struct vcpu *vcpu)
 	    (uint64_t)vcpu->vc_svm_ioio_pa);
 
 exit:
-	if (ret) {
-		if (vcpu->vc_control_va)
-			km_free((void *)vcpu->vc_control_va, PAGE_SIZE,
-			    &kv_page, &kp_zero);
-		if (vcpu->vc_msr_bitmap_va)
-			km_free((void *)vcpu->vc_msr_bitmap_va, 2 * PAGE_SIZE,
-			    &kv_any, &vmm_kp_contig);
-		if (vcpu->vc_svm_hsa_va)
-			km_free((void *)vcpu->vc_svm_hsa_va, PAGE_SIZE,
-			    &kv_page, &kp_zero);
-		if (vcpu->vc_svm_ioio_va)
-			km_free((void *)vcpu->vc_svm_ioio_va,
-			    3 * PAGE_SIZE, &kv_any, &vmm_kp_contig);
-	}
+	if (ret)
+		vcpu_deinit_svm(vcpu);
 
 	return (ret);
 }
@@ -3693,18 +3954,26 @@ vcpu_init(struct vcpu *vcpu)
 void
 vcpu_deinit_vmx(struct vcpu *vcpu)
 {
-	if (vcpu->vc_control_va)
+	if (vcpu->vc_control_va) {
 		km_free((void *)vcpu->vc_control_va, PAGE_SIZE,
 		    &kv_page, &kp_zero);
-	if (vcpu->vc_vmx_msr_exit_save_va)
+		vcpu->vc_control_va = 0;
+	}
+	if (vcpu->vc_vmx_msr_exit_save_va) {
 		km_free((void *)vcpu->vc_vmx_msr_exit_save_va,
 		    PAGE_SIZE, &kv_page, &kp_zero);
-	if (vcpu->vc_vmx_msr_exit_load_va)
+		vcpu->vc_vmx_msr_exit_save_va = 0;
+	}
+	if (vcpu->vc_vmx_msr_exit_load_va) {
 		km_free((void *)vcpu->vc_vmx_msr_exit_load_va,
 		    PAGE_SIZE, &kv_page, &kp_zero);
-	if (vcpu->vc_vmx_msr_entry_load_va)
+		vcpu->vc_vmx_msr_exit_load_va = 0;
+	}
+	if (vcpu->vc_vmx_msr_entry_load_va) {
 		km_free((void *)vcpu->vc_vmx_msr_entry_load_va,
 		    PAGE_SIZE, &kv_page, &kp_zero);
+		vcpu->vc_vmx_msr_entry_load_va = 0;
+	}
 
 	if (vcpu->vc_vmx_vpid_enabled)
 		vmm_free_vpid(vcpu->vc_vpid);
@@ -3721,18 +3990,26 @@ vcpu_deinit_vmx(struct vcpu *vcpu)
 void
 vcpu_deinit_svm(struct vcpu *vcpu)
 {
-	if (vcpu->vc_control_va)
+	if (vcpu->vc_control_va) {
 		km_free((void *)vcpu->vc_control_va, PAGE_SIZE, &kv_page,
 		    &kp_zero);
-	if (vcpu->vc_msr_bitmap_va)
+		vcpu->vc_control_va = 0;
+	}
+	if (vcpu->vc_msr_bitmap_va) {
 		km_free((void *)vcpu->vc_msr_bitmap_va, 2 * PAGE_SIZE, &kv_any,
 		    &vmm_kp_contig);
-	if (vcpu->vc_svm_hsa_va)
+		vcpu->vc_msr_bitmap_va = 0;
+	}
+	if (vcpu->vc_svm_hsa_va) {
 		km_free((void *)vcpu->vc_svm_hsa_va, PAGE_SIZE, &kv_page,
 		    &kp_zero);
-	if (vcpu->vc_svm_ioio_va)
+		vcpu->vc_svm_hsa_va = 0;
+	}
+	if (vcpu->vc_svm_ioio_va) {
 		km_free((void *)vcpu->vc_svm_ioio_va, 3 * PAGE_SIZE, &kv_any,
 		    &vmm_kp_contig);
+		vcpu->vc_svm_ioio_va = 0;
+	}
 
 	vmm_free_vpid(vcpu->vc_vpid);
 }
@@ -3763,42 +4040,51 @@ vcpu_deinit(struct vcpu *vcpu)
  *
  * Tears down (destroys) the vm indicated by 'vm'.
  *
+ * Assumes the vm is already removed from the global vm list (or was never
+ * added).
+ *
  * Parameters:
  *  vm: vm to be torn down
  */
 void
-vm_teardown(struct vm *vm)
+vm_teardown(struct vm **target)
 {
+	size_t nvcpu = 0;
 	struct vcpu *vcpu, *tmp;
+	struct vm *vm = *target;
+	struct vmspace *vm_vmspace;
 
-	rw_assert_wrlock(&vmm_softc->vm_lock);
-	KERNEL_LOCK();
+	KERNEL_ASSERT_UNLOCKED();
+
+	refcnt_finalize(&vm->vm_refcnt, "vmteardown");
 
 	/* Free VCPUs */
 	rw_enter_write(&vm->vm_vcpu_lock);
 	SLIST_FOREACH_SAFE(vcpu, &vm->vm_vcpu_list, vc_vcpu_link, tmp) {
+		refcnt_take(&vcpu->vc_refcnt);
+		refcnt_finalize(&vcpu->vc_refcnt, "vcputeardown");
+
 		SLIST_REMOVE(&vm->vm_vcpu_list, vcpu, vcpu, vc_vcpu_link);
 		vcpu_deinit(vcpu);
+
 		pool_put(&vcpu_pool, vcpu);
+		nvcpu++;
 	}
+	rw_exit_write(&vm->vm_vcpu_lock);
 
 	vm_impl_deinit(vm);
 
 	/* teardown guest vmspace */
-	if (vm->vm_vmspace != NULL) {
-		uvmspace_free(vm->vm_vmspace);
+	KERNEL_LOCK();
+	vm_vmspace = vm->vm_vmspace;
+	if (vm_vmspace != NULL) {
 		vm->vm_vmspace = NULL;
+		uvmspace_free(vm_vmspace);
 	}
-
-	if (vm->vm_id > 0) {
-		vmm_softc->vm_ct--;
-		if (vmm_softc->vm_ct < 1)
-			vmm_stop();
-	}
-	pool_put(&vm_pool, vm);
-
 	KERNEL_UNLOCK();
-	rw_exit_write(&vm->vm_vcpu_lock);
+
+	pool_put(&vm_pool, vm);
+	*target = NULL;
 }
 
 /*
@@ -3897,6 +4183,8 @@ vcpu_vmx_compute_ctrl(uint64_t ctrlval, uint16_t ctrl, uint32_t want1,
 	uint32_t want0, uint32_t *out)
 {
 	int i, set, clear;
+
+	*out = 0;
 
 	/*
 	 * The Intel SDM gives three formulae for determining which bits to
@@ -4060,11 +4348,11 @@ vcpu_vmx_compute_ctrl(uint64_t ctrlval, uint16_t ctrl, uint32_t want1,
  * after allocating a sufficiently large buffer.
  *
  * Parameters:
- *  vip: information structure identifying the VM to queery
+ *  vip: information structure identifying the VM to query
  *
  * Return values:
  *  0: the operation succeeded
- *  ENOMEM: memory allocation error during processng
+ *  ENOMEM: memory allocation error during processing
  *  EFAULT: error copying data to user process
  */
 int
@@ -4073,28 +4361,32 @@ vm_get_info(struct vm_info_params *vip)
 	struct vm_info_result *out;
 	struct vm *vm;
 	struct vcpu *vcpu;
-	int i, j;
-	size_t need;
+	int i = 0, j;
+	size_t need, vm_ct;
 
 	rw_enter_read(&vmm_softc->vm_lock);
-	need = vmm_softc->vm_ct * sizeof(struct vm_info_result);
+	vm_ct = vmm_softc->vm_ct;
+	rw_exit_read(&vmm_softc->vm_lock);
+
+	need = vm_ct * sizeof(struct vm_info_result);
 	if (vip->vip_size < need) {
 		vip->vip_info_ct = 0;
 		vip->vip_size = need;
-		rw_exit_read(&vmm_softc->vm_lock);
 		return (0);
 	}
 
 	out = malloc(need, M_DEVBUF, M_NOWAIT|M_ZERO);
 	if (out == NULL) {
 		vip->vip_info_ct = 0;
-		rw_exit_read(&vmm_softc->vm_lock);
 		return (ENOMEM);
 	}
 
-	i = 0;
-	vip->vip_info_ct = vmm_softc->vm_ct;
+	vip->vip_info_ct = vm_ct;
+
+	rw_enter_read(&vmm_softc->vm_lock);
 	SLIST_FOREACH(vm, &vmm_softc->vm_list, vm_link) {
+		refcnt_take(&vm->vm_refcnt);
+
 		out[i].vir_memory_size = vm->vm_memory_size;
 		out[i].vir_used_size =
 		    pmap_resident_count(vm->vm_map->pmap) * PAGE_SIZE;
@@ -4102,20 +4394,28 @@ vm_get_info(struct vm_info_params *vip)
 		out[i].vir_id = vm->vm_id;
 		out[i].vir_creator_pid = vm->vm_creator_pid;
 		strlcpy(out[i].vir_name, vm->vm_name, VMM_MAX_NAME_LEN);
+
 		rw_enter_read(&vm->vm_vcpu_lock);
 		for (j = 0; j < vm->vm_vcpu_ct; j++) {
 			out[i].vir_vcpu_state[j] = VCPU_STATE_UNKNOWN;
 			SLIST_FOREACH(vcpu, &vm->vm_vcpu_list,
 			    vc_vcpu_link) {
+				refcnt_take(&vcpu->vc_refcnt);
 				if (vcpu->vc_id == j)
 					out[i].vir_vcpu_state[j] =
 					    vcpu->vc_state;
+				refcnt_rele_wake(&vcpu->vc_refcnt);
 			}
 		}
 		rw_exit_read(&vm->vm_vcpu_lock);
+
+		refcnt_rele_wake(&vm->vm_refcnt);
 		i++;
+		if (i == vm_ct)
+			break;	/* Truncate to keep within bounds of 'out'. */
 	}
 	rw_exit_read(&vmm_softc->vm_lock);
+
 	if (copyout(out, vip->vip_info, need) == EFAULT) {
 		free(out, M_DEVBUF, need);
 		return (EFAULT);
@@ -4143,39 +4443,50 @@ vm_terminate(struct vm_terminate_params *vtp)
 	struct vm *vm;
 	struct vcpu *vcpu;
 	u_int old, next;
-	int error;
+	int error, nvcpu, vm_id;
 
 	/*
 	 * Find desired VM
 	 */
-	rw_enter_write(&vmm_softc->vm_lock);
 	error = vm_find(vtp->vtp_vm_id, &vm);
-
-	if (error == 0) {
-		rw_enter_read(&vm->vm_vcpu_lock);
-		SLIST_FOREACH(vcpu, &vm->vm_vcpu_list, vc_vcpu_link) {
-			do {
-				old = vcpu->vc_state;
-				if (old == VCPU_STATE_RUNNING)
-					next = VCPU_STATE_REQTERM;
-				else if (old == VCPU_STATE_STOPPED)
-					next = VCPU_STATE_TERMINATED;
-				else /* must be REQTERM or TERMINATED */
-					break;
-			} while (old != atomic_cas_uint(&vcpu->vc_state,
-			    old, next));
-		}
-		rw_exit_read(&vm->vm_vcpu_lock);
-	} else {
-		rw_exit_write(&vmm_softc->vm_lock);
+	if (error)
 		return (error);
+
+	/* Stop all vcpu's for the vm. */
+	rw_enter_read(&vm->vm_vcpu_lock);
+	SLIST_FOREACH(vcpu, &vm->vm_vcpu_list, vc_vcpu_link) {
+		refcnt_take(&vcpu->vc_refcnt);
+		do {
+			old = vcpu->vc_state;
+			if (old == VCPU_STATE_RUNNING)
+				next = VCPU_STATE_REQTERM;
+			else if (old == VCPU_STATE_STOPPED)
+				next = VCPU_STATE_TERMINATED;
+			else /* must be REQTERM or TERMINATED */
+				break;
+		} while (old != atomic_cas_uint(&vcpu->vc_state, old, next));
+		refcnt_rele_wake(&vcpu->vc_refcnt);
 	}
+	rw_exit_read(&vm->vm_vcpu_lock);
 
+	/* Pop the vm out of the global vm list. */
+	rw_enter_write(&vmm_softc->vm_lock);
 	SLIST_REMOVE(&vmm_softc->vm_list, vm, vm, vm_link);
-	if (vm->vm_vcpus_running == 0)
-		vm_teardown(vm);
-
 	rw_exit_write(&vmm_softc->vm_lock);
+
+	vm_id = vm->vm_id;
+	nvcpu = vm->vm_vcpu_ct;
+
+	vm_teardown(&vm);
+
+	if (vm_id > 0) {
+		rw_enter_write(&vmm_softc->vm_lock);
+		vmm_softc->vm_ct--;
+		vmm_softc->vcpu_ct -= nvcpu;
+		if (vmm_softc->vm_ct < 1)
+			vmm_stop();
+		rw_exit_write(&vmm_softc->vm_lock);
+	}
 
 	return (0);
 }
@@ -4202,49 +4513,34 @@ vm_run(struct vm_run_params *vrp)
 {
 	struct vm *vm;
 	struct vcpu *vcpu;
-	int ret = 0, error;
+	int ret = 0;
 	u_int old, next;
 
 	/*
 	 * Find desired VM
 	 */
-	rw_enter_read(&vmm_softc->vm_lock);
-	error = vm_find(vrp->vrp_vm_id, &vm);
-
-	/*
-	 * Attempt to locate the requested VCPU. If found, attempt to
-	 * to transition from VCPU_STATE_STOPPED -> VCPU_STATE_RUNNING.
-	 * Failure to make the transition indicates the VCPU is busy.
-	 */
-	if (error == 0) {
-		rw_enter_read(&vm->vm_vcpu_lock);
-		SLIST_FOREACH(vcpu, &vm->vm_vcpu_list, vc_vcpu_link) {
-			if (vcpu->vc_id == vrp->vrp_vcpu_id)
-				break;
-		}
-
-		if (vcpu != NULL) {
-			old = VCPU_STATE_STOPPED;
-			next = VCPU_STATE_RUNNING;
-
-			if (atomic_cas_uint(&vcpu->vc_state, old, next) != old)
-				ret = EBUSY;
-			else
-				atomic_inc_int(&vm->vm_vcpus_running);
-			rw_enter_write(&vcpu->vc_lock);
-		} else
-			ret = ENOENT;
-
-		rw_exit_read(&vm->vm_vcpu_lock);
-	}
-	rw_exit_read(&vmm_softc->vm_lock);
-
-	if (error != 0)
-		ret = error;
-
-	/* Bail if errors detected in the previous steps */
+	ret = vm_find(vrp->vrp_vm_id, &vm);
 	if (ret)
 		return (ret);
+
+	vcpu = vm_find_vcpu(vm, vrp->vrp_vcpu_id);
+	if (vcpu == NULL) {
+		ret = ENOENT;
+		goto out;
+	}
+
+	/*
+	 * Attempt to transition from VCPU_STATE_STOPPED -> VCPU_STATE_RUNNING.
+	 * Failure to make the transition indicates the VCPU is busy.
+	 */
+	rw_enter_write(&vcpu->vc_lock);
+	old = VCPU_STATE_STOPPED;
+	next = VCPU_STATE_RUNNING;
+	if (atomic_cas_uint(&vcpu->vc_state, old, next) != old) {
+		ret = EBUSY;
+		goto out_unlock;
+	}
+	atomic_inc_int(&vm->vm_vcpus_running);
 
 	/*
 	 * We may be returning from userland helping us from the last exit.
@@ -4255,8 +4551,8 @@ vm_run(struct vm_run_params *vrp)
 	if (vrp->vrp_continue) {
 		if (copyin(vrp->vrp_exit, &vcpu->vc_exit,
 		    sizeof(struct vm_exit)) == EFAULT) {
-			rw_exit_write(&vcpu->vc_lock);
-			return (EFAULT);
+			ret = EFAULT;
+			goto out_unlock;
 		}
 	}
 
@@ -4269,24 +4565,11 @@ vm_run(struct vm_run_params *vrp)
 		ret = vcpu_run_svm(vcpu, vrp);
 	}
 
-	/*
-	 * We can set the VCPU states here without CAS because once
-	 * a VCPU is in state RUNNING or REQTERM, only the VCPU itself
-	 * can switch the state.
-	 */
 	atomic_dec_int(&vm->vm_vcpus_running);
-	if (vcpu->vc_state == VCPU_STATE_REQTERM) {
-		vrp->vrp_exit_reason = VM_EXIT_TERMINATED;
-		vcpu->vc_state = VCPU_STATE_TERMINATED;
-		if (vm->vm_vcpus_running == 0) {
-			rw_enter_write(&vmm_softc->vm_lock);
-			vm_teardown(vm);
-			rw_exit_write(&vmm_softc->vm_lock);
-		}
-		ret = 0;
-	} else if (ret == EAGAIN) {
+	if (ret == 0 || ret == EAGAIN) {
 		/* If we are exiting, populate exit data so vmd can help. */
-		vrp->vrp_exit_reason = vcpu->vc_gueststate.vg_exit_reason;
+		vrp->vrp_exit_reason = (ret == 0) ? VM_EXIT_NONE
+		    : vcpu->vc_gueststate.vg_exit_reason;
 		vrp->vrp_irqready = vcpu->vc_irqready;
 		vcpu->vc_state = VCPU_STATE_STOPPED;
 
@@ -4295,16 +4578,16 @@ vm_run(struct vm_run_params *vrp)
 			ret = EFAULT;
 		} else
 			ret = 0;
-	} else if (ret == 0) {
-		vrp->vrp_exit_reason = VM_EXIT_NONE;
-		vcpu->vc_state = VCPU_STATE_STOPPED;
 	} else {
 		vrp->vrp_exit_reason = VM_EXIT_TERMINATED;
 		vcpu->vc_state = VCPU_STATE_TERMINATED;
 	}
-
+out_unlock:
 	rw_exit_write(&vcpu->vc_lock);
-
+out:
+	if (vcpu != NULL)
+		refcnt_rele_wake(&vcpu->vc_refcnt);
+	refcnt_rele_wake(&vm->vm_refcnt);
 	return (ret);
 }
 
@@ -4346,9 +4629,11 @@ vmm_fpurestore(struct vcpu *vcpu)
 {
 	struct cpu_info *ci = curcpu();
 
+	rw_assert_wrlock(&vcpu->vc_lock);
+
 	/* save vmm's FPU state if we haven't already */
-	if (ci->ci_flags & CPUF_USERXSTATE) {
-		ci->ci_flags &= ~CPUF_USERXSTATE;
+	if (ci->ci_pflags & CPUPF_USERXSTATE) {
+		ci->ci_pflags &= ~CPUPF_USERXSTATE;
 		fpusavereset(&curproc->p_addr->u_pcb.pcb_savefpu);
 	}
 
@@ -4381,6 +4666,8 @@ vmm_fpurestore(struct vcpu *vcpu)
 void
 vmm_fpusave(struct vcpu *vcpu)
 {
+	rw_assert_wrlock(&vcpu->vc_lock);
+
 	if (xsave_mask) {
 		/* Save guest %xcr0 */
 		vcpu->vc_gueststate.vg_xcr0 = xgetbv(0);
@@ -4437,7 +4724,7 @@ vmm_translate_gva(struct vcpu *vcpu, uint64_t va, uint64_t *pa, int mode)
 
 	if (vmm_softc->mode == VMM_MODE_EPT ||
 	    vmm_softc->mode == VMM_MODE_VMX) {
-		if (vcpu_readregs_vmx(vcpu, VM_RWREGS_ALL, &vrs))
+		if (vcpu_readregs_vmx(vcpu, VM_RWREGS_ALL, 1, &vrs))
 			return (EINVAL);
 	} else if (vmm_softc->mode == VMM_MODE_RVI ||
 	    vmm_softc->mode == VMM_MODE_SVM) {
@@ -4679,7 +4966,7 @@ vcpu_run_vmx(struct vcpu *vcpu, struct vm_run_params *vrp)
 			return (EINVAL);
 		}
 
-		/* Interruptbility state 0x3 covers NMIs and STI */
+		/* Interruptibility state 0x3 covers NMIs and STI */
 		if (!(int_st & 0x3) && vcpu->vc_irqready) {
 			eii = (irq & 0xFF);
 			eii |= (1ULL << 31);	/* Valid */
@@ -4793,19 +5080,27 @@ vcpu_run_vmx(struct vcpu *vcpu, struct vm_run_params *vrp)
 		vmm_fpusave(vcpu);
 		intr_restore(s);
 
-		TRACEPOINT(vmm, guest_exit, vcpu, vrp, exit_reason);
-
 		atomic_swap_uint(&vcpu->vc_vmx_vmcs_state, VMCS_LAUNCHED);
 		exit_reason = VM_EXIT_NONE;
 
 		/* If we exited successfully ... */
 		if (ret == 0) {
-			/*
-			 * ret == 0 implies we entered the guest, and later
-			 * exited for some valid reason
-			 */
 			exitinfo = vmx_get_exit_info(
 			    &vcpu->vc_gueststate.vg_rip, &exit_reason);
+			if (!(exitinfo & VMX_EXIT_INFO_HAVE_RIP)) {
+				printf("%s: cannot read guest rip\n", __func__);
+				ret = EINVAL;
+				break;
+			}
+			if (!(exitinfo & VMX_EXIT_INFO_HAVE_REASON)) {
+				printf("%s: cant read exit reason\n", __func__);
+				ret = EINVAL;
+				break;
+			}
+			vcpu->vc_gueststate.vg_exit_reason = exit_reason;
+			TRACEPOINT(vmm, guest_exit, vcpu, vrp, exit_reason);
+
+			/* Update our state */
 			if (vmread(VMCS_GUEST_IA32_RFLAGS,
 			    &vcpu->vc_gueststate.vg_rflags)) {
 				printf("%s: can't read guest rflags during "
@@ -4814,24 +5109,10 @@ vcpu_run_vmx(struct vcpu *vcpu, struct vm_run_params *vrp)
 				break;
                         }
 
-			/* Update our state */
-			if (!(exitinfo & VMX_EXIT_INFO_HAVE_RIP)) {
-				printf("%s: cannot read guest rip\n", __func__);
-				ret = EINVAL;
-				break;
-			}
-
-			if (!(exitinfo & VMX_EXIT_INFO_HAVE_REASON)) {
-				printf("%s: cant read exit reason\n", __func__);
-				ret = EINVAL;
-				break;
-			}
-
 			/*
 			 * Handle the exit. This will alter "ret" to EAGAIN if
 			 * the exit handler determines help from vmd is needed.
 			 */
-			vcpu->vc_gueststate.vg_exit_reason = exit_reason;
 			ret = vmx_handle_exit(vcpu);
 
 			if (vcpu->vc_gueststate.vg_rflags & PSL_I)
@@ -4923,7 +5204,7 @@ vcpu_run_vmx(struct vcpu *vcpu, struct vm_run_params *vrp)
 	vcpu->vc_last_pcpu = curcpu();
 
 	/* Copy the VCPU register state to the exit structure */
-	if (vcpu_readregs_vmx(vcpu, VM_RWREGS_ALL, &vcpu->vc_exit.vrs))
+	if (vcpu_readregs_vmx(vcpu, VM_RWREGS_ALL, 0, &vcpu->vc_exit.vrs))
 		ret = EINVAL;
 	vcpu->vc_exit.cpl = vmm_get_guest_cpu_cpl(vcpu);
 
@@ -5279,7 +5560,7 @@ vmx_handle_exit(struct vcpu *vcpu)
 			return (EINVAL);
 		}
 
-		/* Interruptibilty state 0x3 covers NMIs and STI */
+		/* Interruptibility state 0x3 covers NMIs and STI */
 		istate &= ~0x3;
 
 		if (vmwrite(VMCS_GUEST_INTERRUPTIBILITY_ST,
@@ -5534,7 +5815,7 @@ svm_handle_np_fault(struct vcpu *vcpu)
  *
  * Return Values:
  *  0: if successful
- *  EINVAL: if fault type could not be determined
+ *  EINVAL: if fault type could not be determined or VMCS reload fails
  *  EAGAIN: if a protection fault occurred, ie writing to a read-only page
  *  errno: if uvm_fault(9) fails to wire in the page
  */
@@ -5544,20 +5825,26 @@ vmx_fault_page(struct vcpu *vcpu, paddr_t gpa)
 	int fault_type, ret;
 
 	fault_type = vmx_get_guest_faulttype();
-	if (fault_type == -1) {
+	switch (fault_type) {
+	case -1:
 		printf("%s: invalid fault type\n", __func__);
 		return (EINVAL);
-	}
-
-	if (fault_type == VM_FAULT_PROTECT) {
+	case VM_FAULT_PROTECT:
 		vcpu->vc_exit.vee.vee_fault_type = VEE_FAULT_PROTECT;
 		return (EAGAIN);
+	default:
+		vcpu->vc_exit.vee.vee_fault_type = VEE_FAULT_HANDLED;
+		break;
 	}
 
-	KERNEL_LOCK();
+	/* We may sleep during uvm_fault(9), so reload VMCS. */
+	vcpu->vc_last_pcpu = curcpu();
 	ret = uvm_fault(vcpu->vc_parent->vm_map, gpa, VM_FAULT_WIRE,
 	    PROT_READ | PROT_WRITE | PROT_EXEC);
-	KERNEL_UNLOCK();
+	if (vcpu_reload_vmcs_vmx(vcpu)) {
+		printf("%s: failed to reload vmcs\n", __func__);
+		return (EINVAL);
+	}
 
 	if (ret)
 		printf("%s: uvm_fault returns %d, GPA=0x%llx, rip=0x%llx\n",
@@ -5947,7 +6234,16 @@ vmx_load_pdptes(struct vcpu *vcpu)
 
 	ret = 0;
 
-	cr3_host_virt = (vaddr_t)km_alloc(PAGE_SIZE, &kv_any, &kp_none, &kd_waitok);
+	/* We may sleep during km_alloc(9), so reload VMCS. */
+	vcpu->vc_last_pcpu = curcpu();
+	cr3_host_virt = (vaddr_t)km_alloc(PAGE_SIZE, &kv_any, &kp_none,
+	    &kd_waitok);
+	if (vcpu_reload_vmcs_vmx(vcpu)) {
+		printf("%s: failed to reload vmcs\n", __func__);
+		ret = EINVAL;
+		goto exit;
+	}
+
 	if (!cr3_host_virt) {
 		printf("%s: can't allocate address for guest CR3 mapping\n",
 		    __func__);
@@ -5983,7 +6279,15 @@ vmx_load_pdptes(struct vcpu *vcpu)
 
 exit:
 	pmap_kremove(cr3_host_virt, PAGE_SIZE);
+
+	/* km_free(9) might sleep, so we need to reload VMCS. */
+	vcpu->vc_last_pcpu = curcpu();
 	km_free((void *)cr3_host_virt, PAGE_SIZE, &kv_any, &kp_none);
+	if (vcpu_reload_vmcs_vmx(vcpu)) {
+		printf("%s: failed to reload vmcs after km_free\n", __func__);
+		ret = EINVAL;
+	}
+
 	return (ret);
 }
 
@@ -6611,7 +6915,7 @@ svm_handle_msr(struct vcpu *vcpu)
 			*rdx = (vcpu->vc_shadow_pat >> 32);
 			break;
 		case MSR_DE_CFG:
-			/* LFENCE seralizing bit is set by host */
+			/* LFENCE serializing bit is set by host */
 			*rax = DE_CFG_SERIALIZE_LFENCE;
 			*rdx = 0;
 			break;
@@ -6648,10 +6952,16 @@ int
 vmm_handle_cpuid(struct vcpu *vcpu)
 {
 	uint64_t insn_length, cr4;
-	uint64_t *rax, *rbx, *rcx, *rdx, cpuid_limit;
+	uint64_t *rax, *rbx, *rcx, *rdx;
 	struct vmcb *vmcb;
-	uint32_t eax, ebx, ecx, edx;
+	uint32_t leaf, subleaf, eax, ebx, ecx, edx;
 	struct vmx_msr_store *msr_store;
+	int vmm_cpuid_level;
+
+	/* what's the cpuid level we support/advertise? */
+	vmm_cpuid_level = cpuid_level;
+	if (vmm_cpuid_level < 0x15 && tsc_is_invariant)
+		vmm_cpuid_level = 0x15;
 
 	if (vmm_softc->mode == VMM_MODE_VMX ||
 	    vmm_softc->mode == VMM_MODE_EPT) {
@@ -6667,10 +6977,17 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		}
 
 		rax = &vcpu->vc_gueststate.vg_rax;
+
+		/*
+		 * "CPUID leaves above 02H and below 80000000H are only
+		 * visible when IA32_MISC_ENABLE MSR has bit 22 set to its
+		 * default value 0"
+		 */
 		msr_store =
 		    (struct vmx_msr_store *)vcpu->vc_vmx_msr_exit_save_va;
-		cpuid_limit = msr_store[VCPU_REGS_MISC_ENABLE].vms_data &
-		    MISC_ENABLE_LIMIT_CPUID_MAXVAL;
+		if (msr_store[VCPU_REGS_MISC_ENABLE].vms_data &
+		    MISC_ENABLE_LIMIT_CPUID_MAXVAL)
+			vmm_cpuid_level = 0x02;
 	} else {
 		/* XXX: validate insn_length 2 */
 		insn_length = 2;
@@ -6684,50 +7001,41 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 	rdx = &vcpu->vc_gueststate.vg_rdx;
 	vcpu->vc_gueststate.vg_rip += insn_length;
 
+	leaf = *rax;
+	subleaf = *rcx;
+
 	/*
 	 * "If a value entered for CPUID.EAX is higher than the maximum input
 	 *  value for basic or extended function for that processor then the
 	 *  data for the highest basic information leaf is returned."
 	 *
-	 * This means if rax is between cpuid_level and 0x40000000 (the start
-	 * of the hypervisor info leaves), clamp to cpuid_level. Also, if
-	 * rax is greater than the extended function info, clamp also to
-	 * cpuid_level.
+	 * "When CPUID returns the highest basic leaf information as a result
+	 *  of an invalid input EAX value, any dependence on input ECX value
+	 *  in the basic leaf is honored."
 	 *
-	 * Note that %rax may be overwritten here - that's ok since we are
-	 * going to reassign it a new value (based on the input parameter)
-	 * later anyway.
+	 * This means if leaf is between vmm_cpuid_level and 0x40000000 (the start
+	 * of the hypervisor info leaves), clamp to vmm_cpuid_level, but without
+	 * altering subleaf.  Also, if leaf is greater than the extended function
+	 * info, clamp also to vmm_cpuid_level.
 	 */
-	if ((*rax > cpuid_level && *rax < 0x40000000) ||
-	    (*rax > curcpu()->ci_pnfeatset)) {
-		DPRINTF("%s: invalid cpuid input leaf 0x%llx, guest rip="
-		    "0x%llx - resetting to 0x%x\n", __func__, *rax,
+	if ((leaf > vmm_cpuid_level && leaf < 0x40000000) ||
+	    (leaf > curcpu()->ci_pnfeatset)) {
+		DPRINTF("%s: invalid cpuid input leaf 0x%x, guest rip="
+		    "0x%llx - resetting to 0x%x\n", __func__, leaf,
 		    vcpu->vc_gueststate.vg_rip - insn_length,
-		    cpuid_level);
-		*rax = cpuid_level;
+		    vmm_cpuid_level);
+		leaf = vmm_cpuid_level;
 	}
 
-	/*
-	 * "CPUID leaves above 02H and below 80000000H are only visible when
-	 * IA32_MISC_ENABLE MSR has bit 22 set to its default value 0"
-	 */
-	if ((vmm_softc->mode == VMM_MODE_VMX || vmm_softc->mode == VMM_MODE_EPT)
-	    && cpuid_limit && (*rax > 0x02 && *rax < 0x80000000)) {
-		*rax = 0;
-		*rbx = 0;
-		*rcx = 0;
-		*rdx = 0;
-		return (0);
-	}
+	/* we fake up values in the range (cpuid_level, vmm_cpuid_level] */
+	if (leaf <= cpuid_level || leaf > 0x80000000)
+		CPUID_LEAF(leaf, subleaf, eax, ebx, ecx, edx);
+	else
+		eax = ebx = ecx = edx = 0;
 
-	CPUID_LEAF(*rax, 0, eax, ebx, ecx, edx);
-
-	switch (*rax) {
+	switch (leaf) {
 	case 0x00:	/* Max level and vendor ID */
-		if (cpuid_level < 0x15 && tsc_is_invariant)
-			*rax = 0x15;
-		else
-			*rax = cpuid_level;
+		*rax = vmm_cpuid_level;
 		*rbx = *((uint32_t *)&cpu_vendor);
 		*rdx = *((uint32_t *)&cpu_vendor + 1);
 		*rcx = *((uint32_t *)&cpu_vendor + 2);
@@ -6762,18 +7070,10 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		*rdx = 0;
 		break;
 	case 0x04: 	/* Deterministic cache info */
-		if (*rcx == 0) {
-			*rax = eax & VMM_CPUID4_CACHE_TOPOLOGY_MASK;
-			*rbx = ebx;
-			*rcx = ecx;
-			*rdx = edx;
-		} else {
-			CPUID_LEAF(*rax, *rcx, eax, ebx, ecx, edx);
-			*rax = eax & VMM_CPUID4_CACHE_TOPOLOGY_MASK;
-			*rbx = ebx;
-			*rcx = ecx;
-			*rdx = edx;
-		}
+		*rax = eax & VMM_CPUID4_CACHE_TOPOLOGY_MASK;
+		*rbx = ebx;
+		*rcx = ecx;
+		*rdx = edx;
 		break;
 	case 0x05:	/* MONITOR/MWAIT (not supported) */
 		DPRINTF("%s: function 0x05 (monitor/mwait) not supported\n",
@@ -6792,7 +7092,7 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		*rdx = 0;
 		break;
 	case 0x07:	/* SEFF */
-		if (*rcx == 0) {
+		if (subleaf == 0) {
 			*rax = 0;	/* Highest subleaf supported */
 			*rbx = curcpu()->ci_feature_sefflags_ebx & VMM_SEFF0EBX_MASK;
 			*rcx = curcpu()->ci_feature_sefflags_ecx & VMM_SEFF0ECX_MASK;
@@ -6800,7 +7100,7 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		} else {
 			/* Unsupported subleaf */
 			DPRINTF("%s: function 0x07 (SEFF) unsupported subleaf "
-			    "0x%llx not supported\n", __func__, *rcx);
+			    "0x%x not supported\n", __func__, subleaf);
 			*rax = 0;
 			*rbx = 0;
 			*rcx = 0;
@@ -6832,18 +7132,17 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		*rdx = 0;
 		break;
 	case 0x0d:	/* Processor ext. state information */
-		if (*rcx == 0) {
+		if (subleaf == 0) {
 			*rax = xsave_mask;
 			*rbx = ebx;
 			*rcx = ecx;
 			*rdx = edx;
-		} else if (*rcx == 1) {
+		} else if (subleaf == 1) {
 			*rax = 0;
 			*rbx = 0;
 			*rcx = 0;
 			*rdx = 0;
 		} else {
-			CPUID_LEAF(*rax, *rcx, eax, ebx, ecx, edx);
 			*rax = eax;
 			*rbx = ebx;
 			*rcx = ecx;
@@ -6868,16 +7167,15 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		break;
 	case 0x15:
 		if (cpuid_level >= 0x15) {
-			CPUID(0x15, *rax, *rbx, *rcx, *rdx);
-		} else if (tsc_is_invariant) {
+			*rax = eax;
+			*rbx = ebx;
+			*rcx = ecx;
+			*rdx = edx;
+		} else {
+			KASSERT(tsc_is_invariant);
 			*rax = 1;
 			*rbx = 100;
 			*rcx = tsc_frequency / 100;
-			*rdx = 0;
-		} else {
-			*rax = 0;
-			*rbx = 0;
-			*rcx = 0;
 			*rdx = 0;
 		}
 		break;
@@ -6931,25 +7229,35 @@ vmm_handle_cpuid(struct vcpu *vcpu)
 		*rdx = curcpu()->ci_brand[11];
 		break;
 	case 0x80000005:	/* Reserved (Intel), cacheinfo (AMD) */
-		*rax = curcpu()->ci_amdcacheinfo[0];
-		*rbx = curcpu()->ci_amdcacheinfo[1];
-		*rcx = curcpu()->ci_amdcacheinfo[2];
-		*rdx = curcpu()->ci_amdcacheinfo[3];
+		*rax = eax;
+		*rbx = ebx;
+		*rcx = ecx;
+		*rdx = edx;
 		break;
 	case 0x80000006:	/* ext. cache info */
-		*rax = curcpu()->ci_extcacheinfo[0];
-		*rbx = curcpu()->ci_extcacheinfo[1];
-		*rcx = curcpu()->ci_extcacheinfo[2];
-		*rdx = curcpu()->ci_extcacheinfo[3];
+		*rax = eax;
+		*rbx = ebx;
+		*rcx = ecx;
+		*rdx = edx;
 		break;
 	case 0x80000007:	/* apmi */
-		CPUID(0x80000007, *rax, *rbx, *rcx, *rdx);
+		*rax = eax;
+		*rbx = ebx;
+		*rcx = ecx;
+		*rdx = edx;
 		break;
 	case 0x80000008:	/* Phys bits info and topology (AMD) */
-		CPUID(0x80000008, *rax, *rbx, *rcx, *rdx);
-		*rbx &= VMM_AMDSPEC_EBX_MASK;
+		*rax = eax;
+		*rbx = ebx & VMM_AMDSPEC_EBX_MASK;
 		/* Reset %rcx (topology) */
 		*rcx = 0;
+		*rdx = edx;
+		break;
+	case 0x8000001d:	/* cache topology (AMD) */
+		*rax = eax;
+		*rbx = ebx;
+		*rcx = ecx;
+		*rdx = edx;
 		break;
 	default:
 		DPRINTF("%s: unsupported rax=0x%llx\n", __func__, *rax);
@@ -7111,16 +7419,12 @@ vcpu_run_svm(struct vcpu *vcpu, struct vm_run_params *vrp)
 		vmcb->v_tlb_control = SVM_TLB_CONTROL_FLUSH_NONE;
 		svm_set_clean(vcpu, SVM_CLEANBITS_ALL);
 
-		/* Record the exit reason on successful exit */
+		/* If we exited successfully ... */
 		if (ret == 0) {
 			exit_reason = vmcb->v_exitcode;
 			vcpu->vc_gueststate.vg_exit_reason = exit_reason;
-		}
+			TRACEPOINT(vmm, guest_exit, vcpu, vrp, exit_reason);
 
-		TRACEPOINT(vmm, guest_exit, vcpu, vrp, exit_reason);
-
-		/* If we exited successfully ... */
-		if (ret == 0) {
 			vcpu->vc_gueststate.vg_rflags = vmcb->v_rflags;
 
 			/*

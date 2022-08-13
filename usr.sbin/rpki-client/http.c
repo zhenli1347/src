@@ -1,4 +1,4 @@
-/*	$OpenBSD: http.c,v 1.38 2021/09/01 09:39:14 claudio Exp $  */
+/*	$OpenBSD: http.c,v 1.64 2022/08/09 09:02:26 claudio Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -70,9 +70,8 @@
 #define HTTP_USER_AGENT		"OpenBSD rpki-client"
 #define HTTP_BUF_SIZE		(32 * 1024)
 #define HTTP_IDLE_TIMEOUT	10
-#define HTTP_IO_TIMEOUT		(3 * 60)
-#define MAX_CONNECTIONS		64
-#define NPFDS			(MAX_CONNECTIONS + 1)
+#define MAX_CONTENTLEN		(2 * 1024 * 1024 * 1024LL)
+#define NPFDS			(MAX_HTTP_REQUESTS + 1)
 
 enum res {
 	DONE,
@@ -119,6 +118,7 @@ struct http_connection {
 	size_t			bufsz;
 	size_t			bufpos;
 	off_t			iosz;
+	off_t			totalsz;
 	time_t			idle_time;
 	time_t			io_time;
 	int			status;
@@ -138,7 +138,7 @@ struct http_request {
 	char			*host;
 	char			*port;
 	const char		*path;	/* points into uri */
-	size_t			 id;
+	unsigned int		 id;
 	int			 outfd;
 	int			 redirect_loop;
 };
@@ -148,7 +148,7 @@ TAILQ_HEAD(http_req_queue, http_request);
 static struct http_conn_list	active = LIST_HEAD_INITIALIZER(active);
 static struct http_conn_list	idle = LIST_HEAD_INITIALIZER(idle);
 static struct http_req_queue	queue = TAILQ_HEAD_INITIALIZER(queue);
-static size_t http_conn_count;
+static unsigned int		http_conn_count;
 
 static struct msgbuf msgq;
 static struct sockaddr_storage http_bindaddr;
@@ -157,10 +157,10 @@ static uint8_t *tls_ca_mem;
 static size_t tls_ca_size;
 
 /* HTTP request API */
-static void	http_req_new(size_t, char *, char *, int);
+static void	http_req_new(unsigned int, char *, char *, int, int);
 static void	http_req_free(struct http_request *);
-static void	http_req_done(size_t, enum http_result, const char *);
-static void	http_req_fail(size_t);
+static void	http_req_done(unsigned int, enum http_result, const char *);
+static void	http_req_fail(unsigned int);
 static int	http_req_schedule(struct http_request *);
 
 /* HTTP connection API */
@@ -178,7 +178,7 @@ static void	http_do(struct http_connection *,
 static enum res	http_connect(struct http_connection *);
 static enum res	http_request(struct http_connection *);
 static enum res	http_close(struct http_connection *);
-static enum res http_handle(struct http_connection *);
+static enum res	http_handle(struct http_connection *);
 
 /* Internal state functions used by the above functions */
 static enum res	http_finish_connect(struct http_connection *);
@@ -190,16 +190,6 @@ static enum res	http_write(struct http_connection *);
 static enum res	proxy_read(struct http_connection *);
 static enum res	proxy_write(struct http_connection *);
 static enum res	data_write(struct http_connection *);
-
-static time_t
-getmonotime(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		err(1, "clock_gettime");
-	return (ts.tv_sec);
-}
 
 /*
  * Return a string that can be used in error message to identify the
@@ -219,14 +209,17 @@ http_info(const char *uri)
 }
 
 /*
- * Determine whether the character needs encoding, per RFC1738:
- *	- No corresponding graphic US-ASCII.
- *	- Unsafe characters.
+ * Determine whether the character needs encoding, per RFC2396.
  */
 static int
-unsafe_char(const char *c0)
+to_encode(const char *c0)
 {
-	const char *unsafe_chars = " <>\"#{}|\\^~[]`";
+	/* 2.4.3. Excluded US-ASCII Characters */
+	const char *excluded_chars =
+	    " "         /* space */
+	    "<>#\""     /* delims (modulo "%", see below) */
+	    "{}|\\^[]`" /* unwise */
+	    ;
 	const unsigned char *c = (const unsigned char *)c0;
 
 	/*
@@ -236,16 +229,15 @@ unsafe_char(const char *c0)
 	return (iscntrl(*c) || !isascii(*c) ||
 
 	    /*
-	     * Unsafe characters.
-	     * '%' is also unsafe, if is not followed by two
+	     * '%' is also reserved, if is not followed by two
 	     * hexadecimal digits.
 	     */
-	    strchr(unsafe_chars, *c) != NULL ||
+	    strchr(excluded_chars, *c) != NULL ||
 	    (*c == '%' && (!isxdigit(c[1]) || !isxdigit(c[2]))));
 }
 
 /*
- * Encode given URL, per RFC1738.
+ * Encode given URL, per RFC2396.
  * Allocate and return string to the caller.
  */
 static char *
@@ -262,7 +254,7 @@ url_encode(const char *path)
 	 * final URL.
 	 */
 	for (i = 0; i < length; i++)
-		if (unsafe_char(path + i))
+		if (to_encode(path + i))
 			new_length += 2;
 
 	epath = epathp = malloc(new_length + 1);	/* One more for '\0'. */
@@ -274,7 +266,7 @@ url_encode(const char *path)
 	 * Encode, and copy final URL.
 	 */
 	for (i = 0; i < length; i++)
-		if (unsafe_char(path + i)) {
+		if (to_encode(path + i)) {
 			snprintf(epathp, 4, "%%" "%02x",
 			    (unsigned char)path[i]);
 			epathp += 3;
@@ -387,7 +379,7 @@ proxy_parse_uri(char *uri)
 
 		if ((hosttail = strrchr(host, ']')) == NULL)
 			errx(1, "%s: unmatched opening bracket",
-			     http_info(uri));
+			    http_info(uri));
 		if (hosttail[1] == '\0' || hosttail[1] == ':')
 			host++;
 		if (hosttail[1] == ':')
@@ -442,7 +434,7 @@ http_parse_uri(char *uri, char **ohost, char **oport, char **opath)
 		warnx("%s: preposterous host length", http_info(uri));
 		return -1;
 	}
-	
+
 	if (memchr(host, '@', path - host) != NULL) {
 		warnx("%s: URI with userinfo not supported", http_info(uri));
 		return -1;
@@ -515,7 +507,8 @@ http_resolv(struct addrinfo **res, const char *host, const char *port)
  * Create and queue a new request.
  */
 static void
-http_req_new(size_t id, char *uri, char *modified_since, int outfd)
+http_req_new(unsigned int id, char *uri, char *modified_since, int count,
+    int outfd)
 {
 	struct http_request *req;
 	char *host, *port, *path;
@@ -538,6 +531,7 @@ http_req_new(size_t id, char *uri, char *modified_since, int outfd)
 	req->path = path;
 	req->uri = uri;
 	req->modified_since = modified_since;
+	req->redirect_loop = count;
 
 	TAILQ_INSERT_TAIL(&queue, req, entry);
 }
@@ -565,33 +559,31 @@ http_req_free(struct http_request *req)
  * Enqueue request response
  */
 static void
-http_req_done(size_t id, enum http_result res, const char *last_modified)
+http_req_done(unsigned int id, enum http_result res, const char *last_modified)
 {
 	struct ibuf *b;
 
-	if ((b = ibuf_dynamic(64, UINT_MAX)) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &id, sizeof(id));
 	io_simple_buffer(b, &res, sizeof(res));
 	io_str_buffer(b, last_modified);
-	ibuf_close(&msgq, b);
+	io_close_buffer(&msgq, b);
 }
 
 /*
  * Enqueue request failure response
  */
 static void
-http_req_fail(size_t id)
+http_req_fail(unsigned int id)
 {
 	struct ibuf *b;
 	enum http_result res = HTTP_FAILED;
 
-	if ((b = ibuf_dynamic(8, UINT_MAX)) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &id, sizeof(id));
 	io_simple_buffer(b, &res, sizeof(res));
 	io_str_buffer(b, NULL);
-	ibuf_close(&msgq, b);
+	io_close_buffer(&msgq, b);
 }
 
 /*
@@ -626,7 +618,7 @@ http_req_schedule(struct http_request *req)
 		return 1;
 	}
 
-	if (http_conn_count < MAX_CONNECTIONS) {
+	if (http_conn_count < MAX_HTTP_REQUESTS) {
 		http_new(req);
 		return 1;
 	}
@@ -639,7 +631,7 @@ http_req_schedule(struct http_request *req)
 /*
  * Create a new HTTP connection which will be used for the HTTP request req.
  * On errors a req faulure is issued and both connection and request are freed.
- */ 
+ */
 static void
 http_new(struct http_request *req)
 {
@@ -764,6 +756,19 @@ http_failed(struct http_connection *conn)
 }
 
 /*
+ * Called in case of connect timeout, try an alternate connection.
+ */
+static enum res
+http_connect_failed(struct http_connection *conn)
+{
+	assert(conn->state == STATE_CONNECT);
+	close(conn->fd);
+	conn->fd = -1;
+
+	return http_connect(conn);
+}
+
+/*
  * Call the function f and update the connection events based
  * on the return value.
  */
@@ -809,7 +814,7 @@ http_connect(struct http_connection *conn)
 {
 	const char *cause = NULL;
 
-	assert(conn->fd == -1); 
+	assert(conn->fd == -1);
 	conn->state = STATE_CONNECT;
 
 	/* start the loop below with first or next address */
@@ -988,8 +993,6 @@ http_request(struct http_connection *conn)
 	assert(conn->state == STATE_IDLE || conn->state == STATE_TLSCONNECT);
 	conn->state = STATE_REQUEST;
 
-	/* TODO adjust request for HTTP proxy setups */
-
 	/*
 	 * Send port number only if it's specified and does not equal
 	 * the default. Some broken HTTP servers get confused if you explicitly
@@ -1053,10 +1056,15 @@ http_request(struct http_connection *conn)
 static int
 http_parse_status(struct http_connection *conn, char *buf)
 {
+#define HTTP_11	"HTTP/1.1 "
 	const char *errstr;
 	char *cp, ststr[4];
 	char gerror[200];
 	int status;
+
+	/* Check if the protocol is 1.1 and enable keep-alive in that case */
+	if (strncmp(buf, HTTP_11, strlen(HTTP_11)) == 0)
+		conn->keep_alive = 1;
 
 	cp = strchr(buf, ' ');
 	if (cp == NULL) {
@@ -1142,7 +1150,8 @@ http_redirect(struct http_connection *conn)
 			err(1, NULL);
 
 	logx("redirect to %s", http_info(uri));
-	http_req_new(conn->req->id, uri, mod_since, outfd);	
+	http_req_new(conn->req->id, uri, mod_since, conn->req->redirect_loop,
+	    outfd);
 
 	/* clear request before moving connection to idle */
 	http_req_free(conn->req);
@@ -1169,8 +1178,8 @@ http_parse_header(struct http_connection *conn, char *buf)
 		size_t s;
 		cp += sizeof(CONTENTLEN) - 1;
 		if ((s = strcspn(cp, " \t")) != 0)
-			*(cp+s) = 0;
-		conn->iosz = strtonum(cp, 0, LLONG_MAX, &errstr);
+			*(cp + s) = 0;
+		conn->iosz = strtonum(cp, 0, MAX_CONTENTLEN, &errstr);
 		if (errstr != NULL) {
 			warnx("Content-Length of %s is %s",
 			    http_info(conn->req->uri), errstr);
@@ -1226,11 +1235,14 @@ http_parse_header(struct http_connection *conn, char *buf)
 	} else if (strncasecmp(cp, CONNECTION, sizeof(CONNECTION) - 1) == 0) {
 		cp += sizeof(CONNECTION) - 1;
 		cp[strcspn(cp, " \t")] = '\0';
-		if (strcasecmp(cp, "keep-alive") == 0)
+		if (strcasecmp(cp, "close") == 0)
+			conn->keep_alive = 0;
+		else if (strcasecmp(cp, "keep-alive") == 0)
 			conn->keep_alive = 1;
 	} else if (strncasecmp(cp, LAST_MODIFIED,
 	    sizeof(LAST_MODIFIED) - 1) == 0) {
 		cp += sizeof(LAST_MODIFIED) - 1;
+		free(conn->last_modified);
 		if ((conn->last_modified = strdup(cp)) == NULL)
 			err(1, NULL);
 	}
@@ -1243,7 +1255,7 @@ http_parse_header(struct http_connection *conn, char *buf)
  * The line returned has any possible '\r' and '\n' at the end stripped.
  * The buffer is advanced to the start of the next line.
  * If there is currently no full line in the buffer NULL is returned.
- */ 
+ */
 static char *
 http_get_line(struct http_connection *conn)
 {
@@ -1304,6 +1316,9 @@ http_read(struct http_connection *conn)
 	char *buf;
 	int done;
 
+	if (conn->bufpos > 0)
+		goto again;
+
 read_more:
 	s = tls_read(conn->tls, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
@@ -1345,8 +1360,11 @@ again:
 			if (buf == NULL)
 				goto read_more;
 			/* empty line, end of header */
-			if (*buf == '\0')
+			if (*buf == '\0') {
+				free(buf);
 				break;
+			}
+			free(buf);
 		}
 		/* proxy is ready to take connection */
 		if (conn->status == 200) {
@@ -1380,7 +1398,7 @@ again:
 
 			if (rv == -1)
 				return http_failed(conn);
-			if (rv ==  0)
+			if (rv == 0)
 				done = 1;
 		}
 
@@ -1389,6 +1407,7 @@ again:
 			if (http_isredirect(conn))
 				http_redirect(conn);
 
+			conn->totalsz = 0;
 			if (conn->chunked)
 				conn->state = STATE_RESPONSE_CHUNKED_HEADER;
 			else
@@ -1399,7 +1418,7 @@ again:
 		} else if (conn->status == 304) {
 			return http_done(conn, HTTP_NOT_MOD);
 		}
-		
+
 		return http_failed(conn);
 	case STATE_RESPONSE_DATA:
 		if (conn->bufpos != conn->bufsz &&
@@ -1412,10 +1431,10 @@ again:
 			 * After redirects all data needs to be discarded.
 			 */
 			if (conn->iosz < (off_t)conn->bufpos) {
-				conn->bufpos  -= conn->iosz;
+				conn->bufpos -= conn->iosz;
 				conn->iosz = 0;
 			} else {
-				conn->iosz  -= conn->bufpos;
+				conn->iosz -= conn->bufpos;
 				conn->bufpos = 0;
 			}
 			if (conn->chunked)
@@ -1438,6 +1457,7 @@ again:
 			free(buf);
 			return http_failed(conn);
 		}
+		free(buf);
 
 		/*
 		 * check if transfer is done, in which case the last trailer
@@ -1581,7 +1601,7 @@ proxy_write(struct http_connection *conn)
 	assert(conn->state == STATE_PROXY_REQUEST);
 
 	s = write(conn->fd, conn->buf + conn->bufpos,
-		    conn->bufsz - conn->bufpos);
+	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
 		warn("%s: write", http_info(conn->host));
 		return http_failed(conn);
@@ -1645,9 +1665,14 @@ data_write(struct http_connection *conn)
 		bsz = conn->iosz;
 
 	s = write(conn->req->outfd, conn->buf, bsz);
-
 	if (s == -1) {
 		warn("%s: data write", http_info(conn->req->uri));
+		return http_failed(conn);
+	}
+
+	conn->totalsz += s;
+	if (conn->totalsz > MAX_CONTENTLEN) {
+		warn("%s: too much data offered", http_info(conn->req->uri));
 		return http_failed(conn);
 	}
 
@@ -1661,7 +1686,7 @@ data_write(struct http_connection *conn)
 
 	/* all data written, switch back to read */
 	if (conn->bufpos == 0 || conn->iosz == 0) {
-		if (conn->chunked)
+		if (conn->chunked && conn->iosz == 0)
 			conn->state = STATE_RESPONSE_CHUNKED_TRAILER;
 		else
 			conn->state = STATE_RESPONSE_DATA;
@@ -1681,7 +1706,7 @@ data_write(struct http_connection *conn)
 static enum res
 http_handle(struct http_connection *conn)
 {
-	assert (conn->pfd != NULL && conn->pfd->revents != 0);
+	assert(conn->pfd != NULL && conn->pfd->revents != 0);
 
 	conn->io_time = 0;
 
@@ -1745,7 +1770,7 @@ http_setup(void)
 		err(1, "tls_load_file: %s", tls_default_ca_cert_file());
 	tls_config_set_ca_mem(tls_config, tls_ca_mem, tls_ca_size);
 
-        if ((httpproxy = getenv("http_proxy")) != NULL && *httpproxy == '\0')
+	if ((httpproxy = getenv("http_proxy")) != NULL && *httpproxy == '\0')
 		httpproxy = NULL;
 
 	proxy_parse_uri(httpproxy);
@@ -1757,6 +1782,10 @@ proc_http(char *bind_addr, int fd)
 	struct pollfd pfds[NPFDS];
 	struct http_connection *conn, *nc;
 	struct http_request *req, *nr;
+	struct ibuf *b, *inbuf = NULL;
+
+	if (pledge("stdio rpath inet dns recvfd", NULL) == -1)
+		err(1, "pledge");
 
 	if (bind_addr != NULL) {
 		struct addrinfo hints, *res;
@@ -1775,8 +1804,6 @@ proc_http(char *bind_addr, int fd)
 	if (pledge("stdio inet dns recvfd", NULL) == -1)
 		err(1, "pledge");
 
-	memset(&pfds, 0, sizeof(pfds));
-
 	msgbuf_init(&msgq);
 	msgq.fd = fd;
 
@@ -1785,6 +1812,7 @@ proc_http(char *bind_addr, int fd)
 		int timeout;
 		size_t i;
 
+		memset(&pfds, 0, sizeof(pfds));
 		pfds[0].fd = fd;
 		pfds[0].events = POLLIN;
 		if (msgq.queued)
@@ -1794,13 +1822,20 @@ proc_http(char *bind_addr, int fd)
 		timeout = INFTIM;
 		now = getmonotime();
 		LIST_FOREACH(conn, &active, entry) {
-			if (conn->io_time == 0)
-				conn->io_time = now + HTTP_IO_TIMEOUT;
+			if (i >= NPFDS)
+				errx(1, "too many connections");
+
+			if (conn->io_time == 0) {
+				if (conn->state == STATE_CONNECT)
+					conn->io_time = now + MAX_CONN_TIMEOUT;
+				else
+					conn->io_time = now + MAX_IO_TIMEOUT;
+			}
 
 			if (conn->io_time <= now)
 				timeout = 0;
 			else {
-				int diff = conn->io_time - now; 
+				int diff = conn->io_time - now;
 				diff *= 1000;
 				if (timeout == INFTIM || diff < timeout)
 					timeout = diff;
@@ -1813,14 +1848,15 @@ proc_http(char *bind_addr, int fd)
 			pfds[i].events = conn->events;
 			conn->pfd = &pfds[i];
 			i++;
-			if (i > NPFDS)
-				errx(1, "too many connections");
 		}
 		LIST_FOREACH(conn, &idle, entry) {
+			if (i >= NPFDS)
+				errx(1, "too many connections");
+
 			if (conn->idle_time <= now)
 				timeout = 0;
 			else {
-				int diff = conn->idle_time - now; 
+				int diff = conn->idle_time - now;
 				diff *= 1000;
 				if (timeout == INFTIM || diff < timeout)
 					timeout = diff;
@@ -1829,12 +1865,13 @@ proc_http(char *bind_addr, int fd)
 			pfds[i].events = POLLIN;
 			conn->pfd = &pfds[i];
 			i++;
-			if (i > NPFDS)
-				errx(1, "too many connections");
 		}
 
-		if (poll(pfds, i, timeout) == -1)
+		if (poll(pfds, i, timeout) == -1) {
+			if (errno == EINTR)
+				continue;
 			err(1, "poll");
+		}
 
 		if (pfds[0].revents & POLLHUP)
 			break;
@@ -1847,17 +1884,20 @@ proc_http(char *bind_addr, int fd)
 			}
 		}
 		if (pfds[0].revents & POLLIN) {
-			size_t id;
-			int outfd;
-			char *uri;
-			char *mod;
+			b = io_buf_recvfd(fd, &inbuf);
+			if (b != NULL) {
+				unsigned int id;
+				char *uri;
+				char *mod;
 
-			outfd = io_recvfd(fd, &id, sizeof(id));
-			io_str_read(fd, &uri);
-			io_str_read(fd, &mod);
+				io_read_buf(b, &id, sizeof(id));
+				io_read_str(b, &uri);
+				io_read_str(b, &mod);
 
-			/* queue up new requests */
-			http_req_new(id, uri, mod, outfd);
+				/* queue up new requests */
+				http_req_new(id, uri, mod, 0, b->fd);
+				ibuf_free(b);
+			}
 		}
 
 		now = getmonotime();
@@ -1878,15 +1918,20 @@ proc_http(char *bind_addr, int fd)
 			if (conn->pfd != NULL && conn->pfd->revents != 0)
 				http_do(conn, http_handle);
 			else if (conn->io_time <= now) {
-				warnx("%s: timeout, connection closed",
-				    http_info(conn->host));
-				http_do(conn, http_failed);
+				if (conn->state == STATE_CONNECT) {
+					warnx("%s: connect timeout",
+					    http_info(conn->host));
+					http_do(conn, http_connect_failed);
+				} else {
+					warnx("%s: timeout, connection closed",
+					    http_info(conn->host));
+					http_do(conn, http_failed);
+				}
 			}
 
 			if (conn->state == STATE_FREE)
 				http_free(conn);
 		}
-
 
 		TAILQ_FOREACH_SAFE(req, &queue, entry, nr)
 			if (!http_req_schedule(req))

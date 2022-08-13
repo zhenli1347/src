@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ti_pci.c,v 1.5 2015/11/24 17:11:39 mpi Exp $	*/
+/*	$OpenBSD: if_ti_pci.c,v 1.7 2022/03/11 18:00:50 mpi Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999
@@ -53,7 +53,7 @@
  *
  * The Tigon 2 contains 2 R4000 CPUs and requires a newer firmware
  * revision, which supports new features such as extended commands,
- * extended jumbo receive ring desciptors and a mini receive ring.
+ * extended jumbo receive ring descriptors and a mini receive ring.
  *
  * Alteon Networks is to be commended for releasing such a vast amount
  * of development material for the Tigon NIC without requiring an NDA
@@ -92,7 +92,7 @@
 int	ti_pci_match(struct device *, void *, void *);
 void	ti_pci_attach(struct device *, struct device *, void *);
 
-struct cfattach ti_pci_ca = {
+const struct cfattach ti_pci_ca = {
 	sizeof(struct ti_softc), ti_pci_match, ti_pci_attach
 };
 

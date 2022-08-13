@@ -1,4 +1,4 @@
-/*	$OpenBSD: file.h,v 1.62 2020/12/02 15:50:01 martijn Exp $	*/
+/*	$OpenBSD: file.h,v 1.66 2022/06/20 01:39:44 visa Exp $	*/
 /*	$NetBSD: file.h,v 1.11 1995/03/26 20:24:13 jtc Exp $	*/
 
 /*
@@ -45,6 +45,7 @@
 #define	DTYPE_PIPE	3	/* pipe */
 #define	DTYPE_KQUEUE	4	/* event queue */
 #define	DTYPE_DMABUF	5	/* DMA buffer (for DRM) */
+#define	DTYPE_SYNC	6	/* sync file (for DRM) */
 
 #ifdef _KERNEL
 struct proc;
@@ -65,7 +66,6 @@ struct	fileops {
 	int	(*fo_read)(struct file *, struct uio *, int);
 	int	(*fo_write)(struct file *, struct uio *, int);
 	int	(*fo_ioctl)(struct file *, u_long, caddr_t, struct proc *);
-	int	(*fo_poll)(struct file *, int, struct proc *);
 	int	(*fo_kqfilter)(struct file *, struct knote *);
 	int	(*fo_stat)(struct file *, struct stat *, struct proc *);
 	int	(*fo_close)(struct file *, struct proc *);

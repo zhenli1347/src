@@ -1,4 +1,4 @@
-#	$OpenBSD: list,v 1.45 2021/08/29 09:05:21 deraadt Exp $
+#	$OpenBSD: list,v 1.47 2022/02/19 08:33:28 visa Exp $
 
 SRCDIRS distrib/special
 
@@ -63,6 +63,7 @@ LINK	instbin					usr/bin/sed
 LINK	instbin					usr/bin/signify
 LINK	instbin					usr/bin/tee
 LINK	instbin					usr/sbin/chroot
+LINK	instbin					usr/sbin/installboot
 LINK	instbin					usr/sbin/mkuboot
 LINK	instbin					usr/sbin/pwd_mkdb
 ARGVLINK ksh					-sh
@@ -93,6 +94,11 @@ COPY	${DESTDIR}/etc/firmware/atu-rfmd2958-ext etc/firmware/atu-rfmd2958-ext
 COPY	${DESTDIR}/etc/firmware/atu-rfmd2958-int etc/firmware/atu-rfmd2958-int
 COPY	${DESTDIR}/etc/firmware/atu-rfmd2958smc-ext etc/firmware/atu-rfmd2958smc-ext
 COPY	${DESTDIR}/etc/firmware/atu-rfmd2958smc-int etc/firmware/atu-rfmd2958smc-int
+COPY    ${DESTDIR}/etc/firmware/rsu-rtl8712	etc/firmware/rsu-rtl8712
+COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8188eu	etc/firmware/urtwn-rtl8188eu
+COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192cT	etc/firmware/urtwn-rtl8192cT
+COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192cU	etc/firmware/urtwn-rtl8192cU
+COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192eu	etc/firmware/urtwn-rtl8192eu
 
 # u-boot and dtbs
 MKDIR						usr/mdec/am335x

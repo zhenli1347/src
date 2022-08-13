@@ -1,4 +1,4 @@
-/*	$OpenBSD: simplefb.c,v 1.13 2021/03/13 14:02:02 kettenis Exp $	*/
+/*	$OpenBSD: simplefb.c,v 1.16 2022/07/15 17:57:26 kettenis Exp $	*/
 /*
  * Copyright (c) 2016 Mark Kettenis
  *
@@ -43,7 +43,7 @@ struct simplefb_format {
 };
 
 /*
- * Supported pixel formats.  Layout ommitted when it matches the
+ * Supported pixel formats.  Layout omitted when it matches the
  * rasops defaults.
  */
 struct simplefb_format simplefb_formats[] = {
@@ -81,7 +81,7 @@ struct wsdisplay_charcell simplefb_bs[SIMPLEFB_WIDTH * SIMPLEFB_HEIGHT];
 int	simplefb_match(struct device *, void *, void *);
 void	simplefb_attach(struct device *, struct device *, void *);
 
-struct cfattach simplefb_ca = {
+const struct cfattach simplefb_ca = {
 	sizeof(struct simplefb_softc), simplefb_match, simplefb_attach
 };
 
@@ -234,6 +234,7 @@ int
 simplefb_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 {
 	struct rasops_info *ri = v;
+	struct simplefb_softc *sc = ri->ri_hw;
 	struct wsdisplay_param *dp = (struct wsdisplay_param *)data;
 	struct wsdisplay_fbinfo	*wdf;
 
@@ -254,6 +255,8 @@ simplefb_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		wdf->width = ri->ri_width;
 		wdf->height = ri->ri_height;
 		wdf->depth = ri->ri_depth;
+		wdf->stride = ri->ri_stride;
+		wdf->offset = sc->sc_paddr & PAGE_MASK;
 		wdf->cmsize = 0;	/* color map is unavailable */
 		break;
 	case WSDISPLAYIO_LINEBYTES:

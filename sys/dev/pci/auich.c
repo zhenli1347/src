@@ -1,4 +1,4 @@
-/*	$OpenBSD: auich.c,v 1.112 2019/08/22 09:47:29 miko Exp $	*/
+/*	$OpenBSD: auich.c,v 1.116 2022/03/21 19:22:40 miod Exp $	*/
 
 /*
  * Copyright (c) 2000,2001 Michael Shalayeff
@@ -251,7 +251,7 @@ int  auich_intr(void *);
 
 int auich_activate(struct device *, int);
 
-struct cfattach auich_ca = {
+const struct cfattach auich_ca = {
 	sizeof(struct auich_softc), auich_match, auich_attach,
 	NULL, auich_activate
 };
@@ -315,7 +315,7 @@ void auich_freemem(struct auich_softc *, struct auich_dma *);
 
 void auich_resume(struct auich_softc *);
 
-struct audio_hw_if auich_hw_if = {
+const struct audio_hw_if auich_hw_if = {
 	auich_open,
 	auich_close,
 	auich_set_params,
@@ -512,7 +512,7 @@ auich_attach(struct device *parent, struct device *self, void *aux)
 		goto fail_disestablish_intr;
 	sc->codec_if->vtbl->unlock(sc->codec_if);
 
-	audio_attach_mi(&auich_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&auich_hw_if, sc, NULL, &sc->sc_dev);
 
 	/* Watch for power changes */
 	sc->suspend = DVACT_RESUME;
@@ -1405,7 +1405,7 @@ auich_calibrate(struct auich_softc *sc)
 	bus_space_write_1(sc->iot, sc->aud_ioh, AUICH_PCMI + AUICH_LVI,
 	    civ & AUICH_LVI_MASK);
 
-	/* start, but don't request any interupts */
+	/* start, but don't request any interrupts */
 	microuptime(&t1);
 	bus_space_write_1(sc->iot, sc->aud_ioh, AUICH_PCMI + AUICH_CTRL,
 	    AUICH_RPBM);

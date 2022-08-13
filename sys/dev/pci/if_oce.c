@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_oce.c,v 1.104 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_oce.c,v 1.106 2022/03/11 18:00:48 mpi Exp $	*/
 
 /*
  * Copyright (c) 2012 Mike Belopuhov
@@ -499,7 +499,7 @@ struct cfdriver oce_cd = {
 	NULL, "oce", DV_IFNET
 };
 
-struct cfattach oce_ca = {
+const struct cfattach oce_ca = {
 	sizeof(struct oce_softc), oce_match, oce_attach, NULL, NULL
 };
 
@@ -2862,10 +2862,10 @@ oce_cmd(struct oce_softc *sc, int subsys, int opcode, int version,
 
 /**
  * @brief	Firmware will send gracious notifications during
- *		attach only after sending first mcc commnad. We
+ *		attach only after sending first mcc command. We
  *		use MCC queue only for getting async and mailbox
  *		for sending cmds. So to get gracious notifications
- *		atleast send one dummy command on mcc.
+ *		at least send one dummy command on mcc.
  */
 void
 oce_first_mcc(struct oce_softc *sc)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_socket.c,v 1.137 2021/01/02 02:41:42 cheloha Exp $	*/
+/*	$OpenBSD: nfs_socket.c,v 1.142 2022/06/06 14:45:41 claudio Exp $	*/
 /*	$NetBSD: nfs_socket.c,v 1.27 1996/04/15 20:20:00 thorpej Exp $	*/
 
 /*
@@ -46,7 +46,6 @@
 #include <sys/kernel.h>
 #include <sys/mbuf.h>
 #include <sys/vnode.h>
-#include <sys/domain.h>
 #include <sys/protosw.h>
 #include <sys/signalvar.h>
 #include <sys/socket.h>
@@ -235,7 +234,7 @@ int
 nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 {
 	struct socket *so;
-	int s, error, rcvreserve, sndreserve;
+	int error, rcvreserve, sndreserve;
 	struct sockaddr *saddr;
 	struct sockaddr_in *sin;
 	struct mbuf *nam = NULL, *mopt = NULL;
@@ -259,7 +258,7 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 		MGET(nam, M_WAIT, MT_SONAME);
 
 	so = nmp->nm_so;
-	s = solock(so);
+	solock(so);
 	nmp->nm_soflags = so->so_proto->pr_flags;
 
 	/*
@@ -366,7 +365,7 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 		goto bad;
 	so->so_rcv.sb_flags |= SB_NOINTR;
 	so->so_snd.sb_flags |= SB_NOINTR;
-	sounlock(so, s);
+	sounlock(so);
 
 	m_freem(mopt);
 	m_freem(nam);
@@ -379,7 +378,7 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 	return (0);
 
 bad:
-	sounlock(so, s);
+	sounlock(so);
 
 	m_freem(mopt);
 	m_freem(nam);
@@ -1114,7 +1113,7 @@ nfs_rephead(int siz, struct nfsrv_descript *nd, struct nfssvc_sock *slp,
 
 /*
  * nfs timer routine
- * Scan the nfsreq list and retranmit any requests that have timed out.
+ * Scan the nfsreq list and retransmit any requests that have timed out.
  */
 void
 nfs_timer(void *arg)
@@ -1494,7 +1493,7 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 		nfsm_adv(nfsm_rndup(len));
 		nfsm_dissect(tl, u_int32_t *, 3 * NFSX_UNSIGNED);
 		memset(&nd->nd_cr, 0, sizeof (struct ucred));
-		nd->nd_cr.cr_ref = 1;
+		refcnt_init(&nd->nd_cr.cr_refcnt);
 		nd->nd_cr.cr_uid = fxdr_unsigned(uid_t, *tl++);
 		nd->nd_cr.cr_gid = fxdr_unsigned(gid_t, *tl++);
 		len = fxdr_unsigned(int, *tl);
@@ -1562,8 +1561,10 @@ nfsrv_rcv(struct socket *so, caddr_t arg, int waitflag)
 	struct uio auio;
 	int flags, error;
 
+	KERNEL_LOCK();
+
 	if ((slp->ns_flag & SLP_VALID) == 0)
-		return;
+		goto out;
 
 	/* Defer soreceive() to an nfsd. */
 	if (waitflag == M_DONTWAIT) {
@@ -1645,6 +1646,9 @@ dorecs:
 	if (waitflag == M_DONTWAIT &&
 		(slp->ns_rec || (slp->ns_flag & (SLP_NEEDQ | SLP_DISCONN))))
 		nfsrv_wakenfsd(slp);
+
+out:
+	KERNEL_UNLOCK();
 }
 
 /*

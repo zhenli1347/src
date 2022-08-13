@@ -1,4 +1,4 @@
-/*	$Id: revokeproc.c,v 1.17 2021/01/02 19:04:21 sthen Exp $ */
+/*	$Id: revokeproc.c,v 1.19 2021/11/22 08:26:08 tb Exp $ */
 /*
  * Copyright (c) 2016 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -94,19 +94,20 @@ int
 revokeproc(int fd, const char *certfile, int force,
     int revocate, const char *const *alts, size_t altsz)
 {
-	char		*der = NULL, *dercp, *der64 = NULL;
-	char		*san = NULL, *str, *tok;
-	int		 rc = 0, cc, i, extsz, ssz, len;
-	size_t		*found = NULL;
-	BIO		*bio = NULL;
-	FILE		*f = NULL;
-	X509		*x = NULL;
-	long		 lval;
-	enum revokeop	 op, rop;
-	time_t		 t;
-	X509_EXTENSION	*ex;
-	ASN1_OBJECT	*obj;
-	size_t		 j;
+	char				*der = NULL, *dercp, *der64 = NULL;
+	char				*san = NULL, *str, *tok;
+	int				 rc = 0, cc, i, ssz, len;
+	size_t				*found = NULL;
+	BIO				*bio = NULL;
+	FILE				*f = NULL;
+	X509				*x = NULL;
+	long				 lval;
+	enum revokeop			 op, rop;
+	time_t				 t;
+	const STACK_OF(X509_EXTENSION)	*exts;
+	X509_EXTENSION			*ex;
+	ASN1_OBJECT			*obj;
+	size_t				 j;
 
 	/*
 	 * First try to open the certificate before we drop privileges
@@ -164,13 +165,12 @@ revokeproc(int fd, const char *certfile, int force,
 	 * command line.
 	 */
 
-	extsz = x->cert_info->extensions != NULL ?
-		sk_X509_EXTENSION_num(x->cert_info->extensions) : 0;
+	exts = X509_get0_extensions(x);
 
 	/* Scan til we find the SAN NID. */
 
-	for (i = 0; i < extsz; i++) {
-		ex = sk_X509_EXTENSION_value(x->cert_info->extensions, i);
+	for (i = 0; i < sk_X509_EXTENSION_num(exts); i++) {
+		ex = sk_X509_EXTENSION_value(exts, i);
 		assert(ex != NULL);
 		obj = X509_EXTENSION_get_object(ex);
 		assert(obj != NULL);
@@ -186,15 +186,17 @@ revokeproc(int fd, const char *certfile, int force,
 		if (bio == NULL) {
 			warnx("BIO_new");
 			goto out;
-		} else if (!X509V3_EXT_print(bio, ex, 0, 0)) {
+		}
+		if (!X509V3_EXT_print(bio, ex, 0, 0)) {
 			warnx("X509V3_EXT_print");
 			goto out;
-		} else if ((san = calloc(1, bio->num_write + 1)) == NULL) {
+		}
+		if ((san = calloc(1, BIO_number_written(bio) + 1)) == NULL) {
 			warn("calloc");
 			goto out;
 		}
-		ssz = BIO_read(bio, san, bio->num_write);
-		if (ssz < 0 || (unsigned)ssz != bio->num_write) {
+		ssz = BIO_read(bio, san, BIO_number_written(bio));
+		if (ssz < 0 || (unsigned)ssz != BIO_number_written(bio)) {
 			warnx("BIO_read");
 			goto out;
 		}

@@ -1,4 +1,4 @@
-/* $OpenBSD: arguments.c,v 1.49 2021/09/02 07:11:03 nicm Exp $ */
+/* $OpenBSD: arguments.c,v 1.56 2022/08/02 09:23:34 nicm Exp $ */
 
 /*
  * Copyright (c) 2010 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -108,6 +108,7 @@ args_value_as_string(struct args_value *value)
 	case ARGS_STRING:
 		return (value->string);
 	}
+	fatalx("unexpected argument type");
 }
 
 /* Create an empty arguments set. */
@@ -130,8 +131,9 @@ args_parse(const struct args_parse *parse, struct args_value *values,
 	u_int			 i;
 	enum args_parse_type	 type;
 	struct args_value	*value, *new;
-	u_char			 flag, argument;
+	u_char			 flag;
 	const char		*found, *string, *s;
+	int			 optional_argument;
 
 	if (count == 0)
 		return (args_create());
@@ -153,6 +155,10 @@ args_parse(const struct args_parse *parse, struct args_value *values,
 			flag = *string++;
 			if (flag == '\0')
 				break;
+			if (flag == '?') {
+				args_free(args);
+				return (NULL);
+			}
 			if (!isalnum(flag)) {
 				xasprintf(cause, "invalid flag -%c", flag);
 				args_free(args);
@@ -164,11 +170,14 @@ args_parse(const struct args_parse *parse, struct args_value *values,
 				args_free(args);
 				return (NULL);
 			}
-			argument = *++found;
-			if (argument != ':') {
+			if (*++found != ':') {
 				log_debug("%s: -%c", __func__, flag);
 				args_set(args, flag, NULL);
 				continue;
+			}
+			if (*found == ':') {
+				optional_argument = 1;
+				found++;
 			}
 			new = xcalloc(1, sizeof *new);
 			if (*string != '\0') {
@@ -176,6 +185,12 @@ args_parse(const struct args_parse *parse, struct args_value *values,
 				new->string = xstrdup(string);
 			} else {
 				if (i == count) {
+					if (optional_argument) {
+						log_debug("%s: -%c", __func__,
+						    flag);
+						args_set(args, flag, NULL);
+						continue;
+					}
 					xasprintf(cause,
 					    "-%c expects an argument",
 					    flag);
@@ -651,13 +666,14 @@ args_string(struct args *args, u_int idx)
 
 /* Make a command now. */
 struct cmd_list *
-args_make_commands_now(struct cmd *self, struct cmdq_item *item, u_int idx)
+args_make_commands_now(struct cmd *self, struct cmdq_item *item, u_int idx,
+    int expand)
 {
 	struct args_command_state	*state;
 	char				*error;
 	struct cmd_list			*cmdlist;
 
-	state = args_make_commands_prepare(self, item, idx, NULL, 0, 0);
+	state = args_make_commands_prepare(self, item, idx, NULL, 0, expand);
 	cmdlist = args_make_commands(state, 0, NULL, &error);
 	if (cmdlist == NULL) {
 		cmdq_error(item, "%s", error);
@@ -748,6 +764,7 @@ args_make_commands(struct args_command_state *state, int argc, char **argv,
 	case CMD_PARSE_SUCCESS:
 		return (pr->cmdlist);
 	}
+	fatalx("invalid parse return state");
 }
 
 /* Free commands state. */
@@ -814,8 +831,49 @@ args_strtonum(struct args *args, u_char flag, long long minval,
 		return (0);
 	}
 	value = TAILQ_LAST(&entry->values, args_values);
+	if (value == NULL ||
+	    value->type != ARGS_STRING ||
+	    value->string == NULL) {
+		*cause = xstrdup("missing");
+		return (0);
+	}
 
 	ll = strtonum(value->string, minval, maxval, &errstr);
+	if (errstr != NULL) {
+		*cause = xstrdup(errstr);
+		return (0);
+	}
+
+	*cause = NULL;
+	return (ll);
+}
+
+/* Convert an argument value to a number, and expand formats. */
+long long
+args_strtonum_and_expand(struct args *args, u_char flag, long long minval,
+    long long maxval, struct cmdq_item *item, char **cause)
+{
+	const char		*errstr;
+	char			*formatted;
+	long long		 ll;
+	struct args_entry	*entry;
+	struct args_value	*value;
+
+	if ((entry = args_find(args, flag)) == NULL) {
+		*cause = xstrdup("missing");
+		return (0);
+	}
+	value = TAILQ_LAST(&entry->values, args_values);
+	if (value == NULL ||
+	    value->type != ARGS_STRING ||
+	    value->string == NULL) {
+		*cause = xstrdup("missing");
+		return (0);
+	}
+
+	formatted = format_single_from_target(item, value->string);
+	ll = strtonum(formatted, minval, maxval, &errstr);
+	free(formatted);
 	if (errstr != NULL) {
 		*cause = xstrdup(errstr);
 		return (0);
@@ -837,6 +895,10 @@ args_percentage(struct args *args, u_char flag, long long minval,
 		*cause = xstrdup("missing");
 		return (0);
 	}
+	if (TAILQ_EMPTY(&entry->values)) {
+		*cause = xstrdup("empty");
+		return (0);
+	}
 	value = TAILQ_LAST(&entry->values, args_values)->string;
 	return (args_string_percentage(value, minval, maxval, curval, cause));
 }
@@ -851,6 +913,10 @@ args_string_percentage(const char *value, long long minval, long long maxval,
 	size_t		 valuelen = strlen(value);
 	char		*copy;
 
+	if (valuelen == 0) {
+		*cause = xstrdup("empty");
+		return (0);
+	}
 	if (value[valuelen - 1] == '%') {
 		copy = xstrdup(value);
 		copy[valuelen - 1] = '\0';
@@ -872,6 +938,77 @@ args_string_percentage(const char *value, long long minval, long long maxval,
 		}
 	} else {
 		ll = strtonum(value, minval, maxval, &errstr);
+		if (errstr != NULL) {
+			*cause = xstrdup(errstr);
+			return (0);
+		}
+	}
+
+	*cause = NULL;
+	return (ll);
+}
+
+/*
+ * Convert an argument to a number which may be a percentage, and expand
+ * formats.
+ */
+long long
+args_percentage_and_expand(struct args *args, u_char flag, long long minval,
+    long long maxval, long long curval, struct cmdq_item *item, char **cause)
+{
+	const char		*value;
+	struct args_entry	*entry;
+
+	if ((entry = args_find(args, flag)) == NULL) {
+		*cause = xstrdup("missing");
+		return (0);
+	}
+	if (TAILQ_EMPTY(&entry->values)) {
+		*cause = xstrdup("empty");
+		return (0);
+	}
+	value = TAILQ_LAST(&entry->values, args_values)->string;
+	return (args_string_percentage_and_expand(value, minval, maxval, curval,
+		    item, cause));
+}
+
+/*
+ * Convert a string to a number which may be a percentage, and expand formats.
+ */
+long long
+args_string_percentage_and_expand(const char *value, long long minval,
+    long long maxval, long long curval, struct cmdq_item *item, char **cause)
+{
+	const char	*errstr;
+	long long	 ll;
+	size_t		 valuelen = strlen(value);
+	char		*copy, *f;
+
+	if (value[valuelen - 1] == '%') {
+		copy = xstrdup(value);
+		copy[valuelen - 1] = '\0';
+
+		f = format_single_from_target(item, copy);
+		ll = strtonum(f, 0, 100, &errstr);
+		free(f);
+		free(copy);
+		if (errstr != NULL) {
+			*cause = xstrdup(errstr);
+			return (0);
+		}
+		ll = (curval * ll) / 100;
+		if (ll < minval) {
+			*cause = xstrdup("too small");
+			return (0);
+		}
+		if (ll > maxval) {
+			*cause = xstrdup("too large");
+			return (0);
+		}
+	} else {
+		f = format_single_from_target(item, value);
+		ll = strtonum(f, minval, maxval, &errstr);
+		free(f);
 		if (errstr != NULL) {
 			*cause = xstrdup(errstr);
 			return (0);

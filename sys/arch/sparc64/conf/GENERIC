@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.319 2021/08/20 05:23:19 anton Exp $
+#	$OpenBSD: GENERIC,v 1.322 2022/01/02 23:14:27 jsg Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -103,7 +103,7 @@ ath*	at pci?			# Atheros AR5k (802.11a/b/g)
 ath*	at cardbus?		# Atheros AR5k (802.11a/b/g)
 athn*	at pci?			# Atheros AR9k (802.11a/g/n)
 athn*	at cardbus?		# Atheros AR9k (802.11a/g/n)
-#pgt*	at pci?			# Prism54 (only full-mac varients)
+#pgt*	at pci?			# Prism54 Full-MAC
 #acx*	at pci?			# TI ACX100/ACX111 (802.11b/g)
 #acx*	at cardbus?		# TI ACX100/ACX111 (802.11b/g)
 ral*	at pci?			# Ralink RT2500/RT2501/RT2600
@@ -129,10 +129,6 @@ ahci*	at pci? flags 0x0000	# AHCI SATA controllers
 				# flags 0x0001 to force SATA 1 (1.5Gb/s)
 sili*	at pci?			# Silicon Image 3124/3132/3531 SATA controllers
 nvme*	at pci?			# NVMe controllers
-
-# PCI crypto
-hifn*	at pci?			# Hifn 7751/7811/7951
-ubsec*	at pci?			# Broadcom 580[125]/582[012]
 
 # PCI sound
 auacer*	at pci?			# Acer Labs M5455
@@ -417,7 +413,7 @@ qla*	at sbus?
 # to the underlying hardware controller.
 
 # These entries find devices on all SCSI busses and assign
-# unit numers dynamically.
+# unit numbers dynamically.
 scsibus*	at scsi?
 sd*		at scsibus?		# SCSI disks
 st*		at scsibus?		# SCSI tapes

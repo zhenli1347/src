@@ -1,4 +1,4 @@
-/* $OpenBSD: mvpinctrl.c,v 1.8 2021/05/07 01:54:17 jsg Exp $ */
+/* $OpenBSD: mvpinctrl.c,v 1.11 2022/06/28 23:43:12 naddy Exp $ */
 /*
  * Copyright (c) 2013,2016 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -47,8 +47,8 @@
 	HWRITE4((sc), (reg), HREAD4((sc), (reg)) & ~(bits))
 
 struct mvpinctrl_pin {
-	char *pin;
-	char *function;
+	const char *pin;
+	const char *function;
 	int value;
 	int pid;
 };
@@ -58,7 +58,7 @@ struct mvpinctrl_softc {
 	bus_space_tag_t		 sc_iot;
 	bus_space_handle_t	 sc_ioh;
 	struct regmap		*sc_rm;
-	struct mvpinctrl_pin	*sc_pins;
+	const struct mvpinctrl_pin *sc_pins;
 	int			 sc_npins;
 	struct gpio_controller	 sc_gc;
 	struct clock_device	 sc_cd_xtal;
@@ -74,7 +74,7 @@ void	mvpinctrl_set_pin(void *, uint32_t *, int);
 
 uint32_t a3700_xtal_get_frequency(void *, uint32_t *);
 
-struct cfattach mvpinctrl_ca = {
+const struct cfattach mvpinctrl_ca = {
 	sizeof (struct mvpinctrl_softc), mvpinctrl_match, mvpinctrl_attach
 };
 
@@ -90,11 +90,11 @@ struct cfdriver mvpinctrl_cd = {
 
 struct mvpinctrl_pins {
 	const char *compat;
-	struct mvpinctrl_pin *pins;
+	const struct mvpinctrl_pin *pins;
 	int npins;
 };
 
-struct mvpinctrl_pins mvpinctrl_pins[] = {
+const struct mvpinctrl_pins mvpinctrl_pins[] = {
 	{
 		"marvell,mv88f6810-pinctrl",
 		armada_38x_pins, nitems(armada_38x_pins)
@@ -113,6 +113,10 @@ struct mvpinctrl_pins mvpinctrl_pins[] = {
 	},
 	{
 		"marvell,cp110-pinctrl",
+		armada_cp110_pins, nitems(armada_cp110_pins)
+	},
+	{
+		"marvell,cp115-standalone-pinctrl",
 		armada_cp110_pins, nitems(armada_cp110_pins)
 	},
 	{

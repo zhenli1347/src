@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpath_sym.c,v 1.26 2021/03/12 10:22:46 jsg Exp $ */
+/*	$OpenBSD: mpath_sym.c,v 1.28 2022/07/02 08:50:42 visa Exp $ */
 
 /*
  * Copyright (c) 2010 David Gwynne <dlg@openbsd.org>
@@ -26,8 +26,6 @@
 #include <sys/rwlock.h>
 #include <sys/pool.h>
 #include <sys/ioctl.h>
-#include <sys/poll.h>
-#include <sys/selinfo.h>
 
 #include <scsi/scsi_all.h>
 #include <scsi/scsiconf.h>
@@ -44,7 +42,7 @@ void		sym_attach(struct device *, struct device *, void *);
 int		sym_detach(struct device *, int);
 int		sym_activate(struct device *, int);
 
-struct cfattach sym_ca = {
+const struct cfattach sym_ca = {
 	sizeof(struct sym_softc),
 	sym_match,
 	sym_attach,

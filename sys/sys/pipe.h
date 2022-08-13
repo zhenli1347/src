@@ -1,4 +1,4 @@
-/*	$OpenBSD: pipe.h,v 1.27 2020/06/29 18:23:18 anton Exp $	*/
+/*	$OpenBSD: pipe.h,v 1.29 2022/07/09 12:48:21 visa Exp $	*/
 
 /*
  * Copyright (c) 1996 John S. Dyson
@@ -26,9 +26,9 @@
 
 #ifndef _KERNEL
 #include <sys/time.h>			/* for struct timespec */
-#include <sys/selinfo.h>		/* for struct selinfo */
 #endif /* _KERNEL */
 
+#include <sys/event.h>			/* for struct klist */
 #include <sys/sigio.h>			/* for struct sigio_ref */
 
 /*
@@ -62,7 +62,6 @@ struct pipebuf {
 #define PIPE_WANTR	0x008	/* Reader wants some characters. */
 #define PIPE_WANTW	0x010	/* Writer wants space to put characters. */
 #define PIPE_WANTD	0x020	/* Pipe is wanted to be run-down. */
-#define PIPE_SEL	0x040	/* Pipe has a select active. */
 #define PIPE_EOF	0x080	/* Pipe is in EOF condition. */
 #define PIPE_LOCK	0x100	/* Thread has exclusive I/O access. */
 #define PIPE_LWANT	0x200	/* Thread wants exclusive I/O access. */
@@ -81,7 +80,7 @@ struct pipe_pair;
 struct pipe {
 	struct	rwlock *pipe_lock;
 	struct	pipebuf pipe_buffer;	/* [p] data storage */
-	struct	selinfo pipe_sel;	/* [p] for compat with select */
+	struct	klist pipe_klist;	/* [p] list of knotes */
 	struct	timespec pipe_atime;	/* [p] time of last access */
 	struct	timespec pipe_mtime;	/* [p] time of last modify */
 	struct	timespec pipe_ctime;	/* [I] time of status change */

@@ -1,4 +1,4 @@
-/* $OpenBSD: ihidev.c,v 1.24 2021/08/26 21:05:01 jcs Exp $ */
+/* $OpenBSD: ihidev.c,v 1.27 2022/05/20 05:03:45 anton Exp $ */
 /*
  * HID-over-i2c driver
  *
@@ -74,7 +74,7 @@ int	ihidev_maxrepid(void *buf, int len);
 int	ihidev_print(void *aux, const char *pnp);
 int	ihidev_submatch(struct device *parent, void *cf, void *aux);
 
-struct cfattach ihidev_ca = {
+const struct cfattach ihidev_ca = {
 	sizeof(struct ihidev_softc),
 	ihidev_match,
 	ihidev_attach,
@@ -237,7 +237,7 @@ ihidev_activate(struct device *self, int act)
 	case DVACT_QUIESCE:
 		sc->sc_dying = 1;
 		if (sc->sc_poll && timeout_initialized(&sc->sc_timer)) {
-			DPRINTF(("%s: canceling polling\n",
+			DPRINTF(("%s: cancelling polling\n",
 			    sc->sc_dev.dv_xname));
 			timeout_del_barrier(&sc->sc_timer);
 		}
@@ -732,7 +732,7 @@ ihidev_maxrepid(void *buf, int len)
 
 	maxid = -1;
 	h.report_ID = 0;
-	for (d = hid_start_parse(buf, len, hid_none); hid_get_item(d, &h); )
+	for (d = hid_start_parse(buf, len, hid_all); hid_get_item(d, &h);)
 		if (h.report_ID > maxid)
 			maxid = h.report_ID;
 	hid_end_parse(d);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.394 2021/05/04 21:57:15 bluhm Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.404 2022/07/26 14:53:45 deraadt Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -120,8 +120,7 @@
 
 extern struct forkstat forkstat;
 extern struct nchstats nchstats;
-extern int nselcoll, fscale;
-extern struct disklist_head disklist;
+extern int fscale;
 extern fixpt_t ccpu;
 extern long numvnodes;
 extern int allowdt;
@@ -299,7 +298,7 @@ const struct sysctl_bounded_args kern_vars[] = {
 	{KERN_NFILES, &numfiles, SYSCTL_INT_READONLY},
 	{KERN_TTYCOUNT, &tty_count, SYSCTL_INT_READONLY},
 	{KERN_ARGMAX, &arg_max, SYSCTL_INT_READONLY},
-	{KERN_NSELCOLL, &nselcoll, SYSCTL_INT_READONLY},
+	{KERN_NSELCOLL, &int_zero, SYSCTL_INT_READONLY},
 	{KERN_POSIX1, &posix_version, SYSCTL_INT_READONLY},
 	{KERN_NGROUPS, &ngroups_max, SYSCTL_INT_READONLY},
 	{KERN_JOB_CONTROL, &int_one, SYSCTL_INT_READONLY},
@@ -474,14 +473,12 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (0);
 #if NDT > 0
 	case KERN_ALLOWDT:
-		if (securelevel > 0)
-			return (sysctl_rdint(oldp, oldlenp, newp, allowdt));
-		return (sysctl_int(oldp, oldlenp, newp, newlen,  &allowdt));
+		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
+		    &allowdt));
 #endif
 	case KERN_ALLOWKMEM:
-		if (securelevel > 0)
-			return (sysctl_rdint(oldp, oldlenp, newp, allowkmem));
-		return (sysctl_int(oldp, oldlenp, newp, newlen, &allowkmem));
+		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
+		    &allowkmem));
 	case KERN_HOSTNAME:
 		error = sysctl_tstring(oldp, oldlenp, newp, newlen,
 		    hostname, sizeof(hostname));
@@ -489,8 +486,11 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			hostnamelen = newlen;
 		return (error);
 	case KERN_DOMAINNAME:
-		error = sysctl_tstring(oldp, oldlenp, newp, newlen,
-		    domainname, sizeof(domainname));
+		if (securelevel >= 1 && domainnamelen && newp)
+			error = EPERM;
+		else
+			error = sysctl_tstring(oldp, oldlenp, newp, newlen,
+			    domainname, sizeof(domainname));
 		if (newp && !error)
 			domainnamelen = newlen;
 		return (error);
@@ -654,6 +654,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
  */
 char *hw_vendor, *hw_prod, *hw_uuid, *hw_serial, *hw_ver;
 int allowpowerdown = 1;
+int hw_power = 1;
 
 /* morally const values reported by sysctl_bounded_arr */
 static int byte_order = BYTE_ORDER;
@@ -665,6 +666,7 @@ const struct sysctl_bounded_args hw_vars[] = {
 	{HW_BYTEORDER, &byte_order, SYSCTL_INT_READONLY},
 	{HW_PAGESIZE, &page_size, SYSCTL_INT_READONLY},
 	{HW_DISKCOUNT, &disk_count, SYSCTL_INT_READONLY},
+	{HW_POWER, &hw_power, SYSCTL_INT_READONLY},
 };
 
 int
@@ -756,10 +758,7 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (sysctl_rdquad(oldp, oldlenp, newp,
 		    ptoa((psize_t)physmem - uvmexp.wired)));
 	case HW_ALLOWPOWERDOWN:
-		if (securelevel > 0)
-			return (sysctl_rdint(oldp, oldlenp, newp,
-			    allowpowerdown));
-		return (sysctl_int(oldp, oldlenp, newp, newlen,
+		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
 		    &allowpowerdown));
 #ifdef __HAVE_CPU_TOPOLOGY
 	case HW_SMT:
@@ -872,6 +871,18 @@ sysctl_rdint(void *oldp, size_t *oldlenp, void *newp, int val)
 	if (oldp)
 		error = copyout((caddr_t)&val, oldp, sizeof(int));
 	return (error);
+}
+
+/*
+ * Selects between sysctl_rdint and sysctl_int according to securelevel.
+ */
+int
+sysctl_securelevel_int(void *oldp, size_t *oldlenp, void *newp, size_t newlen,
+    int *valp)
+{
+	if (securelevel > 0)
+		return (sysctl_rdint(oldp, oldlenp, newp, *valp));
+	return (sysctl_int(oldp, oldlenp, newp, newlen, valp));
 }
 
 /*
@@ -1358,16 +1369,24 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 			struct inpcb *inp;
 
 			NET_LOCK();
+			mtx_enter(&tcbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &tcbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
+			mtx_leave(&tcbtable.inpt_mtx);
+			mtx_enter(&udbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &udbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
+			mtx_leave(&udbtable.inpt_mtx);
+			mtx_enter(&rawcbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &rawcbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
+			mtx_leave(&rawcbtable.inpt_mtx);
 #ifdef INET6
+			mtx_enter(&rawin6pcbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &rawin6pcbtable.inpt_queue,
 			    inp_queue)
 				FILLSO(inp->inp_socket);
+			mtx_leave(&rawin6pcbtable.inpt_mtx);
 #endif
 			NET_UNLOCK();
 		}
@@ -1998,7 +2017,7 @@ sysctl_proc_nobroadcastkill(int *name, u_int namelen, void *newp, size_t newlen,
 		return (EINVAL);
 
 	/* Only root can change PS_NOBROADCASTKILL */
-	if (newp != 0 && (error = suser(cp)) != 0)
+	if (newp != NULL && (error = suser(cp)) != 0)
 		return (error);
 
 	/* get the PS_NOBROADCASTKILL flag */
@@ -2130,24 +2149,33 @@ sysctl_diskinit(int update, struct proc *p)
 	struct diskstats *sdk;
 	struct disk *dk;
 	const char *duid;
-	int i, tlen, l;
+	int error, changed = 0;
 
-	if ((i = rw_enter(&sysctl_disklock, RW_WRITE|RW_INTR)) != 0)
-		return i;
+	KERNEL_ASSERT_LOCKED();
 
-	if (disk_change) {
-		for (dk = TAILQ_FIRST(&disklist), tlen = 0; dk;
-		    dk = TAILQ_NEXT(dk, dk_link)) {
+	if ((error = rw_enter(&sysctl_disklock, RW_WRITE|RW_INTR)) != 0)
+		return error;
+
+	/* Run in a loop, disks may change while malloc sleeps. */
+	while (disk_change) {
+		int tlen;
+
+		disk_change = 0;
+
+		tlen = 0;
+		TAILQ_FOREACH(dk, &disklist, dk_link) {
 			if (dk->dk_name)
 				tlen += strlen(dk->dk_name);
 			tlen += 18;	/* label uid + separators */
 		}
 		tlen++;
 
-		if (disknames)
-			free(disknames, M_SYSCTL, disknameslen);
-		if (diskstats)
-			free(diskstats, M_SYSCTL, diskstatslen);
+		/*
+		 * The sysctl_disklock ensures that no other process can
+		 * allocate disknames and diskstats while our malloc sleeps.
+		 */
+		free(disknames, M_SYSCTL, disknameslen);
+		free(diskstats, M_SYSCTL, diskstatslen);
 		diskstats = NULL;
 		disknames = NULL;
 		diskstats = mallocarray(disk_count, sizeof(struct diskstats),
@@ -2156,17 +2184,22 @@ sysctl_diskinit(int update, struct proc *p)
 		disknames = malloc(tlen, M_SYSCTL, M_WAITOK|M_ZERO);
 		disknameslen = tlen;
 		disknames[0] = '\0';
+		changed = 1;
+	}
 
-		for (dk = TAILQ_FIRST(&disklist), i = 0, l = 0; dk;
-		    dk = TAILQ_NEXT(dk, dk_link), i++) {
+	if (changed) {
+		int l;
+
+		l = 0;
+		sdk = diskstats;
+		TAILQ_FOREACH(dk, &disklist, dk_link) {
 			duid = NULL;
 			if (dk->dk_label && !duid_iszero(dk->dk_label->d_uid))
 				duid = duid_format(dk->dk_label->d_uid);
-			snprintf(disknames + l, tlen - l, "%s:%s,",
+			snprintf(disknames + l, disknameslen - l, "%s:%s,",
 			    dk->dk_name ? dk->dk_name : "",
 			    duid ? duid : "");
 			l += strlen(disknames + l);
-			sdk = diskstats + i;
 			strlcpy(sdk->ds_name, dk->dk_name,
 			    sizeof(sdk->ds_name));
 			mtx_enter(&dk->dk_mtx);
@@ -2180,17 +2213,16 @@ sysctl_diskinit(int update, struct proc *p)
 			sdk->ds_timestamp = dk->dk_timestamp;
 			sdk->ds_time = dk->dk_time;
 			mtx_leave(&dk->dk_mtx);
+			sdk++;
 		}
 
 		/* Eliminate trailing comma */
 		if (l != 0)
 			disknames[l - 1] = '\0';
-		disk_change = 0;
 	} else if (update) {
 		/* Just update, number of drives hasn't changed */
-		for (dk = TAILQ_FIRST(&disklist), i = 0; dk;
-		    dk = TAILQ_NEXT(dk, dk_link), i++) {
-			sdk = diskstats + i;
+		sdk = diskstats;
+		TAILQ_FOREACH(dk, &disklist, dk_link) {
 			strlcpy(sdk->ds_name, dk->dk_name,
 			    sizeof(sdk->ds_name));
 			mtx_enter(&dk->dk_mtx);
@@ -2204,6 +2236,7 @@ sysctl_diskinit(int update, struct proc *p)
 			sdk->ds_timestamp = dk->dk_timestamp;
 			sdk->ds_time = dk->dk_time;
 			mtx_leave(&dk->dk_mtx);
+			sdk++;
 		}
 	}
 	rw_exit_write(&sysctl_disklock);
@@ -2486,11 +2519,9 @@ sysctl_utc_offset(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 	int adjustment_seconds, error, new_offset_minutes, old_offset_minutes;
 
 	old_offset_minutes = utc_offset / 60;	/* seconds -> minutes */
-	if (securelevel > 0)
-		return sysctl_rdint(oldp, oldlenp, newp, old_offset_minutes);
-
 	new_offset_minutes = old_offset_minutes;
-	error = sysctl_int(oldp, oldlenp, newp, newlen, &new_offset_minutes);
+	error = sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
+	     &new_offset_minutes);
 	if (error)
 		return error;
 	if (new_offset_minutes < -24 * 60 || new_offset_minutes > 24 * 60)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.239 2021/07/20 12:07:46 claudio Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.253 2022/07/28 13:11:48 deraadt Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -68,7 +68,7 @@ char			*rcname;
 
 struct connect_elm {
 	TAILQ_ENTRY(connect_elm)	entry;
-	u_int32_t			id;
+	uint32_t			id;
 	int				fd;
 };
 
@@ -273,7 +273,7 @@ main(int argc, char *argv[])
 	imsg_init(ibuf_rde, pipe_m2r[0]);
 	imsg_init(ibuf_rtr, pipe_m2roa[0]);
 	mrt_init(ibuf_rde, ibuf_se);
-	if (kr_init(&rfd) == -1)
+	if (kr_init(&rfd, conf->fib_priority) == -1)
 		quit = 1;
 	keyfd = pfkey_init();
 
@@ -345,11 +345,13 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 
 		if (timeout < 0 || timeout > MAX_TIMEOUT)
 			timeout = MAX_TIMEOUT;
-		if (poll(pfd, npfd, timeout * 1000) == -1)
+		if (poll(pfd, npfd, timeout * 1000) == -1) {
 			if (errno != EINTR) {
 				log_warn("poll error");
 				quit = 1;
 			}
+			goto next_loop;
+		}
 
 		if (handle_pollfd(&pfd[PFD_PIPE_SESSION], ibuf_se) == -1) {
 			log_warnx("main: Lost connection to SE");
@@ -386,7 +388,7 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 		}
 
 		if (pfd[PFD_SOCK_ROUTE].revents & POLLIN) {
-			if (kr_dispatch_msg(conf->default_tableid) == -1)
+			if (kr_dispatch_msg() == -1)
 				quit = 1;
 		}
 
@@ -401,6 +403,7 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 			if (pfd[i].revents != 0)
 				bgpd_rtr_connect_done(pfd[i].fd, conf);
 
+ next_loop:
 		if (reconfig) {
 			u_int	error;
 
@@ -457,7 +460,7 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 
 	/* cleanup kernel data structures */
 	carp_demote_shutdown();
-	kr_shutdown(conf->fib_priority, conf->default_tableid);
+	kr_shutdown();
 	pftable_clear_all();
 
 	RB_FOREACH(p, peer_head, &conf->peers)
@@ -596,7 +599,9 @@ send_config(struct bgpd_config *conf)
 
 	reconfpending = 3;	/* one per child */
 
-	expand_networks(conf);
+	expand_networks(conf, &conf->networks);
+	SIMPLEQ_FOREACH(vpn, &conf->l3vpns, entry)
+		expand_networks(conf, &vpn->net_l);
 
 	cflags = conf->flags;
 
@@ -624,9 +629,8 @@ send_config(struct bgpd_config *conf)
 	/* RIBs for the RDE */
 	while ((rr = SIMPLEQ_FIRST(&ribnames))) {
 		SIMPLEQ_REMOVE_HEAD(&ribnames, entry);
-		if (ktable_update(rr->rtableid, rr->name, rr->flags,
-		    conf->fib_priority) == -1) {
-			log_warnx("failed to load rdomain %d",
+		if (ktable_update(rr->rtableid, rr->name, rr->flags) == -1) {
+			log_warnx("failed to load routing table %d",
 			    rr->rtableid);
 			return (-1);
 		}
@@ -699,7 +703,7 @@ send_config(struct bgpd_config *conf)
 	/* as-sets for filters in the RDE */
 	while ((aset = SIMPLEQ_FIRST(&conf->as_sets)) != NULL) {
 		struct ibuf *wbuf;
-		u_int32_t *as;
+		uint32_t *as;
 		size_t i, l, n;
 
 		SIMPLEQ_REMOVE_HEAD(&conf->as_sets, entry);
@@ -742,9 +746,9 @@ send_config(struct bgpd_config *conf)
 
 	while ((vpn = SIMPLEQ_FIRST(&conf->l3vpns)) != NULL) {
 		SIMPLEQ_REMOVE_HEAD(&conf->l3vpns, entry);
-		if (ktable_update(vpn->rtableid, vpn->descr, vpn->flags,
-		    conf->fib_priority) == -1) {
-			log_warnx("failed to load rdomain %d",
+		if (ktable_update(vpn->rtableid, vpn->descr, vpn->flags) ==
+		    -1) {
+			log_warnx("failed to load routing table %d",
 			    vpn->rtableid);
 			return (-1);
 		}
@@ -798,6 +802,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 	struct peer		*p;
 	struct rtr_config	*r;
 	ssize_t			 n;
+	u_int			 rtableid;
 	int			 rv, verbose;
 
 	rv = 0;
@@ -815,8 +820,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct kroute_full))
 				log_warnx("wrong imsg len");
-			else if (kr_change(imsg.hdr.peerid, imsg.data,
-			    conf->fib_priority))
+			else if (kr_change(imsg.hdr.peerid, imsg.data))
 				rv = -1;
 			break;
 		case IMSG_KROUTE_DELETE:
@@ -825,8 +829,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct kroute_full))
 				log_warnx("wrong imsg len");
-			else if (kr_delete(imsg.hdr.peerid, imsg.data,
-			    conf->fib_priority))
+			else if (kr_delete(imsg.hdr.peerid, imsg.data))
 				rv = -1;
 			break;
 		case IMSG_KROUTE_FLUSH:
@@ -843,9 +846,11 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct bgpd_addr))
 				log_warnx("wrong imsg len");
-			else if (kr_nexthop_add(imsg.hdr.peerid, imsg.data,
-			    conf) == -1)
-				rv = -1;
+			else {
+				rtableid = conf->default_tableid;
+				if (kr_nexthop_add(rtableid, imsg.data) == -1)
+					rv = -1;
+			}
 			break;
 		case IMSG_NEXTHOP_REMOVE:
 			if (idx != PFD_PIPE_RDE)
@@ -853,9 +858,10 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
 			    sizeof(struct bgpd_addr))
 				log_warnx("wrong imsg len");
-			else
-				kr_nexthop_delete(imsg.hdr.peerid, imsg.data,
-				    conf);
+			else {
+				rtableid = conf->default_tableid;
+				kr_nexthop_delete(rtableid, imsg.data);
+			}
 			break;
 		case IMSG_PFTABLE_ADD:
 			if (idx != PFD_PIPE_RDE)
@@ -913,15 +919,13 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("couple request not from SE");
 			else
-				kr_fib_couple(imsg.hdr.peerid,
-				    conf->fib_priority);
+				kr_fib_couple(imsg.hdr.peerid);
 			break;
 		case IMSG_CTL_FIB_DECOUPLE:
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("decouple request not from SE");
 			else
-				kr_fib_decouple(imsg.hdr.peerid,
-				    conf->fib_priority);
+				kr_fib_decouple(imsg.hdr.peerid);
 			break;
 		case IMSG_CTL_KROUTE:
 		case IMSG_CTL_KROUTE_ADDR:
@@ -933,11 +937,11 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 			else
 				kr_show_route(&imsg);
 			break;
-		case IMSG_IFINFO:
+		case IMSG_SESSION_DEPENDON:
 			if (idx != PFD_PIPE_SESSION)
-				log_warnx("IFINFO request not from SE");
+				log_warnx("DEPENDON request not from SE");
 			else if (imsg.hdr.len != IMSG_HEADER_SIZE + IFNAMSIZ)
-				log_warnx("IFINFO request with wrong len");
+				log_warnx("DEPENDON request with wrong len");
 			else
 				kr_ifinfo(imsg.data);
 			break;
@@ -972,7 +976,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				    0, -1, NULL, 0);
 
 				/* finally fix kroute information */
-				ktable_postload(conf->fib_priority);
+				ktable_postload();
 
 				/* redistribute list needs to be reloaded too */
 				kr_reload();
@@ -1087,7 +1091,7 @@ send_nexthop_update(struct kroute_nexthop *msg)
 }
 
 void
-send_imsg_session(int type, pid_t pid, void *data, u_int16_t datalen)
+send_imsg_session(int type, pid_t pid, void *data, uint16_t datalen)
 {
 	imsg_compose(ibuf_se, type, 0, pid, -1, data, datalen);
 }
@@ -1111,29 +1115,19 @@ send_network(int type, struct network_config *net, struct filter_set_head *h)
 	return (0);
 }
 
+/*
+ * Return true if a route can be used for nexthop resolution.
+ */
 int
-bgpd_filternexthop(struct kroute *kr, struct kroute6 *kr6)
+bgpd_oknexthop(struct kroute_full *kf)
 {
-	/* kernel routes are never filtered */
-	if (kr && kr->flags & F_KERNEL && kr->prefixlen != 0)
-		return (0);
-	if (kr6 && kr6->flags & F_KERNEL && kr6->prefixlen != 0)
-		return (0);
+	if (kf->flags & F_BGPD)
+		return ((cflags & BGPD_FLAG_NEXTHOP_BGP) != 0);
 
-	if (cflags & BGPD_FLAG_NEXTHOP_BGP) {
-		if (kr && kr->flags & F_BGPD_INSERTED)
-			return (0);
-		if (kr6 && kr6->flags & F_BGPD_INSERTED)
-			return (0);
-	}
+	if (kf->prefixlen == 0)
+		return ((cflags & BGPD_FLAG_NEXTHOP_DEFAULT) != 0);
 
-	if (cflags & BGPD_FLAG_NEXTHOP_DEFAULT) {
-		if (kr && kr->prefixlen == 0)
-			return (0);
-		if (kr6 && kr6->prefixlen == 0)
-			return (0);
-	}
-
+	/* any other route is fine */
 	return (1);
 }
 
@@ -1322,7 +1316,7 @@ bgpd_rtr_connect(struct rtr_config *r)
 
 	ce->id = r->id;
 	ce->fd = socket(aid2af(r->remote_addr.aid),
-	     SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
+	    SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
 	if (ce->fd == -1) {
 		log_warn("rtr %s", r->descr);
 		free(ce);
@@ -1371,7 +1365,7 @@ bgpd_rtr_connect_done(int fd, struct bgpd_config *conf)
 	}
 	if (ce == NULL)
 		fatalx("connect entry not found");
-	
+
 	TAILQ_REMOVE(&connect_queue, ce, entry);
 	connect_cnt--;
 

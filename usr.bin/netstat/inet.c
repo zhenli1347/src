@@ -1,4 +1,4 @@
-/*	$OpenBSD: inet.c,v 1.171 2021/01/26 18:22:35 deraadt Exp $	*/
+/*	$OpenBSD: inet.c,v 1.174 2022/08/12 14:49:15 bluhm Exp $	*/
 /*	$NetBSD: inet.c,v 1.14 1995/10/03 21:42:37 thorpej Exp $	*/
 
 /*
@@ -31,7 +31,6 @@
  */
 
 #include <sys/queue.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/domain.h>
@@ -613,6 +612,7 @@ ip_stats(char *name)
 	p(ips_outswcsum, "\t%lu output datagram%s software-checksummed\n");
 	p(ips_notmember, "\t%lu multicast packet%s which we don't join\n");
 	p(ips_wrongif, "\t%lu packet%s received on wrong interface\n");
+	p(ips_idropped, "\t%lu input packet%s dropped due to no bufs, etc.\n");
 #undef p
 #undef p1
 }
@@ -1046,6 +1046,7 @@ ipsec_stats(char *name)
 	p(ipsec_crypto, "\t%llu packet%s that failed crypto processing\n");
 	p(ipsec_noxform, "\t%llu packet%s for which no XFORM was set in TDB received\n");
 	p(ipsec_notdb, "\t%llu packet%s for which no TDB was found\n");
+	p(ipsec_exctdb, "\t%llu TDB%s with hardlimit excess\n");
 #undef p
 }
 

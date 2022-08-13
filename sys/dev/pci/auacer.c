@@ -1,4 +1,4 @@
-/*	$OpenBSD: auacer.c,v 1.22 2019/12/14 12:35:19 fcambus Exp $	*/
+/*	$OpenBSD: auacer.c,v 1.25 2022/03/21 19:22:40 miod Exp $	*/
 /*	$NetBSD: auacer.c,v 1.3 2004/11/10 04:20:26 kent Exp $	*/
 
 /*-
@@ -144,7 +144,7 @@ void	auacer_attach(struct device *, struct device *, void *);
 int	auacer_activate(struct device *, int);
 int	auacer_intr(void *); 
 
-struct cfattach auacer_ca = {
+const struct cfattach auacer_ca = {
         sizeof(struct auacer_softc), auacer_match, auacer_attach, NULL,
 	auacer_activate
 };
@@ -179,7 +179,7 @@ void	auacer_finish_attach(struct device *);
 
 static	void auacer_reset(struct auacer_softc *sc);
 
-struct audio_hw_if auacer_hw_if = {
+const struct audio_hw_if auacer_hw_if = {
 	auacer_open,
 	auacer_close,
 	auacer_set_params,
@@ -274,7 +274,7 @@ auacer_attach(struct device *parent, struct device *self, void *aux)
 	if (ac97_attach(&sc->host_if) != 0)
 		return;
 
-	audio_attach_mi(&auacer_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&auacer_hw_if, sc, NULL, &sc->sc_dev);
 
 	auacer_reset(sc);
 }

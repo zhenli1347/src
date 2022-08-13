@@ -1,4 +1,4 @@
-/*	$OpenBSD: fmsradio.c,v 1.6 2002/06/06 16:29:37 mickey Exp $	*/
+/*	$OpenBSD: fmsradio.c,v 1.8 2022/03/21 19:22:41 miod Exp $	*/
 
 /*
  * Copyright (c) 2002 Vladimir Popov <jumbo@narod.ru>
@@ -136,7 +136,7 @@ int	fmsradio_get_info(void *, struct radio_info *);
 int	fmsradio_set_info(void *, struct radio_info *);
 int	fmsradio_search(void *, int);
 
-struct radio_hw_if fmsradio_hw_if = {
+const struct radio_hw_if fmsradio_hw_if = {
 	NULL,   /* open */
 	NULL,   /* close */
 	fmsradio_get_info,
@@ -537,7 +537,7 @@ fmsradio_get_info(void *v, struct radio_info *ri)
 		ri->info |= buf & PCR_INFO_STEREO ? 0 : RADIO_INFO_STEREO;
 		break;
 	default:
-		break;
+		return EINVAL;
 	}
 
 	ri->freq = radio->freq = tea5757_decode_freq(buf,

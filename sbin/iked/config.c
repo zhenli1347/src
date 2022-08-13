@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.80 2021/09/01 15:30:06 tobhe Exp $	*/
+/*	$OpenBSD: config.c,v 1.86 2022/07/08 19:51:11 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -110,6 +110,8 @@ config_free_fragments(struct iked_frag *frag)
 void
 config_free_sa(struct iked *env, struct iked_sa *sa)
 {
+	int i;
+
 	timer_del(env, &sa->sa_timer);
 	timer_del(env, &sa->sa_keepalive);
 	timer_del(env, &sa->sa_rekey);
@@ -165,6 +167,8 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
 	ibuf_release(sa->sa_rid.id_buf);
 	ibuf_release(sa->sa_icert.id_buf);
 	ibuf_release(sa->sa_rcert.id_buf);
+	for (i = 0; i < IKED_SCERT_MAX; i++)
+		ibuf_release(sa->sa_scert[i].id_buf);
 	ibuf_release(sa->sa_localauth.id_buf);
 	ibuf_release(sa->sa_peerauth.id_buf);
 
@@ -320,12 +324,12 @@ config_free_childsas(struct iked *env, struct iked_childsas *head,
 		TAILQ_REMOVE(head, csa, csa_entry);
 		if (csa->csa_loaded) {
 			RB_REMOVE(iked_activesas, &env->sc_activesas, csa);
-			(void)pfkey_sa_delete(env->sc_pfkey, csa);
+			(void)pfkey_sa_delete(env, csa);
 		}
 		if ((ipcomp = csa->csa_bundled) != NULL) {
 			log_debug("%s: free IPCOMP %p", __func__, ipcomp);
 			if (ipcomp->csa_loaded)
-				(void)pfkey_sa_delete(env->sc_pfkey, ipcomp);
+				(void)pfkey_sa_delete(env, ipcomp);
 			childsa_free(ipcomp);
 		}
 		childsa_free(csa);
@@ -455,7 +459,7 @@ config_new_user(struct iked *env, struct iked_user *new)
 		memcpy(old->usr_pass, new->usr_pass, IKED_PASSWORD_SIZE);
 
 		log_debug("%s: updating user %s", __func__, usr->usr_name);
-		free(usr);
+		freezero(usr, sizeof *usr);
 
 		return (old);
 	}
@@ -482,7 +486,7 @@ config_setcoupled(struct iked *env, unsigned int couple)
 int
 config_getcoupled(struct iked *env, unsigned int type)
 {
-	return (pfkey_couple(env->sc_pfkey, &env->sc_sas,
+	return (pfkey_couple(env, &env->sc_sas,
 	    type == IMSG_CTL_COUPLE ? 1 : 0));
 }
 
@@ -593,7 +597,7 @@ int
 config_getsocket(struct iked *env, struct imsg *imsg,
     void (*cb)(int, short, void *))
 {
-	struct iked_socket	*sock, **sock0, **sock1;
+	struct iked_socket	*sock, **sock0 = NULL, **sock1 = NULL;
 
 	log_debug("%s: received socket fd %d", __func__, imsg->fd);
 
@@ -639,7 +643,7 @@ config_setpfkey(struct iked *env)
 {
 	int	 s;
 
-	if ((s = pfkey_socket()) == -1)
+	if ((s = pfkey_socket(env)) == -1)
 		return (-1);
 	proc_compose_imsg(&env->sc_ps, PROC_IKEV2, -1,
 	    IMSG_PFKEY_SOCKET, -1, s, NULL, 0);
@@ -670,16 +674,18 @@ int
 config_getuser(struct iked *env, struct imsg *imsg)
 {
 	struct iked_user	 usr;
+	int			 ret = -1;
 
 	IMSG_SIZE_CHECK(imsg, &usr);
 	memcpy(&usr, imsg->data, sizeof(usr));
 
-	if (config_new_user(env, &usr) == NULL)
-		return (-1);
+	if (config_new_user(env, &usr) != NULL) {
+		print_user(&usr);
+		ret = 0;
+	}
 
-	print_user(&usr);
-
-	return (0);
+	explicit_bzero(&usr, sizeof(usr));
+	return (ret);
 }
 
 int
@@ -900,6 +906,8 @@ config_getstatic(struct iked *env, struct imsg *imsg)
 	log_debug("%s: %sstickyaddress", __func__,
 	    env->sc_stickyaddress ? "" : "no ");
 
+	ikev2_reset_alive_timer(env);
+
 	return (0);
 }
 
@@ -1068,8 +1076,6 @@ config_getkey(struct iked *env, struct imsg *imsg)
 
 	explicit_bzero(imsg->data, len);
 	ca_getkey(&env->sc_ps, &id, imsg->hdr.type);
-
-	ikev2_reset_alive_timer(env);
 
 	return (0);
 }

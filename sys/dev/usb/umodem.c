@@ -1,4 +1,4 @@
-/*	$OpenBSD: umodem.c,v 1.67 2021/01/29 17:12:19 sthen Exp $ */
+/*	$OpenBSD: umodem.c,v 1.69 2022/07/02 08:50:42 visa Exp $ */
 /*	$NetBSD: umodem.c,v 1.45 2002/09/23 05:51:23 simonb Exp $	*/
 
 /*
@@ -49,9 +49,7 @@
 #include <sys/kernel.h>
 #include <sys/conf.h>
 #include <sys/tty.h>
-#include <sys/selinfo.h>
 #include <sys/device.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbcdc.h>
@@ -121,7 +119,7 @@ int	umodem_open(void *, int portno);
 void	umodem_close(void *, int portno);
 void	umodem_intr(struct usbd_xfer *, void *, usbd_status);
 
-struct ucom_methods umodem_methods = {
+const struct ucom_methods umodem_methods = {
 	umodem_get_status,
 	umodem_set,
 	umodem_param,

@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: PackageLocation.pm,v 1.53 2019/07/10 11:13:06 espie Exp $
+# $OpenBSD: PackageLocation.pm,v 1.60 2022/05/08 13:31:40 espie Exp $
 #
 # Copyright (c) 2003-2007 Marc Espie <espie@openbsd.org>
 #
@@ -23,6 +23,7 @@ package OpenBSD::PackageLocation;
 use OpenBSD::PackageInfo;
 use OpenBSD::Temp;
 use OpenBSD::Error;
+use OpenBSD::Paths;
 
 sub new
 {
@@ -32,6 +33,12 @@ sub new
 	bless $self, $class;
 	return $self;
 
+}
+
+sub decorate
+{
+	my ($self, $plist) = @_;
+	$self->{repository}->decorate($plist, $self);
 }
 
 sub url
@@ -56,17 +63,32 @@ OpenBSD::Auto::cache(pkgname,
 OpenBSD::Auto::cache(update_info,
     sub {
 	my $self = shift;
-	if ($self->name =~ /^quirks\-/) {
+	my $name = $self->name;
+	if ($name =~ /^quirks\-/) {
 		return $self->plist;
 	}
-	return $self->plist(\&OpenBSD::PackingList::UpdateInfoOnly,
-	    sub {
-		return 0 if $_[0] =~ m/^\@option\s+always-update\b/m;
-		return 1 if $_[0] =~ m/^\@(?:newgroup|newuser|cwd)\b/m;
-		return 0;
-	    });
+	my $state = $self->{repository}{state};
+	my $info = $self->{repository}->get_cached_info($name);
+	if (defined $info && 
+	    !defined $state->defines("CACHING_RECHECK")) {
+		return $info;
+	}
+	my $result = $self->plist(\&OpenBSD::PackingList::UpdateInfoOnly);
+	if (defined $info) {
+		my $s1 = OpenBSD::Signature->from_plist($info);
+		my $s2 = OpenBSD::Signature->from_plist($result);
+		my $r = $s1->compare($s2, $state);
+		if (defined $r && $r == 0) {
+			$state->say("Cache comparison for #1 is okay", $name)
+			    if $state->defines("TEST_CACHING_VERBOSE");
+			return $result;
+		} else {
+			$state->fatal("Signatures differ cache=#1, regular=#2",
+			    $s1->string, $s2->string);
+		}
+	}
+	return $result;
     });
-
 
 # make sure self is opened and move to the right location if need be.
 sub _opened
@@ -110,13 +132,12 @@ sub _set_callback
 
 sub find_contents
 {
-	my ($self, $extra) = @_;
+	my $self = shift;
 
 	while (my $e = $self->next) {
 		if ($e->isFile && is_info_name($e->{name})) {
 			if ($e->{name} eq CONTENTS ) {
-				my $v = 
-				    $self->{extra_content}.$e->contents($extra);
+				my $v = $e->contents;
 				return $v;
 			}
 		} else {
@@ -128,17 +149,10 @@ sub find_contents
 
 sub contents
 {
-	my ($self, $extra) = @_;
+	my $self = shift;
 	if (!defined $self->{contents}) {
 		if (!$self->_opened) {
 			return;
-		}
-		if (defined $extra) {
-			my $contents = $self->find_contents($extra);
-			if ($contents) {
-				$self->unput;
-			}
-			return $contents;
 		}
 		$self->{contents} = $self->find_contents;
 	}
@@ -231,7 +245,7 @@ sub info
 
 sub plist
 {
-	my ($self, $code, $extra) = @_;
+	my ($self, $code) = @_;
 	require OpenBSD::PackingList;
 
 	if (defined $self->{dir} && -f $self->{dir}.CONTENTS) {
@@ -241,7 +255,7 @@ sub plist
 		$plist->set_infodir($self->{dir});
 		return $plist;
 	}
-	if (my $value = $self->contents($extra)) {
+	if (my $value = $self->contents) {
 		return OpenBSD::PackingList->fromfile(\$value, $code);
 	}
 	# hopeless

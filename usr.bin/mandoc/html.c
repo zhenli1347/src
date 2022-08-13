@@ -1,7 +1,8 @@
-/* $OpenBSD: html.c,v 1.145 2021/08/10 12:36:42 schwarze Exp $ */
+/* $OpenBSD: html.c,v 1.150 2022/08/09 11:21:50 schwarze Exp $ */
 /*
  * Copyright (c) 2008-2011, 2014 Kristaps Dzonsons <kristaps@bsd.lv>
  * Copyright (c) 2011-2015, 2017-2021 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2022 Anna Vyalkova <cyber@sysrq.in>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -65,8 +66,10 @@ static	const struct htmldata htmltags[TAG_MAX] = {
 	{"style",	HTML_NLALL | HTML_INDENT},
 	{"title",	HTML_NLAROUND},
 	{"body",	HTML_NLALL},
+	{"main",	HTML_NLALL},
 	{"div",		HTML_NLAROUND},
 	{"section",	HTML_NLALL},
+	{"nav",		HTML_NLALL},
 	{"table",	HTML_NLALL | HTML_INDENT},
 	{"tr",		HTML_NLALL | HTML_INDENT},
 	{"td",		HTML_NLAROUND},
@@ -76,8 +79,8 @@ static	const struct htmldata htmltags[TAG_MAX] = {
 	{"dl",		HTML_NLALL | HTML_INDENT},
 	{"dt",		HTML_NLAROUND},
 	{"dd",		HTML_NLAROUND | HTML_INDENT},
-	{"h1",		HTML_TOPHRASE | HTML_NLAROUND},
 	{"h2",		HTML_TOPHRASE | HTML_NLAROUND},
+	{"h3",		HTML_TOPHRASE | HTML_NLAROUND},
 	{"p",		HTML_TOPHRASE | HTML_NLAROUND | HTML_INDENT},
 	{"pre",		HTML_TOPHRASE | HTML_NLAROUND | HTML_NOINDENT},
 	{"a",		HTML_INPHRASE | HTML_TOPHRASE},
@@ -89,6 +92,7 @@ static	const struct htmldata htmltags[TAG_MAX] = {
 	{"span",	HTML_INPHRASE | HTML_TOPHRASE},
 	{"var",		HTML_INPHRASE | HTML_TOPHRASE},
 	{"br",		HTML_INPHRASE | HTML_NOSTACK | HTML_NLALL},
+	{"hr",		HTML_INPHRASE | HTML_NOSTACK},
 	{"mark",	HTML_INPHRASE },
 	{"math",	HTML_INPHRASE | HTML_NLALL | HTML_INDENT},
 	{"mrow",	0},
@@ -397,10 +401,13 @@ html_make_id(const struct roff_node *n, int unique)
 	 * In addition, reserve '~' for ordinal suffixes.
 	 */
 
-	for (cp = buf; *cp != '\0'; cp++)
-		if (isalnum((unsigned char)*cp) == 0 &&
+	for (cp = buf; *cp != '\0'; cp++) {
+		if (*cp == ASCII_HYPH)
+			*cp = '-';
+		else if (isalnum((unsigned char)*cp) == 0 &&
 		    strchr("!$&'()*+,-./:;=?@_", *cp) == NULL)
 			*cp = '_';
+	}
 
 	if (unique == 0)
 		return buf;
@@ -704,6 +711,9 @@ print_otag(struct html *h, enum htmltag tag, const char *fmt, ...)
 			break;
 		case 'i':
 			attr = "id";
+			break;
+		case 'r':
+			attr = "role";
 			break;
 		case '?':
 			attr = arg1;

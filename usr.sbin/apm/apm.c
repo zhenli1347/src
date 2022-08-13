@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.38 2021/04/06 20:30:32 kn Exp $	*/
+/*	$OpenBSD: apm.c,v 1.41 2022/02/13 21:27:51 jmc Exp $	*/
 
 /*
  *  Copyright (c) 1996 John T. Kohl
@@ -163,7 +163,7 @@ main(int argc, char *argv[])
 	size_t cpuspeed_sz = sizeof(cpuspeed);
 
 	if (sysctl(cpuspeed_mib, 2, &cpuspeed, &cpuspeed_sz, NULL, 0) == -1)
-		err(1, "sysctl hw.cpuspeed");
+		cpuspeed = 0;
 
 	while ((ch = getopt(argc, argv, "ACHLlmbvaPSzZf:")) != -1) {
 		switch (ch) {
@@ -354,7 +354,6 @@ balony:
 			printf("\n");
 
 		if (domin && !dobstate && !dopct) {
-#ifdef __powerpc__
 			if (reply.batterystate.battery_state ==
 			    APM_BATT_CHARGING)
 				printf("Remaining battery recharge "
@@ -365,7 +364,6 @@ balony:
 				printf("Battery life estimate: "
 				    "not available\n");
 			else
-#endif
 			{
 				printf("Battery life estimate: ");
 				if (reply.batterystate.minutes_left ==
@@ -376,7 +374,6 @@ balony:
 					    reply.batterystate.minutes_left);
 			}
 		} else if (domin) {
-#ifdef __powerpc__
 			if (reply.batterystate.battery_state ==
 			    APM_BATT_CHARGING)
 				printf(", %d minutes recharge time estimate\n",
@@ -385,7 +382,6 @@ balony:
 			    reply.batterystate.battery_life > 10)
 				printf(", unknown life estimate\n");
 			else
-#endif
 			{
 				if (reply.batterystate.minutes_left ==
 				    (u_int)-1)
@@ -398,7 +394,7 @@ balony:
 		}
 
 		if (doac)
-			printf("A/C adapter state: %s\n",
+			printf("AC adapter state: %s\n",
 			    ac_state(reply.batterystate.ac_state));
 
 		if (doperf)

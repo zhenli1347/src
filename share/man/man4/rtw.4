@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rtw.4,v 1.45 2019/03/29 07:07:05 jmc Exp $
+.\"	$OpenBSD: rtw.4,v 1.48 2022/03/31 17:27:21 naddy Exp $
 .\"
 .\" Copyright (c) 2004 Jonathan Gray <jsg@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: March 29 2019 $
+.Dd $Mdocdate: March 31 2022 $
 .Dt RTW 4
 .Os
 .Sh NAME
@@ -141,7 +141,7 @@ using WEP key
 obtaining an IP address using DHCP:
 .Bd -literal -offset indent
 nwid mynwid nwkey mywepkey
-dhcp
+inet autoconf
 .Ed
 .Pp
 The following
@@ -164,7 +164,7 @@ inet 192.168.1.1 255.255.255.0
 .Xr ifconfig 8
 .Rs
 .%T Realtek
-.%U http://www.realtek.com.tw
+.%U https://www.realtek.com/en
 .Re
 .Sh HISTORY
 The
@@ -184,7 +184,7 @@ by
 .Sh CAVEATS
 GCT refuse to release any documentation on their GRF5101 RF transceiver.
 .Pp
-While PCI devices will attach most of them are not able to transmit.
+While PCI devices will attach, most of them are not able to transmit.
 .Pp
 Host AP mode doesn't support power saving.
 Clients attempting to use power saving mode may experience significant

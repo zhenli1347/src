@@ -1,4 +1,4 @@
-/*	$OpenBSD: eephy.c,v 1.58 2020/11/03 21:49:41 patrick Exp $	*/
+/*	$OpenBSD: eephy.c,v 1.60 2022/04/06 18:59:29 naddy Exp $	*/
 /*
  * Principal Author: Parag Patel
  * Copyright (c) 2001
@@ -26,7 +26,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * Additonal Copyright (c) 2001 by Traakan Software under same licence.
+ * Additional Copyright (c) 2001 by Traakan Software under same licence.
  * Secondary Author: Matthew Jacob
  */
 
@@ -58,7 +58,7 @@
 int	eephy_match(struct device *, void *, void *);
 void	eephy_attach(struct device *, struct device *, void *);
 
-struct cfattach eephy_ca = {
+const struct cfattach eephy_ca = {
 	sizeof (struct mii_softc), eephy_match, eephy_attach, mii_phy_detach
 };
 
@@ -336,7 +336,7 @@ eephy_service(struct mii_softc *sc, struct mii_data *mii, int cmd)
 		mii_phy_setmedia(sc);
 
 		/*
-		 * If autonegitation is not enabled, we need a
+		 * If autonegotiation is not enabled, we need a
 		 * software reset for the settings to take effect.
 		 */
 		if (IFM_SUBTYPE(ife->ifm_media) != IFM_AUTO) {

@@ -1,7 +1,11 @@
-#	$OpenBSD: Makefile,v 1.3 2021/08/30 17:34:02 tb Exp $
+#	$OpenBSD: Makefile,v 1.9 2022/05/10 19:27:21 tb Exp $
 
 OPENSSL_RUBY_TESTS =	/usr/local/share/openssl-ruby-tests
-RUBY_BINREV =		27
+.if exists(/usr/local/bin/ruby31)
+RUBY_BINREV =		31
+.else
+RUBY_BINREV =		30
+.endif
 RUBY =			ruby${RUBY_BINREV}
 
 # We work in a subdirectory of obj/ since extconf.rb generates a Makefile whose
@@ -16,7 +20,6 @@ regress:
 .else
 
 REGRESS_TARGETS +=		openssl-ruby-test
-REGRESS_EXPECTED_FAILURES +=	openssl-ruby-test
 
 openssl-ruby-test:	retest
 
@@ -37,7 +40,8 @@ ${_BUILD_COOKIE}: ${_BUILDDIR_COOKIE}
 OPENSSL_RUBY_TESTSRC =	${OPENSSL_RUBY_TESTS}/test/openssl/test_*.rb
 ${_TEST_COOKIE}: ${_BUILD_COOKIE} ${_BUILDDIR_COOKIE}
 	cd ${BUILDDIR} && \
-	    ${RUBY} -I. -I${OPENSSL_RUBY_TESTS}/test/openssl \
+	    env SKIP_EXPECTED_FAILURES=true ${RUBY} -I. \
+		-I${OPENSSL_RUBY_TESTS}/test/openssl \
 		-I${OPENSSL_RUBY_TESTS}/lib \
 		-e 'Dir["${OPENSSL_RUBY_TESTSRC}"].each{|f| require f}' \
 		-- --no-use-color --no-show-detail-immediately
@@ -55,6 +59,17 @@ rebuild:
 retest:
 	rm -f ${_TEST_COOKIE}
 	${_MAKE} test
+
+.for _t in test_client_ca
+REGRESS_TARGETS += ${_t}
+REGRESS_EXPECTED_FAILURES += ${_t}
+${_t}: ${_BUILD_COOKIE}
+	cd ${BUILDDIR} && \
+	    ${RUBY} -I. -I${OPENSSL_RUBY_TESTS}/test/openssl \
+		-I${OPENSSL_RUBY_TESTS}/lib \
+		${OPENSSL_RUBY_TESTS}/test/openssl/test_ssl.rb \
+		-n ${_t}
+.endfor
 
 CLEANFILES +=		${_BUILD_COOKIE} ${_TEST_COOKIE} ${_BUILDDIR_COOKIE}
 

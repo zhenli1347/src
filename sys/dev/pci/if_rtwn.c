@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_rtwn.c,v 1.37 2020/12/12 11:48:53 jan Exp $	*/
+/*	$OpenBSD: if_rtwn.c,v 1.40 2022/04/21 21:03:03 stsp Exp $	*/
 
 /*-
  * Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -972,9 +972,8 @@ rtwn_rx_frame(struct rtwn_pci_softc *sc, struct r92c_rx_desc_pci *rx_desc,
 #endif
 
 	ni = ieee80211_find_rxnode(ic, wh);
-	rxi.rxi_flags = 0;
+	memset(&rxi, 0, sizeof(rxi));
 	rxi.rxi_rssi = rssi;
-	rxi.rxi_tstamp = 0;	/* Unused. */
 	ieee80211_inputm(ifp, m, ni, &rxi, ml);
 	/* Node is no longer needed. */
 	ieee80211_release_node(ic, ni);
@@ -1095,7 +1094,7 @@ rtwn_tx(void *cookie, struct mbuf *m, struct ieee80211_node *ni)
 		if (ic->ic_curmode == IEEE80211_MODE_11B)
 			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, 0));
 		else
-			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, 3));
+			txd->txdw4 |= htole32(SM(R92C_TXDW4_RTSRATE, 8));
 		txd->txdw5 |= htole32(SM(R92C_TXDW5_RTSRATE_FBLIMIT, 0xf));
 
 		/* Use AMMR rate for data. */
@@ -2131,17 +2130,17 @@ rtwn_pci_load_firmware(void *cookie, u_char **fw, size_t *len)
 	int error;
 
 	if (sc->sc_sc.chip & RTWN_CHIP_88E)
-		name = "rtwn-rtl8188efw";
+		name = "rtwn-rtl8188e";
 	else if (sc->sc_sc.chip & RTWN_CHIP_23A) {
 		if (sc->sc_sc.chip & RTWN_CHIP_UMC_A_CUT)
-			name = "rtwn-rtl8723fw";
+			name = "rtwn-rtl8723";
 		else
-			name = "rtwn-rtl8723fw_B";
+			name = "rtwn-rtl8723_B";
 	} else if ((sc->sc_sc.chip & (RTWN_CHIP_UMC_A_CUT | RTWN_CHIP_92C)) ==
 	    RTWN_CHIP_UMC_A_CUT)
-		name = "rtwn-rtl8192cfwU";
+		name = "rtwn-rtl8192cU";
 	else
-		name = "rtwn-rtl8192cfwU_B";
+		name = "rtwn-rtl8192cU_B";
 
 	error = loadfirmware(name, fw, len);
 	if (error)

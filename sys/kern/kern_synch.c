@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_synch.c,v 1.177 2021/03/04 09:02:37 mpi Exp $	*/
+/*	$OpenBSD: kern_synch.c,v 1.189 2022/06/28 09:32:27 bluhm Exp $	*/
 /*	$NetBSD: kern_synch.c,v 1.37 1996/04/22 01:38:37 christos Exp $	*/
 
 /*
@@ -219,9 +219,10 @@ msleep(const volatile void *ident, struct mutex *mtx, int priority,
 	KASSERT(ident != &nowake || ISSET(priority, PCATCH) || timo != 0);
 	KASSERT(mtx != NULL);
 
-	if (priority & PCATCH)
-		KERNEL_ASSERT_LOCKED();
-
+#ifdef DDB
+	if (cold == 2)
+		db_stack_dump();
+#endif
 	if (cold || panicstr) {
 		/*
 		 * After a panic, or during autoconfiguration,
@@ -357,18 +358,7 @@ sleep_setup(struct sleep_state *sls, const volatile void *ident, int prio,
 #endif
 
 	sls->sls_catch = prio & PCATCH;
-	sls->sls_locked = 0;
 	sls->sls_timeout = 0;
-
-	/*
-	 * The kernel has to be locked for signal processing.
-	 * This is done here and not in sleep_finish() because
-	 * KERNEL_LOCK() has to be taken before SCHED_LOCK().
-	 */
-	if (sls->sls_catch != 0) {
-		KERNEL_LOCK();
-		sls->sls_locked = 1;
-	}
 
 	SCHED_LOCK(sls->sls_s);
 
@@ -380,8 +370,8 @@ sleep_setup(struct sleep_state *sls, const volatile void *ident, int prio,
 	p->p_slppri = prio & PRIMASK;
 	TAILQ_INSERT_TAIL(&slpque[LOOKUP(ident)], p, p_runq);
 
-	KASSERT((p->p_flag & P_TIMEOUT) == 0);
 	if (timo) {
+		KASSERT((p->p_flag & P_TIMEOUT) == 0);
 		sls->sls_timeout = 1;
 		timeout_add(&p->p_sleep_to, timo);
 	}
@@ -394,9 +384,6 @@ sleep_finish(struct sleep_state *sls, int do_sleep)
 	int error = 0, error1 = 0;
 
 	if (sls->sls_catch != 0) {
-		/* sleep_setup() has locked the kernel. */
-		KERNEL_ASSERT_LOCKED();
-
 		/*
 		 * We put ourselves on the sleep queue and start our
 		 * timeout before calling sleep_signal_check(), as we could
@@ -445,21 +432,17 @@ sleep_finish(struct sleep_state *sls, int do_sleep)
 
 	if (sls->sls_timeout) {
 		if (p->p_flag & P_TIMEOUT) {
-			atomic_clearbits_int(&p->p_flag, P_TIMEOUT);
 			error1 = EWOULDBLOCK;
 		} else {
-			/* This must not sleep. */
+			/* This can sleep. It must not use timeouts. */
 			timeout_del_barrier(&p->p_sleep_to);
-			KASSERT((p->p_flag & P_TIMEOUT) == 0);
 		}
+		atomic_clearbits_int(&p->p_flag, P_TIMEOUT);
 	}
 
 	/* Check if thread was woken up because of a unwind or signal */
 	if (sls->sls_catch != 0)
 		error = sleep_signal_check();
-
-	if (sls->sls_locked)
-		KERNEL_UNLOCK();
 
 	/* Signal errors are higher priority than timeouts. */
 	if (error == 0 && error1 != 0)
@@ -475,12 +458,13 @@ int
 sleep_signal_check(void)
 {
 	struct proc *p = curproc;
+	struct sigctx ctx;
 	int err, sig;
 
 	if ((err = single_thread_check(p, 1)) != 0)
 		return err;
-	if ((sig = cursig(p)) != 0) {
-		if (p->p_p->ps_sigacts->ps_sigintr & sigmask(sig))
+	if ((sig = cursig(p, &ctx)) != 0) {
+		if (ctx.sig_intr)
 			return EINTR;
 		else
 			return ERESTART;
@@ -537,7 +521,8 @@ unsleep(struct proc *p)
 	if (p->p_wchan != NULL) {
 		TAILQ_REMOVE(&slpque[LOOKUP(p->p_wchan)], p, p_runq);
 		p->p_wchan = NULL;
-		TRACEPOINT(sched, wakeup, p->p_tid, p->p_p->ps_pid);
+		TRACEPOINT(sched, wakeup, p->p_tid + THREAD_PID_OFFSET,
+		    p->p_p->ps_pid);
 	}
 }
 
@@ -556,16 +541,13 @@ wakeup_n(const volatile void *ident, int n)
 	qp = &slpque[LOOKUP(ident)];
 	for (p = TAILQ_FIRST(qp); p != NULL && n != 0; p = pnext) {
 		pnext = TAILQ_NEXT(p, p_runq);
-#ifdef DIAGNOSTIC
 		/*
-		 * If the rwlock passed to rwsleep() is contended, the
-		 * CPU will end up calling wakeup() between sleep_setup()
-		 * and sleep_finish().
+		 * This happens if wakeup(9) is called after enqueuing
+		 * itself on the sleep queue and both `ident' collide.
 		 */
-		if (p == curproc) {
-			KASSERT(p->p_stat == SONPROC);
+		if (p == curproc)
 			continue;
-		}
+#ifdef DIAGNOSTIC
 		if (p->p_stat != SSLEEP && p->p_stat != SSTOP)
 			panic("wakeup: p_stat is %d", (int)p->p_stat);
 #endif
@@ -801,31 +783,42 @@ sys___thrwakeup(struct proc *p, void *v, register_t *retval)
 void
 refcnt_init(struct refcnt *r)
 {
-	r->refs = 1;
+	refcnt_init_trace(r, 0);
+}
+
+void
+refcnt_init_trace(struct refcnt *r, int idx)
+{
+	r->r_traceidx = idx;
+	atomic_store_int(&r->r_refs, 1);
+	TRACEINDEX(refcnt, r->r_traceidx, r, 0, +1);
 }
 
 void
 refcnt_take(struct refcnt *r)
 {
-#ifdef DIAGNOSTIC
-	u_int refcnt;
+	u_int refs;
 
-	refcnt = atomic_inc_int_nv(&r->refs);
-	KASSERT(refcnt != 0);
-#else
-	atomic_inc_int(&r->refs);
-#endif
+	refs = atomic_inc_int_nv(&r->r_refs);
+	KASSERT(refs != 0);
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs - 1, +1);
+	(void)refs;
 }
 
 int
 refcnt_rele(struct refcnt *r)
 {
-	u_int refcnt;
+	u_int refs;
 
-	refcnt = atomic_dec_int_nv(&r->refs);
-	KASSERT(refcnt != ~0);
-
-	return (refcnt == 0);
+	membar_exit_before_atomic();
+	refs = atomic_dec_int_nv(&r->r_refs);
+	KASSERT(refs != ~0);
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs + 1, -1);
+	if (refs == 0) {
+		membar_enter_after_atomic();
+		return (1);
+	}
+	return (0);
 }
 
 void
@@ -839,26 +832,52 @@ void
 refcnt_finalize(struct refcnt *r, const char *wmesg)
 {
 	struct sleep_state sls;
-	u_int refcnt;
+	u_int refs;
 
-	refcnt = atomic_dec_int_nv(&r->refs);
-	while (refcnt) {
+	membar_exit_before_atomic();
+	refs = atomic_dec_int_nv(&r->r_refs);
+	KASSERT(refs != ~0);
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs + 1, -1);
+	while (refs) {
 		sleep_setup(&sls, r, PWAIT, wmesg, 0);
-		refcnt = r->refs;
-		sleep_finish(&sls, refcnt);
+		refs = atomic_load_int(&r->r_refs);
+		sleep_finish(&sls, refs);
 	}
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs, 0);
+	/* Order subsequent loads and stores after refs == 0 load. */
+	membar_sync();
+}
+
+int
+refcnt_shared(struct refcnt *r)
+{
+	u_int refs;
+
+	refs = atomic_load_int(&r->r_refs);
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs, 0);
+	return (refs > 1);
+}
+
+unsigned int
+refcnt_read(struct refcnt *r)
+{
+	u_int refs;
+
+	refs = atomic_load_int(&r->r_refs);
+	TRACEINDEX(refcnt, r->r_traceidx, r, refs, 0);
+	return (refs);
 }
 
 void
 cond_init(struct cond *c)
 {
-	c->c_wait = 1;
+	atomic_store_int(&c->c_wait, 1);
 }
 
 void
 cond_signal(struct cond *c)
 {
-	c->c_wait = 0;
+	atomic_store_int(&c->c_wait, 0);
 
 	wakeup_one(c);
 }
@@ -867,12 +886,12 @@ void
 cond_wait(struct cond *c, const char *wmesg)
 {
 	struct sleep_state sls;
-	int wait;
+	unsigned int wait;
 
-	wait = c->c_wait;
+	wait = atomic_load_int(&c->c_wait);
 	while (wait) {
 		sleep_setup(&sls, c, PWAIT, wmesg, 0);
-		wait = c->c_wait;
+		wait = atomic_load_int(&c->c_wait);
 		sleep_finish(&sls, wait);
 	}
 }

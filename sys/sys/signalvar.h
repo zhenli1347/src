@@ -1,4 +1,4 @@
-/*	$OpenBSD: signalvar.h,v 1.48 2021/05/10 18:01:24 mpi Exp $	*/
+/*	$OpenBSD: signalvar.h,v 1.54 2022/05/13 15:32:00 claudio Exp $	*/
 /*	$NetBSD: signalvar.h,v 1.17 1996/04/22 01:23:31 christos Exp $	*/
 
 /*
@@ -43,17 +43,21 @@
 /*
  * Process signal actions and state, needed only within the process
  * (not necessarily resident).
+ *
+ * Locks used to protect struct members in struct sigacts:
+ *	a	atomic operations
+ *	m	this process' `ps_mtx'
  */
 struct	sigacts {
-	sig_t	ps_sigact[NSIG];	/* disposition of signals */
-	sigset_t ps_catchmask[NSIG];	/* signals to be blocked */
-	sigset_t ps_sigonstack;		/* signals to take on sigstack */
-	sigset_t ps_sigintr;		/* signals that interrupt syscalls */
-	sigset_t ps_sigreset;		/* signals that reset when caught */
-	sigset_t ps_siginfo;		/* signals that provide siginfo */
-	sigset_t ps_sigignore;		/* signals being ignored */
-	sigset_t ps_sigcatch;		/* signals being caught by user */
-	int	ps_sigflags;		/* signal flags, below */
+	sig_t	ps_sigact[NSIG];	/* [m] disposition of signals */
+	sigset_t ps_catchmask[NSIG];	/* [m] signals to be blocked */
+	sigset_t ps_sigonstack;		/* [m] signals to take on sigstack */
+	sigset_t ps_sigintr;		/* [m] signals interrupt syscalls */
+	sigset_t ps_sigreset;		/* [m] signals that reset when caught */
+	sigset_t ps_siginfo;		/* [m] signals that provide siginfo */
+	sigset_t ps_sigignore;		/* [m] signals being ignored */
+	sigset_t ps_sigcatch;		/* [m] signals being caught by user */
+	int	ps_sigflags;		/* [a] signal flags, below */
 };
 
 /* signal flags */
@@ -72,18 +76,7 @@ struct	sigacts {
 	(((p)->p_siglist | (p)->p_p->ps_siglist) & ~(p)->p_sigmask)
 
 /*
- * Clear a pending signal from a process.
- */
-#define CLRSIG(p, sig)	do {						\
-	int __mask = sigmask(sig);					\
-	atomic_clearbits_int(&(p)->p_siglist, __mask);			\
-	atomic_clearbits_int(&(p)->p_p->ps_siglist, __mask);		\
-} while (0)
-
-/*
  * Signal properties and actions.
- * The array below categorizes the signals and their default actions
- * according to the following properties:
  */
 #define	SA_KILL		0x01		/* terminates process by default */
 #define	SA_CORE		0x02		/* ditto and coredumps */
@@ -100,21 +93,31 @@ enum signal_type { SPROCESS, STHREAD, SPROPAGATED };
 
 struct sigio_ref;
 
+struct sigctx {
+	sig_t		sig_action;
+	sigset_t	sig_catchmask;
+	int		sig_onstack;
+	int		sig_intr;
+	int		sig_reset;
+	int		sig_info;
+	int		sig_ignore;
+	int		sig_catch;
+};
+
 /*
  * Machine-independent functions:
  */
 int	coredump(struct proc *p);
 void	execsigs(struct proc *p);
-int	cursig(struct proc *p);
+int	cursig(struct proc *p, struct sigctx *);
 void	pgsigio(struct sigio_ref *sir, int sig, int checkctty);
 void	pgsignal(struct pgrp *pgrp, int sig, int checkctty);
 void	psignal(struct proc *p, int sig);
 void	ptsignal(struct proc *p, int sig, enum signal_type type);
 #define prsignal(pr,sig)	ptsignal((pr)->ps_mainproc, (sig), SPROCESS)
-void	siginit(struct sigacts *);
 void	trapsignal(struct proc *p, int sig, u_long code, int type,
 	    union sigval val);
-void	sigexit(struct proc *, int);
+__dead void sigexit(struct proc *, int);
 void	sigabort(struct proc *);
 int	sigismasked(struct proc *, int);
 int	sigonstack(size_t);
@@ -122,13 +125,15 @@ int	killpg1(struct proc *, int, int, int);
 
 void	signal_init(void);
 
-struct sigacts *sigactsinit(struct process *);
 void	sigstkinit(struct sigaltstack *);
-void	sigactsfree(struct process *);
+struct sigacts	*sigactsinit(struct process *);
+void	sigactsfree(struct sigacts *);
+void	siginit(struct sigacts *);
 
 /*
  * Machine-dependent functions:
  */
-int	sendsig(sig_t _catcher, int _sig, sigset_t _mask, const siginfo_t *_si);
+int	sendsig(sig_t _catcher, int _sig, sigset_t _mask, const siginfo_t *_si,
+	    int _info, int _onstack);
 #endif	/* _KERNEL */
 #endif	/* !_SYS_SIGNALVAR_H_ */

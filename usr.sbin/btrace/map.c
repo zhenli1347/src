@@ -1,4 +1,4 @@
-/*	$OpenBSD: map.c,v 1.16 2021/09/01 08:06:49 mpi Exp $ */
+/*	$OpenBSD: map.c,v 1.20 2022/04/30 01:29:05 tedu Exp $ */
 
 /*
  * Copyright (c) 2020 Martin Pieuchot <mpi@openbsd.org>
@@ -49,13 +49,13 @@ struct mentry {
 	struct bt_arg		*mval;
 };
 
-int		 mcmp(struct mentry *, struct mentry *);
+int		 mcmp(const struct mentry *, const struct mentry *);
 struct mentry	*mget(struct map *, const char *);
 
 RB_GENERATE(map, mentry, mlink, mcmp);
 
 int
-mcmp(struct mentry *me0, struct mentry *me1)
+mcmp(const struct mentry *me0, const struct mentry *me1)
 {
 	return strncmp(me0->mkey, me1->mkey, KLEN - 1);
 }
@@ -83,9 +83,6 @@ void
 map_clear(struct map *map)
 {
 	struct mentry *mep;
-
-	if (map == NULL)
-		return;
 
 	while ((mep = RB_MIN(map, map)) != NULL) {
 		RB_REMOVE(map, map, mep);
@@ -147,6 +144,7 @@ map_insert(struct map *map, const char *key, struct bt_arg *bval,
 	case B_AT_BI_NSECS:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
+	case B_AT_BI_PROBE:
 		free(mep->mval);
 		mep->mval = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
@@ -185,35 +183,49 @@ map_insert(struct map *map, const char *key, struct bt_arg *bval,
 	return map;
 }
 
+static int
+map_cmp(const void *a, const void *b)
+{
+	const struct mentry *ma = *(const struct mentry **)a;
+	const struct mentry *mb = *(const struct mentry **)b;
+	long rv;
+
+	rv = bacmp(ma->mval, mb->mval);
+	if (rv != 0)
+		return (rv > 0 ? -1 : 1);
+	return mcmp(ma, mb);
+}
+
 /* Print at most `top' entries of the map ordered by value. */
 void
 map_print(struct map *map, size_t top, const char *name)
 {
-	struct mentry *mep, *mcur;
-	struct bt_arg *bhigh, *bprev;
-	size_t i;
+	struct mentry **elms, *mep;
+	size_t i, count = 0;
 
 	if (map == NULL)
 		return;
 
-	bprev = &g_maxba;
-	for (i = 0; i < top; i++) {
-		mcur = NULL;
-		bhigh = &g_nullba;
-		RB_FOREACH(mep, map, map) {
-			if (bacmp(mep->mval, bhigh) >= 0 &&
-			    bacmp(mep->mval, bprev) < 0 &&
-			    mep->mval != bprev) {
-				mcur = mep;
-				bhigh = mcur->mval;
-			}
-		}
-		if (mcur == NULL)
-			break;
-		printf("@%s[%s]: %s\n", name, mcur->mkey,
-		    ba2str(mcur->mval, NULL));
-		bprev = mcur->mval;
+	RB_FOREACH(mep, map, map)
+		count++;
+
+	elms = calloc(count, sizeof(*elms));
+	if (elms == NULL)
+		err(1, NULL);
+
+	count = 0;
+	RB_FOREACH(mep, map, map)
+		elms[count++] = mep;
+
+	qsort(elms, count, sizeof(*elms), map_cmp);
+
+	for (i = 0; i < top && i < count; i++) {
+		mep = elms[i];
+		printf("@%s[%s]: %s\n", name, mep->mkey,
+		    ba2str(mep->mval, NULL));
 	}
+
+	free(elms);
 }
 
 void
@@ -255,11 +267,26 @@ hist_increment(struct hist *hist, const char *key, long step)
 long
 hist_get_bin_suffix(long bin, char **suffix)
 {
+#define EXA	(PETA * 1024)
+#define PETA	(TERA * 1024)
+#define TERA	(GIGA * 1024)
 #define GIGA	(MEGA * 1024)
 #define MEGA	(KILO * 1024)
-#define KILO	(1024)
+#define KILO	(1024LL)
 
 	*suffix = "";
+	if (bin >= EXA) {
+		bin /= EXA;
+		*suffix = "E";
+	}
+	if (bin >= PETA) {
+		bin /= PETA;
+		*suffix = "P";
+	}
+	if (bin >= TERA) {
+		bin /= TERA;
+		*suffix = "T";
+	}
 	if (bin >= GIGA) {
 		bin /= GIGA;
 		*suffix = "G";
@@ -272,10 +299,7 @@ hist_get_bin_suffix(long bin, char **suffix)
 		bin /= KILO;
 		*suffix = "K";
 	}
-
 	return bin;
-#undef MEGA
-#undef KILO
 }
 
 /*

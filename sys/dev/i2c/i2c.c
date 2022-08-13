@@ -1,4 +1,4 @@
-/*	$OpenBSD: i2c.c,v 1.16 2015/03/14 03:38:47 jsg Exp $	*/
+/*	$OpenBSD: i2c.c,v 1.19 2022/04/06 18:59:28 naddy Exp $	*/
 /*	$NetBSD: i2c.c,v 1.1 2003/09/30 00:35:31 thorpej Exp $	*/
 
 /*
@@ -56,14 +56,14 @@ int	iic_match(struct device *, void *, void *);
 void	iic_attach(struct device *, struct device *, void *);
 int	iic_search(struct device *, void *, void *);
 
-struct cfattach iic_ca = {
+const struct cfattach iic_ca = {
 	sizeof (struct iic_softc),
 	iic_match,
 	iic_attach
 };
 
 struct cfdriver iic_cd = {
-	NULL, "iic", DV_DULL
+	NULL, "iic", DV_DULL, CD_SKIPHIBERNATE
 };
 
 int
@@ -142,4 +142,27 @@ iic_attach(struct device *parent, struct device *self, void *aux)
 		(iba->iba_bus_scan)(self, aux, iba->iba_bus_scan_arg);
 	else
 		iic_scan(self, aux);
+}
+
+int
+iic_is_compatible(const struct i2c_attach_args *ia, const char *name)
+{
+	const char *end, *entry;
+
+	if (ia->ia_namelen > 0) {
+		/* ia_name points to a concatenation of strings. */
+		entry = ia->ia_name;
+		end = entry + ia->ia_namelen;
+		while (entry < end) {
+			if (strcmp(entry, name) == 0)
+				return (1);
+			entry += strlen(entry) + 1;
+		}
+	} else {
+		/* ia_name points to a string. */
+		if (strcmp(ia->ia_name, name) == 0)
+			return (1);
+	}
+
+	return (0);
 }

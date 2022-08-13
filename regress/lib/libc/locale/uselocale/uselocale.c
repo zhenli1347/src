@@ -1,6 +1,6 @@
-/* $OpenBSD: uselocale.c,v 1.5 2017/08/16 13:52:50 schwarze Exp $ */
+/* $OpenBSD: uselocale.c,v 1.8 2022/07/25 21:29:16 guenther Exp $ */
 /*
- * Copyright (c) 2017 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2017, 2022 Ingo Schwarze <schwarze@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -38,7 +38,6 @@
 
 /* Options for TESTFUNC(). */
 #define	TOPT_ERR	 (1 << 0)
-#define	TOPT_STR	 (1 << 1)
 
 /*
  * Generate one test function for a specific interface.
@@ -62,19 +61,28 @@ _test_##Fn(int line, int ee, Ft er, FUNCPARA)				\
 	Ft ar;								\
 	errno = 0;							\
 	ar = Fn(FUNCARGS);						\
-	if (Op & TOPT_STR) {						\
-		if (er == (Ft)NULL)					\
-			er = (Ft)"NULL";				\
-		if (ar == (Ft)NULL)					\
-			ar = (Ft)"NULL";				\
-	}								\
-	if (Op & TOPT_STR ? strcmp((const char *)er, (const char *)ar)	\
-	    : ar != er)							\
+	if (ar != er)							\
 		errx(1, "[%d] %s(" Af ")=" Rf " [exp: " Rf "]",		\
 		    line, #Fn, FUNCARGS, ar, er);			\
 	if (Op & TOPT_ERR && errno != ee)				\
 		errx(1, "[%d] %s(" Af ") errno=%d [exp: %d]",		\
 		    line, #Fn, FUNCARGS, errno, ee);			\
+}
+
+#define	STRTESTFUNC(Fn, Af)						\
+static void								\
+_test_##Fn(int line, int ee, const char *er, FUNCPARA)			\
+{									\
+	const char *ar;							\
+	errno = 0;							\
+	ar = Fn(FUNCARGS);						\
+	if (er == NULL)							\
+		er = "NULL";						\
+	if (ar == NULL)							\
+		ar = "NULL";						\
+	if (strcmp((const char *)er, (const char *)ar) != 0)		\
+		errx(1, "[%d] %s(" Af ")=%s [exp: %s]",			\
+		    line, #Fn, FUNCARGS, ar, er);			\
 }
 
 /*
@@ -91,15 +99,15 @@ TESTFUNC(uselocale, locale_t, "%p", "%p", TOPT_ERR)
 
 #define	FUNCPARA	int category, char *locname
 #define	FUNCARGS	category, locname
-TESTFUNC(setlocale, const char *, "%d, %s", "%s", TOPT_STR)
+STRTESTFUNC(setlocale, "%d, %s")
 
 #define	FUNCPARA	nl_item item
 #define	FUNCARGS	item
-TESTFUNC(nl_langinfo, const char *, "%ld", "%s", TOPT_STR)
+STRTESTFUNC(nl_langinfo, "%ld")
 
 #define	FUNCPARA	nl_item item, locale_t locale
 #define	FUNCARGS	item, locale
-TESTFUNC(nl_langinfo_l, const char *, "%ld, %p", "%s", TOPT_STR)
+STRTESTFUNC(nl_langinfo_l, "%ld, %p")
 
 #define	FUNCPARA	int c
 #define	FUNCARGS	c
@@ -170,6 +178,10 @@ _test_MB_CUR_MAX(int line, int ee, size_t ar)
 #define	TEST_R(Fn, ...)		_test_##Fn(__LINE__, 0, __VA_ARGS__)
 #define	TEST_ER(Fn, ...)	_test_##Fn(__LINE__, __VA_ARGS__)
 
+static pthread_mutex_t		 mtx;
+static pthread_mutexattr_t	 mtxattr;
+static pthread_cond_t		 cond;
+
 /*
  * SWITCH_SIGNAL wakes the other thread.
  * SWITCH_WAIT goes to sleep.
@@ -179,40 +191,21 @@ _test_MB_CUR_MAX(int line, int ee, size_t ar)
 static void
 switch_thread(int step, int flags)
 {
-	static pthread_mutexattr_t	 ma;
-	static struct timespec		 t;
-	static pthread_cond_t		*c;
-	static pthread_mutex_t		*m;
-	int				 irc;
+	struct timespec	 t;
+	int		 irc;
 
-	if (m == NULL) {
-		if ((m = malloc(sizeof(*m))) == NULL)
-			err(1, NULL);
-		if ((irc = pthread_mutexattr_init(&ma)) != 0)
-			errc(1, irc, "pthread_mutexattr_init");
-		if ((irc = pthread_mutexattr_settype(&ma,
-		    PTHREAD_MUTEX_STRICT_NP)) != 0)
-			errc(1, irc, "pthread_mutexattr_settype");
-		if ((irc = pthread_mutex_init(m, &ma)) != 0)
-			errc(1, irc, "pthread_mutex_init");
-	}
-	if (c == NULL) {
-		if ((c = malloc(sizeof(*c))) == NULL)
-			err(1, NULL);
-		if ((irc = pthread_cond_init(c, NULL)) != 0)
-			errc(1, irc, "pthread_cond_init");
-	}
 	if (flags & SWITCH_SIGNAL) {
-		if ((irc = pthread_cond_signal(c)) != 0)
+		if ((irc = pthread_cond_signal(&cond)) != 0)
 			errc(1, irc, "pthread_cond_signal(%d)", step);
 	}
 	if (flags & SWITCH_WAIT) {
-		if ((irc = pthread_mutex_trylock(m)) != 0)
+		if ((irc = pthread_mutex_trylock(&mtx)) != 0)
 			errc(1, irc, "pthread_mutex_trylock(%d)", step);
 		t.tv_sec = time(NULL) + 2;
-		if ((irc = pthread_cond_timedwait(c, m, &t)) != 0)
+		t.tv_nsec = 0;
+		if ((irc = pthread_cond_timedwait(&cond, &mtx, &t)) != 0)
 			errc(1, irc, "pthread_cond_timedwait(%d)", step);
-		if ((irc = pthread_mutex_unlock(m)) != 0)
+		if ((irc = pthread_mutex_unlock(&mtx)) != 0)
 			errc(1, irc, "pthread_mutex_unlock(%d)", step);
 	}
 }
@@ -322,8 +315,6 @@ child_func(void *arg)
 	wctyc = wctype_l("upper", _LOCALE_C);
 	if (wctyc == NULL)
 		errx(1, "wctype_l(upper, C) == NULL");
-	if (wctyg == wctyc)
-		errx(1, "wctype global == C");
 	TEST_R(iswctype, 1, 0x00D0, wctyg);  /* Eth */
 	TEST_R(iswctype_l, 1, 0x00D0, wctyu, _LOCALE_UTF8);
 	TEST_R(iswctype_l, 0, 0x00D0, wctyc, _LOCALE_C);
@@ -344,8 +335,6 @@ child_func(void *arg)
 	wctrc = wctrans_l("tolower", _LOCALE_C);
 	if (wctrc == NULL)
 		errx(1, "wctrans(tolower, C) == NULL");
-	if (wctrg == wctrc)
-		errx(1, "wctrans global == C");
 	TEST_R(towctrans, 0x00FE, 0x00DE, wctrg);  /* Thorn */
 	TEST_R(towctrans_l, 0x00FE, 0x00DE, wctru, _LOCALE_UTF8);
 	TEST_R(towctrans_l, 0x00DE, 0x00DE, wctrc, _LOCALE_C);
@@ -441,6 +430,16 @@ main(void)
 	unsetenv("LC_TIME");
 	unsetenv("LC_MESSAGES");
 	unsetenv("LANG");
+
+	if ((irc = pthread_mutexattr_init(&mtxattr)) != 0)
+		errc(1, irc, "pthread_mutexattr_init");
+	if ((irc = pthread_mutexattr_settype(&mtxattr,
+	    PTHREAD_MUTEX_STRICT_NP)) != 0)
+		errc(1, irc, "pthread_mutexattr_settype");
+	if ((irc = pthread_mutex_init(&mtx, &mtxattr)) != 0)
+		errc(1, irc, "pthread_mutex_init");
+	if ((irc = pthread_cond_init(&cond, NULL)) != 0)
+		errc(1, irc, "pthread_cond_init");
 
 	/* First let the child do some tests. */
 	if ((irc = pthread_create(&child_thread, NULL, child_func, NULL)) != 0)

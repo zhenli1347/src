@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_pflow.c,v 1.93 2020/08/21 22:59:27 kn Exp $	*/
+/*	$OpenBSD: if_pflow.c,v 1.96 2022/08/12 16:38:50 mvs Exp $	*/
 
 /*
  * Copyright (c) 2011 Florian Obser <florian@narrans.de>
@@ -274,6 +274,10 @@ pflow_clone_destroy(struct ifnet *ifp)
 
 	error = 0;
 
+	NET_LOCK();
+	SLIST_REMOVE(&pflowif_list, sc, pflow_softc, sc_next);
+	NET_UNLOCK();
+
 	if (timeout_initialized(&sc->sc_tmo))
 		timeout_del(&sc->sc_tmo);
 	if (timeout_initialized(&sc->sc_tmo6))
@@ -282,6 +286,7 @@ pflow_clone_destroy(struct ifnet *ifp)
 		timeout_del(&sc->sc_tmo_tmpl);
 	pflow_flush(sc);
 	task_del(net_tq(ifp->if_index), &sc->sc_outputtask);
+	taskq_barrier(net_tq(ifp->if_index));
 	mq_purge(&sc->sc_outputqueue);
 	m_freem(sc->send_nam);
 	if (sc->so != NULL) {
@@ -293,9 +298,6 @@ pflow_clone_destroy(struct ifnet *ifp)
 	if (sc->sc_flowsrc != NULL)
 		free(sc->sc_flowsrc, M_DEVBUF, sc->sc_flowsrc->sa_len);
 	if_detach(ifp);
-	NET_LOCK();
-	SLIST_REMOVE(&pflowif_list, sc, pflow_softc, sc_next);
-	NET_UNLOCK();
 	free(sc, M_DEVBUF, sizeof(*sc));
 	return (error);
 }
@@ -431,7 +433,6 @@ pflow_set(struct pflow_softc *sc, struct pflowreq *pflowr)
 				return (error);
 			if (pflowvalidsockaddr(sc->sc_flowsrc, 1)) {
 				struct mbuf *m;
-				int s;
 
 				MGET(m, M_WAIT, MT_SONAME);
 				m->m_len = sc->sc_flowsrc->sa_len;
@@ -439,9 +440,9 @@ pflow_set(struct pflow_softc *sc, struct pflowreq *pflowr)
 				memcpy(sa, sc->sc_flowsrc,
 				    sc->sc_flowsrc->sa_len);
 
-				s = solock(so);
+				solock(so);
 				error = sobind(so, m, p);
-				sounlock(so, s);
+				sounlock(so);
 				m_freem(m);
 				if (error) {
 					soclose(so, MSG_DONTWAIT);
@@ -593,10 +594,7 @@ pflow_setmtu(struct pflow_softc *sc, int mtu_req)
 {
 	int	mtu;
 
-	if (sc->sc_pflow_ifp && sc->sc_pflow_ifp->if_mtu < mtu_req)
-		mtu = sc->sc_pflow_ifp->if_mtu;
-	else
-		mtu = mtu_req;
+	mtu = mtu_req;
 
 	switch (sc->sc_version) {
 	case PFLOW_PROTO_5:

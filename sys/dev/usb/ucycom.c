@@ -1,4 +1,4 @@
-/*	$OpenBSD: ucycom.c,v 1.39 2021/03/08 14:35:57 jcs Exp $	*/
+/*	$OpenBSD: ucycom.c,v 1.41 2022/04/09 20:07:44 naddy Exp $	*/
 /*	$NetBSD: ucycom.c,v 1.3 2005/08/05 07:27:47 skrll Exp $	*/
 
 /*
@@ -129,7 +129,7 @@ void	ucycom_close(void *, int);
 void	ucycom_write(void *, int, u_char *, u_char *, u_int32_t *);
 void	ucycom_read(void *, int, u_char **, u_int32_t *);
 
-struct ucom_methods ucycom_methods = {
+const struct ucom_methods ucycom_methods = {
 	NULL, /* ucycom_get_status, */
 	ucycom_set,
 	ucycom_param,
@@ -165,7 +165,7 @@ ucycom_match(struct device *parent, void *match, void *aux)
 {
 	struct uhidev_attach_arg *uha = aux;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	return (usb_lookup(ucycom_devs, uha->uaa->vendor, uha->uaa->product) != NULL ?

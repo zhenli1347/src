@@ -1,4 +1,4 @@
-/* $OpenBSD: vga_pci.c,v 1.88 2019/10/13 10:56:31 kettenis Exp $ */
+/* $OpenBSD: vga_pci.c,v 1.90 2022/03/11 18:00:52 mpi Exp $ */
 /* $NetBSD: vga_pci.c,v 1.3 1998/06/08 06:55:58 thorpej Exp $ */
 
 /*
@@ -103,7 +103,7 @@ void	vga_save_state(struct vga_pci_softc *);
 void	vga_restore_state(struct vga_pci_softc *);
 #endif
 
-struct cfattach vga_pci_ca = {
+const struct cfattach vga_pci_ca = {
 	sizeof(struct vga_pci_softc), vga_pci_match, vga_pci_attach,
 	NULL, vga_pci_activate
 };
@@ -258,8 +258,8 @@ vga_pci_activate(struct device *self, int act)
 #if !defined(SMALL_KERNEL) && NACPI > 0
 		/*
 		 * Save the common vga state. This should theoretically only
-		 * be necessary if we intend to POST, but it is preferrable
-		 * to do it unconditionnaly, as many systems do not restore
+		 * be necessary if we intend to POST, but it is preferable
+		 * to do it unconditionally, as many systems do not restore
 		 * this state correctly upon resume.
 		 */
 		vga_save_state(sc);

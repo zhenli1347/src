@@ -1,4 +1,4 @@
-/*	$OpenBSD: fms.c,v 1.30 2016/12/20 15:31:00 ratchov Exp $ */
+/*	$OpenBSD: fms.c,v 1.33 2022/03/21 19:22:41 miod Exp $ */
 /*	$NetBSD: fms.c,v 1.5.4.1 2000/06/30 16:27:50 simonb Exp $	*/
 
 /*-
@@ -95,11 +95,11 @@ struct  cfdriver fms_cd = {
 	NULL, "fms", DV_DULL
 };
 
-struct cfattach fms_ca = {
+const struct cfattach fms_ca = {
 	sizeof (struct fms_softc), fms_match, fms_attach
 };
 
-struct audio_hw_if fms_hw_if = {
+const struct audio_hw_if fms_hw_if = {
 	fms_open,
 	fms_close,
 	fms_set_params,
@@ -256,7 +256,7 @@ fms_attach(struct device *parent, struct device *self, void *aux)
 		fms_set_port(sc, &ctl);
 	}
 
-	audio_attach_mi(&fms_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&fms_hw_if, sc, NULL, &sc->sc_dev);
 
 	aa.type = AUDIODEV_TYPE_OPL;
 	aa.hwif = NULL;

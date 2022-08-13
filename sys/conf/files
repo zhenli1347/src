@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.704 2021/09/03 16:45:45 jasper Exp $
+#	$OpenBSD: files,v 1.716 2022/07/29 17:47:11 semarie Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -28,9 +28,6 @@ define firmload
 
 # radio device attributes
 define tea5757
-define lm700x
-define tc921x
-define pt2254a
 
 device	video
 attach	video at video
@@ -228,10 +225,6 @@ file	dev/ic/osiop.c			osiop & (osiop_gsc | osiop_eisa | osiop_mc | osiop_pcctwo)
 # Symbios/NCR 53c700 SCSI controllers
 device	oosiop: scsi
 file	dev/ic/oosiop.c			oosiop
-
-# Western Digital WD33C93 SCSI controllers
-define	wd33c93ctrl
-file	dev/ic/wd33c93.c		wd33c93ctrl
 
 # 3Com Etherlink-III Ethernet controller
 device	ep: ether, ifnet, ifmedia, mii
@@ -440,12 +433,10 @@ define	eisabus {}			# EISA attachment
 define	pcibus {[bus = -1]}		# PCI attachment
 define	tcbus {}			# TurboChannel attachment
 define	usbus {}			# USB attachment
-define	usbdev {}			# USB function attachment
 define	pcmciabus {[controller = -1], [socket = -1]}	# PCMCIA attachment
 define	cbbus {[slot = -1]}		# CardBus attachment
 define	pcmciaslot {[slot = -1]}	# PCMCIA slot itself
 define	sdmmcbus {}			# SD/MMC attachment
-define	btbus {}			# Bluetooth host controller
 define	agpbus {}			# AGP bridge
 device	virtio {}			# VirtIO
 
@@ -470,6 +461,7 @@ device	ccp
 file	dev/ic/ccp.c			ccp
 
 # SDHC SD/MMC controller
+define	sdhc
 device	sdhc: sdmmcbus
 file	dev/sdmmc/sdhc.c		sdhc
 
@@ -525,10 +517,6 @@ file	dev/softraid_raid1c.c		softraid & crypto
 device	spdmem
 file	dev/spdmem.c			spdmem
 
-# AIC-6250 SCSI
-device	oaic: scsi
-file	dev/ic/aic6250.c		oaic
-
 # Synopsys DesignWare HDMI transmitter
 define	dwhdmi
 file	dev/ic/dwhdmi.c			dwhdmi
@@ -576,8 +564,7 @@ pseudo-device mpip: ifnet, mpls
 pseudo-device bpe: ifnet, ether, ifmedia, etherbridge
 pseudo-device vether: ifnet, ether
 pseudo-device pppx: ifnet
-pseudo-device vxlan: ifnet, ether, ifmedia
-pseudo-device switch: ifnet, ether
+pseudo-device vxlan: ifnet, ether, etherbridge
 pseudo-device wg: ifnet
 
 pseudo-device ksyms
@@ -650,6 +637,7 @@ file ddb/db_input.c			ddb
 file ddb/db_lex.c			ddb
 file ddb/db_output.c			ddb
 file ddb/db_prof.c			ddb & ddbprof & !gprof
+file ddb/db_rint.c			ddb
 file ddb/db_run.c			ddb
 file ddb/db_sym.c			ddb
 file ddb/db_trap.c			ddb
@@ -663,9 +651,6 @@ file dev/firmload.c			firmload
 file dev/ic/dp8390.c			dp8390nic
 file dev/ic/rtl80x9.c			rtl80x9
 file dev/ic/tea5757.c			tea5757
-file dev/ic/lm700x.c			lm700x
-file dev/ic/tc921x.c			tc921x
-file dev/ic/pt2254a.c			pt2254a
 file dev/midi.c				midi | midibus		needs-flag
 file dev/mulaw.c			audio			needs-flag
 file dev/vnd.c				vnd			needs-flag
@@ -725,9 +710,11 @@ file kern/kern_srp.c
 file kern/kern_xxx.c
 file kern/sched_bsd.c
 file kern/subr_autoconf.c
+file kern/subr_blist.c
 file kern/subr_disk.c
 file kern/subr_evcount.c
 file kern/subr_extent.c
+file kern/subr_suspend.c		suspend
 file kern/subr_hibernate.c		hibernate
 file kern/subr_kubsan.c			kubsan
 file kern/subr_log.c
@@ -822,9 +809,6 @@ file net/bridgestp.c			bridge
 file net/if_etherbridge.c		etherbridge
 file net/if_veb.c			veb
 file net/if_vlan.c			vlan			needs-count
-file net/if_switch.c			switch			needs-count
-file net/switchctl.c			switch
-file net/switchofp.c			switch
 file net/pipex.c			pipex
 file net/radix.c			pf | ipsec | pipex | nfsserver
 file net/rtable.c
@@ -859,13 +843,13 @@ file net80211/ieee80211_crypto_tkip.c	wlan
 file net80211/ieee80211_crypto_wep.c	wlan
 file net80211/ieee80211_input.c		wlan
 file net80211/ieee80211_ioctl.c		wlan
-#file net80211/ieee80211_mira.c		wlan
 file net80211/ieee80211_node.c		wlan
 file net80211/ieee80211_output.c	wlan
 file net80211/ieee80211_pae_input.c	wlan
 file net80211/ieee80211_pae_output.c	wlan
 file net80211/ieee80211_proto.c		wlan
 file net80211/ieee80211_ra.c		wlan
+file net80211/ieee80211_ra_vht.c	wlan
 file net80211/ieee80211_rssadapt.c	wlan
 file net80211/ieee80211_regdomain.c	wlan
 file netinet/if_ether.c			ether

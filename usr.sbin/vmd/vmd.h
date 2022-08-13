@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmd.h,v 1.106 2021/09/01 11:08:21 dv Exp $	*/
+/*	$OpenBSD: vmd.h,v 1.109 2022/05/03 21:39:18 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -39,7 +39,8 @@
 #define SET(_v, _m)		((_v) |= (_m))
 #define CLR(_v, _m)		((_v) &= ~(_m))
 #define ISSET(_v, _m)		((_v) & (_m))
-#define NELEM(a) (sizeof(a) / sizeof((a)[0]))
+
+#define nitems(_a)      (sizeof((_a)) / sizeof((_a)[0]))
 
 #define VMD_USER		"_vmd"
 #define VMD_CONF		"/etc/vm.conf"
@@ -55,7 +56,7 @@
 #define MAX_TAP			256
 #define NR_BACKLOG		5
 #define VMD_SWITCH_TYPE		"bridge"
-#define VM_DEFAULT_MEMORY	512
+#define VM_DEFAULT_MEMORY	512 * 1024 * 1024	/* 512 MiB */
 
 #define VMD_DEFAULT_STAGGERED_START_DELAY 30
 
@@ -100,7 +101,6 @@ enum imsg_type {
 	IMSG_VMDOP_SEND_VM_REQUEST,
 	IMSG_VMDOP_SEND_VM_RESPONSE,
 	IMSG_VMDOP_RECEIVE_VM_REQUEST,
-	IMSG_VMDOP_RECEIVE_VM_RESPONSE,
 	IMSG_VMDOP_RECEIVE_VM_END,
 	IMSG_VMDOP_WAIT_VM_REQUEST,
 	IMSG_VMDOP_TERMINATE_VM_REQUEST,

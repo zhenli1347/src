@@ -1,4 +1,4 @@
-.\" $OpenBSD: ipw.4,v 1.48 2019/11/10 14:10:41 sthen Exp $
+.\" $OpenBSD: ipw.4,v 1.51 2022/01/05 17:39:24 jmc Exp $
 .\"
 .\" Copyright (c) 2004
 .\"	Damien Bergamini <damien.bergamini@free.fr>. All rights reserved.
@@ -25,7 +25,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: November 10 2019 $
+.Dd $Mdocdate: January 5 2022 $
 .Dt IPW 4
 .Os
 .Sh NAME
@@ -113,7 +113,7 @@ The official person to state your views to about this issue is
 .Mt majid.awad@intel.com .
 .Pp
 A prepackaged version of the firmware can be installed using
-.Xr fw_update 1 .
+.Xr fw_update 8 .
 .Sh EXAMPLES
 The following example scans for available networks:
 .Pp
@@ -127,8 +127,8 @@ using WPA key
 .Dq mywpakey ,
 obtaining an IP address using DHCP:
 .Bd -literal -offset indent
-nwid mynwid wpakey mywpakey
-dhcp
+join mynwid wpakey mywpakey
+inet autoconf
 .Ed
 .Sh DIAGNOSTICS
 .Bl -diag

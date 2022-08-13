@@ -1,4 +1,4 @@
-/* $OpenBSD: imxspi.c,v 1.1 2018/07/26 10:59:07 patrick Exp $ */
+/* $OpenBSD: imxspi.c,v 1.4 2022/02/14 00:53:40 jsg Exp $ */
 /*
  * Copyright (c) 2018 Patrick Wildt <patrick@blueri.se>
  *
@@ -91,7 +91,7 @@ struct imxspi_softc {
 	int			 sc_node;
 
 	uint32_t		*sc_gpio;
-	size_t			 sc_gpiolen;
+	int			 sc_gpiolen;
 
 	struct rwlock		 sc_buslock;
 	struct spi_controller	 sc_tag;
@@ -99,6 +99,7 @@ struct imxspi_softc {
 	int			 sc_ridx;
 	int			 sc_widx;
 	int			 sc_cs;
+	u_int			 sc_cs_delay;
 };
 
 int	 imxspi_match(struct device *, void *, void *);
@@ -109,7 +110,7 @@ int	 imxspi_intr(void *);
 
 void	 imxspi_config(void *, struct spi_config *);
 uint32_t imxspi_clkdiv(struct imxspi_softc *, uint32_t);
-int	 imxspi_transfer(void *, char *, char *, int);
+int	 imxspi_transfer(void *, char *, char *, int, int);
 int	 imxspi_acquire_bus(void *, int);
 void	 imxspi_release_bus(void *, int);
 
@@ -127,7 +128,7 @@ void	 imxspi_scan(struct imxspi_softc *);
 #define HCLR4(sc, reg, bits)						\
 	HWRITE4((sc), (reg), HREAD4((sc), (reg)) & ~(bits))
 
-struct cfattach imxspi_ca = {
+const struct cfattach imxspi_ca = {
 	sizeof(struct imxspi_softc), imxspi_match, imxspi_attach,
 	imxspi_detach
 };
@@ -178,7 +179,7 @@ imxspi_attachhook(struct device *self)
 	clock_enable(sc->sc_node, NULL);
 
 	sc->sc_gpiolen = OF_getproplen(sc->sc_node, "cs-gpios");
-	if (sc->sc_gpiolen) {
+	if (sc->sc_gpiolen > 0) {
 		sc->sc_gpio = malloc(sc->sc_gpiolen, M_DEVBUF, M_WAITOK);
 		OF_getpropintarray(sc->sc_node, "cs-gpios",
 		    sc->sc_gpio, sc->sc_gpiolen);
@@ -235,6 +236,7 @@ imxspi_config(void *cookie, struct spi_config *conf)
 		return;
 	}
 	sc->sc_cs = cs;
+	sc->sc_cs_delay = conf->sc_cs_delay;
 
 	conreg = SPI_CONREG_EN;
 	conreg |= SPI_CONREG_CHANNEL_MASTER;
@@ -322,7 +324,7 @@ imxspi_find_cs_gpio(struct imxspi_softc *sc, int cs)
 }
 
 int
-imxspi_transfer(void *cookie, char *out, char *in, int len)
+imxspi_transfer(void *cookie, char *out, char *in, int len, int flags)
 {
 	struct imxspi_softc *sc = cookie;
 	uint32_t *gpio;
@@ -335,6 +337,7 @@ imxspi_transfer(void *cookie, char *out, char *in, int len)
 		gpio_controller_set_pin(gpio, 0);
 		delay(1);
 	}
+	delay(sc->sc_cs_delay);
 
 	/* drain input buffer */
 	while (HREAD4(sc, SPI_STATREG) & SPI_STATREG_RR)
@@ -370,10 +373,12 @@ imxspi_transfer(void *cookie, char *out, char *in, int len)
 		HWRITE4(sc, SPI_STATREG, SPI_STATREG_TC);
 	}
 
-	gpio = imxspi_find_cs_gpio(sc, sc->sc_cs);
-	if (gpio) {
-		gpio_controller_set_pin(gpio, 1);
-		delay(1);
+	if (!ISSET(flags, SPI_KEEP_CS)) {
+		gpio = imxspi_find_cs_gpio(sc, sc->sc_cs);
+		if (gpio) {
+			gpio_controller_set_pin(gpio, 1);
+			delay(1);
+		}
 	}
 
 	return 0;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_interface.c,v 1.7 2021/05/30 15:05:32 visa Exp $	*/
+/*	$OpenBSD: db_interface.c,v 1.10 2022/04/14 19:47:11 naddy Exp $	*/
 /*      $NetBSD: db_interface.c,v 1.12 2001/07/22 11:29:46 wiz Exp $ */
 
 /*
@@ -86,10 +86,7 @@ db_trap_glue(struct trapframe *frame)
 
 		while (db_enter_ddb()) {
 #endif
-			bcopy(frame->fixreg, ddb_regs.fixreg,
-				32 * sizeof(u_int32_t));
-			ddb_regs.srr0 = frame->srr0;
-			ddb_regs.srr1 = frame->srr1;
+			ddb_regs = *frame;
 
 			s = splhigh();
 			db_active++;
@@ -99,8 +96,7 @@ db_trap_glue(struct trapframe *frame)
 			db_active--;
 			splx(s);
 
-			bcopy(ddb_regs.fixreg, frame->fixreg,
-				32 * sizeof(u_int32_t));
+			*frame = ddb_regs;
 #ifdef MULTIPROCESSOR
 			if (!db_switch_cpu)
 				ddb_state = DDB_STATE_EXITING;
@@ -133,6 +129,8 @@ db_enter_ddb(void)
 				ppc_send_ipi(&cpu_info[i], PPC_IPI_DDB);
 			}
 		}
+		/* ipi is slow.  Try not to db_active++ too early. */
+		delay(100);
 		return (1);
 	}
 
@@ -223,7 +221,7 @@ db_cpuinfo_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 }
 #endif
 
-struct db_command db_machine_command_table[] = {
+const struct db_command db_machine_command_table[] = {
 #ifdef MULTIPROCESSOR
 	{ "cpuinfo",    db_cpuinfo_cmd,         0,      NULL },
 	{ "startcpu",   db_startproc_cmd,       0,      NULL },
@@ -238,10 +236,7 @@ db_machine_init(void)
 {
 #ifdef MULTIPROCESSOR
 	int i;
-#endif
 
-	db_machine_commands_install(db_machine_command_table);
-#ifdef MULTIPROCESSOR
 	for (i = 0; i < ncpus; i++) {
 		cpu_info[i].ci_ddb_paused = CI_DDB_RUNNING;
 	}

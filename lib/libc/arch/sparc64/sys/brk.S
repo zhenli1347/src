@@ -1,4 +1,4 @@
-/*	$OpenBSD: brk.S,v 1.7 2015/09/05 06:22:47 guenther Exp $	*/
+/*	$OpenBSD: brk.S,v 1.9 2022/01/01 23:47:14 guenther Exp $	*/
 /*	$NetBSD: brk.S,v 1.9 2000/07/25 20:15:40 mycroft Exp $	*/
 
 /*
@@ -41,8 +41,6 @@
 	.globl	__curbrk
 	.globl	_C_LABEL(_end)
 
-	.weak	brk
-
 	.data
 	.align	8
 __minbrk:
@@ -51,7 +49,7 @@ __minbrk:
 	OTYPE(__minbrk)
 	.text
 
-ENTRY(brk)
+ENTRY_NB(brk)
 #ifdef __PIC__
 	PIC_PROLOGUE(%o5,%o4)
 	set	__minbrk, %o4
@@ -85,3 +83,4 @@ ENTRY(brk)
 	 stx	%o2, [%g1 + %lo(__curbrk)]
 #endif
 END(brk)
+	.weak	brk

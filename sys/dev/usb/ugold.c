@@ -1,4 +1,4 @@
-/*	$OpenBSD: ugold.c,v 1.17 2021/04/05 16:26:06 landry Exp $   */
+/*	$OpenBSD: ugold.c,v 1.21 2022/01/09 05:43:00 jsg Exp $   */
 
 /*
  * Copyright (c) 2013 Takayoshi SASANO <uaa@openbsd.org>
@@ -19,7 +19,7 @@
  */
 
 /*
- * Driver for Microdia's HID base TEMPer and TEMPerHUM temperature and
+ * Driver for Microdia's HID based TEMPer and TEMPerHUM temperature and
  * humidity sensors
  */
 
@@ -113,7 +113,7 @@ ugold_match(struct device *parent, void *match, void *aux)
 	int size;
 	void *desc;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (UMATCH_NONE);
 
 	if (usb_lookup(ugold_devs, uha->uaa->vendor, uha->uaa->product) == NULL)

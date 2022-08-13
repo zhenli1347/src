@@ -1,4 +1,4 @@
-/*	$OpenBSD: st.c,v 1.186 2021/03/12 10:22:46 jsg Exp $	*/
+/*	$OpenBSD: st.c,v 1.189 2022/02/27 02:27:55 krw Exp $	*/
 /*	$NetBSD: st.c,v 1.71 1997/02/21 23:03:49 thorpej Exp $	*/
 
 /*
@@ -223,7 +223,7 @@ int	st_interpret_sense(struct scsi_xfer *);
 int	st_touch_tape(struct st_softc *);
 int	st_erase(struct st_softc *, int, int);
 
-struct cfattach st_ca = {
+const struct cfattach st_ca = {
 	sizeof(struct st_softc), stmatch, stattach,
 	stdetach, stactivate
 };
@@ -360,8 +360,8 @@ stopen(dev_t dev, int flags, int fmt, struct proc *p)
 	if (st == NULL)
 		return ENXIO;
 	if (ISSET(st->flags, ST_DYING)) {
-		error = ENXIO;
-		goto done;
+		device_unref(&st->sc_dev);
+		return ENXIO;
 	}
 	link = st->sc_link;
 
@@ -394,7 +394,7 @@ stopen(dev_t dev, int flags, int fmt, struct proc *p)
 	    SCSI_IGNORE_ILLEGAL_REQUEST);
 
 	/*
-	 * Terminate any exising mount session if there is no media.
+	 * Terminate any existing mount session if there is no media.
 	 */
 	if (!ISSET(link->flags, SDEV_MEDIA_LOADED))
 		st_unmount(st, NOEJECT, DOREWIND);
@@ -1834,8 +1834,8 @@ st_rewind(struct st_softc *st, u_int immediate, int flags)
 }
 
 /*
- * Look at the returned sense and act on the error and detirmine
- * The unix error number to pass back... (0 = report no error)
+ * Look at the returned sense and act on the error to determine
+ * the unix error number to pass back... (0 = report no error)
  *                            (-1 = continue processing)
  */
 int

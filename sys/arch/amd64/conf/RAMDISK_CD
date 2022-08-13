@@ -1,4 +1,4 @@
-#	$OpenBSD: RAMDISK_CD,v 1.192 2021/09/02 10:49:26 mlarkin Exp $
+#	$OpenBSD: RAMDISK_CD,v 1.200 2022/04/06 13:23:58 krw Exp $
 
 machine		amd64
 maxusers	4
@@ -51,6 +51,10 @@ bytgpio*	at acpi?
 sdhc*		at acpi?
 acpihve*	at acpi?
 chvgpio*        at acpi?
+com0		at acpi? addr 0x3f8
+com1		at acpi? addr 0x2f8
+com2		at acpi? addr 0x3e8
+com*		at acpi?
 glkgpio*	at acpi?
 
 mpbios0		at bios0
@@ -122,12 +126,14 @@ mos*		at uhub?		# MOSCHIP MCS7730/7830 10/100 Ethernet
 mue*		at uhub?		# Microchip LAN75xx/LAN78xx Ethernet
 url*		at uhub?		# Realtek RTL8150L based adapters
 ure*		at uhub?		# Realtek RTL8152 based adapters
+uaq*		at uhub?		# Aquantia AQC111U/AQC112U adapters
 wi*		at uhub?		# WaveLAN IEEE 802.11DS
 upl*		at uhub?		# Prolific PL2301/PL2302 host-to-host
 ugl*		at uhub?		# Genesys Logic GL620USB-A host-to-host
 ural*		at uhub?		# Ralink RT2500
 rum*		at uhub?		# Ralink RT2501USB/RT2601USB
 run*		at uhub?		# Ralink RT2700U/RT2800U/RT3000U
+mtw*		at uhub?		# MediaTek MT7601U
 zyd*		at uhub?		# Zydas ZD1211
 upgt*		at uhub?		# Conexant/Intersil PrismGT SoftMAC USB
 urtw*		at uhub?		# Realtek 8187
@@ -184,6 +190,7 @@ scsibus*	at scsi?
 sd*		at scsibus?		# SCSI disk drives
 st*		at scsibus?		# SCSI tape drives
 cd*		at scsibus?		# SCSI CD-ROM drives
+uk*		at scsibus?		# Unknown SCSI devices
 
 pciide*		at pci? flags 0x0000
 wdc0		at isa? disable port 0x1f0 irq 14 flags 0x00
@@ -255,6 +262,7 @@ ixl*		at pci?			# Intel Ethernet 700 Series
 mcx*		at pci?			# Mellanox ConnectX-4
 iavf*		at pci?			# Intel Ethernet Adaptive VF
 aq*		at pci?			# Aquantia aQtion Ethernet
+igc*		at pci?			# Intel I225 Ethernet
 
 acx*		at pci?			# TI ACX100/ACX111 (802.11b/g)
 acx*		at cardbus?		# TI ACX100/ACX111 (802.11b/g)
@@ -279,8 +287,8 @@ ral*		at cardbus?		# Ralink RT2500/RT2501/RT2600
 rtw*		at pci?			# Realtek 8180
 rtw*		at cardbus?		# Realtek 8180
 rtwn*		at pci?			# Realtek 8188CE/8192CE
-pgt*		at pci?			# Prism54 (only full-mac varients)
-pgt*		at cardbus?		# Prism54 (only full-mac varients)
+pgt*		at pci?			# Prism54 Full-MAC
+pgt*		at cardbus?		# Prism54 Full-MAC
 malo*		at pci?			# Marvell 88W8385
 malo*		at cardbus?		# Marvell Libertas
 malo*		at pcmcia?		# Marvell 88W8385

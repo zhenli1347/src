@@ -1,4 +1,4 @@
-/*	$OpenBSD: plic.c,v 1.7 2021/05/19 17:39:49 kettenis Exp $	*/
+/*	$OpenBSD: plic.c,v 1.11 2022/08/09 04:49:08 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2020, Mars Li <mengshi.li.mars@gmail.com>
@@ -27,6 +27,7 @@
 #include <machine/bus.h>
 #include <machine/fdt.h>
 #include <machine/cpu.h>
+#include <machine/sbi.h>
 #include "riscv64/dev/riscv_cpu_intc.h"
 
 #include <dev/ofw/openfirm.h>
@@ -133,7 +134,7 @@ void	plic_intr_enable_with_pri(int, uint32_t, int);
 void	plic_intr_disable(int, int);
 
 
-struct cfattach plic_ca = {
+const struct cfattach plic_ca = {
 	sizeof(struct plic_softc), plic_match, plic_attach,
 };
 
@@ -162,7 +163,7 @@ plic_attach(struct device *parent, struct device *dev, void *aux)
 	struct fdt_attach_args *faa;
 	uint32_t *cells;
 	uint32_t irq;
-	uint32_t cpu;
+	int cpu;
 	int node;
 	int len;
 	int ncell;
@@ -251,11 +252,8 @@ plic_attach(struct device *parent, struct device *dev, void *aux)
 
 		/* Get the corresponding cpuid. */
 		cpu = plic_get_cpuid(OF_getnodebyphandle(cells[i]));
-		if (cpu < 0) {
-			printf(": invalid hart!\n");
-			free(cells, M_TEMP, len);
-			return;
-		}
+		if (cpu < 0)
+			continue;
 
 		/*
 		 * Set the enable and context register offsets for the CPU.
@@ -381,7 +379,7 @@ plic_irq_dispatch(uint32_t irq,	void *frame)
 			KERNEL_LOCK();
 #endif
 
-		if (ih->ih_arg != 0)
+		if (ih->ih_arg)
 			arg = ih->ih_arg;
 		else
 			arg = frame;
@@ -559,6 +557,10 @@ plic_setipl(int new)
 
 	/* higher values are higher priority */
 	plic_set_threshold(ci->ci_cpuid, new);
+
+	/* trigger deferred timer interrupt if cpl is now low enough */
+	if (ci->ci_timer_deferred && new < IPL_CLOCK)
+		sbi_set_timer(0);
 
 	intr_restore(sie);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cdio.c,v 1.81 2021/08/13 10:56:54 schwarze Exp $	*/
+/*	$OpenBSD: cdio.c,v 1.84 2022/02/15 08:17:50 jsg Exp $	*/
 
 /*  Copyright (c) 1995 Serge V. Vakulenko
  * All rights reserved.
@@ -52,7 +52,7 @@
  * $FreeBSD: cdcontrol.c,v 1.13 1996/06/25 21:01:27 ache Exp $
  */
 
-#include <sys/param.h>	/* isset */
+#include <sys/types.h>
 #include <sys/cdio.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
@@ -431,17 +431,14 @@ run(int cmd, char *arg)
 		rc = ioctl(fd, CDIOCEJECT);
 		if (rc == -1)
 			return (rc);
-#if defined(__OpenBSD__)
 		close(fd);
 		fd = -1;
-#endif
 		if (track_names)
 			free_names(track_names);
 		track_names = NULL;
 		return (0);
 
 	case CMD_CLOSE:
-#if defined(CDIOCCLOSE)
 		if (!open_cd(cdname, 0))
 			return (0);
 
@@ -452,10 +449,6 @@ run(int cmd, char *arg)
 		close(fd);
 		fd = -1;
 		return (0);
-#else
-		printf("%s: Command not yet supported\n", __progname);
-		return (0);
-#endif
 
 	case CMD_PLAY:
 		if (!open_cd(cdname, 0))
@@ -526,7 +519,7 @@ run(int cmd, char *arg)
 			warnx("Can't determine media type");
 			return (0);
 		}
-		if (isset(mediacap, MMC_FEATURE_CDRW_WRITE) == 0 &&
+		if (cdio_isset(mediacap, MMC_FEATURE_CDRW_WRITE) == 0 &&
 		    get_media_type() != MEDIATYPE_CDRW) {
 			warnx("The media doesn't support blanking");
 			return (0);
@@ -645,7 +638,7 @@ tao(int argc, char **argv)
 		if (argv[0] == NULL)
 			usage();
 		tr->file = argv[0];
-		tr->fd = open(tr->file, O_RDONLY, 0640);
+		tr->fd = open(tr->file, O_RDONLY);
 		if (tr->fd == -1)
 			err(1, "cannot open file %s", tr->file);
 		if (fstat(tr->fd, &sb) == -1)
@@ -669,7 +662,7 @@ tao(int argc, char **argv)
 		exit(1);
 	if (get_media_capabilities(mediacap, 1) == -1)
 		errx(1, "Can't determine media type");
-	if (isset(mediacap, MMC_FEATURE_CD_TAO) == 0)
+	if (cdio_isset(mediacap, MMC_FEATURE_CD_TAO) == 0)
 		errx(1, "The media can't be written in TAO mode");
 
 	get_disc_size(&availblk);

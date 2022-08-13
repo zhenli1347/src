@@ -1,4 +1,4 @@
-/*	$OpenBSD: dead_vnops.c,v 1.35 2021/04/28 09:53:53 claudio Exp $	*/
+/*	$OpenBSD: dead_vnops.c,v 1.41 2022/06/26 05:20:42 visa Exp $	*/
 /*	$NetBSD: dead_vnops.c,v 1.16 1996/02/13 13:12:48 mycroft Exp $	*/
 
 /*
@@ -40,19 +40,16 @@
 #include <sys/lock.h>
 #include <sys/errno.h>
 #include <sys/buf.h>
-#include <sys/poll.h>
 
 /*
  * Prototypes for dead operations on vnodes.
  */
-int	dead_badop(void *);
 int	dead_ebadf(void *);
 
 int	dead_open(void *);
 int	dead_read(void *);
 int	dead_write(void *);
 int	dead_ioctl(void *);
-int	dead_poll(void *);
 int	dead_kqfilter(void *v);
 int	dead_inactive(void *);
 int	dead_lock(void *);
@@ -64,8 +61,8 @@ int	chkvnlock(struct vnode *);
 
 const struct vops dead_vops = {
 	.vop_lookup	= vop_generic_lookup,
-	.vop_create	= dead_badop,
-	.vop_mknod	= dead_badop,
+	.vop_create	= vop_generic_badop,
+	.vop_mknod	= vop_generic_badop,
 	.vop_open	= dead_open,
 	.vop_close	= nullop,
 	.vop_access	= dead_ebadf,
@@ -74,27 +71,26 @@ const struct vops dead_vops = {
 	.vop_read	= dead_read,
 	.vop_write	= dead_write,
 	.vop_ioctl	= dead_ioctl,
-	.vop_poll	= dead_poll,
 	.vop_kqfilter	= dead_kqfilter,
 	.vop_revoke	= NULL,
 	.vop_fsync	= nullop,
-	.vop_remove	= dead_badop,
-	.vop_link	= dead_badop,
-	.vop_rename	= dead_badop,
-	.vop_mkdir	= dead_badop,
-	.vop_rmdir	= dead_badop,
-	.vop_symlink	= dead_badop,
+	.vop_remove	= vop_generic_badop,
+	.vop_link	= vop_generic_badop,
+	.vop_rename	= vop_generic_badop,
+	.vop_mkdir	= vop_generic_badop,
+	.vop_rmdir	= vop_generic_badop,
+	.vop_symlink	= vop_generic_badop,
 	.vop_readdir	= dead_ebadf,
 	.vop_readlink	= dead_ebadf,
-	.vop_abortop	= dead_badop,
+	.vop_abortop	= vop_generic_badop,
 	.vop_inactive	= dead_inactive,
 	.vop_reclaim	= nullop,
 	.vop_lock	= dead_lock,
-	.vop_unlock	= vop_generic_unlock,
+	.vop_unlock	= nullop,
+	.vop_islocked	= nullop,
 	.vop_bmap	= dead_bmap,
 	.vop_strategy	= dead_strategy,
 	.vop_print	= dead_print,
-	.vop_islocked	= vop_generic_islocked,
 	.vop_pathconf	= dead_ebadf,
 	.vop_advlock	= dead_ebadf,
 	.vop_bwrite	= nullop,
@@ -157,20 +153,6 @@ dead_ioctl(void *v)
 	return ((ap->a_vp->v_op->vop_ioctl)(ap));
 }
 
-/* ARGSUSED */
-int
-dead_poll(void *v)
-{
-#if 0
-	struct vop_poll_args *ap = v;
-#endif
-
-	/*
-	 * Let the user find out that the descriptor is gone.
-	 */
-	return (POLLHUP);
-}
-
 int
 dead_kqfilter(void *v)
 {
@@ -179,6 +161,11 @@ dead_kqfilter(void *v)
 	switch (ap->a_kn->kn_filter) {
 	case EVFILT_READ:
 	case EVFILT_WRITE:
+		ap->a_kn->kn_fop = &dead_filtops;
+		break;
+	case EVFILT_EXCEPT:
+		if ((ap->a_kn->kn_flags & __EV_POLL) == 0)
+			return (EINVAL);
 		ap->a_kn->kn_fop = &dead_filtops;
 		break;
 	default:
@@ -204,7 +191,7 @@ dead_strategy(void *v)
 		splx(s);
 		return (EIO);
 	}
-	return (VOP_STRATEGY(ap->a_bp));
+	return (VOP_STRATEGY(ap->a_bp->b_vp, ap->a_bp));
 }
 
 int
@@ -228,7 +215,7 @@ dead_lock(void *v)
 	if (ap->a_flags & LK_DRAIN || !chkvnlock(vp))
 		return (0);
 
-	return ((vp->v_op->vop_lock)(ap));
+	return VOP_LOCK(vp, ap->a_flags);
 }
 
 /*
@@ -263,17 +250,6 @@ int
 dead_ebadf(void *v)
 {
 	return (EBADF);
-}
-
-/*
- * Empty vnode bad operation
- */
-/*ARGSUSED*/
-int
-dead_badop(void *v)
-{
-	panic("dead_badop called");
-	/* NOTREACHED */
 }
 
 /*

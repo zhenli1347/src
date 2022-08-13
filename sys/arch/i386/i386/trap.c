@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.154 2021/06/20 10:58:36 sthen Exp $	*/
+/*	$OpenBSD: trap.c,v 1.156 2021/12/09 00:26:11 guenther Exp $	*/
 /*	$NetBSD: trap.c,v 1.95 1996/05/05 06:50:02 mycroft Exp $	*/
 
 /*-
@@ -126,9 +126,7 @@ upageflttrap(struct trapframe *frame, uint32_t cr2)
 	union sigval sv;
 	int signal, sicode, error;
 
-	KERNEL_LOCK();
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-	KERNEL_UNLOCK();
 
 	if (error == 0) {
 		uvm_grow(p, va);
@@ -203,9 +201,7 @@ kpageflttrap(struct trapframe *frame, uint32_t cr2)
 	if (curcpu()->ci_inatomic == 0 || map == kernel_map) {
 		onfault = pcb->pcb_onfault;
 		pcb->pcb_onfault = NULL;
-		KERNEL_LOCK();
 		error = uvm_fault(map, va, 0, access_type);
-		KERNEL_UNLOCK();
 		pcb->pcb_onfault = onfault;
 
 		if (error == 0 && map != kernel_map)
@@ -521,9 +517,9 @@ void
 syscall(struct trapframe *frame)
 {
 	caddr_t params;
-	struct sysent *callp;
+	const struct sysent *callp;
 	struct proc *p;
-	int error, nsys;
+	int error;
 	register_t code, args[8], rval[2];
 #ifdef DIAGNOSTIC
 	int ocpl = lapic_tpr;
@@ -549,9 +545,6 @@ syscall(struct trapframe *frame)
 	p->p_md.md_regs = frame;
 	code = frame->tf_eax;
 
-	nsys = p->p_p->ps_emul->e_nsysent;
-	callp = p->p_p->ps_emul->e_sysent;
-
 	params = (caddr_t)frame->tf_esp + sizeof(int);
 
 	switch (code) {
@@ -567,16 +560,16 @@ syscall(struct trapframe *frame)
 		 * Like syscall, but code is a quad, so as to maintain
 		 * quad alignment for the rest of the arguments.
 		 */
-		if (callp != sysent)
-			break;
 		copyin(params + _QUAD_LOWWORD * sizeof(int), &code, sizeof(int));
 		params += sizeof(quad_t);
 		break;
 	default:
 		break;
 	}
-	if (code < 0 || code >= nsys)
-		callp += p->p_p->ps_emul->e_nosys;		/* illegal */
+
+	callp = sysent;
+	if (code < 0 || code >= SYS_MAXSYSCALL)
+		callp += SYS_syscall;
 	else
 		callp += code;
 	argsize = callp->sy_argsize;

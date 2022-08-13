@@ -1,4 +1,4 @@
-/*	$OpenBSD: pipex_local.h,v 1.43 2021/07/27 09:29:09 mvs Exp $	*/
+/*	$OpenBSD: pipex_local.h,v 1.49 2022/07/15 22:56:13 mvs Exp $	*/
 
 /*
  * Copyright (c) 2009 Internet Initiative Japan Inc.
@@ -26,6 +26,11 @@
  * SUCH DAMAGE.
  */
 
+#include <sys/mutex.h>
+#include <sys/refcnt.h>
+
+extern struct mutex pipex_list_mtx;
+
 #define	PIPEX_PPTP	1
 #define	PIPEX_L2TP	1
 #define	PIPEX_PPPOE	1
@@ -46,17 +51,14 @@
 #define	PIPEX_PPPMINLEN			5
 	/* minimum PPP header length is 1 and minimum ppp payload length is 4 */
 
-#ifndef	NNBY		/* usually defined on the <sys/types.h> */
-#define	NNBY	8	/* number of bits of a byte */
-#endif
-
 #define PIPEX_MPPE_NOLDKEY		64 /* should be power of two */
 #define PIPEX_MPPE_OLDKEYMASK		(PIPEX_MPPE_NOLDKEY - 1)
 
 /*
  * Locks used to protect struct members:
+ *      A       atomic operation
  *      I       immutable after creation
- *      N       net lock
+ *      L       pipex_list_mtx
  *      s       this pipex_session' `pxs_mtx'
  *      m       this pipex_mppe' `pxm_mtx'
  */
@@ -65,12 +67,13 @@
 /* mppe rc4 key */
 struct pipex_mppe {
 	struct mutex pxm_mtx;
-	int16_t	stateless:1,			/* [I] key change mode */
-		resetreq:1,			/* [m] */
-		reserved:14;
+	u_int flags;				/* [m] flags, see below */
+#define PIPEX_MPPE_STATELESS	0x01		/* [I] key change mode */
+#define PIPEX_MPPE_RESETREQ	0x02		/* [m] */
+
 	int16_t	keylenbits;			/* [I] key length */
 	int16_t keylen;				/* [I] */
-	uint16_t coher_cnt;			/* [m] cohency counter */
+	uint16_t coher_cnt;			/* [m] coherency counter */
 	struct  rc4_ctx rc4ctx;			/* [m] */
 	u_char master_key[PIPEX_MPPE_KEYLEN];	/* [m] master key of MPPE */
 	u_char session_key[PIPEX_MPPE_KEYLEN];	/* [m] session key of MPPE */
@@ -88,14 +91,14 @@ struct pipex_pppoe_session {
 #ifdef PIPEX_PPTP
 struct pipex_pptp_session {
 	/* sequence number gap between pipex and userland */
-	int32_t	snd_gap;		/* [N] gap of our sequence */
-	int32_t rcv_gap;		/* [N] gap of peer's sequence */
-	int32_t ul_snd_una;		/* [N] userland send acked seq */
+	int32_t	snd_gap;		/* [s] gap of our sequence */
+	int32_t rcv_gap;		/* [s] gap of peer's sequence */
+	int32_t ul_snd_una;		/* [s] userland send acked seq */
 
-	uint32_t snd_nxt;		/* [N] send next */
-	uint32_t rcv_nxt;		/* [N] receive next */
-	uint32_t snd_una;		/* [N] send acked sequence */
-	uint32_t rcv_acked;		/* [N] recv acked sequence */
+	uint32_t snd_nxt;		/* [s] send next */
+	uint32_t rcv_nxt;		/* [s] receive next */
+	uint32_t snd_una;		/* [s] send acked sequence */
+	uint32_t rcv_acked;		/* [s] recv acked sequence */
 
 	int winsz;			/* [I] windows size */
 	int maxwinsz;			/* [I] max windows size */
@@ -138,47 +141,50 @@ struct pipex_l2tp_session {
 
 	uint32_t option_flags;		/* [I] protocol options */
 
-	int16_t ns_gap;		/* [N] gap between userland and pipex */
-	int16_t nr_gap;		/* [N] gap between userland and pipex */
-	uint16_t ul_ns_una;	/* [N] unacked sequence number (userland) */
+	int16_t ns_gap;		/* [s] gap between userland and pipex */
+	int16_t nr_gap;		/* [s] gap between userland and pipex */
+	uint16_t ul_ns_una;	/* [s] unacked sequence number (userland) */
 
-	uint16_t ns_nxt;	/* [N] next sequence number to send */
-	uint16_t ns_una;	/* [N] unacked sequence number to send */
+	uint16_t ns_nxt;	/* [s] next sequence number to send */
+	uint16_t ns_una;	/* [s] unacked sequence number to send */
 
-	uint16_t nr_nxt;	/* [N] next sequence number to recv */
-	uint16_t nr_acked;	/* [N] acked sequence number to recv */
-	uint32_t ipsecflowinfo;	/* [N] IPsec SA flow id for NAT-T */
+	uint16_t nr_nxt;	/* [s] next sequence number to recv */
+	uint16_t nr_acked;	/* [s] acked sequence number to recv */
+	uint32_t ipsecflowinfo;	/* [s] IPsec SA flow id for NAT-T */
 };
 #endif /* PIPEX_L2TP */
 
 struct cpumem;
 
-/* pppac ip-extension sessoin table */
+/* pppac ip-extension session table */
 struct pipex_session {
 	struct radix_node	ps4_rn[2];
-					/* [N] tree glue, and other values */
+					/* [L] tree glue, and other values */
 	struct radix_node	ps6_rn[2];
-					/* [N] tree glue, and other values */
+					/* [L] tree glue, and other values */
+
+	struct refcnt pxs_refcnt;
 	struct mutex pxs_mtx;
 
-	LIST_ENTRY(pipex_session) session_list;	/* [N] all session chain */
-	LIST_ENTRY(pipex_session) state_list;	/* [N] state list chain */
-	LIST_ENTRY(pipex_session) id_chain;	/* [N] id hash chain */
+	LIST_ENTRY(pipex_session) session_list;	/* [L] all session chain */
+	LIST_ENTRY(pipex_session) state_list;	/* [L] state list chain */
+	LIST_ENTRY(pipex_session) id_chain;	/* [L] id hash chain */
 	LIST_ENTRY(pipex_session) peer_addr_chain;
-					/* [N] peer's address hash chain */
-	uint16_t	state;		/* [N] pipex session state */
+					/* [L] peer's address hash chain */
+	u_int		state;		/* [L] pipex session state */
 #define PIPEX_STATE_INITIAL		0x0000
 #define PIPEX_STATE_OPENED		0x0001
 #define PIPEX_STATE_CLOSE_WAIT		0x0002
 #define PIPEX_STATE_CLOSE_WAIT2		0x0003
 #define PIPEX_STATE_CLOSED		0x0004
 
-	uint32_t	idle_time;	/* [N] idle time in seconds */
-	uint16_t	ip_forward:1,	/* [N] {en|dis}ableIP forwarding */
-			ip6_forward:1,	/* [I] {en|dis}able IPv6 forwarding */
-			is_multicast:1,	/* [I] virtual entry for multicast */
-			is_pppx:1,	/* [I] interface is point2point(pppx) */
-			reserved:12;
+	uint32_t	idle_time;	/* [L] idle time in seconds */
+
+	u_int		flags;		/* [I] flags, see below */
+#define PIPEX_SFLAGS_MULTICAST		0x01 /* virtual entry for multicast */
+#define PIPEX_SFLAGS_PPPX		0x02 /* interface is
+						point2point(pppx) */
+
 	uint16_t	protocol;		/* [I] tunnel protocol (PK) */
 	uint16_t	session_id;		/* [I] session-id (PK) */
 	uint16_t	peer_session_id;	/* [I] peer's session-id */
@@ -191,7 +197,7 @@ struct pipex_session {
 	struct sockaddr_in6 ip6_address; /* [I] remote IPv6 address */
 	int		ip6_prefixlen;   /* [I] remote IPv6 prefixlen */
 
-	u_int		ifindex;		/* [N] interface index */
+	u_int		ifindex;		/* [A] interface index */
 	void		*ownersc;		/* [I] owner context */
 
 	uint32_t	ppp_flags;		/* [I] configure flags */
@@ -400,19 +406,19 @@ extern struct pool		pipex_session_pool;
 void                  pipex_destroy_all_sessions (void *);
 int                   pipex_init_session(struct pipex_session **,
                                              struct pipex_session_req *);
-void                  pipex_rele_session(struct pipex_session *);
 int                   pipex_link_session(struct pipex_session *,
                           struct ifnet *, void *);
 void                  pipex_unlink_session(struct pipex_session *);
+void                  pipex_unlink_session_locked(struct pipex_session *);
 void                  pipex_export_session_stats(struct pipex_session *,
                           struct pipex_statistics *);
-int                   pipex_config_session (struct pipex_session_config_req *,
-                          void *);
 int                   pipex_get_stat (struct pipex_session_stat_req *,
                           void *);
 int                   pipex_get_closed (struct pipex_session_list_req *,
                           void *);
+struct pipex_session  *pipex_lookup_by_ip_address_locked (struct in_addr);
 struct pipex_session  *pipex_lookup_by_ip_address (struct in_addr);
+struct pipex_session  *pipex_lookup_by_session_id_locked (int, int);
 struct pipex_session  *pipex_lookup_by_session_id (int, int);
 void                  pipex_ip_output (struct mbuf *, struct pipex_session *);
 void                  pipex_ppp_output (struct mbuf *, struct pipex_session *, int);
@@ -423,7 +429,7 @@ void                  pipex_ip_input (struct mbuf *, struct pipex_session *);
 void                  pipex_ip6_input (struct mbuf *, struct pipex_session *);
 #endif
 struct mbuf           *pipex_common_input(struct pipex_session *,
-                          struct mbuf *, int, int);
+                          struct mbuf *, int, int, int);
 
 #ifdef PIPEX_PPPOE
 void                  pipex_pppoe_output (struct mbuf *, struct pipex_session *);
@@ -443,8 +449,10 @@ void                  pipex_mppe_init (struct pipex_mppe *, int, int, u_char *, 
 void                  GetNewKeyFromSHA (u_char *, u_char *, int, u_char *);
 void                  pipex_mppe_reduce_key (struct pipex_mppe *);
 void                  mppe_key_change (struct pipex_mppe *);
-void                  pipex_mppe_input (struct mbuf *, struct pipex_session *);
-void                  pipex_mppe_output (struct mbuf *, struct pipex_session *, uint16_t);
+struct mbuf           *pipex_mppe_input (struct mbuf *,
+                          struct pipex_session *);
+struct mbuf           *pipex_mppe_output (struct mbuf *,
+                          struct pipex_session *, uint16_t);
 void                  pipex_ccp_input (struct mbuf *, struct pipex_session *);
 int                   pipex_ccp_output (struct pipex_session *, int, int);
 #endif

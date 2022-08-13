@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_if.c,v 1.100 2020/06/24 22:03:42 cheloha Exp $ */
+/*	$OpenBSD: pf_if.c,v 1.106 2022/06/26 11:37:08 mbuhl Exp $ */
 
 /*
  * Copyright 2005 Henning Brauer <henning@openbsd.org>
@@ -57,6 +57,10 @@
 #include <netinet/ip6.h>
 #endif /* INET6 */
 
+#define isupper(c)	((c) >= 'A' && (c) <= 'Z')
+#define islower(c)	((c) >= 'a' && (c) <= 'z')
+#define isalpha(c)	(isupper(c)||islower(c))
+
 struct pfi_kif		 *pfi_all = NULL;
 struct pool		  pfi_addr_pl;
 struct pfi_ifhead	  pfi_ifs;
@@ -75,6 +79,7 @@ void		 pfi_address_add(struct sockaddr *, sa_family_t, u_int8_t);
 int		 pfi_if_compare(struct pfi_kif *, struct pfi_kif *);
 int		 pfi_skip_if(const char *, struct pfi_kif *);
 int		 pfi_unmask(void *);
+void		 pfi_group_change(const char *);
 
 RB_PROTOTYPE(pfi_ifhead, pfi_kif, pfik_tree, pfi_if_compare);
 RB_GENERATE(pfi_ifhead, pfi_kif, pfik_tree, pfi_if_compare);
@@ -82,9 +87,49 @@ RB_GENERATE(pfi_ifhead, pfi_kif, pfik_tree, pfi_if_compare);
 #define PFI_BUFFER_MAX		0x10000
 #define PFI_MTYPE		M_IFADDR
 
+struct pfi_kif *
+pfi_kif_alloc(const char *kif_name, int mflags)
+{
+	struct pfi_kif *kif;
+
+	kif = malloc(sizeof(*pfi_all), PFI_MTYPE, mflags|M_ZERO);
+	if (kif == NULL)
+		return (NULL);
+	strlcpy(kif->pfik_name, kif_name, sizeof(kif->pfik_name));
+	kif->pfik_tzero = gettime();
+	TAILQ_INIT(&kif->pfik_dynaddrs);
+
+	if (!strcmp(kif->pfik_name, "any")) {
+		/* both so it works in the ioctl and the regular case */
+		kif->pfik_flags |= PFI_IFLAG_ANY;
+		kif->pfik_flags_new |= PFI_IFLAG_ANY;
+	}
+
+	return (kif);
+}
+
+void
+pfi_kif_free(struct pfi_kif *kif)
+{
+	if (kif == NULL)
+		return;
+
+	if (kif->pfik_rules || kif->pfik_states || kif->pfik_routes ||
+	     kif->pfik_srcnodes || kif->pfik_flagrefs)
+		panic("kif is still alive");
+
+	free(kif, PFI_MTYPE, sizeof(*kif));
+}
+
 void
 pfi_initialize(void)
 {
+	/*
+	 * The first time we arrive here is during kernel boot,
+	 * when if_attachsetup() for the first time. No locking
+	 * is needed in this case, because it's granted there
+	 * is a single thread, which sets pfi_all global var.
+	 */
 	if (pfi_all != NULL)	/* already initialized */
 		return;
 
@@ -94,8 +139,10 @@ pfi_initialize(void)
 	pfi_buffer = mallocarray(pfi_buffer_max, sizeof(*pfi_buffer),
 	    PFI_MTYPE, M_WAITOK);
 
-	if ((pfi_all = pfi_kif_get(IFG_ALL)) == NULL)
-		panic("pfi_kif_get for pfi_all failed");
+	pfi_all = pfi_kif_alloc(IFG_ALL, M_WAITOK);
+
+	if (RB_INSERT(pfi_ifhead, &pfi_ifs, pfi_all) != NULL)
+		panic("IFG_ALL kif found already");
 }
 
 struct pfi_kif *
@@ -109,7 +156,7 @@ pfi_kif_find(const char *kif_name)
 }
 
 struct pfi_kif *
-pfi_kif_get(const char *kif_name)
+pfi_kif_get(const char *kif_name, struct pfi_kif **prealloc)
 {
 	struct pfi_kif		*kif;
 
@@ -117,17 +164,13 @@ pfi_kif_get(const char *kif_name)
 		return (kif);
 
 	/* create new one */
-	if ((kif = malloc(sizeof(*kif), PFI_MTYPE, M_NOWAIT|M_ZERO)) == NULL)
-		return (NULL);
-
-	strlcpy(kif->pfik_name, kif_name, sizeof(kif->pfik_name));
-	kif->pfik_tzero = gettime();
-	TAILQ_INIT(&kif->pfik_dynaddrs);
-
-	if (!strcmp(kif->pfik_name, "any")) {
-		/* both so it works in the ioctl and the regular case */
-		kif->pfik_flags |= PFI_IFLAG_ANY;
-		kif->pfik_flags_new |= PFI_IFLAG_ANY;
+	if ((prealloc == NULL) || (*prealloc == NULL)) {
+		kif = pfi_kif_alloc(kif_name, M_NOWAIT);
+		if (kif == NULL)
+			return (NULL);
+	} else {
+		kif = *prealloc;
+		*prealloc = NULL;
 	}
 
 	RB_INSERT(pfi_ifhead, &pfi_ifs, kif);
@@ -150,6 +193,9 @@ pfi_kif_ref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	case PFI_KIF_REF_SRCNODE:
 		kif->pfik_srcnodes++;
 		break;
+	case PFI_KIF_REF_FLAG:
+		kif->pfik_flagrefs++;
+		break;
 	default:
 		panic("pfi_kif_ref with unknown type");
 	}
@@ -167,7 +213,8 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	case PFI_KIF_REF_RULE:
 		if (kif->pfik_rules <= 0) {
 			DPFPRINTF(LOG_ERR,
-			    "pfi_kif_unref: rules refcount <= 0");
+			    "pfi_kif_unref (%s): rules refcount <= 0",
+			    kif->pfik_name);
 			return;
 		}
 		kif->pfik_rules--;
@@ -175,7 +222,8 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	case PFI_KIF_REF_STATE:
 		if (kif->pfik_states <= 0) {
 			DPFPRINTF(LOG_ERR,
-			    "pfi_kif_unref: state refcount <= 0");
+			    "pfi_kif_unref (%s): state refcount <= 0",
+			    kif->pfik_name);
 			return;
 		}
 		kif->pfik_states--;
@@ -183,7 +231,8 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	case PFI_KIF_REF_ROUTE:
 		if (kif->pfik_routes <= 0) {
 			DPFPRINTF(LOG_ERR,
-			    "pfi_kif_unref: route refcount <= 0");
+			    "pfi_kif_unref (%s): route refcount <= 0",
+			    kif->pfik_name);
 			return;
 		}
 		kif->pfik_routes--;
@@ -191,20 +240,30 @@ pfi_kif_unref(struct pfi_kif *kif, enum pfi_kif_refs what)
 	case PFI_KIF_REF_SRCNODE:
 		if (kif->pfik_srcnodes <= 0) {
 			DPFPRINTF(LOG_ERR,
-			    "pfi_kif_unref: src-node refcount <= 0");
+			    "pfi_kif_unref (%s): src-node refcount <= 0",
+			    kif->pfik_name);
 			return;
 		}
 		kif->pfik_srcnodes--;
 		break;
+	case PFI_KIF_REF_FLAG:
+		if (kif->pfik_flagrefs <= 0) {
+			DPFPRINTF(LOG_ERR,
+			    "pfi_kif_unref (%s): flags refcount <= 0",
+			    kif->pfik_name);
+			return;
+		}
+		kif->pfik_flagrefs--;
+		break;
 	default:
-		panic("pfi_kif_unref with unknown type");
+		panic("pfi_kif_unref (%s) with unknown type", kif->pfik_name);
 	}
 
 	if (kif->pfik_ifp != NULL || kif->pfik_group != NULL || kif == pfi_all)
 		return;
 
 	if (kif->pfik_rules || kif->pfik_states || kif->pfik_routes ||
-	    kif->pfik_srcnodes)
+	    kif->pfik_srcnodes || kif->pfik_flagrefs)
 		return;
 
 	RB_REMOVE(pfi_ifhead, &pfi_ifs, kif);
@@ -239,7 +298,7 @@ pfi_attach_ifnet(struct ifnet *ifp)
 
 	pfi_initialize();
 	pfi_update++;
-	if ((kif = pfi_kif_get(ifp->if_xname)) == NULL)
+	if ((kif = pfi_kif_get(ifp->if_xname, NULL)) == NULL)
 		panic("%s: pfi_kif_get failed", __func__);
 
 	kif->pfik_ifp = ifp;
@@ -282,7 +341,7 @@ pfi_attach_ifgroup(struct ifg_group *ifg)
 
 	pfi_initialize();
 	pfi_update++;
-	if ((kif = pfi_kif_get(ifg->ifg_group)) == NULL)
+	if ((kif = pfi_kif_get(ifg->ifg_group, NULL)) == NULL)
 		panic("%s: pfi_kif_get failed", __func__);
 
 	kif->pfik_group = ifg;
@@ -310,23 +369,24 @@ pfi_group_change(const char *group)
 	struct pfi_kif		*kif;
 
 	pfi_update++;
-	if ((kif = pfi_kif_get(group)) == NULL)
+	if ((kif = pfi_kif_get(group, NULL)) == NULL)
 		panic("%s: pfi_kif_get failed", __func__);
 
 	pfi_kif_update(kif);
 }
 
 void
-pfi_group_addmember(const char *group, struct ifnet *ifp)
+pfi_group_delmember(const char *group)
 {
-	struct pfi_kif		*gkif, *ikif;
+	pfi_group_change(group);
+	pfi_xcommit();
+}
 
-	if ((gkif = pfi_kif_get(group)) == NULL ||
-	    (ikif = pfi_kif_get(ifp->if_xname)) == NULL)
-		panic("%s: pfi_kif_get failed", __func__);
-	ikif->pfik_flags |= gkif->pfik_flags;
-
+void
+pfi_group_addmember(const char *group)
+{
 	pfi_group_change(group);	
+	pfi_xcommit();
 }
 
 int
@@ -363,7 +423,7 @@ pfi_match_addr(struct pfi_dynaddr *dyn, struct pf_addr *a, sa_family_t af)
 }
 
 int
-pfi_dynaddr_setup(struct pf_addr_wrap *aw, sa_family_t af)
+pfi_dynaddr_setup(struct pf_addr_wrap *aw, sa_family_t af, int wait)
 {
 	struct pfi_dynaddr	*dyn;
 	char			 tblname[PF_TABLE_NAME_SIZE];
@@ -372,14 +432,13 @@ pfi_dynaddr_setup(struct pf_addr_wrap *aw, sa_family_t af)
 
 	if (aw->type != PF_ADDR_DYNIFTL)
 		return (0);
-	if ((dyn = pool_get(&pfi_addr_pl, PR_WAITOK | PR_LIMITFAIL | PR_ZERO))
-	    == NULL)
+	if ((dyn = pool_get(&pfi_addr_pl, wait|PR_LIMITFAIL|PR_ZERO)) == NULL)
 		return (1);
 
 	if (!strcmp(aw->v.ifname, "self"))
-		dyn->pfid_kif = pfi_kif_get(IFG_ALL);
+		dyn->pfid_kif = pfi_kif_get(IFG_ALL, NULL);
 	else
-		dyn->pfid_kif = pfi_kif_get(aw->v.ifname);
+		dyn->pfid_kif = pfi_kif_get(aw->v.ifname, NULL);
 	if (dyn->pfid_kif == NULL) {
 		rv = 1;
 		goto _bad;
@@ -406,7 +465,7 @@ pfi_dynaddr_setup(struct pf_addr_wrap *aw, sa_family_t af)
 		goto _bad;
 	}
 
-	if ((dyn->pfid_kt = pfr_attach_table(ruleset, tblname, 1)) == NULL) {
+	if ((dyn->pfid_kt = pfr_attach_table(ruleset, tblname, wait)) == NULL) {
 		rv = 1;
 		goto _bad;
 	}
@@ -697,7 +756,7 @@ pfi_update_status(const char *name, struct pf_status *pfs)
 	}
 }
 
-int
+void
 pfi_get_ifaces(const char *name, struct pfi_kif *buf, int *size)
 {
 	struct pfi_kif	*p, *nextp;
@@ -710,17 +769,11 @@ pfi_get_ifaces(const char *name, struct pfi_kif *buf, int *size)
 		if (*size > n++) {
 			if (!p->pfik_tzero)
 				p->pfik_tzero = gettime();
-			pfi_kif_ref(p, PFI_KIF_REF_RULE);
-			if (copyout(p, buf++, sizeof(*buf))) {
-				pfi_kif_unref(p, PFI_KIF_REF_RULE);
-				return (EFAULT);
-			}
+			memcpy(buf++, p, sizeof(*buf));
 			nextp = RB_NEXT(pfi_ifhead, &pfi_ifs, p);
-			pfi_kif_unref(p, PFI_KIF_REF_RULE);
 		}
 	}
 	*size = n;
-	return (0);
 }
 
 int
@@ -749,35 +802,103 @@ int
 pfi_set_flags(const char *name, int flags)
 {
 	struct pfi_kif	*p;
+	size_t	n;
 
-	RB_FOREACH(p, pfi_ifhead, &pfi_ifs) {
-		if (pfi_skip_if(name, p))
-			continue;
-		p->pfik_flags_new = p->pfik_flags | flags;
+	if (name != NULL && name[0] != '\0') {
+		p = pfi_kif_find(name);
+		if (p == NULL) {
+			n = strlen(name);
+			if (n < 1 || n >= IFNAMSIZ)
+				return (EINVAL);
+
+			if (!isalpha(name[0]))
+				return (EINVAL);
+
+			p = pfi_kif_get(name, NULL);
+			if (p != NULL) {
+				p->pfik_flags_new = p->pfik_flags | flags;
+				/*
+				 * We use pfik_flagrefs counter as an
+				 * indication whether the kif has been created
+				 * on behalf of 'pfi_set_flags()' or not.
+				 */
+				KASSERT(p->pfik_flagrefs == 0);
+				if (ISSET(p->pfik_flags_new, PFI_IFLAG_SKIP))
+					pfi_kif_ref(p, PFI_KIF_REF_FLAG);
+			} else
+				panic("%s pfi_kif_get() returned NULL\n",
+				    __func__);
+		} else
+			p->pfik_flags_new = p->pfik_flags | flags;
+	} else {
+		RB_FOREACH(p, pfi_ifhead, &pfi_ifs)
+			p->pfik_flags_new = p->pfik_flags | flags;
 	}
+
 	return (0);
 }
 
 int
 pfi_clear_flags(const char *name, int flags)
 {
-	struct pfi_kif	*p;
+	struct pfi_kif	*p, *w;
 
-	RB_FOREACH(p, pfi_ifhead, &pfi_ifs) {
-		if (pfi_skip_if(name, p))
-			continue;
-		p->pfik_flags_new = p->pfik_flags & ~flags;
-	}
+	if (name != NULL && name[0] != '\0') {
+		p = pfi_kif_find(name);
+		if (p != NULL) {
+			p->pfik_flags_new = p->pfik_flags & ~flags;
+
+			KASSERT((p->pfik_flagrefs == 0) ||
+			    (p->pfik_flagrefs == 1));
+
+			if (!ISSET(p->pfik_flags_new, PFI_IFLAG_SKIP) &&
+			    (p->pfik_flagrefs == 1))
+				pfi_kif_unref(p, PFI_KIF_REF_FLAG);
+		} else
+			return (ESRCH);
+
+	} else
+		RB_FOREACH_SAFE(p, pfi_ifhead, &pfi_ifs, w) {
+			p->pfik_flags_new = p->pfik_flags & ~flags;
+
+			KASSERT((p->pfik_flagrefs == 0) ||
+			    (p->pfik_flagrefs == 1));
+
+			if (!ISSET(p->pfik_flags_new, PFI_IFLAG_SKIP) &&
+			    (p->pfik_flagrefs == 1))
+				pfi_kif_unref(p, PFI_KIF_REF_FLAG);
+		}
+
 	return (0);
 }
 
 void
 pfi_xcommit(void)
 {
-	struct pfi_kif	*p;
+	struct pfi_kif	*p, *gkif;
+	struct ifg_list	*g;
+	struct ifnet	*ifp;
+	size_t n;
 
-	RB_FOREACH(p, pfi_ifhead, &pfi_ifs)
+	RB_FOREACH(p, pfi_ifhead, &pfi_ifs) {
 		p->pfik_flags = p->pfik_flags_new;
+		n = strlen(p->pfik_name);
+		ifp = p->pfik_ifp;
+		/*
+		 * if kif is backed by existing interface, then we must use
+		 * skip flags found in groups. We use pfik_flags_new, otherwise
+		 * we would need to do two RB_FOREACH() passes: the first to
+		 * commit group changes the second to commit flag changes for
+		 * interfaces.
+		 */
+		if (ifp != NULL)
+			TAILQ_FOREACH(g, &ifp->if_groups, ifgl_next) {
+				gkif =
+				    (struct pfi_kif *)g->ifgl_group->ifg_pf_kif;
+				KASSERT(gkif != NULL);
+				p->pfik_flags |= gkif->pfik_flags_new;
+			}
+	}
 }
 
 /* from pf_print_state.c */

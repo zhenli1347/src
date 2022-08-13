@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_page.h,v 1.66 2021/03/26 13:40:05 mpi Exp $	*/
+/*	$OpenBSD: uvm_page.h,v 1.69 2022/08/01 14:15:46 mpi Exp $	*/
 /*	$NetBSD: uvm_page.h,v 1.19 2000/12/28 08:24:55 chs Exp $	*/
 
 /* 
@@ -171,9 +171,9 @@ struct vm_page {
  * physical memory layout structure
  *
  * MD vmparam.h must #define:
- *   VM_PHYSEG_MAX = max number of physical memory segments we support
+ *   VM_PHYSSEG_MAX = max number of physical memory segments we support
  *		   (if this is "1" then we revert to a "contig" case)
- *   VM_PHYSSEG_STRAT: memory sort/search options (for VM_PHYSEG_MAX > 1)
+ *   VM_PHYSSEG_STRAT: memory sort/search options (for VM_PHYSSEG_MAX > 1)
  * 	- VM_PSTRAT_RANDOM:   linear search (random order)
  *	- VM_PSTRAT_BSEARCH:  binary search (sorted by address)
  *	- VM_PSTRAT_BIGFIRST: linear search (sorted by largest segment first)
@@ -224,6 +224,7 @@ boolean_t	uvm_page_physget(paddr_t *);
 #endif
 
 void		uvm_pageactivate(struct vm_page *);
+void		uvm_pagedequeue(struct vm_page *);
 vaddr_t		uvm_pageboot_alloc(vsize_t);
 void		uvm_pagecopy(struct vm_page *, struct vm_page *);
 void		uvm_pagedeactivate(struct vm_page *);
@@ -232,7 +233,7 @@ void		uvm_pagefree(struct vm_page *);
 void		uvm_page_unbusy(struct vm_page **, int);
 struct vm_page	*uvm_pagelookup(struct uvm_object *, voff_t);
 void		uvm_pageunwire(struct vm_page *);
-void		uvm_pagewait(struct vm_page *, int);
+void		uvm_pagewait(struct vm_page *, struct rwlock *, const char *);
 void		uvm_pagewake(struct vm_page *);
 void		uvm_pagewire(struct vm_page *);
 void		uvm_pagezero(struct vm_page *);

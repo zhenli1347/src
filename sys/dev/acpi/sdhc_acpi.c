@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdhc_acpi.c,v 1.18 2021/03/08 13:48:56 kettenis Exp $	*/
+/*	$OpenBSD: sdhc_acpi.c,v 1.21 2022/04/06 18:59:27 naddy Exp $	*/
 /*
  * Copyright (c) 2016 Mark Kettenis
  *
@@ -50,7 +50,7 @@ struct sdhc_acpi_softc {
 int	sdhc_acpi_match(struct device *, void *, void *);
 void	sdhc_acpi_attach(struct device *, struct device *, void *);
 
-struct cfattach sdhc_acpi_ca = {
+const struct cfattach sdhc_acpi_ca = {
 	sizeof(struct sdhc_acpi_softc), sdhc_acpi_match, sdhc_acpi_attach
 };
 
@@ -77,6 +77,8 @@ sdhc_acpi_match(struct device *parent, void *match, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct cfdata *cf = match;
 
+	if (aaa->aaa_naddr < 1 || aaa->aaa_nirq < 1)
+		return 0;
 	return acpi_matchhids(aaa, sdhc_hids, cf->cf_driver->cd_name);
 }
 
@@ -86,21 +88,11 @@ sdhc_acpi_attach(struct device *parent, struct device *self, void *aux)
 	struct sdhc_acpi_softc *sc = (struct sdhc_acpi_softc *)self;
 	struct acpi_attach_args *aaa = aux;
 	struct aml_value res;
-	uint32_t cap, capmask;
+	uint64_t capmask, capset;
 
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
 	printf(" %s", sc->sc_node->name);
-
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
-
-	if (aaa->aaa_nirq < 1) {
-		printf(": no interrupt\n");
-		return;
-	}
 
 	if (aml_evalname(sc->sc_acpi, sc->sc_node, "_CRS", 0, NULL, &res)) {
 		printf(": can't find registers\n");
@@ -143,13 +135,8 @@ sdhc_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sdhc_acpi_power_on(sc, sc->sc_node);
 	sdhc_acpi_explore(sc);
 
-	cap = acpi_getpropint(sc->sc_node, "sdhci-caps", 0);
 	capmask = acpi_getpropint(sc->sc_node, "sdhci-caps-mask", 0);
-	if (capmask != 0) {
-		cap = bus_space_read_4(sc->sc_memt, sc->sc_memh,
-		    SDHC_CAPABILITIES);
-		cap &= ~capmask;
-	}
+	capset = acpi_getpropint(sc->sc_node, "sdhci-caps", 0);
 
 	/* Raspberry Pi4 "emmc2" controller. */
 	if (strcmp(aaa->aaa_dev, "BRCME88C") == 0)
@@ -160,7 +147,7 @@ sdhc_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc.sc_clkbase = acpi_getpropint(sc->sc_node,
 	    "clock-frequency", 0) / 1000;
 	sdhc_host_found(&sc->sc, sc->sc_memt, sc->sc_memh,
-	    aaa->aaa_size[0], 1, cap);
+	    aaa->aaa_size[0], 1, capmask, capset);
 }
 
 int

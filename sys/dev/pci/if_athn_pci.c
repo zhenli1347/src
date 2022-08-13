@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_athn_pci.c,v 1.21 2021/04/15 18:25:44 stsp Exp $	*/
+/*	$OpenBSD: if_athn_pci.c,v 1.23 2022/07/24 17:22:12 kn Exp $	*/
 
 /*-
  * Copyright (c) 2009 Damien Bergamini <damien.bergamini@free.fr>
@@ -80,7 +80,7 @@ void		athn_pci_write(struct athn_softc *, uint32_t, uint32_t);
 void		athn_pci_write_barrier(struct athn_softc *);
 void		athn_pci_disable_aspm(struct athn_softc *);
 
-struct cfattach athn_pci_ca = {
+const struct cfattach athn_pci_ca = {
 	sizeof (struct athn_pci_softc),
 	athn_pci_match,
 	athn_pci_attach,
@@ -93,7 +93,7 @@ static const struct pci_matchid athn_pci_devices[] = {
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR5418 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9160 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9280 },
-	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9281 },
+	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR928X },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9285 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR2427 },
 	{ PCI_VENDOR_ATHEROS, PCI_PRODUCT_ATHEROS_AR9227 },

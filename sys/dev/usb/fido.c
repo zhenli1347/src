@@ -1,4 +1,4 @@
-/*	$OpenBSD: fido.c,v 1.3 2021/03/08 14:35:57 jcs Exp $	*/
+/*	$OpenBSD: fido.c,v 1.5 2022/07/02 08:50:42 visa Exp $	*/
 
 /*
  * Copyright (c) 2019 Reyk Floeter <reyk@openbsd.org>
@@ -27,10 +27,8 @@
 #include <sys/ioctl.h>
 #include <sys/conf.h>
 #include <sys/tty.h>
-#include <sys/selinfo.h>
 #include <sys/proc.h>
 #include <sys/vnode.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbhid.h>
@@ -63,7 +61,7 @@ fido_match(struct device *parent, void *match, void *aux)
 	void			 *desc;
 	int			  ret = UMATCH_NONE;
 
-	if (uha->reportid == UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (UHIDEV_CLAIM_MULTIPLE_REPORTID(uha))
 		return (ret);
 
 	/* Find the FIDO usage page and U2F collection */

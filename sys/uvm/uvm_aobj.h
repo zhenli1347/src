@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_aobj.h,v 1.17 2020/10/21 09:08:14 mpi Exp $	*/
+/*	$OpenBSD: uvm_aobj.h,v 1.19 2022/07/24 11:00:22 mpi Exp $	*/
 /*	$NetBSD: uvm_aobj.h,v 1.10 2000/01/11 06:57:49 chs Exp $	*/
 
 /*

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ucom.c,v 1.71 2020/07/31 10:49:33 mglocker Exp $ */
+/*	$OpenBSD: ucom.c,v 1.74 2022/07/02 08:50:42 visa Exp $ */
 /*	$NetBSD: ucom.c,v 1.49 2003/01/01 00:10:25 thorpej Exp $	*/
 
 /*
@@ -42,10 +42,8 @@
 #include <sys/conf.h>
 #include <sys/tty.h>
 #include <sys/fcntl.h>
-#include <sys/selinfo.h>
 #include <sys/vnode.h>
 #include <sys/device.h>
-#include <sys/poll.h>
 
 #include <dev/usb/usb.h>
 
@@ -102,7 +100,7 @@ struct ucom_softc {
 	struct usbd_pipe	*sc_ipipe;	/* hid interrupt input pipe */
 	struct usbd_pipe	*sc_opipe;	/* hid interrupt pipe */
 
-	struct ucom_methods     *sc_methods;
+	const struct ucom_methods *sc_methods;
 	void                    *sc_parent;
 	int			sc_portno;
 
@@ -114,6 +112,7 @@ struct ucom_softc {
 	int			sc_swflags;
 
 	u_char			sc_cua;
+	int			sc_error;
 
 	struct rwlock		sc_lock;	/* lock during open */
 	int			sc_open;
@@ -306,6 +305,8 @@ ucomopen(dev_t dev, int flag, int mode, struct proc *p)
 	sc = ucom_cd.cd_devs[unit];
 	if (sc == NULL)
 		return (ENXIO);
+
+	sc->sc_error = 0;
 
 	if (usbd_is_dying(sc->sc_uparent))
 		return (EIO);
@@ -605,6 +606,9 @@ ucomread(dev_t dev, struct uio *uio, int flag)
 
 	if (sc == NULL || usbd_is_dying(sc->sc_uparent))
 		return (EIO);
+
+	if (sc->sc_error)
+		return (sc->sc_error);
 
 	sc->sc_refcnt++;
 	tp = sc->sc_tty;
@@ -1144,6 +1148,7 @@ ucomreadcb(struct usbd_xfer *xfer, void *p, usbd_status status)
 	    usbd_is_dying(sc->sc_uparent)) {
 		DPRINTF(("ucomreadcb: dying\n"));
 		/* Send something to wake upper layer */
+		sc->sc_error = EIO;
 		s = spltty();
 		(*rint)('\n', tp);
 		ttwakeup(tp);

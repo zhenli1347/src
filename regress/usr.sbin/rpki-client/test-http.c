@@ -25,19 +25,28 @@ logx(const char *fmt, ...)
 	va_end(ap);
 }
 
+time_t
+getmonotime(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+		err(1, "clock_gettime");
+	return (ts.tv_sec);
+}
+
 static void
-http_request(size_t id, const char *uri, const char *last_mod, int fd)
+http_request(unsigned int id, const char *uri, const char *last_mod, int fd)
 {
 	struct ibuf     *b;
 
-	if ((b = ibuf_dynamic(256, UINT_MAX)) == NULL)
-		err(1, NULL);
+	b = io_new_buffer();
 	io_simple_buffer(b, &id, sizeof(id));
 	io_str_buffer(b, uri);
 	io_str_buffer(b, last_mod);
 	/* pass file as fd */
 	b->fd = fd;
-	ibuf_close(&httpq, b);
+	io_close_buffer(&httpq, b);
 }
 
 static const char *
@@ -55,31 +64,37 @@ http_result(enum http_result res)
 	}
 }
 
-static void
+static int
 http_response(int fd)
 {
-	size_t id;
+	struct ibuf *b, *httpbuf = NULL;
+	unsigned int id;
 	enum http_result res;
 	char *lastmod;
 
-	io_simple_read(fd, &id, sizeof(id));
-	io_simple_read(fd, &res, sizeof(res));
-	io_str_read(fd, &lastmod);
+	while ((b = io_buf_read(fd, &httpbuf)) == NULL)
+		/* nothing */ ;
+
+	io_read_buf(b, &id, sizeof(id));
+	io_read_buf(b, &res, sizeof(res));
+	io_read_str(b, &lastmod);
+	ibuf_free(b);
 
 	printf("transfer %s", http_result(res));
 	if (lastmod)
 		printf(", last-modified: %s" , lastmod);
 	printf("\n");
+	return res == HTTP_FAILED;
 }
 
 int
 main(int argc, char **argv)
 {
 	pid_t httppid;
-	int fd[2], outfd, http;
+	int error, fd[2], outfd, http;
 	int fl = SOCK_STREAM | SOCK_CLOEXEC;
 	char *uri, *file, *mod;
-	size_t req = 0;
+	unsigned int req = 0;
 
 	if (argc != 3 && argc != 4) {
 		fprintf(stderr, "usage: test-http uri file [last-modified]\n");
@@ -120,7 +135,6 @@ main(int argc, char **argv)
 	case -1:
 		err(1, "write");
 	}
-	http_response(http);
-
-	return 0;
+	error = http_response(http);
+	return error;
 }

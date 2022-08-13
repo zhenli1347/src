@@ -1,4 +1,4 @@
-/*	$OpenBSD: usbhidaction.c,v 1.23 2019/06/28 13:35:05 deraadt Exp $ */
+/*	$OpenBSD: usbhidaction.c,v 1.25 2022/08/02 09:07:34 mestre Exp $ */
 /*      $NetBSD: usbhidaction.c,v 1.7 2002/01/18 14:38:59 augustss Exp $ */
 
 /*
@@ -163,6 +163,13 @@ main(int argc, char **argv)
 			err(1, "daemon()");
 		isdemon = 1;
 	}
+
+	if (unveil(conf, "r") == -1)
+		err(1, "unveil %s", conf);
+	if (unveil(_PATH_BSHELL, "x") == -1)
+		err(1, "unveil %s", _PATH_BSHELL);
+	if (unveil(NULL, NULL) == -1)
+		err(1, "unveil");
 
 	for(;;) {
 		n = read(fd, buf, sz);

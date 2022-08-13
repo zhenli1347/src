@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhidev.c,v 1.92 2021/03/18 09:21:53 anton Exp $	*/
+/*	$OpenBSD: uhidev.c,v 1.108 2022/05/20 05:03:45 anton Exp $	*/
 /*	$NetBSD: uhidev.c,v 1.14 2003/03/11 16:44:00 augustss Exp $	*/
 
 /*
@@ -63,8 +63,10 @@
 #include <dev/usb/uhid_rdesc.h>
 int uhidev_use_rdesc(struct uhidev_softc *, usb_interface_descriptor_t *,
 		int, int, void **, int *);
-#define UISUBCLASS_XBOX360_CONTROLLER 0x5d
-#define UIPROTO_XBOX360_GAMEPAD 0x01
+#define UISUBCLASS_XBOX360_CONTROLLER	0x5d
+#define UIPROTO_XBOX360_GAMEPAD		0x01
+#define UISUBCLASS_XBOXONE_CONTROLLER	0x47
+#define UIPROTO_XBOXONE_GAMEPAD		0xd0
 #endif /* !SMALL_KERNEL */
 
 #define DEVNAME(sc)		((sc)->sc_dev.dv_xname)
@@ -89,7 +91,6 @@ void uhidev_intr(struct usbd_xfer *, void *, usbd_status);
 
 int uhidev_maxrepid(void *buf, int len);
 int uhidevprint(void *aux, const char *pnp);
-int uhidevsubmatch(struct device *parent, void *cf, void *aux);
 
 int uhidev_match(struct device *, void *, void *);
 void uhidev_attach(struct device *, struct device *, void *);
@@ -124,6 +125,11 @@ uhidev_match(struct device *parent, void *match, void *aux)
 	    id->bInterfaceSubClass == UISUBCLASS_XBOX360_CONTROLLER &&
 	    id->bInterfaceProtocol == UIPROTO_XBOX360_GAMEPAD)
 		return (UMATCH_IFACECLASS_IFACESUBCLASS_IFACEPROTO);
+	if (id->bInterfaceClass == UICLASS_VENDOR &&
+	    id->bInterfaceSubClass == UISUBCLASS_XBOXONE_CONTROLLER &&
+	    id->bInterfaceProtocol == UIPROTO_XBOXONE_GAMEPAD) {
+		return (UMATCH_IFACECLASS_IFACESUBCLASS_IFACEPROTO);
+	}
 #endif /* !SMALL_KERNEL */
 	if (id->bInterfaceClass != UICLASS_HID)
 		return (UMATCH_NONE);
@@ -141,9 +147,10 @@ uhidev_attach(struct device *parent, struct device *self, void *aux)
 	usb_interface_descriptor_t *id;
 	usb_endpoint_descriptor_t *ed;
 	struct uhidev_attach_arg uha;
-	int size, nrepid, repid, repsz;
-	int i, repsizes[256];
+	int nrepid, repid, repsz;
+	int i;
 	void *desc = NULL;
+	int size = 0;
 	struct device *dev;
 
 	sc->sc_udev = uaa->device;
@@ -241,7 +248,6 @@ uhidev_attach(struct device *parent, struct device *self, void *aux)
 	for (repid = 0; repid < nrepid; repid++) {
 		repsz = hid_report_size(desc, size, hid_input, repid);
 		DPRINTF(("uhidev_match: repid=%d, repsz=%d\n", repid, repsz));
-		repsizes[repid] = repsz;
 		if (repsz > sc->sc_isize)
 			sc->sc_isize = repsz;
 	}
@@ -250,23 +256,28 @@ uhidev_attach(struct device *parent, struct device *self, void *aux)
 
 	uha.uaa = uaa;
 	uha.parent = sc;
-	uha.reportid = UHIDEV_CLAIM_MULTIPLE_REPORTID;
+	uha.reportid = 0;
 	uha.nreports = nrepid;
 	uha.claimed = malloc(nrepid, M_TEMP, M_WAITOK|M_ZERO);
 
 	/* Look for a driver claiming multiple report IDs first. */
-	dev = config_found_sm(self, &uha, NULL, uhidevsubmatch);
+	dev = config_found_sm(self, &uha, NULL, NULL);
 	if (dev != NULL) {
+		int nclaimed = 0;
+
 		for (repid = 0; repid < nrepid; repid++) {
+			if (!uha.claimed[repid])
+				continue;
+
+			nclaimed++;
 			/*
 			 * Could already be assigned by uhidev_set_report_dev().
 			 */
-			if (sc->sc_subdevs[repid] != NULL)
-				continue;
-
-			if (uha.claimed[repid])
+			if (sc->sc_subdevs[repid] == NULL)
 				sc->sc_subdevs[repid] = (struct uhidev *)dev;
 		}
+		KASSERTMSG(nclaimed > 0, "%s did not claim any report ids",
+		    dev->dv_xname);
 	}
 
 	free(uha.claimed, M_TEMP, nrepid);
@@ -284,7 +295,7 @@ uhidev_attach(struct device *parent, struct device *self, void *aux)
 			continue;
 
 		uha.reportid = repid;
-		dev = config_found_sm(self, &uha, uhidevprint, uhidevsubmatch);
+		dev = config_found_sm(self, &uha, uhidevprint, NULL);
 		sc->sc_subdevs[repid] = (struct uhidev *)dev;
 	}
 }
@@ -322,6 +333,13 @@ uhidev_use_rdesc(struct uhidev_softc *sc, usb_interface_descriptor_t *id,
 		/* The Xbox 360 gamepad has no report descriptor. */
 		size = sizeof(uhid_xb360gp_report_descr);
 		descptr = uhid_xb360gp_report_descr;
+	} else if ((id->bInterfaceClass == UICLASS_VENDOR &&
+		    id->bInterfaceSubClass == UISUBCLASS_XBOXONE_CONTROLLER &&
+		    id->bInterfaceProtocol == UIPROTO_XBOXONE_GAMEPAD)) {
+		sc->sc_flags |= UHIDEV_F_XB1;
+		/* The Xbox One gamepad has no report descriptor. */
+		size = sizeof(uhid_xbonegp_report_descr);
+		descptr = uhid_xbonegp_report_descr;
 	}
 
 	if (descptr) {
@@ -348,7 +366,7 @@ uhidev_maxrepid(void *buf, int len)
 
 	maxid = -1;
 	h.report_ID = 0;
-	for (d = hid_start_parse(buf, len, hid_none); hid_get_item(d, &h); )
+	for (d = hid_start_parse(buf, len, hid_all); hid_get_item(d, &h);)
 		if (h.report_ID > maxid)
 			maxid = h.report_ID;
 	hid_end_parse(d);
@@ -362,20 +380,9 @@ uhidevprint(void *aux, const char *pnp)
 
 	if (pnp)
 		printf("uhid at %s", pnp);
-	if (uha->reportid != 0 && uha->reportid != UHIDEV_CLAIM_MULTIPLE_REPORTID)
+	if (uha->reportid != 0)
 		printf(" reportid %d", uha->reportid);
 	return (UNCONF);
-}
-
-int uhidevsubmatch(struct device *parent, void *match, void *aux)
-{
-	struct uhidev_attach_arg *uha = aux;
-        struct cfdata *cf = match;
-
-	if (cf->uhidevcf_reportid != UHIDEV_UNK_REPORTID &&
-	    cf->uhidevcf_reportid != uha->reportid)
-		return (0);
-	return ((*cf->cf_attach->ca_match)(parent, cf, aux));
 }
 
 int
@@ -452,6 +459,7 @@ uhidev_detach(struct device *self, int flags)
 
 		sc->sc_subdevs[i] = NULL;
 	}
+	free(sc->sc_subdevs, M_USBDEV, sc->sc_nrepid * sizeof(struct uhidev *));
 
 	return (rv);
 }
@@ -591,6 +599,25 @@ uhidev_open(struct uhidev *scd)
 			error = ENOMEM;
 			goto out3;
 		}
+
+#ifndef SMALL_KERNEL
+		/* XBox One controller initialization */
+		if (sc->sc_flags & UHIDEV_F_XB1) {
+			uint8_t init_data[] = { 0x05, 0x20, 0x00, 0x01, 0x00 };
+			size_t init_data_len = sizeof(init_data);
+			usbd_setup_xfer(sc->sc_oxfer, sc->sc_opipe, 0,
+			    init_data, init_data_len,
+			    USBD_SYNCHRONOUS | USBD_CATCH, USBD_NO_TIMEOUT,
+			    NULL);
+			err = usbd_transfer(sc->sc_oxfer);
+			if (err != USBD_NORMAL_COMPLETION) {
+				DPRINTF(("uhidev_open: xb1 init failed, "
+				"error=%d\n", err));
+				error = EIO;
+				goto out3;
+			}
+		}
+#endif /* !SMALL_KERNEL */
 	}
 
 	return (0);
@@ -604,6 +631,7 @@ out2:
 out1:
 	DPRINTF(("uhidev_open: failed in someway"));
 	free(sc->sc_ibuf, M_USBDEV, sc->sc_isize);
+	sc->sc_ibuf = NULL;
 	scd->sc_state &= ~UHIDEV_OPEN;
 	sc->sc_refcnt = 0;
 	sc->sc_ipipe = NULL;

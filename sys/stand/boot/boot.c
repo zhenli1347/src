@@ -1,4 +1,4 @@
-/*	$OpenBSD: boot.c,v 1.54 2020/06/15 14:43:57 naddy Exp $	*/
+/*	$OpenBSD: boot.c,v 1.56 2021/10/26 16:29:49 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2003 Dale Rahn
@@ -92,6 +92,7 @@ boot(dev_t bootdev)
 	if (bootdev_has_hibernate()) {
 		strlcpy(cmd.image, "/bsd.booted", sizeof(cmd.image));
 		printf("unhibernate detected: switching to %s\n", cmd.image);
+		cmd.boothowto |= RB_UNHIBERNATE;
 	}
 #endif
 
@@ -167,8 +168,6 @@ loadrandom(char *name, char *buf, size_t buflen)
 	char path[MAXPATHLEN];
 	struct stat sb;
 	int fd, i, error = 0;
-
-#define O_RDONLY	0
 
 	/* Extract the device name from the kernel we are loading. */
 	for (i = 0; i < sizeof(cmd.path); i++) {

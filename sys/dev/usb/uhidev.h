@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhidev.h,v 1.29 2021/03/18 09:21:53 anton Exp $	*/
+/*	$OpenBSD: uhidev.h,v 1.41 2022/03/21 12:18:52 thfr Exp $	*/
 /*	$NetBSD: uhidev.h,v 1.3 2002/10/08 09:56:17 dan Exp $	*/
 
 /*
@@ -31,12 +31,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define UHIDBUSCF_REPORTID		0
-#define UHIDBUSCF_REPORTID_DEFAULT	-1
-
-#define uhidevcf_reportid cf_loc[UHIDBUSCF_REPORTID]
-#define UHIDEV_UNK_REPORTID UHIDBUSCF_REPORTID_DEFAULT
-
 struct uhidev_softc {
 	struct device sc_dev;		/* base device */
 	struct usbd_device *sc_udev;
@@ -61,6 +55,9 @@ struct uhidev_softc {
 	struct uhidev **sc_subdevs;
 
 	int sc_refcnt;
+
+	u_int sc_flags;
+#define UHIDEV_F_XB1	0x0001		/* Xbox One controller */
 };
 
 struct uhidev {
@@ -81,10 +78,11 @@ struct uhidev_attach_arg {
 	struct usb_attach_arg	*uaa;
 	struct uhidev_softc	*parent;
 	uint8_t			 reportid;
-#define	UHIDEV_CLAIM_MULTIPLE_REPORTID	255
-	uint8_t			 nreports;
-	uint8_t			 *claimed;
+	u_int			 nreports;
+	uint8_t			*claimed;
 };
+
+#define UHIDEV_CLAIM_MULTIPLE_REPORTID(u)	((u)->claimed != NULL)
 
 int uhidev_report_type_conv(int);
 void uhidev_get_report_desc(struct uhidev_softc *, void **, int *);

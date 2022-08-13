@@ -1,4 +1,4 @@
-/* $OpenBSD: p12_attr.c,v 1.13 2021/07/09 14:07:59 tb Exp $ */
+/* $OpenBSD: p12_attr.c,v 1.16 2022/08/03 20:16:06 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
@@ -59,6 +59,8 @@
 #include <stdio.h>
 
 #include <openssl/pkcs12.h>
+
+#include "x509_lcl.h"
 
 /* Add a local keyid to a safebag */
 
@@ -127,12 +129,8 @@ PKCS12_get_attr_gen(const STACK_OF(X509_ATTRIBUTE) *attrs, int attr_nid)
 		return NULL;
 	for (i = 0; i < sk_X509_ATTRIBUTE_num(attrs); i++) {
 		attrib = sk_X509_ATTRIBUTE_value(attrs, i);
-		if (OBJ_obj2nid(attrib->object) == attr_nid) {
-			if (sk_ASN1_TYPE_num(attrib->value.set))
-				return sk_ASN1_TYPE_value(attrib->value.set, 0);
-			else
-				return NULL;
-		}
+		if (OBJ_obj2nid(attrib->object) == attr_nid)
+			return sk_ASN1_TYPE_value(attrib->set, 0);
 	}
 	return NULL;
 }
@@ -140,12 +138,18 @@ PKCS12_get_attr_gen(const STACK_OF(X509_ATTRIBUTE) *attrs, int attr_nid)
 char *
 PKCS12_get_friendlyname(PKCS12_SAFEBAG *bag)
 {
-	ASN1_TYPE *atype;
+	const ASN1_TYPE *atype;
 
-	if (!(atype = PKCS12_get_attr(bag, NID_friendlyName)))
+	if (!(atype = PKCS12_SAFEBAG_get0_attr(bag, NID_friendlyName)))
 		return NULL;
 	if (atype->type != V_ASN1_BMPSTRING)
 		return NULL;
 	return OPENSSL_uni2asc(atype->value.bmpstring->data,
 	    atype->value.bmpstring->length);
+}
+
+const STACK_OF(X509_ATTRIBUTE) *
+PKCS12_SAFEBAG_get0_attrs(const PKCS12_SAFEBAG *bag)
+{
+	return bag->attrib;
 }

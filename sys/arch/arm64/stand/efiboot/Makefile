@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.12 2020/02/29 11:58:57 otto Exp $
+#	$OpenBSD: Makefile,v 1.16 2022/07/30 21:06:54 patrick Exp $
 
 NOMAN=		#
 
@@ -9,7 +9,7 @@ OBJFMT=		binary
 INSTALL_STRIP=
 BINDIR=		/usr/mdec
 SRCS=		start.S self_reloc.c efiboot.c conf.c exec.c efiacpi.c
-SRCS+=		efidev.c efipxe.c efirng.c fdt.c dt_blob.S
+SRCS+=		efidev.c efipxe.c efirng.c fdt.c
 SRCS+=		softraid_arm64.c
 
 S=		${.CURDIR}/../../../..
@@ -19,6 +19,7 @@ OBJCOPY?=	objcopy
 OBJDUMP?=	objdump
 
 LDFLAGS+=-nostdlib -T ${.CURDIR}/ldscript.arm64 -Bsymbolic -shared
+LDFLAGS+=--pack-dyn-relocs=none
 
 .PATH:	${S}/stand/boot
 SRCS+=	boot.c cmd.c vars.c
@@ -47,7 +48,7 @@ CPPFLAGS+=	-I${S} -I. -I${.CURDIR}
 CPPFLAGS+=	-I${EFIDIR}/include -I${EFIDIR}/include/arm64
 CPPFLAGS+=	-D_STANDALONE
 CPPFLAGS+=	-DSMALL -DSLOW -DNOBYFOUR -D__INTERNAL_LIBSA_CREAD
-CPPFLAGS+=	-DNEEDS_HEAP_H -DFWRANDOM
+CPPFLAGS+=	-DNEEDS_HEAP_H -DMDRANDOM -DFWRANDOM
 COPTS+=		-Wno-attributes -Wno-format
 COPTS+=		-ffreestanding -fno-stack-protector
 COPTS+=		-fshort-wchar -fPIC -fno-builtin
@@ -84,6 +85,6 @@ NOPROG=yes
 .endif
 
 DTC=	dtc
-DTCOPTS= -p 4096 -H epapr
+DTCOPTS= -p 16384 -H epapr
 update-blob:
 	${DTC} ${DTCOPTS} -O asm -o ${.CURDIR}/dt_blob.S ${.CURDIR}/acpi.dts

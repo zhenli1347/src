@@ -1,4 +1,4 @@
-/*      $OpenBSD: auglx.c,v 1.17 2019/12/14 12:37:05 fcambus Exp $	*/
+/*      $OpenBSD: auglx.c,v 1.20 2022/03/21 19:22:40 miod Exp $	*/
 
 /*
  * Copyright (c) 2008 Marc Balmer <mbalmer@openbsd.org>
@@ -234,7 +234,7 @@ void auglx_free_prd(struct auglx_softc *sc, struct auglx_ring *bm);
 int auglx_allocmem(struct auglx_softc *, size_t, size_t, struct auglx_dma *);
 void auglx_freemem(struct auglx_softc *, struct auglx_dma *);
 
-struct audio_hw_if auglx_hw_if = {
+const struct audio_hw_if auglx_hw_if = {
 	auglx_open,
 	auglx_close,
 	auglx_set_params,
@@ -270,7 +270,7 @@ int	auglx_write_codec(void *, u_int8_t, u_int16_t);
 void	auglx_reset_codec(void *);
 enum ac97_host_flags	auglx_flags_codec(void *);
 
-struct cfattach auglx_ca = {
+const struct cfattach auglx_ca = {
 	sizeof(struct auglx_softc), auglx_match, auglx_attach, NULL,
 	auglx_activate
 };
@@ -334,7 +334,7 @@ auglx_attach(struct device *parent, struct device *self, void *aux)
 		bus_space_unmap(sc->sc_iot, sc->sc_ioh, bar_size);
 		return;
 	}
-	audio_attach_mi(&auglx_hw_if, sc, &sc->sc_dev);
+	audio_attach_mi(&auglx_hw_if, sc, NULL, &sc->sc_dev);
 }
 
 /* Functions to communicate with the AC97 Codec via the ACC */

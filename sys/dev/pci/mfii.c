@@ -1,4 +1,4 @@
-/* $OpenBSD: mfii.c,v 1.83 2020/12/15 03:05:31 dlg Exp $ */
+/* $OpenBSD: mfii.c,v 1.85 2022/04/16 19:19:59 naddy Exp $ */
 
 /*
  * Copyright (c) 2012 David Gwynne <dlg@openbsd.org>
@@ -363,7 +363,7 @@ void		mfii_attach(struct device *, struct device *, void *);
 int		mfii_detach(struct device *, int);
 int		mfii_activate(struct device *, int);
 
-struct cfattach mfii_ca = {
+const struct cfattach mfii_ca = {
 	sizeof(struct mfii_softc),
 	mfii_match,
 	mfii_attach,
@@ -382,14 +382,14 @@ void		mfii_scsi_cmd_done(struct mfii_softc *, struct mfii_ccb *);
 int		mfii_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
 int		mfii_ioctl_cache(struct scsi_link *, u_long, struct dk_cache *);
 
-struct scsi_adapter mfii_switch = {
+const struct scsi_adapter mfii_switch = {
 	mfii_scsi_cmd, NULL, NULL, NULL, mfii_scsi_ioctl
 };
 
 void		mfii_pd_scsi_cmd(struct scsi_xfer *);
 int		mfii_pd_scsi_probe(struct scsi_link *);
 
-struct scsi_adapter mfii_pd_switch = {
+const struct scsi_adapter mfii_pd_switch = {
 	mfii_pd_scsi_cmd, NULL, mfii_pd_scsi_probe, NULL, NULL,
 };
 

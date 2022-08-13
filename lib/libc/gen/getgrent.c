@@ -1,4 +1,4 @@
-/*	$OpenBSD: getgrent.c,v 1.48 2019/07/02 15:54:05 deraadt Exp $ */
+/*	$OpenBSD: getgrent.c,v 1.50 2022/08/02 17:00:15 deraadt Exp $ */
 /*
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -197,10 +197,6 @@ DEF_WEAK(getgrgid_r);
 static int
 start_gr(void)
 {
-#ifdef YP
-	int saved_errno = errno;
-#endif
-
 	if (_gr_fp) {
 		rewind(_gr_fp);
 #ifdef YP
@@ -213,15 +209,6 @@ start_gr(void)
 #endif
 		return(1);
 	}
-
-#ifdef YP
-	/*
-	 * Hint to the kernel that a passwd database operation is happening.
-	 */
-	saved_errno = errno;
-	(void)access("/var/run/ypbind.lock", R_OK);
-	errno = saved_errno;
-#endif
 
 	return((_gr_fp = fopen(_PATH_GROUP, "re")) ? 1 : 0);
 }
@@ -354,18 +341,8 @@ grscan(int search, gid_t gid, const char *name, struct group *p_gr,
 		}
 #ifdef YP
 		if (line[0] == '+' || line[0] == '-') {
-			if (__ypdomain == NULL &&
-			    yp_get_default_domain(&__ypdomain))
-				goto parse;
-			switch (yp_bind(__ypdomain)) {
-			case 0:
-				break;
-			case YPERR_BADARGS:
-			case YPERR_YPBIND:
-				goto parse;
-			default:
-				return 0;
-			}
+			if (!__ypdomain)
+				yp_get_default_domain(&__ypdomain);
 		}
 		if (line[0] == '+') {
 			switch (line[1]) {

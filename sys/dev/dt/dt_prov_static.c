@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_prov_static.c,v 1.10 2021/09/03 16:45:45 jasper Exp $ */
+/*	$OpenBSD: dt_prov_static.c,v 1.14 2022/06/28 09:32:27 bluhm Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -69,16 +69,35 @@ DT_STATIC_PROBE3(vfs, bufcache_rel, "long", "int", "int64_t");
 DT_STATIC_PROBE3(vfs, bufcache_take, "long", "int", "int64_t");
 DT_STATIC_PROBE4(vfs, cleaner, "long", "int", "long", "long");
 
+#ifdef __amd64__
 /*
  * VMM
  */
 DT_STATIC_PROBE2(vmm, guest_enter, "void *", "void *");
 DT_STATIC_PROBE3(vmm, guest_exit, "void *", "void *", "uint64_t");
+#endif /* __amd64__ */
+
+/*
+ * SMR
+ */
+DT_STATIC_PROBE3(smr, call, "void *", "void *", "int");
+DT_STATIC_PROBE2(smr, called, "void *", "void *");
+DT_STATIC_PROBE1(smr, barrier_enter, "int");
+DT_STATIC_PROBE1(smr, barrier_exit, "int");
+DT_STATIC_PROBE0(smr, wakeup);
+DT_STATIC_PROBE2(smr, thread, "uint64_t", "uint64_t");
+
+/*
+ * reference counting
+ */
+DT_STATIC_PROBE0(refcnt, none);
+DT_STATIC_PROBE3(refcnt, inpcb, "void *", "int", "int");
+DT_STATIC_PROBE3(refcnt, tdb, "void *", "int", "int");
 
 /*
  * List of all static probes
  */
-struct dt_probe *dtps_static[] = {
+struct dt_probe *const dtps_static[] = {
 	/* Scheduler */
 	&_DT_STATIC_P(sched, dequeue),
 	&_DT_STATIC_P(sched, enqueue),
@@ -102,18 +121,36 @@ struct dt_probe *dtps_static[] = {
 	&_DT_STATIC_P(vfs, bufcache_rel),
 	&_DT_STATIC_P(vfs, bufcache_take),
 	&_DT_STATIC_P(vfs, cleaner),
+#ifdef __amd64__
 	/* VMM */
 	&_DT_STATIC_P(vmm, guest_enter),
 	&_DT_STATIC_P(vmm, guest_exit),
+#endif /* __amd64__ */
+	/* SMR */
+	&_DT_STATIC_P(smr, call),
+	&_DT_STATIC_P(smr, called),
+	&_DT_STATIC_P(smr, barrier_enter),
+	&_DT_STATIC_P(smr, barrier_exit),
+	&_DT_STATIC_P(smr, wakeup),
+	&_DT_STATIC_P(smr, thread),
+	/* refcnt */
+	&_DT_STATIC_P(refcnt, none),
+	&_DT_STATIC_P(refcnt, inpcb),
+	&_DT_STATIC_P(refcnt, tdb),
 };
+
+struct dt_probe *const *dtps_index_refcnt;
 
 int
 dt_prov_static_init(void)
 {
 	int i;
 
-	for (i = 0; i < nitems(dtps_static); i++)
+	for (i = 0; i < nitems(dtps_static); i++) {
+		if (dtps_static[i] == &_DT_STATIC_P(refcnt, none))
+			dtps_index_refcnt = &dtps_static[i];
 		dt_dev_register_probe(dtps_static[i]);
+	}
 
 	return i;
 }

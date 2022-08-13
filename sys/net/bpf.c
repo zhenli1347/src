@@ -1,4 +1,4 @@
-/*	$OpenBSD: bpf.c,v 1.205 2021/06/15 05:24:47 dlg Exp $	*/
+/*	$OpenBSD: bpf.c,v 1.219 2022/07/09 12:48:21 visa Exp $	*/
 /*	$NetBSD: bpf.c,v 1.33 1997/02/21 23:59:35 thorpej Exp $	*/
 
 /*
@@ -50,14 +50,15 @@
 #include <sys/vnode.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
-#include <sys/poll.h>
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/rwlock.h>
 #include <sys/atomic.h>
+#include <sys/event.h>
+#include <sys/mutex.h>
+#include <sys/refcnt.h>
 #include <sys/smr.h>
 #include <sys/specdev.h>
-#include <sys/selinfo.h>
 #include <sys/sigio.h>
 #include <sys/task.h>
 #include <sys/time.h>
@@ -97,7 +98,6 @@ void	bpf_mcopy(const void *, void *, size_t);
 int	bpf_movein(struct uio *, struct bpf_d *, struct mbuf **,
 	    struct sockaddr *);
 int	bpf_setif(struct bpf_d *, struct ifreq *);
-int	bpfpoll(dev_t, int, struct proc *);
 int	bpfkqfilter(dev_t, struct knote *);
 void	bpf_wakeup(struct bpf_d *);
 void	bpf_wakeup_cb(void *);
@@ -109,6 +109,8 @@ int	bpf_setdlt(struct bpf_d *, u_int);
 
 void	filt_bpfrdetach(struct knote *);
 int	filt_bpfread(struct knote *, long);
+int	filt_bpfreadmodify(struct kevent *, struct knote *);
+int	filt_bpfreadprocess(struct knote *, struct kevent *);
 
 int	bpf_sysctl_locked(int *, u_int, void *, size_t *, void *, size_t);
 
@@ -142,7 +144,7 @@ bpf_movein(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
 	struct mbuf *m;
 	struct m_tag *mtag;
 	int error;
-	u_int hlen;
+	u_int hlen, alen, mlen;
 	u_int len;
 	u_int linktype;
 	u_int slen;
@@ -197,22 +199,38 @@ bpf_movein(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
 	}
 
 	if (uio->uio_resid > MAXMCLBYTES)
-		return (EIO);
+		return (EMSGSIZE);
 	len = uio->uio_resid;
+	if (len < hlen)
+		return (EINVAL);
+
+	/*
+	 * Get the length of the payload so we can align it properly.
+	 */
+	alen = len - hlen;
+
+	/*
+	 * Allocate enough space for headers and the aligned payload.
+	 */
+	mlen = max(max_linkhdr, hlen) + roundup(alen, sizeof(long));
+	if (mlen > MAXMCLBYTES)
+		return (EMSGSIZE);
 
 	MGETHDR(m, M_WAIT, MT_DATA);
-	m->m_pkthdr.ph_ifidx = 0;
-	m->m_pkthdr.len = len - hlen;
-
-	if (len > MHLEN) {
-		MCLGETL(m, M_WAIT, len);
+	if (mlen > MHLEN) {
+		MCLGETL(m, M_WAIT, mlen);
 		if ((m->m_flags & M_EXT) == 0) {
 			error = ENOBUFS;
 			goto bad;
 		}
 	}
+
+	m_align(m, alen); /* Align the payload. */
+	m->m_data -= hlen;
+
+	m->m_pkthdr.ph_ifidx = 0;
+	m->m_pkthdr.len = len;
 	m->m_len = len;
-	*mp = m;
 
 	error = uiomove(mtod(m, caddr_t), len, uio);
 	if (error)
@@ -230,10 +248,6 @@ bpf_movein(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
 		goto bad;
 	}
 
-	if (m->m_len < hlen) {
-		error = EPERM;
-		goto bad;
-	}
 	/*
 	 * Make room for link header, and copy it to sockaddr
 	 */
@@ -247,8 +261,10 @@ bpf_movein(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
 			sockp->sa_family = ntohl(af);
 		} else
 			memcpy(sockp->sa_data, m->m_data, hlen);
+
+		m->m_pkthdr.len -= hlen;
 		m->m_len -= hlen;
-		m->m_data += hlen; /* XXX */
+		m->m_data += hlen;
 	}
 
 	/*
@@ -258,6 +274,7 @@ bpf_movein(struct uio *uio, struct bpf_d *d, struct mbuf **mp,
 	*(u_int *)(mtag + 1) = linktype;
 	m_tag_prepend(m, mtag);
 
+	*mp = m;
 	return (0);
  bad:
 	m_freem(m);
@@ -377,10 +394,11 @@ bpfopen(dev_t dev, int flag, int mode, struct proc *p)
 	task_set(&bd->bd_wake_task, bpf_wakeup_cb, bd);
 	smr_init(&bd->bd_smr);
 	sigio_init(&bd->bd_sigio);
+	klist_init_mutex(&bd->bd_klist, &bd->bd_mtx);
 
 	bd->bd_rtout = 0;	/* no timeout by default */
 
-	bpf_get(bd);
+	refcnt_init(&bd->bd_refcnt);
 	LIST_INSERT_HEAD(&bpf_d_list, bd, bd_list);
 
 	return (0);
@@ -568,13 +586,14 @@ bpf_wakeup(struct bpf_d *d)
 	if (d->bd_nreaders)
 		wakeup(d);
 
+	KNOTE(&d->bd_klist, 0);
+
 	/*
-	 * As long as pgsigio() and selwakeup() need to be protected
+	 * As long as pgsigio() needs to be protected
 	 * by the KERNEL_LOCK() we have to delay the wakeup to
 	 * another context to keep the hot path KERNEL_LOCK()-free.
 	 */
-	if ((d->bd_async && d->bd_sig) ||
-	    (!klist_empty(&d->bd_sel.si_note) || d->bd_sel.si_seltid != 0)) {
+	if (d->bd_async && d->bd_sig) {
 		bpf_get(d);
 		if (!task_add(systq, &d->bd_wake_task))
 			bpf_put(d);
@@ -589,7 +608,6 @@ bpf_wakeup_cb(void *xd)
 	if (d->bd_async && d->bd_sig)
 		pgsigio(&d->bd_sigio, d->bd_sig, 0);
 
-	selwakeup(&d->bd_sel);
 	bpf_put(d);
 }
 
@@ -800,7 +818,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 			 * No interface attached yet.
 			 */
 			error = EINVAL;
-		} else if (d->bd_bif->bif_ifp != NULL) { 
+		} else if (d->bd_bif->bif_ifp != NULL) {
 			if (d->bd_promisc == 0) {
 				MUTEX_ASSERT_UNLOCKED(&d->bd_mtx);
 				NET_LOCK();
@@ -1121,51 +1139,13 @@ bpf_ifname(struct bpf_if *bif, struct ifreq *ifr)
 	bcopy(bif->bif_name, ifr->ifr_name, sizeof(ifr->ifr_name));
 }
 
-/*
- * Support for poll() system call
- */
-int
-bpfpoll(dev_t dev, int events, struct proc *p)
-{
-	struct bpf_d *d;
-	int revents;
-
-	KERNEL_ASSERT_LOCKED();
-
-	/*
-	 * An imitation of the FIONREAD ioctl code.
-	 */
-	d = bpfilter_lookup(minor(dev));
-
-	/*
-	 * XXX The USB stack manages it to trigger some race condition
-	 * which causes bpfilter_lookup to return NULL when a USB device
-	 * gets detached while it is up and has an open bpf handler (e.g.
-	 * dhclient).  We still should recheck if we can fix the root
-	 * cause of this issue.
-	 */
-	if (d == NULL)
-		return (POLLERR);
-
-	/* Always ready to write data */
-	revents = events & (POLLOUT | POLLWRNORM);
-
-	if (events & (POLLIN | POLLRDNORM)) {
-		mtx_enter(&d->bd_mtx);
-		if (d->bd_hlen != 0 || (d->bd_immediate && d->bd_slen != 0))
-			revents |= events & (POLLIN | POLLRDNORM);
-		else
-			selrecord(p, &d->bd_sel);
-		mtx_leave(&d->bd_mtx);
-	}
-	return (revents);
-}
-
 const struct filterops bpfread_filtops = {
-	.f_flags	= FILTEROP_ISFD,
+	.f_flags	= FILTEROP_ISFD | FILTEROP_MPSAFE,
 	.f_attach	= NULL,
 	.f_detach	= filt_bpfrdetach,
 	.f_event	= filt_bpfread,
+	.f_modify	= filt_bpfreadmodify,
+	.f_process	= filt_bpfreadprocess,
 };
 
 int
@@ -1177,10 +1157,12 @@ bpfkqfilter(dev_t dev, struct knote *kn)
 	KERNEL_ASSERT_LOCKED();
 
 	d = bpfilter_lookup(minor(dev));
+	if (d == NULL)
+		return (ENXIO);
 
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
-		klist = &d->bd_sel.si_note;
+		klist = &d->bd_klist;
 		kn->kn_fop = &bpfread_filtops;
 		break;
 	default:
@@ -1189,7 +1171,7 @@ bpfkqfilter(dev_t dev, struct knote *kn)
 
 	bpf_get(d);
 	kn->kn_hook = d;
-	klist_insert_locked(klist, kn);
+	klist_insert(klist, kn);
 
 	return (0);
 }
@@ -1199,9 +1181,7 @@ filt_bpfrdetach(struct knote *kn)
 {
 	struct bpf_d *d = kn->kn_hook;
 
-	KERNEL_ASSERT_LOCKED();
-
-	klist_remove_locked(&d->bd_sel.si_note, kn);
+	klist_remove(&d->bd_klist, kn);
 	bpf_put(d);
 }
 
@@ -1210,15 +1190,39 @@ filt_bpfread(struct knote *kn, long hint)
 {
 	struct bpf_d *d = kn->kn_hook;
 
-	KERNEL_ASSERT_LOCKED();
+	MUTEX_ASSERT_LOCKED(&d->bd_mtx);
 
-	mtx_enter(&d->bd_mtx);
 	kn->kn_data = d->bd_hlen;
 	if (d->bd_immediate)
 		kn->kn_data += d->bd_slen;
-	mtx_leave(&d->bd_mtx);
 
 	return (kn->kn_data > 0);
+}
+
+int
+filt_bpfreadmodify(struct kevent *kev, struct knote *kn)
+{
+	struct bpf_d *d = kn->kn_hook;
+	int active;
+
+	mtx_enter(&d->bd_mtx);
+	active = knote_modify_fn(kev, kn, filt_bpfread);
+	mtx_leave(&d->bd_mtx);
+
+	return (active);
+}
+
+int
+filt_bpfreadprocess(struct knote *kn, struct kevent *kev)
+{
+	struct bpf_d *d = kn->kn_hook;
+	int active;
+
+	mtx_enter(&d->bd_mtx);
+	active = knote_process_fn(kn, kev, filt_bpfread);
+	mtx_leave(&d->bd_mtx);
+
+	return (active);
 }
 
 /*
@@ -1387,7 +1391,7 @@ bpf_mtap_hdr(caddr_t arg, const void *data, u_int dlen, const struct mbuf *m,
 		mh.mh_len = dlen;
 		mh.mh_data = (void *)data;
 		m0 = (struct mbuf *)&mh;
-	} else 
+	} else
 		m0 = m;
 
 	return _bpf_mtap(arg, m, m0, direction);
@@ -1553,6 +1557,7 @@ bpf_allocbufs(struct bpf_d *d)
 	d->bd_sbuf = malloc(d->bd_bufsize, M_DEVBUF, M_NOWAIT);
 	if (d->bd_sbuf == NULL) {
 		free(d->bd_fbuf, M_DEVBUF, d->bd_bufsize);
+		d->bd_fbuf = NULL;
 		return (ENOMEM);
 	}
 
@@ -1587,13 +1592,14 @@ bpf_d_smr(void *smr)
 	if (bd->bd_wfilter != NULL)
 		bpf_prog_smr(bd->bd_wfilter);
 
+	klist_free(&bd->bd_klist);
 	free(bd, M_DEVBUF, sizeof(*bd));
 }
 
 void
 bpf_get(struct bpf_d *bd)
 {
-	atomic_inc_int(&bd->bd_ref);
+	refcnt_take(&bd->bd_refcnt);
 }
 
 /*
@@ -1603,7 +1609,7 @@ bpf_get(struct bpf_d *bd)
 void
 bpf_put(struct bpf_d *bd)
 {
-	if (atomic_dec_int_nv(&bd->bd_ref) > 0)
+	if (refcnt_rele(&bd->bd_refcnt) == 0)
 		return;
 
 	smr_call(&bd->bd_smr, bpf_d_smr, bd);
@@ -1679,7 +1685,7 @@ bpfsdetach(void *p)
 
 	while ((bd = SMR_SLIST_FIRST_LOCKED(&bp->bif_dlist))) {
 		vdevgone(maj, bd->bd_unit, bd->bd_unit, VCHR);
-		klist_invalidate(&bd->bd_sel.si_note);
+		klist_invalidate(&bd->bd_klist);
 	}
 
 	for (tbp = bpf_iflist; tbp; tbp = tbp->bif_next) {
@@ -1834,7 +1840,7 @@ bpf_mbuf_copy(const struct mbuf *m, u_int32_t off, void *buf, u_int32_t len)
 
 	for (;;) {
 		count = min(m->m_len - off, len);
-		
+
 		memcpy(cp, m->m_data + off, count);
 		len -= count;
 

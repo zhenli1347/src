@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: PackingElement.pm,v 1.278 2021/08/09 16:41:21 espie Exp $
+# $OpenBSD: PackingElement.pm,v 1.283 2022/06/28 08:15:43 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -864,6 +864,8 @@ sub new
 		return OpenBSD::PackingElement::ManualInstallation->new;
 	} elsif ($args eq 'firmware') {
 		return OpenBSD::PackingElement::Firmware->new;
+	} elsif ($args =~ m/always-update\s+(\S+)/) {
+		return OpenBSD::PackingElement::AlwaysUpdate->new_with_hash($1);
 	} elsif ($args eq 'always-update') {
 		return OpenBSD::PackingElement::AlwaysUpdate->new;
 	} elsif ($args eq 'is-branch') {
@@ -913,6 +915,34 @@ our @ISA=qw(OpenBSD::PackingElement::UniqueOption);
 sub category()
 {
 	'always-update';
+}
+
+sub stringize
+{
+	my $self = shift;
+	my @l = ($self->category);
+	if (defined $self->{hash}) {
+		push(@l, $self->{hash});
+	}
+	return join(' ', @l);
+}
+
+sub hash_plist
+{
+	my ($self, $plist) = @_;
+	delete $self->{hash};
+	my $content;
+	open my $fh, '>', \$content;
+	$plist->write_without_variation($fh);
+	close $fh;
+	my $digest = Digest::SHA::sha256_base64($content);
+	$self->{hash} = $digest;
+}
+
+sub new_with_hash
+{
+	my ($class, $hash) = @_;
+	bless { hash => $hash}, $class;
 }
 
 package OpenBSD::PackingElement::IsBranch;
@@ -1673,7 +1703,8 @@ sub install
 {
 	my ($self, $state) = @_;
 	$self->SUPER::install($state);
-	$state->log("You may wish to update your font path for #1", $self->fullname);
+	$state->log("You may wish to update your font path for #1", $self->fullname)
+		unless $self->fullname =~ /^\/usr\/local\/share\/fonts/;
 	$state->{recorder}{fonts_todo}{$state->{destdir}.$self->fullname} = 1;
 }
 
@@ -1785,6 +1816,13 @@ sub destate
 {
 	&OpenBSD::PackingElement::Extra::destate;
 }
+
+package OpenBSD::PackingElement::ExtraGlob;
+our @ISA=qw(OpenBSD::PackingElement::FileObject);
+
+sub keyword() { 'extraglob' }
+sub absolute_okay() { 1 }
+__PACKAGE__->register_with_factory;
 
 package OpenBSD::PackingElement::SpecialFile;
 our @ISA=qw(OpenBSD::PackingElement::Unique);
@@ -2118,9 +2156,19 @@ sub new
 {
 	my ($class, $fullpkgpath) = @_;
 	my ($dir, @mandatory) = split(/\,/, $fullpkgpath);
-	return bless {dir => $dir,
+	my $o = 
+	    bless {dir => $dir,
 		mandatory => {map {($_, 1)} @mandatory},
-	}, $class;
+	    }, $class;
+	my @sub = grep {/^\-/} @mandatory;
+	if (@sub > 1) {
+		print STDERR "Invalid $fullpkgpath (multiple subpackages)\n";
+		exit 1;
+	}
+	if (@sub == 1) {
+		$o->{subpackage} = shift @sub;
+	}
+	return $o;
 }
 
 sub fullpkgpath

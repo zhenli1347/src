@@ -1,4 +1,4 @@
-/* $OpenBSD: input.c,v 1.192 2021/08/14 16:26:29 nicm Exp $ */
+/* $OpenBSD: input.c,v 1.207 2022/08/02 11:09:26 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -135,12 +135,15 @@ static void	input_set_state(struct input_ctx *,
 static void	input_reset_cell(struct input_ctx *);
 
 static void	input_osc_4(struct input_ctx *, const char *);
+static void	input_osc_8(struct input_ctx *, const char *);
 static void	input_osc_10(struct input_ctx *, const char *);
 static void	input_osc_11(struct input_ctx *, const char *);
+static void	input_osc_12(struct input_ctx *, const char *);
 static void	input_osc_52(struct input_ctx *, const char *);
 static void	input_osc_104(struct input_ctx *, const char *);
 static void	input_osc_110(struct input_ctx *, const char *);
 static void	input_osc_111(struct input_ctx *, const char *);
+static void	input_osc_112(struct input_ctx *, const char *);
 
 /* Transition entry/exit handlers. */
 static void	input_clear(struct input_ctx *);
@@ -1076,6 +1079,9 @@ input_reply(struct input_ctx *ictx, const char *fmt, ...)
 	va_list			 ap;
 	char			*reply;
 
+	if (bev == NULL)
+		return;
+
 	va_start(ap, fmt);
 	xvasprintf(&reply, fmt, ap);
 	va_end(ap);
@@ -1617,7 +1623,7 @@ input_csi_dispatch(struct input_ctx *ictx)
 	case INPUT_CSI_DECSCUSR:
 		n = input_get(ictx, 0, 0, 0);
 		if (n != -1)
-			screen_set_cursor_style(s, n);
+			screen_set_cursor_style(n, &s->cstyle, &s->mode);
 		break;
 	case INPUT_CSI_XDA:
 		n = input_get(ictx, 0, 0, 0);
@@ -1646,7 +1652,7 @@ input_csi_dispatch_rm(struct input_ctx *ictx)
 			screen_write_mode_clear(sctx, MODE_INSERT);
 			break;
 		case 34:
-			screen_write_mode_set(sctx, MODE_BLINKING);
+			screen_write_mode_set(sctx, MODE_CURSOR_VERY_VISIBLE);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);
@@ -1682,7 +1688,8 @@ input_csi_dispatch_rm_private(struct input_ctx *ictx)
 			screen_write_mode_clear(sctx, MODE_WRAP);
 			break;
 		case 12:
-			screen_write_mode_clear(sctx, MODE_BLINKING);
+			screen_write_mode_clear(sctx, MODE_CURSOR_BLINKING);
+			screen_write_mode_set(sctx, MODE_CURSOR_BLINKING_SET);
 			break;
 		case 25:	/* TCEM */
 			screen_write_mode_clear(sctx, MODE_CURSOR);
@@ -1734,7 +1741,7 @@ input_csi_dispatch_sm(struct input_ctx *ictx)
 			screen_write_mode_set(sctx, MODE_INSERT);
 			break;
 		case 34:
-			screen_write_mode_clear(sctx, MODE_BLINKING);
+			screen_write_mode_clear(sctx, MODE_CURSOR_VERY_VISIBLE);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);
@@ -1771,7 +1778,8 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 			screen_write_mode_set(sctx, MODE_WRAP);
 			break;
 		case 12:
-			screen_write_mode_set(sctx, MODE_BLINKING);
+			screen_write_mode_set(sctx, MODE_CURSOR_BLINKING);
+			screen_write_mode_set(sctx, MODE_CURSOR_BLINKING_SET);
 			break;
 		case 25:	/* TCEM */
 			screen_write_mode_set(sctx, MODE_CURSOR);
@@ -1793,6 +1801,8 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 				break;
 			screen_write_mode_set(sctx, MODE_FOCUSON);
 			if (wp == NULL)
+				break;
+			if (!options_get_number(global_options, "focus-events"))
 				break;
 			if (wp->flags & PANE_FOCUSED)
 				bufferevent_write(wp->event, "\033[I", 3);
@@ -2231,19 +2241,28 @@ input_enter_dcs(struct input_ctx *ictx)
 static int
 input_dcs_dispatch(struct input_ctx *ictx)
 {
+	struct window_pane	*wp = ictx->wp;
+	struct options		*oo = wp->options;
 	struct screen_write_ctx	*sctx = &ictx->ctx;
 	u_char			*buf = ictx->input_buf;
 	size_t			 len = ictx->input_len;
 	const char		 prefix[] = "tmux;";
 	const u_int		 prefixlen = (sizeof prefix) - 1;
+	long long		 allow_passthrough = 0;
 
+	if (wp == NULL)
+		return (0);
 	if (ictx->flags & INPUT_DISCARD)
 		return (0);
-
+	allow_passthrough = options_get_number(oo, "allow-passthrough");
+	if (!allow_passthrough)
+		return (0);
 	log_debug("%s: \"%s\"", __func__, buf);
 
-	if (len >= prefixlen && strncmp(buf, prefix, prefixlen) == 0)
-		screen_write_rawstring(sctx, buf + prefixlen, len - prefixlen);
+	if (len >= prefixlen && strncmp(buf, prefix, prefixlen) == 0) {
+		screen_write_rawstring(sctx, buf + prefixlen, len - prefixlen,
+		    allow_passthrough == 2);
+	}
 
 	return (0);
 }
@@ -2279,6 +2298,8 @@ input_exit_osc(struct input_ctx *ictx)
 	option = 0;
 	while (*p >= '0' && *p <= '9')
 		option = option * 10 + *p++ - '0';
+	if (*p != ';' && *p != '\0')
+		return;
 	if (*p == ';')
 		p++;
 
@@ -2303,6 +2324,9 @@ input_exit_osc(struct input_ctx *ictx)
 			}
 		}
 		break;
+	case 8:
+		input_osc_8(ictx, p);
+		break;
 	case 10:
 		input_osc_10(ictx, p);
 		break;
@@ -2310,8 +2334,7 @@ input_exit_osc(struct input_ctx *ictx)
 		input_osc_11(ictx, p);
 		break;
 	case 12:
-		if (utf8_isvalid(p) && *p != '?') /* ? is colour request */
-			screen_set_cursor_colour(sctx->s, p);
+		input_osc_12(ictx, p);
 		break;
 	case 52:
 		input_osc_52(ictx, p);
@@ -2326,8 +2349,7 @@ input_exit_osc(struct input_ctx *ictx)
 		input_osc_111(ictx, p);
 		break;
 	case 112:
-		if (*p == '\0') /* no arguments allowed */
-			screen_set_cursor_colour(sctx->s, "");
+		input_osc_112(ictx, p);
 		break;
 	default:
 		log_debug("%s: unknown '%u'", __func__, option);
@@ -2380,6 +2402,7 @@ static void
 input_exit_rename(struct input_ctx *ictx)
 {
 	struct window_pane	*wp = ictx->wp;
+	struct window		*w;
 	struct options_entry	*o;
 
 	if (wp == NULL)
@@ -2392,17 +2415,20 @@ input_exit_rename(struct input_ctx *ictx)
 
 	if (!utf8_isvalid(ictx->input_buf))
 		return;
+	w = wp->window;
 
 	if (ictx->input_len == 0) {
-		o = options_get_only(wp->window->options, "automatic-rename");
+		o = options_get_only(w->options, "automatic-rename");
 		if (o != NULL)
 			options_remove_or_default(o, -1, NULL);
-		return;
+		if (!options_get_number(w->options, "automatic-rename"))
+			window_set_name(w, "");
+	} else {
+		options_set_number(w->options, "automatic-rename", 0);
+		window_set_name(w, ictx->input_buf);
 	}
-	window_set_name(wp->window, ictx->input_buf);
-	options_set_number(wp->window->options, "automatic-rename", 0);
-	server_redraw_window_borders(wp->window);
-	server_status_window(wp->window);
+	server_redraw_window_borders(w);
+	server_status_window(w);
 }
 
 /* Open UTF-8 character. */
@@ -2489,7 +2515,9 @@ input_osc_colour_reply(struct input_ctx *ictx, u_int n, int c)
     u_char	 r, g, b;
     const char	*end;
 
-    if (c == 8 || (~c & COLOUR_FLAG_RGB))
+    if (c != -1)
+	    c = colour_force_rgb(c);
+    if (c == -1)
 	    return;
     colour_split_rgb(c, &r, &g, &b);
 
@@ -2497,7 +2525,8 @@ input_osc_colour_reply(struct input_ctx *ictx, u_int n, int c)
 	    end = "\007";
     else
 	    end = "\033\\";
-    input_reply(ictx, "\033]%u;rgb:%02hhx/%02hhx/%02hhx%s", n, r, g, b, end);
+    input_reply(ictx, "\033]%u;rgb:%02hhx%02hhx/%02hhx%02hhx/%02hhx%02hhx%s",
+	n, r, r, g, g, b, b, end);
 }
 
 /* Handle the OSC 4 sequence for setting (multiple) palette entries. */
@@ -2521,6 +2550,12 @@ input_osc_4(struct input_ctx *ictx, const char *p)
 		}
 
 		s = strsep(&next, ";");
+		if (strcmp(s, "?") == 0) {
+			c = colour_palette_get(ictx->palette, idx);
+			if (c != -1)
+				input_osc_colour_reply(ictx, 4, c);
+			continue;
+		}
 		if ((c = input_osc_parse_colour(s)) == -1) {
 			s = next;
 			continue;
@@ -2534,6 +2569,47 @@ input_osc_4(struct input_ctx *ictx, const char *p)
 	if (redraw)
 		screen_write_fullredraw(&ictx->ctx);
 	free(copy);
+}
+
+/* Handle the OSC 8 sequence for embedding hyperlinks. */
+static void
+input_osc_8(struct input_ctx *ictx, const char *p)
+{
+	struct hyperlinks	*hl = ictx->ctx.s->hyperlinks;
+	struct grid_cell	*gc = &ictx->cell.cell;
+	const char		*start, *end, *uri;
+	char	    		*id = NULL;
+
+	for (start = p; (end = strpbrk(start, ":;")) != NULL; start = end + 1) {
+		if (end - start >= 4 && strncmp(start, "id=", 3) == 0) {
+			if (id != NULL)
+				goto bad;
+			id = xstrndup(start + 3, end - start - 3);
+		}
+
+		/* The first ; is the end of parameters and start of the URI. */
+		if (*end == ';')
+			break;
+	}
+	if (end == NULL || *end != ';')
+		goto bad;
+	uri = end + 1;
+	if (*uri == '\0') {
+		gc->link = 0;
+		free(id);
+		return;
+	}
+	gc->link = hyperlinks_put(hl, uri, id);
+	if (id == NULL)
+		log_debug("hyperlink (anonymous) %s = %u", uri, gc->link);
+	else
+		log_debug("hyperlink (id=%s) %s = %u", id, uri, gc->link);
+	free(id);
+	return;
+
+bad:
+	log_debug("bad OSC 8 %s", p);
+	free(id);
 }
 
 /* Handle the OSC 10 sequence for setting and querying foreground colour. */
@@ -2564,7 +2640,7 @@ input_osc_10(struct input_ctx *ictx, const char *p)
 	}
 }
 
-/* Handle the OSC 110 sequence for resetting background colour. */
+/* Handle the OSC 110 sequence for resetting foreground colour. */
 static void
 input_osc_110(struct input_ctx *ictx, const char *p)
 {
@@ -2624,18 +2700,54 @@ input_osc_111(struct input_ctx *ictx, const char *p)
 	}
 }
 
+/* Handle the OSC 12 sequence for setting and querying cursor colour. */
+static void
+input_osc_12(struct input_ctx *ictx, const char *p)
+{
+	struct window_pane	*wp = ictx->wp;
+	int			 c;
+
+	if (strcmp(p, "?") == 0) {
+		if (wp != NULL) {
+			c = ictx->ctx.s->ccolour;
+			if (c == -1)
+				c = ictx->ctx.s->default_ccolour;
+			input_osc_colour_reply(ictx, 12, c);
+		}
+		return;
+	}
+
+	if ((c = input_osc_parse_colour(p)) == -1) {
+		log_debug("bad OSC 12: %s", p);
+		return;
+	}
+	screen_set_cursor_colour(ictx->ctx.s, c);
+}
+
+/* Handle the OSC 112 sequence for resetting cursor colour. */
+static void
+input_osc_112(struct input_ctx *ictx, const char *p)
+{
+	if (*p == '\0') /* no arguments allowed */
+		screen_set_cursor_colour(ictx->ctx.s, -1);
+}
+
+
 /* Handle the OSC 52 sequence for setting the clipboard. */
 static void
 input_osc_52(struct input_ctx *ictx, const char *p)
 {
 	struct window_pane	*wp = ictx->wp;
 	char			*end;
-	const char		*buf;
-	size_t			 len;
+	const char		*buf = NULL;
+	size_t			 len = 0;
 	u_char			*out;
 	int			 outlen, state;
 	struct screen_write_ctx	 ctx;
 	struct paste_buffer	*pb;
+	const char*              allow = "cpqs01234567";
+	char                     flags[sizeof "cpqs01234567"] = "";
+	u_int			 i, j = 0;
 
 	if (wp == NULL)
 		return;
@@ -2650,27 +2762,19 @@ input_osc_52(struct input_ctx *ictx, const char *p)
 		return;
 	log_debug("%s: %s", __func__, end);
 
+	for (i = 0; p + i != end; i++) {
+		if (strchr(allow, p[i]) != NULL && strchr(flags, p[i]) == NULL)
+			flags[j++] = p[i];
+	}
+	log_debug("%s: %.*s %s", __func__, (int)(end - p - 1), p, flags);
+
 	if (strcmp(end, "?") == 0) {
-		if ((pb = paste_get_top(NULL)) != NULL) {
+		if ((pb = paste_get_top(NULL)) != NULL)
 			buf = paste_buffer_data(pb, &len);
-			outlen = 4 * ((len + 2) / 3) + 1;
-			out = xmalloc(outlen);
-			if ((outlen = b64_ntop(buf, len, out, outlen)) == -1) {
-				free(out);
-				return;
-			}
-		} else {
-			outlen = 0;
-			out = NULL;
-		}
-		bufferevent_write(ictx->event, "\033]52;;", 6);
-		if (outlen != 0)
-			bufferevent_write(ictx->event, out, outlen);
 		if (ictx->input_end == INPUT_END_BEL)
-			bufferevent_write(ictx->event, "\007", 1);
+			input_reply_clipboard(ictx->event, buf, len, "\007");
 		else
-			bufferevent_write(ictx->event, "\033\\", 2);
-		free(out);
+			input_reply_clipboard(ictx->event, buf, len, "\033\\");
 		return;
 	}
 
@@ -2685,7 +2789,7 @@ input_osc_52(struct input_ctx *ictx, const char *p)
 	}
 
 	screen_write_start_pane(&ctx, wp, NULL);
-	screen_write_setselection(&ctx, out, outlen);
+	screen_write_setselection(&ctx, flags, out, outlen);
 	screen_write_stop(&ctx);
 	notify_pane("pane-set-clipboard", wp);
 
@@ -2727,4 +2831,27 @@ input_osc_104(struct input_ctx *ictx, const char *p)
 	if (redraw)
 		screen_write_fullredraw(&ictx->ctx);
 	free(copy);
+}
+
+void
+input_reply_clipboard(struct bufferevent *bev, const char *buf, size_t len,
+    const char *end)
+{
+	char	*out = NULL;
+	size_t	 outlen = 0;
+
+	if (buf != NULL && len != 0) {
+		outlen = 4 * ((len + 2) / 3) + 1;
+		out = xmalloc(outlen);
+		if ((outlen = b64_ntop(buf, len, out, outlen)) == -1) {
+			free(out);
+			return;
+		}
+	}
+
+	bufferevent_write(bev, "\033]52;;", 6);
+	if (outlen != 0)
+		bufferevent_write(bev, out, outlen);
+	bufferevent_write(bev, end, strlen(end));
+	free(out);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwgpio.c,v 1.3 2021/05/16 08:50:59 jsg Exp $	*/
+/*	$OpenBSD: dwgpio.c,v 1.7 2022/04/06 18:59:27 naddy Exp $	*/
 /*
  * Copyright (c) 2020 Mark Kettenis
  *
@@ -74,7 +74,7 @@ struct dwgpio_softc {
 int	dwgpio_match(struct device *, void *, void *);
 void	dwgpio_attach(struct device *, struct device *, void *);
 
-struct cfattach dwgpio_ca = {
+const struct cfattach dwgpio_ca = {
 	sizeof(struct dwgpio_softc), dwgpio_match, dwgpio_attach
 };
 
@@ -100,6 +100,8 @@ dwgpio_match(struct device *parent, void *match, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct cfdata *cf = match;
 
+	if (aaa->aaa_naddr < 1 || aaa->aaa_nirq < 1)
+		return 0;
 	return acpi_matchhids(aaa, dwgpio_hids, cf->cf_driver->cd_name);
 }
 
@@ -113,16 +115,6 @@ dwgpio_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_node = aaa->aaa_node;
 	printf(" %s", sc->sc_node->name);
-
-	if (aaa->aaa_naddr < 1) {
-		printf(": no registers\n");
-		return;
-	}
-
-	if (aaa->aaa_nirq < 1) {
-		printf(": no interrupt\n");
-		return;
-	}
 
 	printf(" addr 0x%llx/0x%llx", aaa->aaa_addr[0], aaa->aaa_size[0]);
 
@@ -158,7 +150,7 @@ dwgpio_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_ih[i] = acpi_intr_establish(aaa->aaa_irq[i],
 		    aaa->aaa_irq_flags[i], IPL_BIO, dwgpio_intr,
 		    sc, sc->sc_dev.dv_xname);
-		if (sc->sc_ih == NULL) {
+		if (sc->sc_ih[i] == NULL) {
 			printf(": can't establish interrupt\n");
 			goto unmap;
 		}
@@ -176,12 +168,10 @@ dwgpio_attach(struct device *parent, struct device *self, void *aux)
 	return;
 
 unmap:
-#ifdef notyet
 	for (i = 0; i < sc->sc_nirq; i++) {
 		if (sc->sc_ih[i])
 			acpi_intr_disestablish(sc->sc_ih[i]);
 	}
-#endif
 	free(sc->sc_ih, M_DEVBUF, sc->sc_nirq * sizeof(*sc->sc_ih));
 	free(sc->sc_pin_ih, M_DEVBUF, sc->sc_npins * sizeof(*sc->sc_pin_ih));
 	bus_space_unmap(sc->sc_memt, sc->sc_memh, aaa->aaa_size[0]);

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.806 2021/09/04 12:11:45 jmatthew Exp $
+#	$OpenBSD: Makefile,v 1.819 2022/08/06 12:00:18 kettenis Exp $
 
 MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	acpi.4 acpiac.4 acpials.4 acpiasus.4 acpibat.4 \
@@ -24,7 +24,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	berkwdt.4 bge.4 bgw.4 bio.4 bpe.4 bktr.4 bmtphy.4 bnx.4 bnxt.4 \
 	boca.4 bpf.4 brgphy.4 bridge.4 brswphy.4 bse.4 bwfm.4 bwi.4 bytgpio.4 \
 	cac.4 cad.4 cas.4 cardbus.4 carp.4 ccp.4 ccpmic.4 cd.4 cdce.4 \
-	cduart.4 cfxga.4 \
+	cdsdhc.4 cduart.4 cfxga.4 \
 	ch.4 chvgpio.4 ciphy.4 ciss.4 clcs.4 clct.4 cmpci.4 \
 	com.4 cue.4 cwfg.4 cy.4 cz.4 \
 	dapmic.4 \
@@ -35,24 +35,27 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	eso.4 ess.4 et.4 etherip.4 etphy.4 ex.4 exphy.4 exrtc.4 \
 	fanpwr.4 fd.4 fdc.4 fec.4 fido.4 fins.4 fintek.4 fms.4 fusbtc.4 \
 	fuse.4 fxp.4 \
-	gdt.4 gentbi.4 gem.4 gfrtc.4 gif.4 glenv.4 glkgpio.4 gpio.4 gpiodcf.4 \
-	gpioiic.4 gpioow.4 graphaudio.4 gre.4 gscsio.4 \
-	hds.4 hiclock.4 hidwusb.4 hifn.4 hil.4 hilid.4 hilkbd.4 hilms.4 \
+	gdt.4 gentbi.4 gem.4 gfrtc.4 gif.4 glenv.4 glkgpio.4 gpio.4 \
+	gpiocharger.4 gpiodcf.4 \
+	gpioiic.4 gpiokeys.4 gpioleds.4 gpioow.4 graphaudio.4 gre.4 gscsio.4 \
+	hds.4 hiclock.4 hidwusb.4 hil.4 hilid.4 hilkbd.4 hilms.4 \
 	hireset.4 hitemp.4 hme.4 hotplug.4 hsq.4 \
 	hvn.4 hvs.4 hyperv.4 \
 	iatp.4 iavf.4 ichiic.4 ichwdt.4 icmp.4 icmp6.4 icsphy.4 ifmedia.4 \
-	iha.4 ihidev.4 iic.4 ikbd.4 ims.4 imt.4 imxanatop.4 imxdog.4 \
-	imxesdhc.4 imxgpc.4 imxgpio.4 imxiic.4 imxpciephy.4 imxpwm.4 imxrtc.4 \
-	imxspi.4 imxsrc.4 imxtmu.4 imxuart.4 inet.4 inet6.4 inphy.4 iophy.4 \
-	ip.4 ip6.4 ipcomp.4 ipgphy.4 ipmi.4 ips.4 ipsec.4 ipw.4 \
-	isa.4 isagpio.4 isapnp.4 islrtc.4 it.4 itherm.4 iwi.4 iwn.4 iwm.4 \
-	iwx.4 ix.4 ixgb.4 ixl.4 jmb.4 jme.4 jmphy.4 \
-	kate.4 kcov.4 km.4 ksmn.4 ksyms.4 kubsan.4 kue.4 lc.4 lge.4 lii.4 \
+	igc.4 iha.4 ihidev.4 iic.4 iicmux.4 ikbd.4 ims.4 imt.4 imxanatop.4 \
+	imxdog.4 imxesdhc.4 imxgpc.4 imxgpio.4 imxiic.4 imxpciephy.4 \
+	imxpwm.4 imxrtc.4 imxspi.4 imxsrc.4 imxtmu.4 imxuart.4 \
+	inet.4 inet6.4 inphy.4 iophy.4 ip.4 ip6.4 ipcomp.4 ipgphy.4 \
+	ipmi.4 ips.4 ipsec.4 ipw.4 isa.4 isagpio.4 isapnp.4 islrtc.4 \
+	it.4 itherm.4 iwi.4 iwn.4 iwm.4 iwx.4 ix.4 ixgb.4 ixl.4 \
+	jmb.4 jme.4 jmphy.4 \
+	kate.4 kcov.4 km.4 ksmn.4 kstat.4 ksyms.4 kubsan.4 kue.4 \
+	lc.4 lge.4 lii.4 \
 	lisa.4 lm.4 lmenv.4 lmn.4 lmtemp.4 lo.4 lpt.4 lxtphy.4 luphy.4 \
 	maestro.4 mainbus.4 malo.4 maxds.4 maxrtc.4 maxtmp.4 mbg.4 \
 	mcprtc.4 mcx.4 midi.4 mii.4 mfi.4 mfii.4 mfokrtc.4 \
 	mlphy.4 moscom.4 mos.4 mpe.4 mpath.4 mpi.4 mpii.4 \
-	mpip.4 mpu.4 msk.4 mpw.4 msts.4 mtd.4 mtdphy.4 mtio.4 mue.4 \
+	mpip.4 mpu.4 msk.4 mpw.4 msts.4 mtd.4 mtdphy.4 mtio.4 mtw.4 mue.4 \
 	multicast.4 mvclock.4 mvdog.4 mvgicp.4 mvgpio.4 mvicu.4 mviic.4 \
 	mvkpcie.4 mvneta.4 mvpinctrl.4 mvpp.4 mvrng.4 mvrtc.4 mvspi.4 \
 	mvtemp.4 mvsw.4 mvuart.4 myx.4 \
@@ -63,7 +66,8 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	pair.4 pcagpio.4 pcaled.4 pcamux.4 \
 	pcdisplay.4 pchb.4 pchtemp.4 pci.4 pcib.4 \
 	pcfadc.4 pcfiic.4 pcfrtc.4 pchgpio.4 pciide.4 pckbc.4 pckbd.4 \
-	pcmcia.4 pcn.4 pcppi.4 pcscp.4 pcxrtc.4 pf.4 pflog.4 pflow.4 pfsync.4 \
+	pcmcia.4 pcn.4 pcppi.4 pcscp.4 pcxrtc.4 pcyrtc.4 \
+	pf.4 pflog.4 pflow.4 pfsync.4 \
 	pgt.4 piixpm.4 pinctrl.4 pipex.4 plgpio.4 plrtc.4 pluart.4 \
 	pms.4 ppb.4 ppp.4 pppoe.4 pppx.4 psci.4 pty.4 puc.4 pvbus.4 \
 	pvclock.4 pwdog.4 pwmbl.4 pwmfan.4 pwmreg.4 \
@@ -73,18 +77,19 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	rkemmcphy.4 rkgpio.4 rkgrf.4 rkiic.4 rkiis.4 rkpcie.4 rkpinctrl.4 \
 	rkpmic.4 rkpwm.4 rkrng.4 rktcphy.4 rktemp.4 rkvop.4 \
 	rl.4 rlphy.4 route.4 rsu.4 rtsx.4 rum.4 run.4 rtw.4 rtwn.4 \
-	safe.4 safte.4 sbus.4 schsio.4 scsi.4 sd.4 \
+	safte.4 sbus.4 schsio.4 scsi.4 sd.4 \
 	sdmmc.4 sdhc.4 se.4 ses.4 sf.4 sili.4 \
 	simpleamp.4 simpleaudio.4 simplefb.4 simplepanel.4 siop.4 sis.4 sk.4 \
 	sm.4 smsc.4 softraid.4 spdmem.4 sdtemp.4 speaker.4 sppp.4 sqphy.4 \
-	ssdfb.4 st.4 ste.4 stge.4 sti.4 stp.4 sv.4 switch.4 sxiccmu.4 \
+	ssdfb.4 st.4 ste.4 stge.4 sti.4 stp.4 sv.4 sxiccmu.4 \
 	sxidog.4 sximmc.4 sxipio.4 sxipwm.4 sxirsb.4 sxirtc.4 sxisid.4 \
 	sxisyscon.4 sxitemp.4 sxitwi.4 sym.4 sypwr.4 syscon.4 \
-	tcic.4 tcp.4 tcpci.4 termios.4 tht.4 ti.4 tipmic.4 titmp.4 tl.4 \
+	tascodec.4 tcic.4 tcp.4 tcpci.4 termios.4 tht.4 ti.4 tipmic.4 \
+	titmp.4 tl.4 \
 	tlphy.4 thmc.4 tpm.4 tpmr.4 tqphy.4 trm.4 trunk.4 tsl.4 tty.4 \
 	tun.4 tap.4 twe.4 \
 	txp.4 txphy.4 uaudio.4 uaq.4 uark.4 uath.4 ubcmtp.4 uberry.4 ubsa.4 \
-	ubsec.4 ucc.4 ucom.4 uchcom.4 ucrcom.4 ucycom.4 ukspan.4 uslhcom.4 \
+	ucc.4 ucom.4 uchcom.4 ucrcom.4 ucycom.4 ukspan.4 uslhcom.4 \
 	udav.4 udcf.4 udl.4 udp.4 udsbr.4 \
 	uftdi.4 ugen.4 ugl.4 ugold.4 uguru.4 uhci.4 uhid.4 uhidev.4 uhidpp.4 \
 	uipaq.4 ujoy.4 uk.4 ukbd.4 \
@@ -108,10 +113,5 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 SUBDIR=	man4.alpha man4.amd64 man4.arm64 man4.armv7 \
 	man4.hppa man4.i386 man4.landisk man4.loongson man4.luna88k \
 	man4.macppc man4.octeon man4.powerpc64 man4.riscv64 man4.sparc64
-
-CLEANFILES+= wi.4
-
-wi.4: wi.4tbl
-	cp ${.ALLSRC} ${.TARGET}
 
 .include <bsd.prog.mk>

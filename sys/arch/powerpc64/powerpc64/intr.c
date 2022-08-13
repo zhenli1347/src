@@ -1,4 +1,4 @@
-/*	$OpenBSD: intr.c,v 1.9 2020/09/26 17:56:54 kettenis Exp $	*/
+/*	$OpenBSD: intr.c,v 1.11 2022/08/09 04:40:08 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -138,6 +138,11 @@ void
 splx(int new)
 {
 	struct cpu_info *ci = curcpu();
+
+	if (ci->ci_dec_deferred && new < IPL_CLOCK) {
+		mtdec(0);
+		mtdec(UINT32_MAX);	/* raise DEC exception */
+	}
 
 	if (ci->ci_ipending & intr_smask[new])
 		intr_do_pending(new);
@@ -280,6 +285,13 @@ fdt_intr_establish_idx_cpu(int node, int idx, int level, struct cpu_info *ci,
 	for (i = 0; i <= idx && ncells > 0; i++) {
 		if (extended) {
 			phandle = cell[0];
+
+			/* Handle "empty" phandle reference. */
+			if (phandle == 0) {
+				cell++;
+				ncells--;
+				continue;
+			}
 
 			LIST_FOREACH(ic, &interrupt_controllers, ic_list) {
 				if (ic->ic_phandle == phandle)

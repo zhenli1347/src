@@ -1,4 +1,4 @@
-/*	$OpenBSD: azalia.c,v 1.264 2021/08/09 12:59:53 kevlo Exp $	*/
+/*	$OpenBSD: azalia.c,v 1.274 2022/06/21 04:17:21 jsg Exp $	*/
 /*	$NetBSD: azalia.c,v 1.20 2006/05/07 08:31:44 kent Exp $	*/
 
 /*-
@@ -280,16 +280,16 @@ int	azalia_resume(azalia_t *);
 int	azalia_resume_codec(codec_t *);
 
 /* variables */
-struct cfattach azalia_ca = {
+const struct cfattach azalia_ca = {
 	sizeof(azalia_t), azalia_pci_match, azalia_pci_attach,
 	azalia_pci_detach, azalia_pci_activate
 };
 
 struct cfdriver azalia_cd = {
-	NULL, "azalia", DV_DULL
+	NULL, "azalia", DV_DULL, CD_SKIPHIBERNATE
 };
 
-struct audio_hw_if azalia_hw_if = {
+const struct audio_hw_if azalia_hw_if = {
 	azalia_open,
 	azalia_close,
 	azalia_set_params,
@@ -472,6 +472,8 @@ azalia_configure_pci(azalia_t *az)
 	case PCI_PRODUCT_INTEL_500SERIES_HDA:
 	case PCI_PRODUCT_INTEL_500SERIES_HDA_2:
 	case PCI_PRODUCT_INTEL_500SERIES_LP_HDA:
+	case PCI_PRODUCT_INTEL_600SERIES_HDA:
+	case PCI_PRODUCT_INTEL_600SERIES_LP_HDA:
 	case PCI_PRODUCT_INTEL_C600_HDA:
 	case PCI_PRODUCT_INTEL_C610_HDA_1:
 	case PCI_PRODUCT_INTEL_C610_HDA_2:
@@ -481,6 +483,7 @@ azalia_configure_pci(azalia_t *az)
 	case PCI_PRODUCT_INTEL_BAYTRAIL_HDA:
 	case PCI_PRODUCT_INTEL_BSW_HDA:
 	case PCI_PRODUCT_INTEL_GLK_HDA:
+	case PCI_PRODUCT_INTEL_JSL_HDA:
 		reg = azalia_pci_read(az->pc, az->tag,
 		    INTEL_PCIE_NOSNOOP_REG);
 		reg &= INTEL_PCIE_NOSNOOP_MASK;
@@ -492,9 +495,12 @@ azalia_configure_pci(azalia_t *az)
 
 const struct pci_matchid azalia_pci_devices[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_200SERIES_U_HDA },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_CAVS },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_300SERIES_U_HDA },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_400SERIES_CAVS },
-	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_500SERIES_LP_HDA }
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_500SERIES_LP_HDA },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_GLK_HDA },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_JSL_HDA },
 };
 
 int
@@ -585,7 +591,7 @@ azalia_pci_attach(struct device *parent, struct device *self, void *aux)
 	if (azalia_init_streams(sc))
 		goto err_exit;
 
-	audio_attach_mi(&azalia_hw_if, sc, &sc->dev);
+	audio_attach_mi(&azalia_hw_if, sc, NULL, &sc->dev);
 
 	return;
 
@@ -1741,7 +1747,7 @@ azalia_codec_init(codec_t *this)
 	/* make sure built-in mic is connected to an adc */
 	if (this->mic != -1 && this->mic_adc == -1) {
 		if (azalia_codec_select_micadc(this)) {
-			DPRINTF(("%s: cound not select mic adc\n", __func__));
+			DPRINTF(("%s: could not select mic adc\n", __func__));
 		}
 	}
 
@@ -2217,7 +2223,7 @@ azalia_codec_select_spkrdac(codec_t *this)
 		if (i < w->nconnections) {
 			conn = i;
 		} else {
-			/* Couldn't get a unique DAC.  Try to get a diferent
+			/* Couldn't get a unique DAC.  Try to get a different
 			 * DAC than the first pin's DAC.
 			 */
 			if (this->spkr_dac == this->opins[0].conv) {

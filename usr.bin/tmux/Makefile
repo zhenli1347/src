@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.108 2021/06/10 07:50:03 nicm Exp $
+# $OpenBSD: Makefile,v 1.110 2022/06/30 09:55:53 nicm Exp $
 
 PROG=	tmux
 SRCS=	alerts.c \
@@ -55,6 +55,7 @@ SRCS=	alerts.c \
 	cmd-select-pane.c \
 	cmd-select-window.c \
 	cmd-send-keys.c \
+	cmd-server-access.c \
 	cmd-set-buffer.c \
 	cmd-set-environment.c \
 	cmd-set-option.c \
@@ -80,6 +81,7 @@ SRCS=	alerts.c \
 	grid-reader.c \
 	grid-view.c \
 	grid.c \
+	hyperlinks.c \
 	input-keys.c \
 	input.c \
 	job.c \
@@ -104,6 +106,7 @@ SRCS=	alerts.c \
 	screen-redraw.c \
 	screen-write.c \
 	screen.c \
+	server-acl.c \
 	server-client.c \
 	server-fn.c \
 	server.c \

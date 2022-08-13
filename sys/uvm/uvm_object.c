@@ -1,7 +1,7 @@
-/*	$OpenBSD: uvm_object.c,v 1.19 2021/06/16 09:02:21 mpi Exp $	*/
+/*	$OpenBSD: uvm_object.c,v 1.25 2022/02/21 16:08:36 kn Exp $	*/
 
 /*
- * Copyright (c) 2006 The NetBSD Foundation, Inc.
+ * Copyright (c) 2006, 2010, 2019 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
  * This code is derived from software contributed to The NetBSD Foundation
@@ -38,28 +38,86 @@
 #include <sys/systm.h>
 #include <sys/mman.h>
 #include <sys/atomic.h>
+#include <sys/rwlock.h>
 
 #include <uvm/uvm.h>
 
-/* We will fetch this page count per step */
+/* Dummy object used by some pmaps for sanity checks. */
+const struct uvm_pagerops pmap_pager = {
+	/* nothing */
+};
+
+/* Dummy object used by the buffer cache for sanity checks. */
+const struct uvm_pagerops bufcache_pager = {
+	/* nothing */
+};
+
+/* Page count to fetch per single step. */
 #define	FETCH_PAGECOUNT	16
 
 /*
- * uvm_obj_init: initialise a uvm object.
+ * uvm_obj_init: initialize UVM memory object.
  */
 void
 uvm_obj_init(struct uvm_object *uobj, const struct uvm_pagerops *pgops, int refs)
 {
+	int alock;
+
+	alock = ((pgops != NULL) && (pgops != &pmap_pager) &&
+	    (pgops != &bufcache_pager) && (refs != UVM_OBJ_KERN));
+
+	if (alock) {
+		/* Allocate and assign a lock. */
+		rw_obj_alloc(&uobj->vmobjlock, "uobjlk");
+	} else {
+		/* The lock will need to be set via uvm_obj_setlock(). */
+		uobj->vmobjlock = NULL;
+	}
 	uobj->pgops = pgops;
 	RBT_INIT(uvm_objtree, &uobj->memt);
 	uobj->uo_npages = 0;
 	uobj->uo_refs = refs;
 }
 
+/*
+ * uvm_obj_destroy: destroy UVM memory object.
+ */
+void
+uvm_obj_destroy(struct uvm_object *uo)
+{
+	KASSERT(RBT_EMPTY(uvm_objtree, &uo->memt));
+
+	rw_obj_free(uo->vmobjlock);
+}
+
+/*
+ * uvm_obj_setlock: assign a vmobjlock to the UVM object.
+ *
+ * => Caller is responsible to ensure that UVM objects is not use.
+ * => Only dynamic lock may be previously set.  We drop the reference then.
+ */
+void
+uvm_obj_setlock(struct uvm_object *uo, struct rwlock *lockptr)
+{
+	struct rwlock *olockptr = uo->vmobjlock;
+
+	if (olockptr) {
+		/* Drop the reference on the old lock. */
+		rw_obj_free(olockptr);
+	}
+	if (lockptr == NULL) {
+		/* If new lock is not passed - allocate default one. */
+		rw_obj_alloc(&lockptr, "uobjlk");
+	}
+	uo->vmobjlock = lockptr;
+}
+
 #ifndef SMALL_KERNEL
 /*
- * uvm_obj_wire: wire the pages of entire uobj
+ * uvm_obj_wire: wire the pages of entire UVM object.
  *
+ * => NOTE: this function should only be used for types of objects
+ *  where PG_RELEASED flag is never set (aobj objects)
  * => caller must pass page-aligned start and end values
  * => if the caller passes in a pageq pointer, we'll return a list of
  *  wired pages.
@@ -75,6 +133,7 @@ uvm_obj_wire(struct uvm_object *uobj, voff_t start, voff_t end,
 
 	left = (end - start) >> PAGE_SHIFT;
 
+	rw_enter(uobj->vmobjlock, RW_WRITE | RW_DUPOK);
 	while (left) {
 
 		npages = MIN(FETCH_PAGECOUNT, left);
@@ -88,6 +147,7 @@ uvm_obj_wire(struct uvm_object *uobj, voff_t start, voff_t end,
 		if (error)
 			goto error;
 
+		rw_enter(uobj->vmobjlock, RW_WRITE | RW_DUPOK);
 		for (i = 0; i < npages; i++) {
 
 			KASSERT(pgs[i] != NULL);
@@ -115,6 +175,7 @@ uvm_obj_wire(struct uvm_object *uobj, voff_t start, voff_t end,
 		left -= npages;
 		offset += (voff_t)npages << PAGE_SHIFT;
 	}
+	rw_exit(uobj->vmobjlock);
 
 	return 0;
 
@@ -126,17 +187,17 @@ error:
 }
 
 /*
- * uobj_unwirepages: unwire the pages of entire uobj
+ * uvm_obj_unwire: unwire the pages of entire UVM object.
  *
  * => caller must pass page-aligned start and end values
  */
-
 void
 uvm_obj_unwire(struct uvm_object *uobj, voff_t start, voff_t end)
 {
 	struct vm_page *pg;
 	off_t offset;
 
+	rw_enter(uobj->vmobjlock, RW_WRITE | RW_DUPOK);
 	uvm_lock_pageq();
 	for (offset = start; offset < end; offset += PAGE_SIZE) {
 		pg = uvm_pagelookup(uobj, offset);
@@ -147,6 +208,7 @@ uvm_obj_unwire(struct uvm_object *uobj, voff_t start, voff_t end)
 		uvm_pageunwire(pg);
 	}
 	uvm_unlock_pageq();
+	rw_exit(uobj->vmobjlock);
 }
 #endif /* !SMALL_KERNEL */
 
@@ -160,11 +222,14 @@ uvm_obj_free(struct uvm_object *uobj)
 	struct vm_page *pg;
 	struct pglist pgl;
 
+	KASSERT(UVM_OBJ_IS_BUFCACHE(uobj));
+	KERNEL_ASSERT_LOCKED();
+
 	TAILQ_INIT(&pgl);
  	/*
 	 * Extract from rb tree in offset order. The phys addresses
 	 * usually increase in that order, which is better for
-	 * uvm_pmr_freepageq.
+	 * uvm_pglistfree().
  	 */
 	RBT_FOREACH(pg, uvm_objtree, &uobj->memt) {
 		/*
@@ -177,6 +242,6 @@ uvm_obj_free(struct uvm_object *uobj)
 		uvm_unlock_pageq();
 		TAILQ_INSERT_TAIL(&pgl, pg, pageq);
  	}
-	uvm_pmr_freepageq(&pgl);
+	uvm_pglistfree(&pgl);
 }
 
