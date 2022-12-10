@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_vnode.c,v 1.126 2022/08/01 14:15:46 mpi Exp $	*/
+/*	$OpenBSD: uvm_vnode.c,v 1.131 2022/12/08 21:32:48 kettenis Exp $	*/
 /*	$NetBSD: uvm_vnode.c,v 1.36 2000/11/24 20:34:01 chs Exp $	*/
 
 /*
@@ -68,11 +68,8 @@
  * we keep a simpleq of vnodes that are currently being sync'd.
  */
 
-LIST_HEAD(uvn_list_struct, uvm_vnode);
-struct uvn_list_struct uvn_wlist;	/* writeable uvns */
-
-SIMPLEQ_HEAD(uvn_sq_struct, uvm_vnode);
-struct uvn_sq_struct uvn_sync_q;		/* sync'ing uvns */
+LIST_HEAD(, uvm_vnode)		uvn_wlist;	/* [K] writeable uvns */
+SIMPLEQ_HEAD(, uvm_vnode)	uvn_sync_q;	/* [S] sync'ing uvns */
 struct rwlock uvn_sync_lock;			/* locks sync operation */
 
 extern int rebooting;
@@ -144,15 +141,17 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	struct partinfo pi;
 	u_quad_t used_vnode_size = 0;
 
-	/* first get a lock on the uvn. */
-	while (uvn->u_flags & UVM_VNODE_BLOCKED) {
-		uvn->u_flags |= UVM_VNODE_WANTED;
-		tsleep_nsec(uvn, PVM, "uvn_attach", INFSLP);
-	}
-
 	/* if we're mapping a BLK device, make sure it is a disk. */
 	if (vp->v_type == VBLK && bdevsw[major(vp->v_rdev)].d_type != D_DISK) {
 		return NULL;
+	}
+
+	/* first get a lock on the uvn. */
+	rw_enter(uvn->u_obj.vmobjlock, RW_WRITE);
+	while (uvn->u_flags & UVM_VNODE_BLOCKED) {
+		uvn->u_flags |= UVM_VNODE_WANTED;
+		rwsleep_nsec(uvn, uvn->u_obj.vmobjlock, PVM, "uvn_attach",
+		    INFSLP);
 	}
 
 	/*
@@ -163,22 +162,21 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	 */
 	if (uvn->u_flags & UVM_VNODE_VALID) {	/* already active? */
 
-		rw_enter(uvn->u_obj.vmobjlock, RW_WRITE);
 		/* regain vref if we were persisting */
 		if (uvn->u_obj.uo_refs == 0) {
 			vref(vp);
 		}
 		uvn->u_obj.uo_refs++;		/* bump uvn ref! */
-		rw_exit(uvn->u_obj.vmobjlock);
 
 		/* check for new writeable uvn */
 		if ((accessprot & PROT_WRITE) != 0 &&
 		    (uvn->u_flags & UVM_VNODE_WRITEABLE) == 0) {
-			LIST_INSERT_HEAD(&uvn_wlist, uvn, u_wlist);
-			/* we are now on wlist! */
 			uvn->u_flags |= UVM_VNODE_WRITEABLE;
+			KERNEL_ASSERT_LOCKED();
+			LIST_INSERT_HEAD(&uvn_wlist, uvn, u_wlist);
 		}
 
+		rw_exit(uvn->u_obj.vmobjlock);
 		return (&uvn->u_obj);
 	}
 
@@ -191,6 +189,7 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	 * it.
 	 */
 	uvn->u_flags = UVM_VNODE_ALOCK;
+	rw_exit(uvn->u_obj.vmobjlock);
 
 	if (vp->v_type == VBLK) {
 		/*
@@ -215,9 +214,11 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	}
 
 	if (result != 0) {
+		rw_enter(uvn->u_obj.vmobjlock, RW_WRITE);
 		if (uvn->u_flags & UVM_VNODE_WANTED)
 			wakeup(uvn);
 		uvn->u_flags = 0;
+		rw_exit(uvn->u_obj.vmobjlock);
 		return NULL;
 	}
 
@@ -238,18 +239,20 @@ uvn_attach(struct vnode *vp, vm_prot_t accessprot)
 	uvn->u_nio = 0;
 	uvn->u_size = used_vnode_size;
 
-	/* if write access, we need to add it to the wlist */
-	if (accessprot & PROT_WRITE) {
-		LIST_INSERT_HEAD(&uvn_wlist, uvn, u_wlist);
-		uvn->u_flags |= UVM_VNODE_WRITEABLE;	/* we are on wlist! */
-	}
-
 	/*
 	 * add a reference to the vnode.   this reference will stay as long
 	 * as there is a valid mapping of the vnode.   dropped when the
 	 * reference count goes to zero [and we either free or persist].
 	 */
 	vref(vp);
+
+	/* if write access, we need to add it to the wlist */
+	if (accessprot & PROT_WRITE) {
+		uvn->u_flags |= UVM_VNODE_WRITEABLE;	/* we are on wlist! */
+		KERNEL_ASSERT_LOCKED();
+		LIST_INSERT_HEAD(&uvn_wlist, uvn, u_wlist);
+	}
+
 	if (oldflags & UVM_VNODE_WANTED)
 		wakeup(uvn);
 
@@ -275,6 +278,7 @@ uvn_reference(struct uvm_object *uobj)
 	struct uvm_vnode *uvn = (struct uvm_vnode *) uobj;
 #endif
 
+	rw_enter(uobj->vmobjlock, RW_WRITE);
 #ifdef DEBUG
 	if ((uvn->u_flags & UVM_VNODE_VALID) == 0) {
 		printf("uvn_reference: ref=%d, flags=0x%x\n",
@@ -282,7 +286,6 @@ uvn_reference(struct uvm_object *uobj)
 		panic("uvn_reference: invalid state");
 	}
 #endif
-	rw_enter(uobj->vmobjlock, RW_WRITE);
 	uobj->uo_refs++;
 	rw_exit(uobj->vmobjlock);
 }
@@ -871,6 +874,8 @@ uvn_cluster(struct uvm_object *uobj, voff_t offset, voff_t *loffset,
 	struct uvm_vnode *uvn = (struct uvm_vnode *) uobj;
 	*loffset = offset;
 
+	KASSERT(rw_write_held(uobj->vmobjlock));
+
 	if (*loffset >= uvn->u_size)
 		panic("uvn_cluster: offset out of range");
 
@@ -880,8 +885,6 @@ uvn_cluster(struct uvm_object *uobj, voff_t offset, voff_t *loffset,
 	*hoffset = *loffset + MAXBSIZE;
 	if (*hoffset > round_page(uvn->u_size))	/* past end? */
 		*hoffset = round_page(uvn->u_size);
-
-	return;
 }
 
 /*
@@ -896,11 +899,34 @@ uvn_cluster(struct uvm_object *uobj, voff_t offset, voff_t *loffset,
 int
 uvn_put(struct uvm_object *uobj, struct vm_page **pps, int npages, int flags)
 {
-	int retval;
+	struct uvm_vnode *uvn = (struct uvm_vnode *)uobj;
+	int dying, retval;
 
 	KASSERT(rw_write_held(uobj->vmobjlock));
 
+	/*
+	 * Unless we're recycling this vnode, grab a reference to it
+	 * to prevent it from being recycled from under our feet.
+	 * This also makes sure we can don't panic if we end up in
+	 * uvn_vnp_uncache() as a result of the I/O operation as that
+	 * function assumes we hold a reference.
+	 *
+	 * If the vnode is in the process of being recycled by someone
+	 * else, grabbing a refernce will fail.  In that case the
+	 * pages will already be written out by whoever is cleaning
+	 * the vnode, so simply return VM_PAGER_AGAIN such that we
+	 * skip these pages.
+	 */
+	dying = (uvn->u_flags & UVM_VNODE_DYING);
+	if (!dying) {
+		if (vget(uvn->u_vnode, LK_NOWAIT))
+			return VM_PAGER_AGAIN;
+	}
+
 	retval = uvn_io((struct uvm_vnode*)uobj, pps, npages, flags, UIO_WRITE);
+
+	if (!dying)
+		vrele(uvn->u_vnode);
 
 	return retval;
 }
@@ -1145,8 +1171,9 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 	off_t file_offset;
 	int waitf, result, mapinflags;
 	size_t got, wanted;
-	int netunlocked = 0;
+	int vnlocked, netunlocked = 0;
 	int lkflags = (flags & PGO_NOWAIT) ? LK_NOWAIT : 0;
+	voff_t uvnsize;
 
 	KASSERT(rw_write_held(uobj->vmobjlock));
 
@@ -1185,6 +1212,8 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 	 * (this time with sleep ok).
 	 */
 	uvn->u_nio++;			/* we have an I/O in progress! */
+	vnlocked = (uvn->u_flags & UVM_VNODE_VNISLOCKED);
+	uvnsize = uvn->u_size;
 	rw_exit(uobj->vmobjlock);
 	if (kva == 0)
 		kva = uvm_pagermapin(pps, npages,
@@ -1198,8 +1227,8 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 	/* fill out uio/iov */
 	iov.iov_base = (caddr_t) kva;
 	wanted = (size_t)npages << PAGE_SHIFT;
-	if (file_offset + wanted > uvn->u_size)
-		wanted = uvn->u_size - file_offset;	/* XXX: needed? */
+	if (file_offset + wanted > uvnsize)
+		wanted = uvnsize - file_offset;	/* XXX: needed? */
 	iov.iov_len = wanted;
 	uio.uio_iov = &iov;
 	uio.uio_iovcnt = 1;
@@ -1230,7 +1259,7 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 	 */
 	result = 0;
 	KERNEL_LOCK();
-	if ((uvn->u_flags & UVM_VNODE_VNISLOCKED) == 0)
+	if (!vnlocked)
 		result = vn_lock(vn, LK_EXCLUSIVE | LK_RECURSEFAIL | lkflags);
 	if (result == 0) {
 		/* NOTE: vnode now locked! */
@@ -1241,7 +1270,7 @@ uvn_io(struct uvm_vnode *uvn, vm_page_t *pps, int npages, int flags, int rw)
 			    (flags & PGO_PDFREECLUST) ? IO_NOCACHE : 0,
 			    curproc->p_ucred);
 
-		if ((uvn->u_flags & UVM_VNODE_VNISLOCKED) == 0)
+		if (!vnlocked)
 			VOP_UNLOCK(vn);
 
 	}

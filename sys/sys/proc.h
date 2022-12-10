@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.334 2022/07/23 22:10:59 cheloha Exp $	*/
+/*	$OpenBSD: proc.h,v 1.336 2022/12/07 20:08:29 mvs Exp $	*/
 /*	$NetBSD: proc.h,v 1.44 1996/04/22 01:23:21 christos Exp $	*/
 
 /*-
@@ -215,6 +215,7 @@ struct process {
 	char	ps_comm[_MAXCOMLEN];	/* command name, incl NUL */
 
 	vaddr_t	ps_strings;		/* User pointers to argv/env */
+	vaddr_t	ps_auxinfo;		/* User pointer to auxinfo */
 	vaddr_t ps_timekeep; 		/* User pointer to timekeep */
 	vaddr_t	ps_sigcode;		/* [I] User pointer to signal code */
 	vaddr_t ps_sigcoderet;		/* [I] User ptr to sigreturn retPC */
@@ -302,6 +303,7 @@ struct p_inentry {
  *  Locks used to protect struct members in this file:
  *	I	immutable after creation
  *	S	scheduler lock
+ *	U	uidinfolk
  *	l	read only reference, see lim_read_enter()
  *	o	owned (read/modified only) by this thread
  */
@@ -432,10 +434,10 @@ struct proc {
 #ifdef _KERNEL
 
 struct uidinfo {
-	LIST_ENTRY(uidinfo) ui_hash;
-	uid_t   ui_uid;
-	long    ui_proccnt;	/* proc structs */
-	long	ui_lockcnt;	/* lockf structs */
+	LIST_ENTRY(uidinfo) ui_hash;	/* [U] */
+	uid_t   ui_uid;			/* [I] */
+	long    ui_proccnt;		/* [U] proc structs */
+	long	ui_lockcnt;		/* [U] lockf structs */
 };
 
 struct uidinfo *uid_find(uid_t);

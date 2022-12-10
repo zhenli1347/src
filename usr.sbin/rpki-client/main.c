@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.209 2022/08/04 13:44:07 claudio Exp $ */
+/*	$OpenBSD: main.c,v 1.227 2022/11/30 08:16:10 job Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -25,7 +25,6 @@
 #include <sys/wait.h>
 
 #include <assert.h>
-#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <dirent.h>
@@ -33,6 +32,7 @@
 #include <fnmatch.h>
 #include <poll.h>
 #include <pwd.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -64,12 +64,21 @@ const char	*bird_tablename = "ROAS";
 int	verbose;
 int	noop;
 int	filemode;
+int	shortlistmode;
 int	rrdpon = 1;
 int	repo_timeout;
-
-struct skiplist skiplist = LIST_HEAD_INITIALIZER(skiplist);
+time_t	deadline;
 
 struct stats	 stats;
+
+struct fqdnlistentry {
+	LIST_ENTRY(fqdnlistentry)	 entry;
+	char				*fqdn;
+};
+LIST_HEAD(fqdns, fqdnlistentry);
+
+struct fqdns shortlist = LIST_HEAD_INITIALIZER(fqdns);
+struct fqdns skiplist = LIST_HEAD_INITIALIZER(fqdns);
 
 /*
  * Log a message to stderr if and only if "verbose" is non-zero.
@@ -256,6 +265,18 @@ rrdp_fetch(unsigned int id, const char *uri, const char *local,
 	io_close_buffer(&rrdpq, b);
 }
 
+void
+rrdp_abort(unsigned int id)
+{
+	enum rrdp_msg type = RRDP_ABORT;
+	struct ibuf *b;
+
+	b = io_new_buffer();
+	io_simple_buffer(b, &type, sizeof(type));
+	io_simple_buffer(b, &id, sizeof(id));
+	io_close_buffer(&rrdpq, b);
+}
+
 /*
  * Request a repository sync via rsync URI to directory local.
  */
@@ -270,6 +291,19 @@ rsync_fetch(unsigned int id, const char *uri, const char *local,
 	io_str_buffer(b, local);
 	io_str_buffer(b, base);
 	io_str_buffer(b, uri);
+	io_close_buffer(&rsyncq, b);
+}
+
+void
+rsync_abort(unsigned int id)
+{
+	struct ibuf	*b;
+
+	b = io_new_buffer();
+	io_simple_buffer(b, &id, sizeof(id));
+	io_str_buffer(b, NULL);
+	io_str_buffer(b, NULL);
+	io_str_buffer(b, NULL);
 	io_close_buffer(&rsyncq, b);
 }
 
@@ -333,12 +367,14 @@ rrdp_http_done(unsigned int id, enum http_result res, const char *last_mod)
  * These are always relative to the directory in which "mft" sits.
  */
 static void
-queue_add_from_mft(const struct mft *mft, struct repo *rp)
+queue_add_from_mft(const struct mft *mft)
 {
 	size_t			 i;
+	struct repo		*rp;
 	const struct mftfile	*f;
 	char			*nfile, *npath = NULL;
 
+	rp = repo_byid(mft->repoid);
 	for (i = 0; i < mft->filesz; i++) {
 		f = &mft->files[i];
 
@@ -419,20 +455,33 @@ static void
 queue_add_from_cert(const struct cert *cert)
 {
 	struct repo		*repo;
-	struct skiplistentry	*sle;
+	struct fqdnlistentry	*le;
 	char			*nfile, *npath, *host;
 	const char		*uri, *repouri, *file;
 	size_t			 repourisz;
+	int			 shortlisted = 0;
 
-	LIST_FOREACH(sle, &skiplist, entry) {
-		if (strncmp(cert->repo, "rsync://", 8) != 0)
-			errx(1, "unexpected protocol");
-		host = cert->repo + 8;
+	if (strncmp(cert->repo, "rsync://", 8) != 0)
+		errx(1, "unexpected protocol");
+	host = cert->repo + 8;
 
-		if (strncasecmp(host, sle->value, strcspn(host, "/")) == 0) {
+	LIST_FOREACH(le, &skiplist, entry) {
+		if (strncasecmp(host, le->fqdn, strcspn(host, "/")) == 0) {
 			warnx("skipping %s (listed in skiplist)", cert->repo);
 			return;
 		}
+	}
+
+	LIST_FOREACH(le, &shortlist, entry) {
+		if (strncasecmp(host, le->fqdn, strcspn(host, "/")) == 0) {
+			shortlisted = 1;
+			break;
+		}
+	}
+	if (shortlistmode && shortlisted == 0) {
+		if (verbose)
+			warnx("skipping %s (not shortlisted)", cert->repo);
+		return;
 	}
 
 	repo = repo_lookup(cert->talid, cert->repo,
@@ -475,13 +524,14 @@ queue_add_from_cert(const struct cert *cert)
  */
 static void
 entity_process(struct ibuf *b, struct stats *st, struct vrp_tree *tree,
-    struct brk_tree *brktree)
+    struct brk_tree *brktree, struct vap_tree *vaptree)
 {
 	enum rtype	 type;
 	struct tal	*tal;
 	struct cert	*cert;
 	struct mft	*mft;
 	struct roa	*roa;
+	struct aspa	*aspa;
 	char		*file;
 	int		 c;
 
@@ -541,7 +591,7 @@ entity_process(struct ibuf *b, struct stats *st, struct vrp_tree *tree,
 		}
 		mft = mft_read(b);
 		if (!mft->stale)
-			queue_add_from_mft(mft, repo_byid(mft->repoid));
+			queue_add_from_mft(mft);
 		else
 			st->mfts_stale++;
 		mft_free(mft);
@@ -565,6 +615,24 @@ entity_process(struct ibuf *b, struct stats *st, struct vrp_tree *tree,
 		break;
 	case RTYPE_GBR:
 		st->gbrs++;
+		break;
+	case RTYPE_ASPA:
+		st->aspas++;
+		io_read_buf(b, &c, sizeof(c));
+		if (c == 0) {
+			st->aspas_fail++;
+			break;
+		}
+		aspa = aspa_read(b);
+		if (aspa->valid)
+			aspa_insert_vaps(vaptree, aspa, &st->vaps,
+			    &st->vaps_uniqs);
+		else
+			st->aspas_invalid++;
+		aspa_free(aspa);
+		break;
+	case RTYPE_TAK:
+		st->taks++;
 		break;
 	case RTYPE_FILE:
 		break;
@@ -671,19 +739,18 @@ tal_load_default(void)
 static void
 load_skiplist(const char *slf)
 {
-	struct skiplistentry	*sle;
+	struct fqdnlistentry	*le;
 	FILE			*fp;
 	char			*line = NULL;
-	size_t			 linesize = 0, s;
-	ssize_t			 linelen;
+	size_t			 linesize = 0, linelen;
 
 	if ((fp = fopen(slf, "r")) == NULL) {
-		if (strcmp(slf, DEFAULT_SKIPLIST_FILE) != 0)
-			errx(1, "failed to open skiplist %s", slf);
-		return;
+		if (errno == ENOENT && strcmp(slf, DEFAULT_SKIPLIST_FILE) == 0)
+			return;
+		err(1, "failed to open %s", slf);
 	}
 
-	while ((linelen = getline(&line, &linesize, fp)) != -1) {
+	while (getline(&line, &linesize, fp) != -1) {
 		/* just eat comment lines or empty lines*/
 		if (line[0] == '#' || line[0] == '\n')
 			continue;
@@ -695,24 +762,43 @@ load_skiplist(const char *slf)
 		 * Ignore anything after comment sign, whitespaces,
 		 * also chop off LF or CR.
 		 */
-		line[strcspn(line, " #\r\n\t")] = 0;
+		linelen = strcspn(line, " #\r\n\t");
+		line[linelen] = '\0';
 
-		for (s = 0; s < strlen(line); s++)
-			if (!isalnum((unsigned char)line[s]) &&
-			    !ispunct((unsigned char)line[s]))
-				errx(1, "invalid entry in skiplist: %s", line);
+		if (!valid_uri(line, linelen, NULL))
+			errx(1, "invalid entry in skiplist: %s", line);
 
-		if ((sle = malloc(sizeof(struct skiplistentry))) == NULL)
+		if ((le = malloc(sizeof(struct fqdnlistentry))) == NULL)
 			err(1, NULL);
-		if ((sle->value = strdup(line)) == NULL)
+		if ((le->fqdn = strdup(line)) == NULL)
 			err(1, NULL);
 
-		LIST_INSERT_HEAD(&skiplist, sle, entry);
+		LIST_INSERT_HEAD(&skiplist, le, entry);
 		stats.skiplistentries++;
 	}
 
 	fclose(fp);
 	free(line);
+}
+
+/*
+ * Load shortlist entries.
+ */
+static void
+load_shortlist(const char *fqdn)
+{
+	struct fqdnlistentry	*le;
+
+	if (!valid_uri(fqdn, strlen(fqdn), NULL))
+		errx(1, "invalid fqdn passed to -q: %s", fqdn);
+
+	if ((le = malloc(sizeof(struct fqdnlistentry))) == NULL)
+		err(1, NULL);
+
+	if ((le->fqdn = strdup(fqdn)) == NULL)
+		err(1, NULL);
+
+	LIST_INSERT_HEAD(&shortlist, le, entry);
 }
 
 static void
@@ -793,6 +879,7 @@ main(int argc, char *argv[])
 	const char	*skiplistfile = NULL;
 	struct vrp_tree	 vrps = RB_INITIALIZER(&vrps);
 	struct brk_tree	 brks = RB_INITIALIZER(&brks);
+	struct vap_tree	 vaps = RB_INITIALIZER(&vaps);
 	struct rusage	 ru;
 	struct timeval	 start_time, now_time;
 
@@ -819,7 +906,7 @@ main(int argc, char *argv[])
 	    "proc exec unveil", NULL) == -1)
 		err(1, "pledge");
 
-	while ((c = getopt(argc, argv, "b:Bcd:e:fjnorRs:S:t:T:vV")) != -1)
+	while ((c = getopt(argc, argv, "b:Bcd:e:fH:jnorRs:S:t:T:vV")) != -1)
 		switch (c) {
 		case 'b':
 			bind_addr = optarg;
@@ -840,6 +927,10 @@ main(int argc, char *argv[])
 			filemode = 1;
 			noop = 1;
 			break;
+		case 'H':
+			shortlistmode = 1;
+			load_shortlist(optarg);
+			break;
 		case 'j':
 			outformats |= FORMAT_JSON;
 			break;
@@ -852,7 +943,7 @@ main(int argc, char *argv[])
 		case 'R':
 			rrdpon = 0;
 			break;
-		case 'r':
+		case 'r': /* Remove after OpenBSD 7.3 */
 			rrdpon = 1;
 			break;
 		case 's':
@@ -1004,6 +1095,10 @@ main(int argc, char *argv[])
 		 */
 		alarm(timeout);
 		signal(SIGALRM, suicide);
+
+		/* give up a bit before the hard timeout and try to finish up */
+		if (!noop)
+			deadline = getmonotime() + timeout - repo_timeout / 2;
 	}
 
 	if (pledge("stdio rpath wpath cpath fattr sendfd unveil", NULL) == -1)
@@ -1074,7 +1169,7 @@ main(int argc, char *argv[])
 
 		polltim = repo_check_timeout(INFTIM);
 
-		if ((c = poll(pfd, NPFD, polltim)) == -1) {
+		if (poll(pfd, NPFD, polltim) == -1) {
 			if (errno == EINTR)
 				continue;
 			err(1, "poll");
@@ -1159,7 +1254,7 @@ main(int argc, char *argv[])
 		if ((pfd[0].revents & POLLIN)) {
 			b = io_buf_read(proc, &procbuf);
 			if (b != NULL) {
-				entity_process(b, &stats, &vrps, &brks);
+				entity_process(b, &stats, &vrps, &brks, &vaps);
 				ibuf_free(b);
 			}
 		}
@@ -1242,7 +1337,7 @@ main(int argc, char *argv[])
 	if (fchdir(outdirfd) == -1)
 		err(1, "fchdir output dir");
 
-	if (outputfiles(&vrps, &brks, &stats))
+	if (outputfiles(&vrps, &brks, &vaps, &stats))
 		rc = 1;
 
 	printf("Processing time %lld seconds "
@@ -1251,8 +1346,10 @@ main(int argc, char *argv[])
 	    (long long)stats.user_time.tv_sec,
 	    (long long)stats.system_time.tv_sec);
 	printf("Skiplist entries: %zu\n", stats.skiplistentries);
-	printf("Route Origin Authorizations: %zu (%zu failed parse, %zu invalid)\n",
-	    stats.roas, stats.roas_fail, stats.roas_invalid);
+	printf("Route Origin Authorizations: %zu (%zu failed parse, %zu "
+	    "invalid)\n", stats.roas, stats.roas_fail, stats.roas_invalid);
+	printf("AS Provider Attestations: %zu (%zu failed parse, %zu "
+	    "invalid)\n", stats.aspas, stats.aspas_fail, stats.aspas_invalid);
 	printf("BGPsec Router Certificates: %zu\n", stats.brks);
 	printf("Certificates: %zu (%zu invalid)\n",
 	    stats.certs, stats.certs_fail);
@@ -1262,10 +1359,12 @@ main(int argc, char *argv[])
 	    stats.mfts, stats.mfts_fail, stats.mfts_stale);
 	printf("Certificate revocation lists: %zu\n", stats.crls);
 	printf("Ghostbuster records: %zu\n", stats.gbrs);
+	printf("Trust Anchor Keys: %zu\n", stats.taks);
 	printf("Repositories: %zu\n", stats.repos);
 	printf("Cleanup: removed %zu files, %zu directories, %zu superfluous\n",
 	    stats.del_files, stats.del_dirs, stats.extra_files);
 	printf("VRP Entries: %zu (%zu unique)\n", stats.vrps, stats.uniqs);
+	printf("VAP Entries: %zu (%zu unique)\n", stats.vaps, stats.vaps_uniqs);
 
 	/* Memory cleanup. */
 	repo_free();
@@ -1276,8 +1375,10 @@ usage:
 	fprintf(stderr,
 	    "usage: rpki-client [-BcjnoRrVv] [-b sourceaddr] [-d cachedir]"
 	    " [-e rsync_prog]\n"
-	    "                   [-S skiplist] [-s timeout] [-T table] [-t tal]"
-	    " [outputdir]\n"
-	    "       rpki-client [-Vv] [-d cachedir] [-t tal] -f file ...\n");
+	    "                   [-H fqdn] [-S skiplist] [-s timeout] [-T table]"
+	    " [-t tal]\n"
+	    "                   [outputdir]\n"
+	    "       rpki-client [-Vv] [-d cachedir] [-j] [-t tal] -f file ..."
+	    "\n");
 	return 1;
 }

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.819 2022/08/06 12:00:18 kettenis Exp $
+#	$OpenBSD: Makefile,v 1.827 2022/11/23 23:47:05 kettenis Exp $
 
 MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	acpi.4 acpiac.4 acpials.4 acpiasus.4 acpibat.4 \
@@ -41,7 +41,8 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	hds.4 hiclock.4 hidwusb.4 hil.4 hilid.4 hilkbd.4 hilms.4 \
 	hireset.4 hitemp.4 hme.4 hotplug.4 hsq.4 \
 	hvn.4 hvs.4 hyperv.4 \
-	iatp.4 iavf.4 ichiic.4 ichwdt.4 icmp.4 icmp6.4 icsphy.4 ifmedia.4 \
+	iatp.4 iavf.4 icc.4 ichiic.4 ichwdt.4 \
+	icmp.4 icmp6.4 icsphy.4 ifmedia.4 \
 	igc.4 iha.4 ihidev.4 iic.4 iicmux.4 ikbd.4 ims.4 imt.4 imxanatop.4 \
 	imxdog.4 imxesdhc.4 imxgpc.4 imxgpio.4 imxiic.4 imxpciephy.4 \
 	imxpwm.4 imxrtc.4 imxspi.4 imxsrc.4 imxtmu.4 imxuart.4 \
@@ -68,9 +69,11 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	pcfadc.4 pcfiic.4 pcfrtc.4 pchgpio.4 pciide.4 pckbc.4 pckbd.4 \
 	pcmcia.4 pcn.4 pcppi.4 pcscp.4 pcxrtc.4 pcyrtc.4 \
 	pf.4 pflog.4 pflow.4 pfsync.4 \
-	pgt.4 piixpm.4 pinctrl.4 pipex.4 plgpio.4 plrtc.4 pluart.4 \
+	pgt.4 piixpm.4 pijuice.4 pinctrl.4 pipex.4 plgpio.4 plrtc.4 pluart.4 \
 	pms.4 ppb.4 ppp.4 pppoe.4 pppx.4 psci.4 pty.4 puc.4 pvbus.4 \
-	pvclock.4 pwdog.4 pwmbl.4 pwmfan.4 pwmreg.4 \
+	pvclock.4 pwdog.4 pwmbl.4 pwmfan.4 pwmleds.4 pwmreg.4 \
+	qcdwusb.4 qcgpio.4 qciic.4 qcpdc.4 qcpmic.4 qcpmicgpio.4 qcpon.4 \
+	qcpwm.4 qcrtc.4 qcspmi.4 \
 	qla.4 qle.4 qlw.4 qsphy.4 \
 	radio.4 ral.4 random.4 rdomain.4 rd.4 rdac.4 re.4 rdcphy.4 rgephy.4 \
 	rge.4 ricohrtc.4 rkanxdp.4 rkclock.4 rkdrm.4 rkdwhdmi.4 rkdwusb.4 \
@@ -82,8 +85,8 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	simpleamp.4 simpleaudio.4 simplefb.4 simplepanel.4 siop.4 sis.4 sk.4 \
 	sm.4 smsc.4 softraid.4 spdmem.4 sdtemp.4 speaker.4 sppp.4 sqphy.4 \
 	ssdfb.4 st.4 ste.4 stge.4 sti.4 stp.4 sv.4 sxiccmu.4 \
-	sxidog.4 sximmc.4 sxipio.4 sxipwm.4 sxirsb.4 sxirtc.4 sxisid.4 \
-	sxisyscon.4 sxitemp.4 sxitwi.4 sym.4 sypwr.4 syscon.4 \
+	sxidog.4 sximmc.4 sxipio.4 sxipwm.4 sxirintc.4 sxirsb.4 sxirtc.4 \
+	sxisid.4 sxisyscon.4 sxitemp.4 sxitwi.4 sym.4 sypwr.4 syscon.4 \
 	tascodec.4 tcic.4 tcp.4 tcpci.4 termios.4 tht.4 ti.4 tipmic.4 \
 	titmp.4 tl.4 \
 	tlphy.4 thmc.4 tpm.4 tpmr.4 tqphy.4 trm.4 trunk.4 tsl.4 tty.4 \

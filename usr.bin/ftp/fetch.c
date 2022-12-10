@@ -1,4 +1,4 @@
-/*	$OpenBSD: fetch.c,v 1.208 2021/11/10 07:32:55 kn Exp $	*/
+/*	$OpenBSD: fetch.c,v 1.212 2022/11/09 17:41:05 claudio Exp $	*/
 /*	$NetBSD: fetch.c,v 1.14 1997/08/18 10:20:20 lukem Exp $	*/
 
 /*-
@@ -171,14 +171,6 @@ url_encode(const char *path)
 
 	*epathp = '\0';
 	return (epath);
-}
-
-/* ARGSUSED */
-static void
-tooslow(int signo)
-{
-	dprintf(STDERR_FILENO, "%s: connect taking too long\n", __progname);
-	_exit(2);
 }
 
 /*
@@ -604,14 +596,8 @@ noslash:
 		}
 #endif /* !SMALL */
 
-		if (connect_timeout) {
-			(void)signal(SIGALRM, tooslow);
-			alarmtimer(connect_timeout);
-		}
-
-		for (error = connect(fd, res->ai_addr, res->ai_addrlen);
-		    error != 0 && errno == EINTR; error = connect_wait(fd))
-			continue;
+		error = timed_connect(fd, res->ai_addr, res->ai_addrlen,
+		    connect_timeout);
 		if (error != 0) {
 			save_errno = errno;
 			close(fd);
@@ -699,11 +685,6 @@ noslash:
 		}
 	}
 #endif
-
-	if (connect_timeout) {
-		signal(SIGALRM, SIG_DFL);
-		alarmtimer(0);
-	}
 
 	/*
 	 * Construct and send the request. Proxy requests don't want leading /.
@@ -894,7 +875,8 @@ noslash:
 			goto cleanup_url_get;
 		}
 
-		while (len > 0 && (buf[len-1] == '\r' || buf[len-1] == '\n'))
+		while (len > 0 && (buf[len-1] == '\r' || buf[len-1] == '\n' ||
+		    buf[len-1] == ' ' || buf[len-1] == '\t'))
 			buf[--len] = '\0';
 		if (len == 0)
 			break;
@@ -905,12 +887,11 @@ noslash:
 
 		/* Look for some headers */
 		cp = buf;
-#define CONTENTLEN "Content-Length: "
+#define CONTENTLEN "Content-Length:"
 		if (strncasecmp(cp, CONTENTLEN, sizeof(CONTENTLEN) - 1) == 0) {
-			size_t s;
 			cp += sizeof(CONTENTLEN) - 1;
-			if ((s = strcspn(cp, " \t")))
-				*(cp+s) = 0;
+			cp += strspn(cp, " \t");
+			cp[strcspn(cp, " \t")] = '\0';
 			filesize = strtonum(cp, 0, LLONG_MAX, &errstr);
 			if (errstr != NULL)
 				goto improper;
@@ -918,10 +899,11 @@ noslash:
 			if (restart_point)
 				filesize += restart_point;
 #endif /* !SMALL */
-#define LOCATION "Location: "
+#define LOCATION "Location:"
 		} else if (isredirect &&
 		    strncasecmp(cp, LOCATION, sizeof(LOCATION) - 1) == 0) {
 			cp += sizeof(LOCATION) - 1;
+			cp += strspn(cp, " \t");
 			/*
 			 * If there is a colon before the first slash, this URI
 			 * is not relative. RFC 3986 4.2
@@ -968,31 +950,37 @@ noslash:
 			loctail = strchr(redirurl, '#');
 			if (loctail != NULL)
 				*loctail = '\0';
-			if (verbose)
-				fprintf(ttyout, "Redirected to %s\n", redirurl);
+			if (verbose) {
+				char *visbuf;
+				if (stravis(&visbuf, redirurl, VIS_SAFE) == -1)
+					err(1, "Cannot vis redirect URL");
+				fprintf(ttyout, "Redirected to %s\n", visbuf);
+				free(visbuf);
+			}
 			ftp_close(&fin, &tls, &fd);
 			rval = url_get(redirurl, proxyenv, savefile, lastfile);
 			free(redirurl);
 			goto cleanup_url_get;
-#define RETRYAFTER "Retry-After: "
+#define RETRYAFTER "Retry-After:"
 		} else if (isunavail &&
 		    strncasecmp(cp, RETRYAFTER, sizeof(RETRYAFTER) - 1) == 0) {
 			size_t s;
 			cp += sizeof(RETRYAFTER) - 1;
-			if ((s = strcspn(cp, " \t")))
-				cp[s] = '\0';
+			cp += strspn(cp, " \t");
+			cp[strcspn(cp, " \t")] = '\0';
 			retryafter = strtonum(cp, 0, 0, &errstr);
 			if (errstr != NULL)
 				retryafter = -1;
-#define TRANSFER_ENCODING "Transfer-Encoding: "
+#define TRANSFER_ENCODING "Transfer-Encoding:"
 		} else if (strncasecmp(cp, TRANSFER_ENCODING,
 			    sizeof(TRANSFER_ENCODING) - 1) == 0) {
 			cp += sizeof(TRANSFER_ENCODING) - 1;
+			cp += strspn(cp, " \t");
 			cp[strcspn(cp, " \t")] = '\0';
 			if (strcasecmp(cp, "chunked") == 0)
 				chunked = 1;
 #ifndef SMALL
-#define LAST_MODIFIED "Last-Modified: "
+#define LAST_MODIFIED "Last-Modified:"
 		} else if (strncasecmp(cp, LAST_MODIFIED,
 			    sizeof(LAST_MODIFIED) - 1) == 0) {
 			cp += sizeof(LAST_MODIFIED) - 1;
@@ -1179,7 +1167,7 @@ save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 		if (getline(&header, &hsize, fin) == -1)
 			break;
 		/* strip CRLF and any optional chunk extension */
-		header[strcspn(header, ";\r\n")] = '\0';
+		header[strcspn(header, "; \t\r\n")] = '\0';
 		errno = 0;
 		chunksize = strtoul(header, &end, 16);
 		if (errno || header[0] == '\0' || *end != '\0' ||
@@ -1241,7 +1229,6 @@ aborthttp(int signo)
 {
 	const char errmsg[] = "\nfetch aborted.\n";
 
-	alarmtimer(0);
 	write(fileno(ttyout), errmsg, sizeof(errmsg) - 1);
 	longjmp(httpabort, 1);
 }

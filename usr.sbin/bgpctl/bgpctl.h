@@ -1,3 +1,5 @@
+/*	$OpenBSD: bgpctl.h,v 1.18 2022/11/09 14:20:11 claudio Exp $ */
+
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  *
@@ -28,7 +30,6 @@ struct output {
 	void	(*communities)(u_char *, size_t, struct parse_result *);
 	void	(*rib)(struct ctl_show_rib *, u_char *, size_t,
 		    struct parse_result *);
-	void	(*rib_hash)(struct rde_hashstats *);
 	void	(*rib_mem)(struct rde_memstats *);
 	void	(*set)(struct ctl_show_set *);
 	void	(*rtr)(struct ctl_show_rtr *);
@@ -36,7 +37,7 @@ struct output {
 	void	(*tail)(void);
 };
 
-extern const struct output show_output, json_output;
+extern const struct output show_output, json_output, ometric_output;
 extern const size_t pt_sizes[];
 
 #define EOL0(flag)	((flag & F_CTL_SSV) ? ';' : '\n')
@@ -57,3 +58,5 @@ const char	*fmt_community(uint16_t, uint16_t);
 const char	*fmt_large_community(uint32_t, uint32_t, uint32_t);
 const char	*fmt_ext_community(uint8_t *);
 const char	*fmt_set_type(struct ctl_show_set *);
+
+#define MPLS_LABEL_OFFSET 12

@@ -1,4 +1,4 @@
-/*	$OpenBSD: sbrk.S,v 1.6 2016/05/30 05:18:52 guenther Exp $	*/
+/*	$OpenBSD: sbrk.S,v 1.8 2022/12/08 02:11:27 guenther Exp $	*/
 /*	$NetBSD: sbrk.S,v 1.9 2006/01/06 03:58:31 uwe Exp $	*/
 
 /*-
@@ -37,7 +37,7 @@
 
 #include "SYS.h"
 
-	.globl	_C_LABEL(_end)
+	.globl	_end
 	.globl	__curbrk
 	.hidden	__curbrk
 
@@ -45,7 +45,7 @@
 
 	.data
 __curbrk:
-	.long	_C_LABEL(_end)
+	.long	_end
 	.size	__curbrk, . - __curbrk
 	.type	__curbrk,@object
 
@@ -64,7 +64,11 @@ ENTRY(sbrk)
 #endif
 	mov.l	@r0, r0
 	add	r0, r4
+#if SYS_break >= 128
 	mov.l	LSYS_break, r0
+#else
+	mov	#SYS_break, r0
+#endif
 	trapa	#0x80
 	bf	1f
 #ifdef __PIC__
@@ -81,7 +85,9 @@ ENTRY(sbrk)
 	SET_ERRNO_AND_RETURN
 
 	.align	2
+#if SYS_break >= 128
 LSYS_break:	.long	SYS_break
+#endif
 #ifdef __PIC__
 L_GOT:		.long	_GLOBAL_OFFSET_TABLE_
 Lcurbrk:	.long	__curbrk@GOT

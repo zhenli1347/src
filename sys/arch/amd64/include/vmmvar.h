@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmmvar.h,v 1.79 2022/06/30 13:17:58 dv Exp $	*/
+/*	$OpenBSD: vmmvar.h,v 1.84 2022/11/10 11:46:39 dv Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -324,7 +324,9 @@ enum {
 };
 
 enum {
+	VEE_FAULT_INVALID = 0,
 	VEE_FAULT_HANDLED,
+	VEE_FAULT_MMIO_ASSIST,
 	VEE_FAULT_PROTECT,
 };
 
@@ -336,13 +338,6 @@ enum {
 	VMM_CPU_MODE_LONG,
 	VMM_CPU_MODE_UNKNOWN,
 };
-
-/*
- * Port definitions not found elsewhere
- */
-#define PCKBC_AUX	0x61
-#define ELCR0		0x4D0
-#define ELCR1		0x4D1
 
 /*
  * vm exit data
@@ -361,7 +356,12 @@ struct vm_exit_inout {
  *  vm_exit_eptviolation	: describes an EPT VIOLATION exit
  */
 struct vm_exit_eptviolation {
-	uint8_t		vee_fault_type;
+	uint8_t		vee_fault_type;		/* type of vm exit */
+	uint8_t		vee_insn_info;		/* bitfield */
+#define VEE_LEN_VALID		0x1		/* vee_insn_len is valid */
+#define VEE_BYTES_VALID		0x2		/* vee_insn_bytes is valid */
+	uint8_t		vee_insn_len;		/* [VMX] instruction length */
+	uint8_t		vee_insn_bytes[15];	/* [SVM] bytes at {R,E,}IP */
 };
 
 /*
@@ -377,22 +377,23 @@ struct vcpu_segment_info {
 	uint64_t	vsi_base;
 };
 
+/* The GPRS are ordered to assist instruction decode. */
 #define VCPU_REGS_RAX		0
-#define VCPU_REGS_RBX		1
-#define VCPU_REGS_RCX		2
-#define VCPU_REGS_RDX		3
-#define VCPU_REGS_RSI		4
-#define VCPU_REGS_RDI		5
-#define VCPU_REGS_R8		6
-#define VCPU_REGS_R9		7
-#define VCPU_REGS_R10		8
-#define VCPU_REGS_R11		9
-#define VCPU_REGS_R12		10
-#define VCPU_REGS_R13		11
-#define VCPU_REGS_R14		12
-#define VCPU_REGS_R15		13
-#define VCPU_REGS_RSP		14
-#define VCPU_REGS_RBP		15
+#define VCPU_REGS_RCX		1
+#define VCPU_REGS_RDX		2
+#define VCPU_REGS_RBX		3
+#define VCPU_REGS_RSP		4
+#define VCPU_REGS_RBP		5
+#define VCPU_REGS_RSI		6
+#define VCPU_REGS_RDI		7
+#define VCPU_REGS_R8		8
+#define VCPU_REGS_R9		9
+#define VCPU_REGS_R10		10
+#define VCPU_REGS_R11		11
+#define VCPU_REGS_R12		12
+#define VCPU_REGS_R13		13
+#define VCPU_REGS_R14		14
+#define VCPU_REGS_R15		15
 #define VCPU_REGS_RIP		16
 #define VCPU_REGS_RFLAGS	17
 #define VCPU_REGS_NGPRS		(VCPU_REGS_RFLAGS + 1)
@@ -709,6 +710,7 @@ enum {
 
 enum {
 	VMM_MEM_TYPE_REGULAR,
+	VMM_MEM_TYPE_MMIO,
 	VMM_MEM_TYPE_UNKNOWN
 };
 
@@ -931,8 +933,8 @@ struct vcpu {
 	uint8_t vc_virt_mode;			/* [I] */
 
 	struct rwlock vc_lock;
-	struct refcnt vc_refcnt;		/* [a] */
 
+	struct cpu_info *vc_curcpu;		/* [a] */
 	struct cpu_info *vc_last_pcpu;		/* [v] */
 	struct vm_exit vc_exit;			/* [v] */
 

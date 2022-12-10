@@ -1,4 +1,4 @@
-/*	$OpenBSD: cert.c,v 1.84 2022/05/31 18:51:35 tb Exp $ */
+/*	$OpenBSD: cert.c,v 1.101 2022/11/30 09:12:34 job Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2021 Job Snijders <job@openbsd.org>
@@ -17,13 +17,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/socket.h>
-
-#include <arpa/inet.h>
 #include <assert.h>
 #include <err.h>
-#include <inttypes.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -433,6 +428,7 @@ sbgp_sia(struct parse *p, X509_EXTENSION *ext)
 	AUTHORITY_INFO_ACCESS	*sia = NULL;
 	ACCESS_DESCRIPTION	*ad;
 	ASN1_OBJECT		*oid;
+	const char		*mftfilename;
 	int			 i, rc = 0;
 
 	if (X509_EXTENSION_get_critical(ext)) {
@@ -470,6 +466,18 @@ sbgp_sia(struct parse *p, X509_EXTENSION *ext)
 	if (p->res->mft == NULL || p->res->repo == NULL) {
 		warnx("%s: RFC 6487 section 4.8.8: SIA: missing caRepository "
 		    "or rpkiManifest", p->fn);
+		goto out;
+	}
+
+	mftfilename = strrchr(p->res->mft, '/');
+	if (mftfilename == NULL) {
+		warnx("%s: SIA: invalid rpkiManifest entry", p->fn);
+		goto out;
+	}
+	mftfilename++;
+	if (!valid_filename(mftfilename, strlen(mftfilename))) {
+		warnx("%s: SIA: rpkiManifest filename contains invalid "
+		    "characters", p->fn);
 		goto out;
 	}
 
@@ -560,7 +568,7 @@ certificate_policies(struct parse *p, X509_EXTENSION *ext)
 		goto out;
 	}
 
-	if (verbose > 1)
+	if (verbose > 1 && !filemode)
 		warnx("%s: CPS %.*s", p->fn, qualifier->d.cpsuri->length,
 		    qualifier->d.cpsuri->data);
 
@@ -568,6 +576,61 @@ certificate_policies(struct parse *p, X509_EXTENSION *ext)
  out:
 	sk_POLICYINFO_pop_free(policies, POLICYINFO_free);
 	return rc;
+}
+
+/*
+ * Lightweight version of cert_parse_pre() for ASPA, ROA, and RSC EE certs.
+ * This only parses the RFC 3779 extensions since these are necessary for
+ * validation.
+ * Returns cert on success and NULL on failure.
+ */
+struct cert *
+cert_parse_ee_cert(const char *fn, X509 *x)
+{
+	struct parse		 p;
+	X509_EXTENSION		*ext;
+	int			 index;
+
+	memset(&p, 0, sizeof(struct parse));
+	p.fn = fn;
+	if ((p.res = calloc(1, sizeof(struct cert))) == NULL)
+		err(1, NULL);
+
+	if (X509_get_key_usage(x) != KU_DIGITAL_SIGNATURE) {
+		warnx("%s: RFC 6487 section 4.8.4: KU must be digitalSignature",
+		    fn);
+		goto out;
+	}
+
+	/* EKU may be allowed for some purposes in the future. */
+	if (X509_get_extended_key_usage(x) != UINT32_MAX) {
+		warnx("%s: RFC 6487 section 4.8.5: EKU not allowed", fn);
+		goto out;
+	}
+
+	index = X509_get_ext_by_NID(x, NID_sbgp_ipAddrBlock, -1);
+	if ((ext = X509_get_ext(x, index)) != NULL) {
+		if (!sbgp_ipaddrblk(&p, ext))
+			goto out;
+	}
+
+	index = X509_get_ext_by_NID(x, NID_sbgp_autonomousSysNum, -1);
+	if ((ext = X509_get_ext(x, index)) != NULL) {
+		if (!sbgp_assysnum(&p, ext))
+			goto out;
+	}
+
+	if (!X509_up_ref(x)) {
+		cryptowarnx("%s: X509_up_ref failed", fn);
+		goto out;
+	}
+
+	p.res->x509 = x;
+	return p.res;
+
+ out:
+	cert_free(p.res);
+	return NULL;
 }
 
 /*
@@ -646,13 +709,18 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 			break;
 		case NID_ext_key_usage:
 			break;
+		case NID_basic_constraints:
+			break;
+		case NID_key_usage:
+			break;
 		default:
-			/* {
+			/* unexpected extensions warrant investigation */
+			{
 				char objn[64];
 				OBJ_obj2txt(objn, sizeof(objn), obj, 0);
 				warnx("%s: ignoring %s (NID %d)",
-					p.fn, objn, OBJ_obj2nid(obj));
-			} */
+				    p.fn, objn, OBJ_obj2nid(obj));
+			}
 			break;
 		}
 	}
@@ -673,6 +741,19 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 
 	switch (p.res->purpose) {
 	case CERT_PURPOSE_CA:
+		if (X509_get_key_usage(x) != (KU_KEY_CERT_SIGN | KU_CRL_SIGN)) {
+			warnx("%s: RFC 6487 section 4.8.4: key usage violation",
+			    p.fn);
+			goto out;
+		}
+
+		/* EKU may be allowed for some purposes in the future. */
+		if (X509_get_extended_key_usage(x) != UINT32_MAX) {
+			warnx("%s: RFC 6487 section 4.8.5: EKU not allowed",
+			    fn);
+			goto out;
+		}
+
 		if (p.res->mft == NULL) {
 			warnx("%s: RFC 6487 section 4.8.8: missing SIA", p.fn);
 			goto out;
@@ -692,6 +773,13 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 			warnx("%s: unexpected IP resources in BGPsec cert",
 			    p.fn);
 			goto out;
+		}
+		for (i = 0; i < p.res->asz; i++) {
+			if (p.res->as[i].type == CERT_AS_INHERIT) {
+				warnx("%s: inherit elements not allowed in EE"
+				    " cert", p.fn);
+				goto out;
+			}
 		}
 		if (sia_present) {
 			warnx("%s: unexpected SIA extension in BGPsec cert",
@@ -811,6 +899,10 @@ ta_parse(const char *fn, struct cert *p, const unsigned char *pkey,
 		warnx("%s: BGPsec cert cannot be a trust anchor", fn);
 		goto badcert;
 	}
+	if (x509_any_inherits(p->x509)) {
+		warnx("%s: Trust anchor IP/AS resources may not inherit", fn);
+		goto badcert;
+	}
 
 	EVP_PKEY_free(pk);
 	return p;
@@ -855,6 +947,7 @@ cert_buffer(struct ibuf *b, const struct cert *p)
 	io_simple_buffer(b, &p->expires, sizeof(p->expires));
 	io_simple_buffer(b, &p->purpose, sizeof(p->purpose));
 	io_simple_buffer(b, &p->talid, sizeof(p->talid));
+	io_simple_buffer(b, &p->repoid, sizeof(p->repoid));
 	io_simple_buffer(b, &p->ipsz, sizeof(p->ipsz));
 	io_simple_buffer(b, &p->asz, sizeof(p->asz));
 
@@ -887,6 +980,7 @@ cert_read(struct ibuf *b)
 	io_read_buf(b, &p->expires, sizeof(p->expires));
 	io_read_buf(b, &p->purpose, sizeof(p->purpose));
 	io_read_buf(b, &p->talid, sizeof(p->talid));
+	io_read_buf(b, &p->repoid, sizeof(p->repoid));
 	io_read_buf(b, &p->ipsz, sizeof(p->ipsz));
 	io_read_buf(b, &p->asz, sizeof(p->asz));
 
@@ -921,6 +1015,18 @@ authcmp(struct auth *a, struct auth *b)
 }
 
 RB_GENERATE_STATIC(auth_tree, auth, entry, authcmp);
+
+void
+auth_tree_free(struct auth_tree *auths)
+{
+	struct auth	*auth, *tauth;
+
+	RB_FOREACH_SAFE(auth, auth_tree, auths, tauth) {
+		RB_REMOVE(auth_tree, auths, auth);
+		cert_free(auth->cert);
+		free(auth);
+	}
+}
 
 struct auth *
 auth_find(struct auth_tree *auths, const char *aki)

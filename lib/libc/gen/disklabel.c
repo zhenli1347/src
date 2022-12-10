@@ -55,7 +55,6 @@ getdiskbyname(const char *name)
 	char	*cp, *cq;
 	char	p, max, psize[3], pbsize[3],
 		pfsize[3], poffset[3], ptype[3];
-	u_int32_t *dx;
 
 	if (cgetent(&buf, db_array, (char *) name) < 0)
 		return NULL;
@@ -70,9 +69,6 @@ getdiskbyname(const char *name)
 	    (*cq = *cp) && *cq != '|' && *cq != ':')
 		cq++, cp++;
 	*cq = '\0';
-
-	if (cgetcap(buf, "sf", ':') != NULL)
-		dp->d_flags |= D_BADSECT;
 
 #define getnumdflt(field, dname, dflt) \
 	{ long f; (field) = (cgetnum(buf, dname, &f) == -1) ? (dflt) : f; }
@@ -92,8 +88,6 @@ getdiskbyname(const char *name)
 	/* XXX */
 	dp->d_secperunith = 0;
 	getnumdflt(dp->d_secperunit, "su", dp->d_secpercyl * dp->d_ncylinders);
-	getnumdflt(dp->d_bbsize, "bs", BBSIZE);
-	getnumdflt(dp->d_sbsize, "sb", SBSIZE);
 	strlcpy(psize, "px", sizeof psize);
 	strlcpy(pbsize, "bx", sizeof pbsize);
 	strlcpy(pfsize, "fx", sizeof pfsize);
@@ -132,12 +126,6 @@ getdiskbyname(const char *name)
 		}
 	}
 	dp->d_npartitions = max + 1 - 'a';
-	(void)strlcpy(psize, "dx", sizeof psize);
-	dx = dp->d_drivedata;
-	for (p = '0'; p < '0' + NDDATA; p++, dx++) {
-		psize[1] = p;
-		getnumdflt(*dx, psize, 0);
-	}
 	dp->d_magic = DISKMAGIC;
 	dp->d_magic2 = DISKMAGIC;
 	free(buf);

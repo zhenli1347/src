@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.108 2022/02/21 10:24:28 mpi Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.110 2022/12/06 01:56:44 cheloha Exp $	*/
 /* $NetBSD: cpu.c,v 1.1.2.7 2000/06/26 02:04:05 sommerfeld Exp $ */
 
 /*-
@@ -406,8 +406,7 @@ cpu_init(struct cpu_info *ci)
 	patinit(ci);
  
 	/*
-	 * Enable ring 0 write protection (486 or above, but 386
-	 * no longer supported).
+	 * Enable ring 0 write protection.
 	 */
 	lcr0(rcr0() | CR0_WP);
 
@@ -702,7 +701,6 @@ cpu_hatch(void *v)
 
 	cpu_init_idt();
 	lapic_enable();
-	lapic_startclock();
 	lapic_set_lvt();
 	gdt_init_cpu(ci);
 
@@ -728,6 +726,8 @@ cpu_hatch(void *v)
 		    ci->ci_dev->dv_xname, ci->ci_cpuid);
 	nanouptime(&ci->ci_schedstate.spc_runtime);
 	splx(s);
+
+	lapic_startclock();
 
 	SCHED_LOCK(s);
 	cpu_switchto(NULL, sched_chooseproc());

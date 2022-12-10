@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_var.h,v 1.96 2022/08/12 14:49:15 bluhm Exp $	*/
+/*	$OpenBSD: ip_var.h,v 1.108 2022/11/17 18:05:43 mvs Exp $	*/
 /*	$NetBSD: ip_var.h,v 1.16 1996/02/13 23:43:20 christos Exp $	*/
 
 /*
@@ -219,6 +219,8 @@ extern int ipmforwarding;		/* enable multicast forwarding */
 extern int ipmultipath;			/* enable multipath routing */
 extern int la_hold_total;
 
+extern const struct pr_usrreqs rip_usrreqs;
+
 extern struct rttimer_queue ip_mtudisc_timeout_q;
 extern struct pool ipqent_pool;
 struct route;
@@ -254,10 +256,16 @@ void	 rip_init(void);
 int	 rip_input(struct mbuf **, int *, int, int);
 int	 rip_output(struct mbuf *, struct socket *, struct sockaddr *,
 	    struct mbuf *);
-int	 rip_usrreq(struct socket *,
-	    int, struct mbuf *, struct mbuf *, struct mbuf *, struct proc *);
-int	 rip_attach(struct socket *, int);
+int	 rip_attach(struct socket *, int, int);
 int	 rip_detach(struct socket *);
+void	 rip_lock(struct socket *);
+void	 rip_unlock(struct socket *);
+int	 rip_bind(struct socket *, struct mbuf *, struct proc *);
+int	 rip_connect(struct socket *, struct mbuf *);
+int	 rip_disconnect(struct socket *);
+int	 rip_shutdown(struct socket *);
+int	 rip_send(struct socket *, struct mbuf *, struct mbuf *,
+	     struct mbuf *);
 #ifdef MROUTING
 extern struct socket *ip_mrouter[];	/* multicast routing daemon */
 #endif

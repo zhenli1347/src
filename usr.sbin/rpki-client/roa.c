@@ -1,4 +1,4 @@
-/*	$OpenBSD: roa.c,v 1.49 2022/08/10 14:54:03 job Exp $ */
+/*	$OpenBSD: roa.c,v 1.58 2022/11/29 20:41:32 job Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -18,7 +18,6 @@
 
 #include <assert.h>
 #include <err.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +85,7 @@ ASN1_SEQUENCE(ROAIPAddressFamily) = {
 } ASN1_SEQUENCE_END(ROAIPAddressFamily);
 
 ASN1_SEQUENCE(RouteOriginAttestation) = {
-	ASN1_IMP_OPT(RouteOriginAttestation, version, ASN1_INTEGER, 0),
+	ASN1_EXP_OPT(RouteOriginAttestation, version, ASN1_INTEGER, 0),
 	ASN1_SIMPLE(RouteOriginAttestation, asid, ASN1_INTEGER),
 	ASN1_SEQUENCE_OF(RouteOriginAttestation, ipAddrBlocks,
 	    ROAIPAddressFamily),
@@ -111,6 +110,7 @@ roa_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 	long				 maxlen;
 	struct ip_addr			 ipaddr;
 	struct roa_ip			*res;
+	int				 ipaddrblocksz;
 	int				 i, j, rc = 0;
 
 	if ((roa = d2i_RouteOriginAttestation(NULL, &d, dsz)) == NULL) {
@@ -128,7 +128,14 @@ roa_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 		goto out;
 	}
 
-	for (i = 0; i < sk_ROAIPAddressFamily_num(roa->ipAddrBlocks); i++) {
+	ipaddrblocksz = sk_ROAIPAddressFamily_num(roa->ipAddrBlocks);
+	if (ipaddrblocksz > 2) {
+		warnx("%s: draft-rfc6482bis: too many ipAddrBlocks "
+		    "(got %d, expected 1 or 2)", p->fn, ipaddrblocksz);
+		goto out;
+	}
+
+	for (i = 0; i < ipaddrblocksz; i++) {
 		addrfam = sk_ROAIPAddressFamily_value(roa->ipAddrBlocks, i);
 		addrs = addrfam->addresses;
 		addrsz = sk_ROAIPAddress_num(addrs);
@@ -204,8 +211,9 @@ roa_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 	struct parse	 p;
 	size_t		 cmsz;
 	unsigned char	*cms;
-	int		 rc = 0;
 	const ASN1_TIME	*at;
+	struct cert	*cert = NULL;
+	int		 rc = 0;
 
 	memset(&p, 0, sizeof(struct parse));
 	p.fn = fn;
@@ -221,16 +229,14 @@ roa_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	if (!x509_get_aki(*x509, fn, &p.res->aki))
 		goto out;
+	if (!x509_get_sia(*x509, fn, &p.res->sia))
+		goto out;
 	if (!x509_get_ski(*x509, fn, &p.res->ski))
 		goto out;
-	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
+	if (p.res->aia == NULL || p.res->aki == NULL || p.res->sia == NULL ||
+	    p.res->ski == NULL) {
 		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI or SKI X509 extension", fn);
-		goto out;
-	}
-
-	if (X509_get_ext_by_NID(*x509, NID_sbgp_autonomousSysNum, -1) != -1) {
-		warnx("%s: superfluous AS Resources extension present", fn);
+		    "missing AIA, AKI, SIA, or SKI X509 extension", fn);
 		goto out;
 	}
 
@@ -239,13 +245,32 @@ roa_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_get0_notAfter failed", fn);
 		goto out;
 	}
-	if (x509_get_time(at, &p.res->expires) == -1) {
+	if (!x509_get_time(at, &p.res->expires)) {
 		warnx("%s: ASN1_time_parse failed", fn);
 		goto out;
 	}
 
 	if (!roa_parse_econtent(cms, cmsz, &p))
 		goto out;
+
+	if (x509_any_inherits(*x509)) {
+		warnx("%s: inherit elements not allowed in EE cert", fn);
+		goto out;
+	}
+
+	if ((cert = cert_parse_ee_cert(fn, *x509)) == NULL)
+		goto out;
+
+	if (cert->asz > 0) {
+		warnx("%s: superfluous AS Resources extension present", fn);
+		goto out;
+	}
+
+	/*
+	 * If the ROA isn't valid, we accept it anyway and depend upon
+	 * the code around roa_read() to check the "valid" field itself.
+	 */
+	p.res->valid = valid_roa(fn, cert, p.res);
 
 	rc = 1;
 out:
@@ -255,6 +280,7 @@ out:
 		X509_free(*x509);
 		*x509 = NULL;
 	}
+	cert_free(cert);
 	free(cms);
 	return p.res;
 }
@@ -271,6 +297,7 @@ roa_free(struct roa *p)
 		return;
 	free(p->aia);
 	free(p->aki);
+	free(p->sia);
 	free(p->ski);
 	free(p->ips);
 	free(p);
@@ -388,6 +415,8 @@ vrpcmp(struct vrp *a, struct vrp *b)
 		rv = memcmp(&a->addr.addr, &b->addr.addr, 16);
 		if (rv)
 			return rv;
+		break;
+	default:
 		break;
 	}
 	/* a smaller prefixlen is considered bigger, e.g. /8 vs /10 */

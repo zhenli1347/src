@@ -1,4 +1,4 @@
-/*	$OpenBSD: asm.h,v 1.14 2022/01/01 23:47:14 guenther Exp $	*/
+/*	$OpenBSD: asm.h,v 1.17 2022/12/08 01:25:45 guenther Exp $	*/
 /*	$NetBSD: asm.h,v 1.15 2000/08/02 22:24:39 eeh Exp $ */
 
 /*
@@ -41,7 +41,7 @@
 #ifndef _MACHINE_ASM_H_
 #define _MACHINE_ASM_H_
 
-/* Pull in CCFSZ, CC64FSZ, and BIAS from frame.h */
+/* Pull in CC64FSZ and BIAS from frame.h */
 #ifndef _LOCORE
 #define _LOCORE
 #endif
@@ -91,14 +91,14 @@
 #define _PROF_PROLOGUE
 #endif
 
-#define ENTRY(name)		_ENTRY(_C_LABEL(name)); _PROF_PROLOGUE
-#define NENTRY(name)		_ENTRY(_C_LABEL(name))
+#define ENTRY(name)		_ENTRY(name); _PROF_PROLOGUE
+#define NENTRY(name)		_ENTRY(name)
 #define ENTRY_NB(name)		_ENTRY_NB(name); _PROF_PROLOGUE
-#define	ASENTRY(name)		_ENTRY(_ASM_LABEL(name)); _PROF_PROLOGUE
+#define	ASENTRY(name)		_ENTRY(name); _PROF_PROLOGUE
 #define	FUNC(name)		ASENTRY(name)
 #define	END(y)			.size y, . - y
-#define RODATA(name)		.align 4; .text; .globl _C_LABEL(name); \
-				OTYPE(_C_LABEL(name)); _C_LABEL(name):
+#define RODATA(name)		.align 4; .text; .globl name; \
+				OTYPE(name); name:
 
 #define	STRONG_ALIAS(alias,sym)						\
 	.global alias;							\
@@ -106,16 +106,5 @@
 #define	WEAK_ALIAS(alias,sym)						\
 	.weak alias;							\
 	alias = sym
-
-/*
- * WARN_REFERENCES: create a warning if the specified symbol is referenced.
- */
-#ifdef __STDC__
-#define	WARN_REFERENCES(_sym,_msg)				\
-	.section .gnu.warning. ## _sym ; .ascii _msg ; .text
-#else
-#define	WARN_REFERENCES(_sym,_msg)				\
-	.section .gnu.warning./**/_sym ; .ascii _msg ; .text
-#endif /* __STDC__ */
 
 #endif /* _MACHINE_ASM_H_ */

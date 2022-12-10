@@ -1,4 +1,4 @@
-/* $OpenBSD: asn1basic.c,v 1.9 2022/06/25 15:49:28 jsing Exp $ */
+/* $OpenBSD: asn1basic.c,v 1.13 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2017, 2021 Joel Sing <jsing@openbsd.org>
  *
@@ -16,12 +16,13 @@
  */
 
 #include <openssl/asn1.h>
+#include <openssl/err.h>
 
 #include <err.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "asn1_locl.h"
+#include "asn1_local.h"
 
 static void
 hexdump(const unsigned char *buf, size_t len)
@@ -40,7 +41,7 @@ asn1_compare_bytes(const char *label, const unsigned char *d1, int len1,
 {
 	if (len1 != len2) {
 		fprintf(stderr, "FAIL: %s - byte lengths differ "
-		    "(%i != %i)\n", label, len1, len2);
+		    "(%d != %d)\n", label, len1, len2);
 		fprintf(stderr, "Got:\n");
 		hexdump(d1, len1);
 		fprintf(stderr, "Want:\n");
@@ -359,6 +360,18 @@ struct asn1_integer_test asn1_integer_tests[] = {
 		.der_len = 11,
 		.want_error = 1,
 	},
+	{
+		/* Invalid encoding (constructed with definite length). */
+		.der = {0x22, 0x03, 0x02, 0x01, 0x01},
+		.der_len = 5,
+		.want_error = 1,
+	},
+	{
+		/* Invalid encoding (constructed with indefinite length). */
+		.der = {0x22, 0x80, 0x02, 0x01, 0x01, 0x00, 0x00},
+		.der_len = 7,
+		.want_error = 1,
+	},
 };
 
 #define N_ASN1_INTEGER_TESTS \
@@ -492,6 +505,7 @@ asn1_integer_decode_test(struct asn1_integer_test *ait)
 		}
 	} else if (ait->want_error == 0) {
 		fprintf(stderr, "FAIL: INTEGER failed to decode\n");
+		ERR_print_errors_fp(stderr);
 		goto failed;
 	}
 
@@ -678,6 +692,42 @@ asn1_integer_cmp_test(void)
 }
 
 static int
+asn1_integer_null_data_test(void)
+{
+	const uint8_t der[] = {0x02, 0x01, 0x00};
+	ASN1_INTEGER *aint = NULL;
+	uint8_t *p = NULL, *pp;
+	int len;
+	int failed = 0;
+
+	if ((aint = ASN1_INTEGER_new()) == NULL) {
+		fprintf(stderr, "FAIL: ASN1_INTEGER_new() == NULL\n");
+		goto failed;
+	}
+	if ((len = i2d_ASN1_INTEGER(aint, NULL)) < 0) {
+		fprintf(stderr, "FAIL: i2d_ASN1_INTEGER() failed\n");
+		goto failed;
+	}
+	if ((p = calloc(1, len)) == NULL)
+		errx(1, "calloc");
+	pp = p;
+	if ((len = i2d_ASN1_INTEGER(aint, &pp)) < 0) {
+		fprintf(stderr, "FAIL: i2d_ASN1_INTEGER() failed\n");
+		goto failed;
+	}
+	if (!asn1_compare_bytes("INTEGER NULL data", p, len, der, sizeof(der)))
+		goto failed;
+
+	failed = 0;
+
+ failed:
+	ASN1_INTEGER_free(aint);
+	free(p);
+
+	return failed;
+}
+
+static int
 asn1_integer_test(void)
 {
 	struct asn1_integer_test *ait;
@@ -694,6 +744,7 @@ asn1_integer_test(void)
 	}
 
 	failed |= asn1_integer_cmp_test();
+	failed |= asn1_integer_null_data_test();
 	failed |= asn1_integer_set_val_test();
 
 	return failed;

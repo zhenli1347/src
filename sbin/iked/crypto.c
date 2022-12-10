@@ -1,4 +1,4 @@
-/*	$OpenBSD: crypto.c,v 1.39 2021/12/13 17:35:34 tobhe Exp $	*/
+/*	$OpenBSD: crypto.c,v 1.41 2022/11/30 12:42:24 tb Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -1057,7 +1057,7 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	if (EVP_DigestSignFinal(dsa->dsa_ctx, tmp, &tmplen) != 1)
 		goto done;
 	p = tmp;
-	if (d2i_ECDSA_SIG(&obj, &p, tmplen) == NULL)
+	if ((obj = d2i_ECDSA_SIG(NULL, &p, tmplen)) == NULL)
 		goto done;
 	ECDSA_SIG_get0(obj, &r, &s);
 	if (BN_num_bytes(r) > bnlen || BN_num_bytes(s) > bnlen)
@@ -1193,11 +1193,11 @@ dsa_verify_final(struct iked_dsa *dsa, void *buf, size_t len)
 		if (_dsa_verify_prepare(dsa, &ptr, &len, &freeme) < 0)
 			return (-1);
 		if (EVP_DigestVerifyFinal(dsa->dsa_ctx, ptr, len) != 1) {
-			free(freeme);
+			OPENSSL_free(freeme);
 			ca_sslerror(__func__);
 			return (-1);
 		}
-		free(freeme);
+		OPENSSL_free(freeme);
 	}
 
 	return (0);

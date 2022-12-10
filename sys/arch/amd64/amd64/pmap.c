@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.153 2022/06/30 13:51:24 mlarkin Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.156 2022/11/29 21:41:39 guenther Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -223,6 +223,14 @@ pd_entry_t *const normal_pdes[] = PDES_INITIALIZER;
  */
 
 struct pmap kernel_pmap_store;	/* the kernel's pmap (proc0) */
+
+/*
+ * pg_nx: NX PTE bit (if CPU supports)
+ * pg_g_kern: PG_G if global pages should be used in kernel mappings,
+ *	0 otherwise (for insecure CPUs)
+ */
+pt_entry_t pg_nx = 0;
+pt_entry_t pg_g_kern = 0;
 
 /*
  * pmap_pg_wc: if our processor supports PAT then we set this
@@ -2206,6 +2214,7 @@ pmap_unwire(struct pmap *pmap, vaddr_t va)
 #endif
 }
 
+#if 0
 /*
  * pmap_collect: free resources held by a pmap
  *
@@ -2221,10 +2230,10 @@ pmap_collect(struct pmap *pmap)
 	 * for its entire address space.
 	 */
 
-/*	pmap_do_remove(pmap, VM_MIN_ADDRESS, VM_MAX_ADDRESS,
+	pmap_do_remove(pmap, VM_MIN_ADDRESS, VM_MAX_ADDRESS,
 	    PMAP_REMOVE_SKIPWIRED);
-*/
 }
+#endif
 
 /*
  * pmap_copy: copy mappings from one pmap to another
@@ -2833,7 +2842,7 @@ enter_now:
 	if (nocache)
 		npte |= PG_N;
 	if (va < VM_MAXUSER_ADDRESS)
-		npte |= PG_u;
+		npte |= ((flags & PMAP_EFI) ? 0 : PG_u);
 	else if (va < VM_MAX_ADDRESS)
 		npte |= (PG_u | PG_RW);	/* XXXCDC: no longer needed? */
 	if (pmap == pmap_kernel())

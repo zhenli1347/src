@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_elf.c,v 1.166 2022/05/12 16:29:58 claudio Exp $	*/
+/*	$OpenBSD: exec_elf.c,v 1.177 2022/12/05 23:18:37 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1996 Per Fogelstrom
@@ -68,7 +68,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/malloc.h>
 #include <sys/pool.h>
@@ -76,14 +75,11 @@
 #include <sys/namei.h>
 #include <sys/vnode.h>
 #include <sys/core.h>
-#include <sys/syslog.h>
 #include <sys/exec.h>
 #include <sys/exec_elf.h>
 #include <sys/fcntl.h>
 #include <sys/ptrace.h>
-#include <sys/syscall.h>
 #include <sys/signalvar.h>
-#include <sys/stat.h>
 #include <sys/pledge.h>
 
 #include <sys/mman.h>
@@ -198,6 +194,19 @@ elf_load_psection(struct exec_vmcmd_set *vcset, struct vnode *vp,
 	*prot |= (ph->p_flags & PF_W) ? PROT_WRITE : 0;
 	if ((ph->p_flags & PF_W) == 0)
 		*prot |= (ph->p_flags & PF_X) ? PROT_EXEC : 0;
+
+	/*
+	 * Apply immutability as much as possible, but not text/rodata
+	 * segments of textrel binaries, or RELRO or PT_OPENBSD_MUTABLE
+	 * sections, or LOADS marked PF_OPENBSD_MUTABLE, or LOADS which
+	 * violate W^X.
+	 * Userland (meaning crt0 or ld.so) will repair those regions.
+	 */
+	if ((ph->p_flags & (PF_X | PF_W)) != (PF_X | PF_W) &&
+	    ((ph->p_flags & PF_OPENBSD_MUTABLE) == 0))
+		flags |= VMCMD_IMMUTABLE;
+	if ((flags & VMCMD_TEXTREL) && (ph->p_flags & PF_W) == 0)
+		flags &= ~VMCMD_IMMUTABLE;
 
 	msize = ph->p_memsz + diff;
 	offset = ph->p_offset - bdiff;
@@ -421,7 +430,6 @@ elf_load_file(struct proc *p, char *path, struct exec_package *epp,
 			addr += size;
 			break;
 
-		case PT_DYNAMIC:
 		case PT_PHDR:
 		case PT_NOTE:
 			break;
@@ -433,6 +441,19 @@ elf_load_file(struct proc *p, char *path, struct exec_package *epp,
 			}
 			randomizequota -= ph[i].p_memsz;
 			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_randomize,
+			    ph[i].p_memsz, ph[i].p_vaddr + pos, NULLVP, 0, 0);
+			break;
+
+		case PT_DYNAMIC:
+#if defined (__mips__)
+			/* DT_DEBUG is not ready on mips */
+			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_mutable,
+			    ph[i].p_memsz, ph[i].p_vaddr + pos, NULLVP, 0, 0);
+#endif
+			break;
+		case PT_GNU_RELRO:
+		case PT_OPENBSD_MUTABLE:
+			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_mutable,
 			    ph[i].p_memsz, ph[i].p_vaddr + pos, NULLVP, 0, 0);
 			break;
 
@@ -467,7 +488,7 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 	Elf_Ehdr *eh = epp->ep_hdr;
 	Elf_Phdr *ph, *pp, *base_ph = NULL;
 	Elf_Addr phdr = 0, exe_base = 0;
-	int error, i, has_phdr = 0, names = 0;
+	int error, i, has_phdr = 0, names = 0, textrel = 0;
 	char *interp = NULL;
 	u_long phsize;
 	size_t randomizequota = ELF_RANDOMIZE_LIMIT;
@@ -528,16 +549,6 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 		}
 	}
 
-	if (eh->e_type == ET_DYN) {
-		/* need phdr and load sections for PIE */
-		if (!has_phdr || base_ph == NULL) {
-			error = EINVAL;
-			goto bad;
-		}
-		/* randomize exe_base for PIE */
-		exe_base = uvm_map_pie(base_ph->p_align);
-	}
-
 	/*
 	 * Verify this is an OpenBSD executable.  If it's marked that way
 	 * via a PT_NOTE then also check for a PT_OPENBSD_WXNEEDED segment.
@@ -547,12 +558,54 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 	if (eh->e_ident[EI_OSABI] == ELFOSABI_OPENBSD)
 		names |= ELF_NOTE_NAME_OPENBSD;
 
+	if (eh->e_type == ET_DYN) {
+		/* need phdr and load sections for PIE */
+		if (!has_phdr || base_ph == NULL) {
+			error = EINVAL;
+			goto bad;
+		}
+		/* randomize exe_base for PIE */
+		exe_base = uvm_map_pie(base_ph->p_align);
+
+		/*
+		 * Check if DYNAMIC contains DT_TEXTREL
+		 */
+		for (i = 0, pp = ph; i < eh->e_phnum; i++, pp++) {
+			Elf_Dyn *dt;
+			int j;
+
+			switch (pp->p_type) {
+			case PT_DYNAMIC:
+				if (pp->p_filesz > 64*1024)
+					break;
+				dt = malloc(pp->p_filesz, M_TEMP, M_WAITOK);
+				error = vn_rdwr(UIO_READ, epp->ep_vp,
+				    (caddr_t)dt, pp->p_filesz, pp->p_offset,
+				    UIO_SYSSPACE, IO_UNIT, p->p_ucred, NULL, p);
+				if (error) {
+					free(dt, M_TEMP, pp->p_filesz);
+					break;
+				}
+				for (j = 0; j < pp->p_filesz / sizeof(*dt); j++) {
+					if (dt[j].d_tag == DT_TEXTREL) {
+						textrel = VMCMD_TEXTREL;
+						break;
+					}
+				}
+				free(dt, M_TEMP, pp->p_filesz);
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
 	/*
 	 * Load all the necessary sections
 	 */
 	for (i = 0, pp = ph; i < eh->e_phnum; i++, pp++) {
 		Elf_Addr addr, size = 0;
-		int prot = 0;
+		int prot = 0, syscall = 0;
 		int flags = 0;
 
 		switch (pp->p_type) {
@@ -571,7 +624,7 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 			/* Permit system calls in specific main-programs */
 			if (interp == NULL) {
 				/* statics. Also block the ld.so syscall-grant */
-				flags |= VMCMD_SYSCALL;
+				syscall = VMCMD_SYSCALL;
 				p->p_vmspace->vm_map.flags |= VM_MAP_SYSCALL_ONCE;
 			}
 
@@ -583,7 +636,7 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 			 * for DATA_PLT, is fine for TEXT_PLT.
 			 */
 			elf_load_psection(&epp->ep_vmcmds, epp->ep_vp,
-			    pp, &addr, &size, &prot, flags);
+			    pp, &addr, &size, &prot, flags | textrel | syscall);
 
 			/*
 			 * Update exe_base in case alignment was off.
@@ -640,7 +693,6 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 
 		case PT_INTERP:
 			/* Already did this one */
-		case PT_DYNAMIC:
 		case PT_NOTE:
 			break;
 
@@ -656,6 +708,19 @@ exec_elf_makecmds(struct proc *p, struct exec_package *epp)
 			}
 			randomizequota -= ph[i].p_memsz;
 			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_randomize,
+			    ph[i].p_memsz, ph[i].p_vaddr + exe_base, NULLVP, 0, 0);
+			break;
+
+		case PT_DYNAMIC:
+#if defined (__mips__)
+			/* DT_DEBUG is not ready on mips */
+			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_mutable,
+			    ph[i].p_memsz, ph[i].p_vaddr + exe_base, NULLVP, 0, 0);
+#endif
+			break;
+		case PT_GNU_RELRO:
+		case PT_OPENBSD_MUTABLE:
+			NEW_VMCMD(&epp->ep_vmcmds, vmcmd_mutable,
 			    ph[i].p_memsz, ph[i].p_vaddr + exe_base, NULLVP, 0, 0);
 			break;
 
@@ -742,6 +807,7 @@ exec_elf_fixup(struct proc *p, struct exec_package *epp)
 
 	if (interp &&
 	    (error = elf_load_file(p, interp, epp, ap)) != 0) {
+		uprintf("execve: cannot load %s\n", interp);
 		free(ap, M_TEMP, sizeof *ap);
 		pool_put(&namei_pool, interp);
 		kill_vmcmds(&epp->ep_vmcmds);
@@ -816,11 +882,11 @@ elf_os_pt_note_name(Elf_Note *np)
 		/* verify name padding (after the NUL) is NUL */
 		for (j = namlen + 1; j < elfround(np->namesz); j++)
 			if (((char *)(np + 1))[j] != '\0')
-				continue;		
+				continue;
 		/* verify desc padding is NUL */
 		for (j = np->descsz; j < elfround(np->descsz); j++)
 			if (((char *)(np + 1))[j] != '\0')
-				continue;		
+				continue;
 		if (strcmp((char *)(np + 1), elf_note_names[i].name) == 0)
 			return elf_note_names[i].id;
 	}
@@ -1155,9 +1221,6 @@ coredump_walk_elf(vaddr_t start, vaddr_t realend, vaddr_t end, vm_prot_t prot,
 int
 coredump_notes_elf(struct proc *p, void *iocookie, size_t *sizep)
 {
-	struct ps_strings pss;
-	struct iovec iov;
-	struct uio uio;
 	struct elfcore_procinfo cpi;
 	Elf_Note nhdr;
 	struct process *pr = p->p_p;
@@ -1216,23 +1279,7 @@ coredump_notes_elf(struct proc *p, void *iocookie, size_t *sizep)
 	/* Second, write an NT_OPENBSD_AUXV note. */
 	notesize = sizeof(nhdr) + elfround(sizeof("OpenBSD")) +
 	    elfround(ELF_AUX_WORDS * sizeof(char *));
-	if (iocookie) {
-		iov.iov_base = &pss;
-		iov.iov_len = sizeof(pss);
-		uio.uio_iov = &iov;
-		uio.uio_iovcnt = 1;
-		uio.uio_offset = (off_t)pr->ps_strings;
-		uio.uio_resid = sizeof(pss);
-		uio.uio_segflg = UIO_SYSSPACE;
-		uio.uio_rw = UIO_READ;
-		uio.uio_procp = NULL;
-
-		error = uvm_io(&p->p_vmspace->vm_map, &uio, 0);
-		if (error)
-			return (error);
-
-		if (pss.ps_envstr == NULL)
-			return (EIO);
+	if (iocookie && pr->ps_auxinfo) {
 
 		nhdr.namesz = sizeof("OpenBSD");
 		nhdr.descsz = ELF_AUX_WORDS * sizeof(char *);
@@ -1249,7 +1296,7 @@ coredump_notes_elf(struct proc *p, void *iocookie, size_t *sizep)
 			return (error);
 
 		error = coredump_write(iocookie, UIO_USERSPACE,
-		    pss.ps_envstr + pss.ps_nenvstr + 1, nhdr.descsz);
+		    (caddr_t)pr->ps_auxinfo, nhdr.descsz);
 		if (error)
 			return (error);
 	}

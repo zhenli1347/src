@@ -1,4 +1,4 @@
-/*	$OpenBSD: if.c,v 1.78 2021/11/29 06:39:23 deraadt Exp $	*/
+/*	$OpenBSD: if.c,v 1.80 2022/09/08 13:18:47 kn Exp $	*/
 /*	$NetBSD: if.c,v 1.16.4.2 1996/06/07 21:46:46 thorpej Exp $	*/
 
 /*
@@ -86,8 +86,6 @@ static const struct if_show_err *if_errs = if_show_errs;
 
 /*
  * Print a description of the network interfaces.
- * NOTE: ifnetaddr is the location of the kernel global "ifnet",
- * which is a TAILQ_HEAD.
  */
 void
 intpr(int interval, int repeatcount)
@@ -122,8 +120,6 @@ intpr(int interval, int repeatcount)
 		    "Ipkts", if_errs->iname,
 		    "Opkts", if_errs->oname, "Colls");
 	}
-	if (tflag)
-		printf(" %s", "Time");
 	putchar('\n');
 
 	lim = buf + len;
@@ -167,8 +163,6 @@ intpr(int interval, int repeatcount)
 				    ifd->ifi_iqdrops);
 				total += if_errs->count(ifd->ifi_oerrors,
 				    ifd->ifi_oqdrops);
-				if (tflag)
-					total += 0; // XXX ifnet.if_timer;
 				if (total == 0)
 					continue;
 			}
@@ -302,8 +296,6 @@ hexprint:
 		    ifd->ifi_opackets,
 		    if_errs->count(ifd->ifi_oerrors, ifd->ifi_oqdrops),
 		    ifd->ifi_collisions);
-	if (tflag)
-		printf(" %4d", 0 /* XXX ifnet.if_timer */);
 	putchar('\n');
 }
 

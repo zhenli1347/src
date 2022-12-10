@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnd.c,v 1.177 2021/12/23 10:09:16 bluhm Exp $	*/
+/*	$OpenBSD: vnd.c,v 1.179 2022/10/23 14:39:19 krw Exp $	*/
 /*	$NetBSD: vnd.c,v 1.26 1996/03/30 23:06:11 christos Exp $	*/
 
 /*
@@ -227,7 +227,6 @@ vndgetdisklabel(dev_t dev, struct vnd_softc *sc, struct disklabel *lp,
 	lp->d_type = DTYPE_VND;
 	strncpy(lp->d_packname, "fictitious", sizeof(lp->d_packname));
 	DL_SETDSIZE(lp, sc->sc_size);
-	lp->d_flags = 0;
 	lp->d_version = 1;
 
 	lp->d_magic = DISKMAGIC;
@@ -455,10 +454,12 @@ vndioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 		 * them.
 		 */
 		NDINIT(&nd, 0, 0, UIO_SYSSPACE, name, p);
+		nd.ni_unveil = UNVEIL_READ | UNVEIL_WRITE;
 		rw = FREAD|FWRITE;
 		error = vn_open(&nd, FREAD|FWRITE, 0);
 		if (error == EROFS) {
 			NDINIT(&nd, 0, 0, UIO_SYSSPACE, name, p);
+			nd.ni_unveil = UNVEIL_READ | UNVEIL_WRITE;
 			rw = FREAD;
 			error = vn_open(&nd, FREAD, 0);
 		}

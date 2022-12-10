@@ -126,7 +126,7 @@
 
 /* Define to 1 if you have the declaration of `NID_ED25519', and to 0 if you
    don't. */
-#define HAVE_DECL_NID_ED25519 0
+#define HAVE_DECL_NID_ED25519 1
 
 /* Define to 1 if you have the declaration of `NID_ED448', and to 0 if you
    don't. */
@@ -223,6 +223,10 @@
 /* Define to 1 if you have the `EVP_cleanup' function. */
 #define HAVE_EVP_CLEANUP 1
 
+/* Define to 1 if you have the `EVP_default_properties_is_fips_enabled'
+   function. */
+/* #undef HAVE_EVP_DEFAULT_PROPERTIES_IS_FIPS_ENABLED */
+
 /* Define to 1 if you have the `EVP_DigestVerify' function. */
 #define HAVE_EVP_DIGESTVERIFY 1
 
@@ -294,6 +298,9 @@
 
 /* Define to 1 if you have the `getrlimit' function. */
 #define HAVE_GETRLIMIT 1
+
+/* Define to 1 if you have the `gettid' function. */
+/* #undef HAVE_GETTID */
 
 /* Define to 1 if you have the `glob' function. */
 #define HAVE_GLOB 1
@@ -374,7 +381,7 @@
 #define HAVE_MEMMOVE 1
 
 /* Define to 1 if you have the <memory.h> header file. */
-/* #undef HAVE_MEMORY_H */
+#define HAVE_MEMORY_H 1
 
 /* Define to 1 if you have the <netdb.h> header file. */
 #define HAVE_NETDB_H 1
@@ -456,6 +463,12 @@
 
 /* Define to 1 if you have the `OSSL_PARAM_BLD_new' function. */
 /* #undef HAVE_OSSL_PARAM_BLD_NEW */
+
+/* Define to 1 if you have the `poll' function. */
+#define HAVE_POLL 1
+
+/* Define to 1 if you have the <poll.h> header file. */
+#define HAVE_POLL_H 1
 
 /* Define if you have POSIX threads libraries and header files. */
 /* #undef HAVE_PTHREAD */
@@ -548,7 +561,7 @@
 #define HAVE_SSL_CTX_SET_CIPHERSUITES 1
 
 /* Define to 1 if you have the `SSL_CTX_set_security_level' function. */
-/* #undef HAVE_SSL_CTX_SET_SECURITY_LEVEL */
+#define HAVE_SSL_CTX_SET_SECURITY_LEVEL 1
 
 /* Define to 1 if you have the `SSL_CTX_set_tlsext_ticket_key_evp_cb'
    function. */
@@ -724,7 +737,7 @@
 
 /* Define if the network stack does not fully support nonblocking io (causes
    lower performance). */
-#define NONBLOCKING_IS_BROKEN 1
+/* #undef NONBLOCKING_IS_BROKEN */
 
 /* Put -D_ALL_SOURCE define in config.h */
 /* #undef OMITTED__D_ALL_SOURCE */
@@ -760,7 +773,7 @@
 #define PACKAGE_NAME "unbound"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "unbound 1.16.0"
+#define PACKAGE_STRING "unbound 1.17.0"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "unbound"
@@ -769,7 +782,7 @@
 #define PACKAGE_URL ""
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.16.0"
+#define PACKAGE_VERSION "1.17.0"
 
 /* default pidfile location */
 #define PIDFILE ""
@@ -792,7 +805,7 @@
 #define ROOT_CERT_FILE "/var/unbound/etc/icannbundle.pem"
 
 /* version number for resource files */
-#define RSRC_PACKAGE_VERSION 1,16,0,0
+#define RSRC_PACKAGE_VERSION 1,17,0,0
 
 /* Directory to chdir to */
 #define RUN_DIR "/var/unbound/etc"
@@ -800,11 +813,17 @@
 /* Shared data */
 #define SHARE_DIR "/var/unbound/etc"
 
+/* The size of `pthread_t', as computed by sizeof. */
+/* #undef SIZEOF_PTHREAD_T */
+
 /* The size of `size_t', as computed by sizeof. */
 #define SIZEOF_SIZE_T 8
 
 /* The size of `time_t', as computed by sizeof. */
 #define SIZEOF_TIME_T 8
+
+/* The size of `unsigned long', as computed by sizeof. */
+/* #undef SIZEOF_UNSIGNED_LONG */
 
 /* define if (v)snprintf does not return length needed, (but length used) */
 /* #undef SNPRINTF_RET_BROKEN */
@@ -861,7 +880,7 @@
 /* #undef USE_ECDSA_EVP_WORKAROUND */
 
 /* Define this to enable ED25519 support. */
-/* #undef USE_ED25519 */
+#define USE_ED25519 1
 
 /* Define this to enable ED448 support. */
 /* #undef USE_ED448 */
@@ -966,7 +985,7 @@
 /* #undef _MINIX */
 
 /* Enable for compile on Minix */
-#define _NETBSD_SOURCE 1
+/* #undef _NETBSD_SOURCE */
 
 /* Define to 2 if the system does not provide POSIX.1 features except with
    this defined. */

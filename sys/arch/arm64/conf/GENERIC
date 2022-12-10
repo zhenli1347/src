@@ -1,4 +1,4 @@
-# $OpenBSD: GENERIC,v 1.234 2022/08/03 13:42:16 kettenis Exp $
+# $OpenBSD: GENERIC,v 1.249 2022/11/26 09:05:32 kettenis Exp $
 #
 # GENERIC machine description file
 #
@@ -39,6 +39,8 @@ apm0		at mainbus?
 efi0		at mainbus?
 smbios0		at efi?
 acpi0		at mainbus?
+acpiac*		at acpi?
+acpibat*	at acpi?
 acpibtn*	at acpi?
 acpiec*		at acpi?
 acpige*		at acpi?
@@ -102,9 +104,10 @@ plgpio*		at fdt? early 1
 plrtc*		at fdt?
 pluart*		at fdt?
 psci*		at fdt? early 1
+pwmfan*		at fdt?
+pwmleds*	at fdt?
 pwmreg*		at fdt? early 1
 syscon*		at fdt? early 1
-pwmfan*		at fdt?
 
 virtio*		at fdt?
 virtio*		at pci?
@@ -136,6 +139,7 @@ amdgpu*		at pci?
 drm*		at amdgpu?
 wsdisplay*	at amdgpu?
 
+gpiobl*		at fdt?
 gpiocharger*	at fdt?
 gpiokeys*	at fdt?
 gpioleds*	at fdt?
@@ -145,12 +149,18 @@ aplaudio*	at fdt?
 audio*		at aplaudio?
 aplcpu*		at fdt?
 apldart*	at fdt? early 1
+apldc*		at fdt?
+apldchidev*	at fdt?
+apldckbd*	at apldchidev?
+wskbd*		at apldckbd? mux 1
+apldcms*	at apldchidev?
+wsmouse*	at apldcms? mux 0
 apldma*		at fdt?
 apldog*		at fdt? early 1
 apliic*		at fdt?
 iic*		at apliic?
 aplintc*	at fdt? early 1
-aplmbox*	at fdt?
+aplmbox*	at fdt? early 1
 aplmca*		at fdt?
 aplnco*		at fdt?
 aplns*		at fdt?			# Apple NVME Storage controllers
@@ -159,6 +169,8 @@ aplpcie*	at fdt?
 pci*		at aplpcie?
 aplpinctrl*	at fdt? early 1
 aplpmgr*	at fdt? early 1
+aplpwm*		at fdt?
+aplrtk*		at fdt?
 aplsart*	at fdt?
 aplsmc*		at fdt?
 aplspi*		at fdt?
@@ -294,6 +306,21 @@ rkvop*		at fdt?
 rkdwusb*	at fdt?
 dwmmc*		at fdt?
 sdmmc*		at dwmmc?
+
+# Qualcomm SoCs
+qcdwusb*	at fdt?
+qcgpio*		at acpi?
+qcgpio*		at fdt? early 1
+qciic*		at acpi?
+qciic*		at fdt?
+iic*		at qciic?
+qcpdc*		at fdt?
+qcspmi*		at fdt?
+qcpmic*		at qcspmi?
+qcpmicgpio*	at qcpmic?
+qcpon*		at qcpmic?
+qcpwm*		at qcpmic?
+qcrtc*		at qcpmic?
 
 # Sunxi SoCs
 sxipio*		at fdt? early 1	# GPIO pins for leds & PHYs
@@ -501,6 +528,15 @@ dsxrtc*		at iic?			# DS3231 RTC
 escodec*	at iic?			# ES8316 audio codec
 fanpwr*		at iic?			# FAN53555 regulator
 fusbtc*		at iic?			# USB Type-C controller
+ihidev*		at iic?			# HID-over-I2C
+ikbd*		at ihidev?		# HID-over-I2C keyboard
+wskbd*		at ikbd? mux 1
+icc*		at ihidev?
+wskbd*		at icc? mux 1		# Consumer Control keyboards
+ims*		at ihidev?		# HID-over-I2C mouse/trackpad
+wsmouse*	at ims? mux 0
+imt*		at ihidev?		# HID-over-I2C multitouch trackpad
+wsmouse*	at imt? mux 0
 ipmi*		at iic?			# IPMI (SIIF)
 islrtc*		at iic?			# ISL1208 RTC
 maxrtc*		at iic?			# DS1307 RTC
@@ -515,6 +551,7 @@ rkpmic*		at iic?			# RK808 PMIC
 sypwr*		at iic?			# SY8106A regulator
 tascodec*	at iic?			# TAS2770 audio codec
 tcpci*		at iic?			# USB Type-C controller
+pijuice*	at iic?			# PiJuice HAT
 
 # GPIO "pin bus" drivers
 gpioiic*	at gpio?		# I2C bus bit-banging

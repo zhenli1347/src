@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2_msg.c,v 1.85 2022/03/14 12:58:55 tobhe Exp $	*/
+/*	$OpenBSD: ikev2_msg.c,v 1.90 2022/12/06 09:07:33 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <endian.h>
 #include <errno.h>
 #include <err.h>
 #include <event.h>
@@ -279,7 +280,7 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 	exchange = hdr->ike_exchange;
 	flags = hdr->ike_flags;
 	logit(exchange == IKEV2_EXCHANGE_INFORMATIONAL ?  LOG_DEBUG : LOG_INFO,
-	    "%ssend %s %s %u peer %s local %s, %ld bytes%s",
+	    "%ssend %s %s %u peer %s local %s, %zu bytes%s",
 	    SPI_IH(hdr),
 	    print_map(exchange, ikev2_exchange_map),
 	    (flags & IKEV2_FLAG_RESPONSE) ? "res" : "req",
@@ -307,7 +308,9 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 			timer_add(env, &sa->sa_timer,
 			    IKED_IKE_SA_DELETE_TIMEOUT);
 		}
-	}
+		ikestat_inc(env, ikes_msg_send_failures);
+	} else
+		ikestat_inc(env, ikes_msg_sent);
 
 	if (sa == NULL)
 		return (0);
@@ -809,7 +812,8 @@ ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
 	    sa->sa_encr == NULL ||
 	    sa->sa_integr == NULL) {
 		log_debug("%s: invalid SA", __func__);
-		goto done;
+		ikestat_inc(env, ikes_frag_send_failures);
+		return ret;
 	}
 
 	sa_fam = ((struct sockaddr *)&sa->sa_local.addr)->sa_family;
@@ -892,6 +896,8 @@ ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
 		if (ikev2_msg_send(env, &resp) == -1)
 			goto done;
 
+		ikestat_inc(env, ikes_frag_sent);
+
 		offset += MINIMUM(left, max_len);
 		left -= MINIMUM(left, max_len);
 		frag_num++;
@@ -908,6 +914,7 @@ ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
 done:
 	ikev2_msg_cleanup(env, &resp);
 	ibuf_release(e);
+	ikestat_inc(env, ikes_frag_send_failures);
 	return ret;
 }
 
@@ -1260,7 +1267,7 @@ ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
 
 	if ((mr = ikev2_msg_lookup(env, &sa->sa_responses, msg, exchange))
 	    == NULL)
-		return (0);
+		return (-2);	/* not found */
 
 	TAILQ_FOREACH(m, &mr->mrt_frags, msg_entry) {
 		if (sendtofrom(m->msg_fd, ibuf_data(m->msg_data),
@@ -1268,6 +1275,7 @@ ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
 		    (struct sockaddr *)&m->msg_peer, m->msg_peerlen,
 		    (struct sockaddr *)&m->msg_local, m->msg_locallen) == -1) {
 			log_warn("%s: sendtofrom", __func__);
+			ikestat_inc(env, ikes_msg_send_failures);
 			return (-1);
 		}
 		log_info("%sretransmit %s res %u local %s peer %s",
@@ -1279,6 +1287,7 @@ ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
 	}
 
 	timer_add(env, &mr->mrt_timer, IKED_RESPONSE_TIMEOUT);
+	ikestat_inc(env, ikes_retransmit_response);
 	return (0);
 }
 
@@ -1309,6 +1318,7 @@ ikev2_msg_retransmit_timeout(struct iked *env, void *arg)
 				log_warn("%s: sendtofrom", __func__);
 				ikev2_ike_sa_setreason(sa, "retransmit failed");
 				sa_free(env, sa);
+				ikestat_inc(env, ikes_msg_send_failures);
 				return;
 			}
 			log_info("%sretransmit %d %s req %u peer %s "
@@ -1321,10 +1331,12 @@ ikev2_msg_retransmit_timeout(struct iked *env, void *arg)
 		/* Exponential timeout */
 		timer_add(env, &mr->mrt_timer,
 		    IKED_RETRANSMIT_TIMEOUT * (2 << (mr->mrt_tries++)));
+		ikestat_inc(env, ikes_retransmit_request);
 	} else {
 		log_debug("%s: retransmit limit reached for req %u",
 		    __func__, msg->msg_msgid);
 		ikev2_ike_sa_setreason(sa, "retransmit limit reached");
+		ikestat_inc(env, ikes_retransmit_limit);
 		sa_free(env, sa);
 	}
 }

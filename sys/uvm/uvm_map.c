@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.c,v 1.292 2022/08/07 19:39:25 miod Exp $	*/
+/*	$OpenBSD: uvm_map.c,v 1.304 2022/11/17 18:53:05 deraadt Exp $	*/
 /*	$NetBSD: uvm_map.c,v 1.86 2000/11/27 08:40:03 chs Exp $	*/
 
 /*
@@ -151,9 +151,6 @@ void			 uvm_map_freelist_update(struct vm_map*,
 			    vaddr_t, vaddr_t, int);
 struct vm_map_entry	*uvm_map_fix_space(struct vm_map*, struct vm_map_entry*,
 			    vaddr_t, vaddr_t, int);
-int			 uvm_map_sel_limits(vaddr_t*, vaddr_t*, vsize_t, int,
-			    struct vm_map_entry*, vaddr_t, vaddr_t, vaddr_t,
-			    int);
 int			 uvm_map_findspace(struct vm_map*,
 			    struct vm_map_entry**, struct vm_map_entry**,
 			    vaddr_t*, vsize_t, vaddr_t, vaddr_t, vm_prot_t,
@@ -233,38 +230,6 @@ void			 vmspace_validate(struct vm_map*);
 #define VM_MAP_KSIZE_INIT	(512 * (vaddr_t)PAGE_SIZE)
 #define VM_MAP_KSIZE_DELTA	(256 * (vaddr_t)PAGE_SIZE)
 #define VM_MAP_KSIZE_ALLOCMUL	4
-/*
- * When selecting a random free-space block, look at most FSPACE_DELTA blocks
- * ahead.
- */
-#define FSPACE_DELTA		8
-/*
- * Put allocations adjecent to previous allocations when the free-space tree
- * is larger than FSPACE_COMPACT entries.
- *
- * Alignment and PMAP_PREFER may still cause the entry to not be fully
- * adjecent. Note that this strategy reduces memory fragmentation (by leaving
- * a large space before or after the allocation).
- */
-#define FSPACE_COMPACT		128
-/*
- * Make the address selection skip at most this many bytes from the start of
- * the free space in which the allocation takes place.
- *
- * The main idea behind a randomized address space is that an attacker cannot
- * know where to target his attack. Therefore, the location of objects must be
- * as random as possible. However, the goal is not to create the most sparse
- * map that is possible.
- * FSPACE_MAXOFF pushes the considered range in bytes down to less insane
- * sizes, thereby reducing the sparseness. The biggest randomization comes
- * from fragmentation, i.e. FSPACE_COMPACT.
- */
-#define FSPACE_MAXOFF		((vaddr_t)32 * 1024 * 1024)
-/*
- * Allow for small gaps in the overflow areas.
- * Gap size is in bytes and does not have to be a multiple of page-size.
- */
-#define FSPACE_BIASGAP		((vaddr_t)32 * 1024)
 
 /* auto-allocate address lower bound */
 #define VMMAP_MIN_ADDR		PAGE_SIZE
@@ -526,6 +491,8 @@ uvmspace_dused(struct vm_map *map, vaddr_t min, vaddr_t max)
 	vaddr_t stack_begin, stack_end; /* Position of stack. */
 
 	KASSERT(map->flags & VM_MAP_ISVMSPACE);
+	vm_map_assert_anylock(map);
+
 	vm = (struct vmspace *)map;
 	stack_begin = MIN((vaddr_t)vm->vm_maxsaddr, (vaddr_t)vm->vm_minsaddr);
 	stack_end = MAX((vaddr_t)vm->vm_maxsaddr, (vaddr_t)vm->vm_minsaddr);
@@ -587,210 +554,6 @@ dead_entry_push(struct uvm_map_deadq *deadq, struct vm_map_entry *entry)
 	dead_entry_push((_headptr), (_entry))
 
 /*
- * Helper function for uvm_map_findspace_tree.
- *
- * Given allocation constraints and pmap constraints, finds the
- * lowest and highest address in a range that can be used for the
- * allocation.
- *
- * pmap_align and pmap_off are ignored on non-PMAP_PREFER archs.
- *
- *
- * Big chunk of math with a seasoning of dragons.
- */
-int
-uvm_map_sel_limits(vaddr_t *min, vaddr_t *max, vsize_t sz, int guardpg,
-    struct vm_map_entry *sel, vaddr_t align,
-    vaddr_t pmap_align, vaddr_t pmap_off, int bias)
-{
-	vaddr_t sel_min, sel_max;
-#ifdef PMAP_PREFER
-	vaddr_t pmap_min, pmap_max;
-#endif /* PMAP_PREFER */
-#ifdef DIAGNOSTIC
-	int bad;
-#endif /* DIAGNOSTIC */
-
-	sel_min = VMMAP_FREE_START(sel);
-	sel_max = VMMAP_FREE_END(sel) - sz - (guardpg ? PAGE_SIZE : 0);
-
-#ifdef PMAP_PREFER
-
-	/*
-	 * There are two special cases, in which we can satisfy the align
-	 * requirement and the pmap_prefer requirement.
-	 * - when pmap_off == 0, we always select the largest of the two
-	 * - when pmap_off % align == 0 and pmap_align > align, we simply
-	 *   satisfy the pmap_align requirement and automatically
-	 *   satisfy the align requirement.
-	 */
-	if (align > PAGE_SIZE &&
-	    !(pmap_align > align && (pmap_off & (align - 1)) == 0)) {
-		/*
-		 * Simple case: only use align.
-		 */
-		sel_min = roundup(sel_min, align);
-		sel_max &= ~(align - 1);
-
-		if (sel_min > sel_max)
-			return ENOMEM;
-
-		/* Correct for bias. */
-		if (sel_max - sel_min > FSPACE_BIASGAP) {
-			if (bias > 0) {
-				sel_min = sel_max - FSPACE_BIASGAP;
-				sel_min = roundup(sel_min, align);
-			} else if (bias < 0) {
-				sel_max = sel_min + FSPACE_BIASGAP;
-				sel_max &= ~(align - 1);
-			}
-		}
-	} else if (pmap_align != 0) {
-		/*
-		 * Special case: satisfy both pmap_prefer and
-		 * align argument.
-		 */
-		pmap_max = sel_max & ~(pmap_align - 1);
-		pmap_min = sel_min;
-		if (pmap_max < sel_min)
-			return ENOMEM;
-
-		/* Adjust pmap_min for BIASGAP for top-addr bias. */
-		if (bias > 0 && pmap_max - pmap_min > FSPACE_BIASGAP)
-			pmap_min = pmap_max - FSPACE_BIASGAP;
-		/* Align pmap_min. */
-		pmap_min &= ~(pmap_align - 1);
-		if (pmap_min < sel_min)
-			pmap_min += pmap_align;
-		if (pmap_min > pmap_max)
-			return ENOMEM;
-
-		/* Adjust pmap_max for BIASGAP for bottom-addr bias. */
-		if (bias < 0 && pmap_max - pmap_min > FSPACE_BIASGAP) {
-			pmap_max = (pmap_min + FSPACE_BIASGAP) &
-			    ~(pmap_align - 1);
-		}
-		if (pmap_min > pmap_max)
-			return ENOMEM;
-
-		/* Apply pmap prefer offset. */
-		pmap_max |= pmap_off;
-		if (pmap_max > sel_max)
-			pmap_max -= pmap_align;
-		pmap_min |= pmap_off;
-		if (pmap_min < sel_min)
-			pmap_min += pmap_align;
-
-		/*
-		 * Fixup: it's possible that pmap_min and pmap_max
-		 * cross each other. In this case, try to find one
-		 * address that is allowed.
-		 * (This usually happens in biased case.)
-		 */
-		if (pmap_min > pmap_max) {
-			if (pmap_min < sel_max)
-				pmap_max = pmap_min;
-			else if (pmap_max > sel_min)
-				pmap_min = pmap_max;
-			else
-				return ENOMEM;
-		}
-
-		/* Internal validation. */
-		KDASSERT(pmap_min <= pmap_max);
-
-		sel_min = pmap_min;
-		sel_max = pmap_max;
-	} else if (bias > 0 && sel_max - sel_min > FSPACE_BIASGAP)
-		sel_min = sel_max - FSPACE_BIASGAP;
-	else if (bias < 0 && sel_max - sel_min > FSPACE_BIASGAP)
-		sel_max = sel_min + FSPACE_BIASGAP;
-
-#else
-
-	if (align > PAGE_SIZE) {
-		sel_min = roundup(sel_min, align);
-		sel_max &= ~(align - 1);
-		if (sel_min > sel_max)
-			return ENOMEM;
-
-		if (bias != 0 && sel_max - sel_min > FSPACE_BIASGAP) {
-			if (bias > 0) {
-				sel_min = roundup(sel_max - FSPACE_BIASGAP,
-				    align);
-			} else {
-				sel_max = (sel_min + FSPACE_BIASGAP) &
-				    ~(align - 1);
-			}
-		}
-	} else if (bias > 0 && sel_max - sel_min > FSPACE_BIASGAP)
-		sel_min = sel_max - FSPACE_BIASGAP;
-	else if (bias < 0 && sel_max - sel_min > FSPACE_BIASGAP)
-		sel_max = sel_min + FSPACE_BIASGAP;
-
-#endif
-
-	if (sel_min > sel_max)
-		return ENOMEM;
-
-#ifdef DIAGNOSTIC
-	bad = 0;
-	/* Lower boundary check. */
-	if (sel_min < VMMAP_FREE_START(sel)) {
-		printf("sel_min: 0x%lx, but should be at least 0x%lx\n",
-		    sel_min, VMMAP_FREE_START(sel));
-		bad++;
-	}
-	/* Upper boundary check. */
-	if (sel_max > VMMAP_FREE_END(sel) - sz - (guardpg ? PAGE_SIZE : 0)) {
-		printf("sel_max: 0x%lx, but should be at most 0x%lx\n",
-		    sel_max,
-		    VMMAP_FREE_END(sel) - sz - (guardpg ? PAGE_SIZE : 0));
-		bad++;
-	}
-	/* Lower boundary alignment. */
-	if (align != 0 && (sel_min & (align - 1)) != 0) {
-		printf("sel_min: 0x%lx, not aligned to 0x%lx\n",
-		    sel_min, align);
-		bad++;
-	}
-	/* Upper boundary alignment. */
-	if (align != 0 && (sel_max & (align - 1)) != 0) {
-		printf("sel_max: 0x%lx, not aligned to 0x%lx\n",
-		    sel_max, align);
-		bad++;
-	}
-	/* Lower boundary PMAP_PREFER check. */
-	if (pmap_align != 0 && align == 0 &&
-	    (sel_min & (pmap_align - 1)) != pmap_off) {
-		printf("sel_min: 0x%lx, aligned to 0x%lx, expected 0x%lx\n",
-		    sel_min, sel_min & (pmap_align - 1), pmap_off);
-		bad++;
-	}
-	/* Upper boundary PMAP_PREFER check. */
-	if (pmap_align != 0 && align == 0 &&
-	    (sel_max & (pmap_align - 1)) != pmap_off) {
-		printf("sel_max: 0x%lx, aligned to 0x%lx, expected 0x%lx\n",
-		    sel_max, sel_max & (pmap_align - 1), pmap_off);
-		bad++;
-	}
-
-	if (bad) {
-		panic("uvm_map_sel_limits(sz = %lu, guardpg = %c, "
-		    "align = 0x%lx, pmap_align = 0x%lx, pmap_off = 0x%lx, "
-		    "bias = %d, "
-		    "FREE_START(sel) = 0x%lx, FREE_END(sel) = 0x%lx)",
-		    sz, (guardpg ? 'T' : 'F'), align, pmap_align, pmap_off,
-		    bias, VMMAP_FREE_START(sel), VMMAP_FREE_END(sel));
-	}
-#endif /* DIAGNOSTIC */
-
-	*min = sel_min;
-	*max = sel_max;
-	return 0;
-}
-
-/*
  * Test if memory starting at addr with sz bytes is free.
  *
  * Fills in *start_ptr and *end_ptr to be the first and last entry describing
@@ -808,6 +571,8 @@ uvm_map_isavail(struct vm_map *map, struct uvm_addr_state *uaddr,
 
 	if (addr + sz < addr)
 		return 0;
+
+	vm_map_assert_anylock(map);
 
 	/*
 	 * Kernel memory above uvm_maxkaddr is considered unavailable.
@@ -1032,11 +797,17 @@ uvm_mapanon(struct vm_map *map, vaddr_t *addr, vsize_t sz,
 		/* Check that the space is available. */
 		if (flags & UVM_FLAG_UNMAP) {
 			if ((flags & UVM_FLAG_STACK) &&
-			    !uvm_map_is_stack_remappable(map, *addr, sz)) {
+			    !uvm_map_is_stack_remappable(map, *addr, sz,
+				(flags & UVM_FLAG_SIGALTSTACK))) {
 				error = EINVAL;
 				goto unlock;
 			}
-			uvm_unmap_remove(map, *addr, *addr + sz, &dead, FALSE, TRUE);
+			if (uvm_unmap_remove(map, *addr, *addr + sz, &dead,
+			    FALSE, TRUE,
+			    (flags & UVM_FLAG_SIGALTSTACK) ? FALSE : TRUE) != 0) {
+				error = EPERM;	/* immutable entries found */
+				goto unlock;
+			}
 		}
 		if (!uvm_map_isavail(map, NULL, &first, &last, *addr, sz)) {
 			error = ENOMEM;
@@ -1277,8 +1048,13 @@ uvm_map(struct vm_map *map, vaddr_t *addr, vsize_t sz,
 		}
 
 		/* Check that the space is available. */
-		if (flags & UVM_FLAG_UNMAP)
-			uvm_unmap_remove(map, *addr, *addr + sz, &dead, FALSE, TRUE);
+		if (flags & UVM_FLAG_UNMAP) {
+			if (uvm_unmap_remove(map, *addr, *addr + sz, &dead,
+			    FALSE, TRUE, TRUE) != 0) {
+				error = EPERM;	/* immutable entries found */
+				goto unlock;
+			}
+		}
 		if (!uvm_map_isavail(map, NULL, &first, &last, *addr, sz)) {
 			error = ENOMEM;
 			goto unlock;
@@ -1685,6 +1461,8 @@ uvm_map_mkentry(struct vm_map *map, struct vm_map_entry *first,
 	entry->guard = 0;
 	entry->fspace = 0;
 
+	vm_map_assert_wrlock(map);
+
 	/* Reset free space in first. */
 	free = uvm_map_uaddr_e(map, first);
 	uvm_mapent_free_remove(map, free, first);
@@ -1812,6 +1590,8 @@ boolean_t
 uvm_map_lookup_entry(struct vm_map *map, vaddr_t address,
     struct vm_map_entry **entry)
 {
+	vm_map_assert_anylock(map);
+
 	*entry = uvm_map_entrybyaddr(&map->addr, address);
 	return *entry != NULL && !UVM_ET_ISHOLE(*entry) &&
 	    (*entry)->start <= address && (*entry)->end > address;
@@ -1926,10 +1706,13 @@ uvm_map_inentry(struct proc *p, struct p_inentry *ie, vaddr_t addr,
  * Must be called with map locked.
  */
 boolean_t
-uvm_map_is_stack_remappable(struct vm_map *map, vaddr_t addr, vaddr_t sz)
+uvm_map_is_stack_remappable(struct vm_map *map, vaddr_t addr, vaddr_t sz,
+    int sigaltstack_check)
 {
 	vaddr_t end = addr + sz;
 	struct vm_map_entry *first, *iter, *prev = NULL;
+
+	vm_map_assert_anylock(map);
 
 	if (!uvm_map_lookup_entry(map, addr, &first)) {
 		printf("map stack 0x%lx-0x%lx of map %p failed: no mapping\n",
@@ -1963,6 +1746,12 @@ uvm_map_is_stack_remappable(struct vm_map *map, vaddr_t addr, vaddr_t sz)
 			    "hole in range\n", addr, end, map);
 			return FALSE;
 		}
+		if (sigaltstack_check) {
+			if ((iter->etype & UVM_ET_SYSCALL))
+				return FALSE;
+			if (iter->protection != (PROT_READ | PROT_WRITE))
+				return FALSE;
+		}
 	}
 
 	return TRUE;
@@ -1987,7 +1776,7 @@ uvm_map_remap_as_stack(struct proc *p, vaddr_t addr, vaddr_t sz)
 	    PROT_READ | PROT_WRITE | PROT_EXEC,
 	    MAP_INHERIT_COPY, MADV_NORMAL,
 	    UVM_FLAG_STACK | UVM_FLAG_FIXED | UVM_FLAG_UNMAP |
-	    UVM_FLAG_COPYONW);
+	    UVM_FLAG_COPYONW | UVM_FLAG_SIGALTSTACK);
 
 	start = round_page(addr);
 	end = trunc_page(addr + sz);
@@ -2002,6 +1791,13 @@ uvm_map_remap_as_stack(struct proc *p, vaddr_t addr, vaddr_t sz)
 	if (start < map->min_offset || end >= map->max_offset || end < start)
 		return EINVAL;
 
+	/*
+	 * UVM_FLAG_SIGALTSTACK indicates that immutable may be bypassed,
+	 * but the range is checked that it is contigous, is not a syscall
+	 * mapping, and protection RW.  Then, a new mapping (all zero) is
+	 * placed upon the region, which prevents an attacker from pivoting
+	 * into pre-placed MAP_STACK space.
+	 */
 	error = uvm_mapanon(map, &start, end - start, 0, flags);
 	if (error != 0)
 		printf("map stack for pid %d failed\n", p->p_p->ps_pid);
@@ -2056,7 +1852,7 @@ uvm_unmap(struct vm_map *map, vaddr_t start, vaddr_t end)
 	    (end & (vaddr_t)PAGE_MASK) == 0);
 	TAILQ_INIT(&dead);
 	vm_map_lock(map);
-	uvm_unmap_remove(map, start, end, &dead, FALSE, TRUE);
+	uvm_unmap_remove(map, start, end, &dead, FALSE, TRUE, FALSE);
 	vm_map_unlock(map);
 
 	if (map->flags & VM_MAP_INTRSAFE)
@@ -2081,6 +1877,8 @@ uvm_mapent_mkfree(struct vm_map *map, struct vm_map_entry *entry,
 	struct vm_map_entry	*prev;
 	vaddr_t			 addr;	/* Start of freed range. */
 	vaddr_t			 end;	/* End of freed range. */
+
+	UVM_MAP_REQ_WRITE(map);
 
 	prev = *prev_ptr;
 	if (prev == entry)
@@ -2198,26 +1996,41 @@ uvm_unmap_kill_entry(struct vm_map *map, struct vm_map_entry *entry)
  * If markfree, entry will be properly marked free, otherwise, no replacement
  * entry will be put in the tree (corrupting the tree).
  */
-void
+int
 uvm_unmap_remove(struct vm_map *map, vaddr_t start, vaddr_t end,
     struct uvm_map_deadq *dead, boolean_t remove_holes,
-    boolean_t markfree)
+    boolean_t markfree, boolean_t checkimmutable)
 {
 	struct vm_map_entry *prev_hint, *next, *entry;
 
 	start = MAX(start, map->min_offset);
 	end = MIN(end, map->max_offset);
 	if (start >= end)
-		return;
+		return 0;
 
-	if ((map->flags & VM_MAP_INTRSAFE) == 0)
-		splassert(IPL_NONE);
-	else
-		splassert(IPL_VM);
+	vm_map_assert_wrlock(map);
 
 	/* Find first affected entry. */
 	entry = uvm_map_entrybyaddr(&map->addr, start);
 	KDASSERT(entry != NULL && entry->start <= start);
+
+	if (checkimmutable) {
+		struct vm_map_entry *entry1 = entry;
+
+		/* Refuse to unmap if any entries are immutable */
+		if (entry1->end <= start)
+			entry1 = RBT_NEXT(uvm_map_addr, entry1);
+		for (; entry1 != NULL && entry1->start < end; entry1 = next) {
+			KDASSERT(entry1->start >= start);
+			next = RBT_NEXT(uvm_map_addr, entry1);
+			/* Treat memory holes as free space. */
+			if (entry1->start == entry1->end || UVM_ET_ISHOLE(entry1))
+				continue;
+			if (entry1->etype & UVM_ET_IMMUTABLE)
+				return EPERM;
+		}
+	}
+
 	if (entry->end <= start && markfree)
 		entry = RBT_NEXT(uvm_map_addr, entry);
 	else
@@ -2282,6 +2095,7 @@ uvm_unmap_remove(struct vm_map *map, vaddr_t start, vaddr_t end,
 			KDASSERT(uvm_map_entrybyaddr(&map->addr, a) == NULL);
 	}
 #endif
+	return 0;
 }
 
 /*
@@ -2726,6 +2540,8 @@ uvm_map_teardown(struct vm_map *map)
 
 	KASSERT((map->flags & VM_MAP_INTRSAFE) == 0);
 
+	vm_map_lock(map);
+
 	/* Remove address selectors. */
 	uvm_addr_destroy(map->uaddr_exe);
 	map->uaddr_exe = NULL;
@@ -2766,6 +2582,8 @@ uvm_map_teardown(struct vm_map *map)
 		/* Update wave-front. */
 		entry = TAILQ_NEXT(entry, dfree.deadq);
 	}
+
+	vm_map_unlock(map);
 
 #ifdef VMMAP_DEBUG
 	numt = numq = 0;
@@ -3010,7 +2828,7 @@ vmspace_validate(struct vm_map *map)
 		imin = imax = iter->start;
 
 		if (UVM_ET_ISHOLE(iter) || iter->object.uvm_obj != NULL ||
-		    iter->prot != PROT_NONE)
+		    iter->protection != PROT_NONE)
 			continue;
 
 		/*
@@ -3042,7 +2860,7 @@ vmspace_validate(struct vm_map *map)
 		printf("vmspace stack range: 0x%lx-0x%lx\n",
 		    stack_begin, stack_end);
 		panic("vmspace_validate: vmspace.vm_dused invalid, "
-		    "expected %ld pgs, got %ld pgs in map %p",
+		    "expected %ld pgs, got %d pgs in map %p",
 		    heap, vm->vm_dused,
 		    map);
 	}
@@ -3302,13 +3120,15 @@ uvm_page_printit(struct vm_page *pg, boolean_t full,
  */
 int
 uvm_map_protect(struct vm_map *map, vaddr_t start, vaddr_t end,
-    vm_prot_t new_prot, boolean_t set_max)
+    vm_prot_t new_prot, int etype, boolean_t set_max, boolean_t checkimmutable)
 {
 	struct vm_map_entry *first, *iter;
 	vm_prot_t old_prot;
 	vm_prot_t mask;
 	vsize_t dused;
 	int error;
+
+	KASSERT((etype & ~UVM_ET_STACK) == 0);	/* only UVM_ET_STACK allowed */
 
 	if (start > end)
 		return EINVAL;
@@ -3337,6 +3157,17 @@ uvm_map_protect(struct vm_map *map, vaddr_t start, vaddr_t end,
 		if (iter->start == iter->end || UVM_ET_ISHOLE(iter))
 			continue;
 
+		if (checkimmutable &&
+		    (iter->etype & UVM_ET_IMMUTABLE)) {
+			if (iter->protection == (PROT_READ | PROT_WRITE) &&
+			    new_prot == PROT_READ) {
+				/* Permit RW to R as a data-locking mechanism */
+				;
+			} else {
+				error = EPERM;
+				goto out;
+			}
+		}
 		old_prot = iter->protection;
 		if (old_prot == PROT_NONE && new_prot != old_prot) {
 			dused += uvmspace_dused(
@@ -3366,6 +3197,10 @@ uvm_map_protect(struct vm_map *map, vaddr_t start, vaddr_t end,
 			goto out;
 		}
 	}
+
+	/* only apply UVM_ET_STACK on a mapping changing to RW */
+	if (etype && new_prot != (PROT_READ|PROT_WRITE))
+		etype = 0;
 
 	/* Fix protections.  */
 	for (iter = first; iter != NULL && iter->start < end;
@@ -3397,6 +3232,7 @@ uvm_map_protect(struct vm_map *map, vaddr_t start, vaddr_t end,
 			iter->protection &= new_prot;
 		} else
 			iter->protection = new_prot;
+		iter->etype |= etype;	/* potentially add UVM_ET_STACK */
 
 		/*
 		 * update physical map if necessary.  worry about copy-on-write
@@ -3477,6 +3313,8 @@ uvm_map_protect(struct vm_map *map, vaddr_t start, vaddr_t end,
 	pmap_update(map->pmap);
 
 out:
+	if (etype & UVM_ET_STACK)
+		map->sserial++;
 	vm_map_unlock(map);
 	return error;
 }
@@ -3595,7 +3433,7 @@ uvmspace_exec(struct proc *p, vaddr_t start, vaddr_t end)
 		 * (as in, not replace them with free-memory entries).
 		 */
 		uvm_unmap_remove(map, map->min_offset, map->max_offset,
-		    &dead_entries, TRUE, FALSE);
+		    &dead_entries, TRUE, FALSE, FALSE);
 
 		KDASSERT(RBT_EMPTY(uvm_map_addr, &map->addr));
 
@@ -3768,7 +3606,7 @@ uvm_share(struct vm_map *dstmap, vaddr_t dstaddr, vm_prot_t prot,
 	}
 
 	ret = EINVAL;
-	uvm_unmap_remove(dstmap, dstaddr, unmap_end, &dead, FALSE, TRUE);
+	uvm_unmap_remove(dstmap, dstaddr, unmap_end, &dead, FALSE, TRUE, FALSE);
 
 exit_unlock:
 	vm_map_unlock_read(srcmap);
@@ -4266,6 +4104,8 @@ uvm_map_checkprot(struct vm_map *map, vaddr_t start, vaddr_t end,
 {
 	struct vm_map_entry *entry;
 
+	vm_map_assert_anylock(map);
+
 	if (start < map->min_offset || end > map->max_offset || start > end)
 		return FALSE;
 	if (start == end)
@@ -4326,8 +4166,10 @@ uvm_map_deallocate(vm_map_t map)
 	 */
 	TAILQ_INIT(&dead);
 	uvm_tree_sanity(map, __FILE__, __LINE__);
+	vm_map_lock(map);
 	uvm_unmap_remove(map, map->min_offset, map->max_offset, &dead,
-	    TRUE, FALSE);
+	    TRUE, FALSE, FALSE);
+	vm_map_unlock(map);
 	pmap_destroy(map->pmap);
 	KASSERT(RBT_EMPTY(uvm_map_addr, &map->addr));
 	free(map, M_VMMAP, sizeof *map);
@@ -4418,6 +4260,45 @@ uvm_map_syscall(struct vm_map *map, vaddr_t start, vaddr_t end)
 
 	map->wserial++;
 	map->flags |= VM_MAP_SYSCALL_ONCE;
+	vm_map_unlock(map);
+	return (0);
+}
+
+/* 
+ * uvm_map_immutable: block mapping/mprotect for range of addrs in map.
+ *
+ * => map must be unlocked
+ */
+int
+uvm_map_immutable(struct vm_map *map, vaddr_t start, vaddr_t end, int imut)
+{
+	struct vm_map_entry *entry;
+
+	if (start > end)
+		return EINVAL;
+	start = MAX(start, map->min_offset);
+	end = MIN(end, map->max_offset);
+	if (start >= end)
+		return 0;
+
+	vm_map_lock(map);
+
+	entry = uvm_map_entrybyaddr(&map->addr, start);
+	if (entry->end > start)
+		UVM_MAP_CLIP_START(map, entry, start);
+	else
+		entry = RBT_NEXT(uvm_map_addr, entry);
+
+	while (entry != NULL && entry->start < end) {
+		UVM_MAP_CLIP_END(map, entry, end);
+		if (imut)
+			entry->etype |= UVM_ET_IMMUTABLE;
+		else
+			entry->etype &= ~UVM_ET_IMMUTABLE;
+		entry = RBT_NEXT(uvm_map_addr, entry);
+	}
+
+	map->wserial++;
 	vm_map_unlock(map);
 	return (0);
 }
@@ -4606,7 +4487,7 @@ uvm_map_extract(struct vm_map *srcmap, vaddr_t start, vsize_t len,
 fail2_unmap:
 	if (error) {
 		uvm_unmap_remove(kernel_map, dstaddr, dstaddr + len, &dead,
-		    FALSE, TRUE);
+		    FALSE, TRUE, FALSE);
 	}
 
 	/* Release maps, release dead entries. */
@@ -5125,6 +5006,7 @@ uvm_map_freelist_update(struct vm_map *map, struct uvm_map_deadq *dead,
     vaddr_t b_start, vaddr_t b_end, vaddr_t s_start, vaddr_t s_end, int flags)
 {
 	KDASSERT(b_end >= b_start && s_end >= s_start);
+	vm_map_assert_wrlock(map);
 
 	/* Clear all free lists. */
 	uvm_map_freelist_update_clear(map, dead);
@@ -5183,6 +5065,8 @@ uvm_map_fix_space(struct vm_map *map, struct vm_map_entry *entry,
 	KDASSERT(min <= max);
 	KDASSERT((entry != NULL && VMMAP_FREE_END(entry) == min) ||
 	    min == map->min_offset);
+
+	UVM_MAP_REQ_WRITE(map);
 
 	/*
 	 * During the function, entfree will always point at the uaddr state
@@ -5547,6 +5431,27 @@ vm_map_unbusy_ln(struct vm_map *map, char *file, int line)
 	mtx_leave(&map->flags_lock);
 	if (oflags & VM_MAP_WANTLOCK)
 		wakeup(&map->flags);
+}
+
+void
+vm_map_assert_anylock_ln(struct vm_map *map, char *file, int line)
+{
+	LPRINTF(("map assert read or write locked: %p (at %s %d)\n", map, file, line));
+	if ((map->flags & VM_MAP_INTRSAFE) == 0)
+		rw_assert_anylock(&map->lock);
+	else
+		MUTEX_ASSERT_LOCKED(&map->mtx);
+}
+
+void
+vm_map_assert_wrlock_ln(struct vm_map *map, char *file, int line)
+{
+	LPRINTF(("map assert write locked: %p (at %s %d)\n", map, file, line));
+	if ((map->flags & VM_MAP_INTRSAFE) == 0) {
+		splassert(IPL_NONE);
+		rw_assert_wrlock(&map->lock);
+	} else
+		MUTEX_ASSERT_LOCKED(&map->mtx);
 }
 
 #ifndef SMALL_KERNEL

@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpctl.c,v 1.281 2022/07/28 10:40:25 claudio Exp $ */
+/*	$OpenBSD: bgpctl.c,v 1.287 2022/10/18 09:30:29 job Exp $ */
 
 /*
  * Copyright (c) 2003 Henning Brauer <henning@openbsd.org>
@@ -79,7 +79,7 @@ int
 main(int argc, char *argv[])
 {
 	struct sockaddr_un	 sa_un;
-	int			 fd, n, done, ch, verbose = 0;
+	int			 fd, n, done, numdone, ch, verbose = 0;
 	struct imsg		 imsg;
 	struct network_config	 net;
 	struct parse_result	*res;
@@ -131,7 +131,7 @@ main(int argc, char *argv[])
 		if (pledge("stdio", NULL) == -1)
 			err(1, "pledge");
 
-		bzero(&ribreq, sizeof(ribreq));
+		memset(&ribreq, 0, sizeof(ribreq));
 		if (res->as.type != AS_UNDEF)
 			ribreq.as = res->as;
 		if (res->addr.aid) {
@@ -160,7 +160,7 @@ main(int argc, char *argv[])
 	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
 		err(1, "control_init: socket");
 
-	bzero(&sa_un, sizeof(sa_un));
+	memset(&sa_un, 0, sizeof(sa_un));
 	sa_un.sun_family = AF_UNIX;
 	if (strlcpy(sa_un.sun_path, sockname, sizeof(sa_un.sun_path)) >=
 	    sizeof(sa_un.sun_path))
@@ -235,7 +235,7 @@ main(int argc, char *argv[])
 			    NULL, 0);
 		break;
 	case SHOW_RIB:
-		bzero(&ribreq, sizeof(ribreq));
+		memset(&ribreq, 0, sizeof(ribreq));
 		type = IMSG_CTL_SHOW_RIB;
 		if (res->addr.aid) {
 			ribreq.prefix = res->addr;
@@ -254,6 +254,12 @@ main(int argc, char *argv[])
 		imsg_compose(ibuf, type, 0, 0, -1, &ribreq, sizeof(ribreq));
 		break;
 	case SHOW_RIB_MEM:
+		imsg_compose(ibuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
+		break;
+	case SHOW_METRICS:
+		output = &ometric_output;
+		numdone = 2;
+		imsg_compose(ibuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1, NULL, 0);
 		imsg_compose(ibuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
 		break;
 	case RELOAD:
@@ -310,7 +316,7 @@ main(int argc, char *argv[])
 		break;
 	case NETWORK_ADD:
 	case NETWORK_REMOVE:
-		bzero(&net, sizeof(net));
+		memset(&net, 0, sizeof(net));
 		net.prefix = res->addr;
 		net.prefixlen = res->prefixlen;
 		net.rd = res->rd;
@@ -333,14 +339,14 @@ main(int argc, char *argv[])
 		done = 1;
 		break;
 	case NETWORK_SHOW:
-		bzero(&ribreq, sizeof(ribreq));
+		memset(&ribreq, 0, sizeof(ribreq));
 		ribreq.aid = res->aid;
 		strlcpy(ribreq.rib, res->rib, sizeof(ribreq.rib));
 		imsg_compose(ibuf, IMSG_CTL_SHOW_NETWORK, 0, 0, -1,
 		    &ribreq, sizeof(ribreq));
 		break;
 	case NETWORK_MRT:
-		bzero(&ribreq, sizeof(ribreq));
+		memset(&ribreq, 0, sizeof(ribreq));
 		if (res->as.type != AS_UNDEF)
 			ribreq.as = res->as;
 		if (res->addr.aid) {
@@ -366,18 +372,14 @@ main(int argc, char *argv[])
 		break;
 	}
 
-	while (ibuf->w.queued)
-		if (msgbuf_write(&ibuf->w) <= 0 && errno != EAGAIN)
-			err(1, "write error");
-
 	output->head(res);
 
-	while (!done) {
-		if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
-			err(1, "imsg_read error");
-		if (n == 0)
-			errx(1, "pipe closed");
+ again:
+	while (ibuf->w.queued)
+		if (msgbuf_write(&ibuf->w) <= 0)
+			err(1, "write error");
 
+	while (!done) {
 		while (!done) {
 			if ((n = imsg_get(ibuf, &imsg)) == -1)
 				err(1, "imsg_get error");
@@ -387,6 +389,20 @@ main(int argc, char *argv[])
 			done = show(&imsg, res);
 			imsg_free(&imsg);
 		}
+
+		if (done)
+			break;
+
+		if ((n = imsg_read(ibuf)) == -1)
+			err(1, "imsg_read error");
+		if (n == 0)
+			errx(1, "pipe closed");
+
+	}
+
+	if (res->action == SHOW_METRICS && --numdone > 0) {
+		done = 0;
+		goto again;
 	}
 
 	output->tail();
@@ -410,28 +426,35 @@ show(struct imsg *imsg, struct parse_result *res)
 	struct ktable		*kt;
 	struct ctl_show_rib	 rib;
 	struct rde_memstats	 stats;
-	struct rde_hashstats	 hash;
 	u_char			*asdata;
 	u_int			 rescode, ilen;
 	size_t			 aslen;
 
 	switch (imsg->hdr.type) {
 	case IMSG_CTL_SHOW_NEIGHBOR:
+		if (output->neighbor == NULL)
+			break;
 		p = imsg->data;
 		output->neighbor(p, res);
 		break;
 	case IMSG_CTL_SHOW_TIMER:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(t))
 			errx(1, "wrong imsg len");
+		if (output->timer == NULL)
+			break;
 		memcpy(&t, imsg->data, sizeof(t));
 		if (t.type > 0 && t.type < Timer_Max)
 			output->timer(&t);
 		break;
 	case IMSG_CTL_SHOW_INTERFACE:
+		if (output->interface == NULL)
+			break;
 		iface = imsg->data;
 		output->interface(iface);
 		break;
 	case IMSG_CTL_SHOW_NEXTHOP:
+		if (output->nexthop == NULL)
+			break;
 		nh = imsg->data;
 		output->nexthop(nh);
 		break;
@@ -439,18 +462,24 @@ show(struct imsg *imsg, struct parse_result *res)
 	case IMSG_CTL_SHOW_NETWORK:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(*kf))
 			errx(1, "wrong imsg len");
+		if (output->fib == NULL)
+			break;
 		kf = imsg->data;
 		output->fib(kf);
 		break;
 	case IMSG_CTL_SHOW_FIB_TABLES:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(*kt))
 			errx(1, "wrong imsg len");
+		if (output->fib_table == NULL)
+			break;
 		kt = imsg->data;
 		output->fib_table(kt);
 		break;
 	case IMSG_CTL_SHOW_RIB:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(rib))
 			errx(1, "wrong imsg len");
+		if (output->rib == NULL)
+			break;
 		memcpy(&rib, imsg->data, sizeof(rib));
 		aslen = imsg->hdr.len - IMSG_HEADER_SIZE - sizeof(rib);
 		asdata = imsg->data;
@@ -463,6 +492,8 @@ show(struct imsg *imsg, struct parse_result *res)
 			warnx("bad IMSG_CTL_SHOW_RIB_COMMUNITIES received");
 			break;
 		}
+		if (output->communities == NULL)
+			break;
 		output->communities(imsg->data, ilen, res);
 		break;
 	case IMSG_CTL_SHOW_RIB_ATTR:
@@ -471,29 +502,31 @@ show(struct imsg *imsg, struct parse_result *res)
 			warnx("bad IMSG_CTL_SHOW_RIB_ATTR received");
 			break;
 		}
+		if (output->attr == NULL)
+			break;
 		output->attr(imsg->data, ilen, res->flags, 0);
 		break;
 	case IMSG_CTL_SHOW_RIB_MEM:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(stats))
 			errx(1, "wrong imsg len");
+		if (output->rib_mem == NULL)
+			break;
 		memcpy(&stats, imsg->data, sizeof(stats));
 		output->rib_mem(&stats);
-		break;
-	case IMSG_CTL_SHOW_RIB_HASH:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(hash))
-			errx(1, "wrong imsg len");
-		memcpy(&hash, imsg->data, sizeof(hash));
-		output->rib_hash(&hash);
-		break;
+		return (1);
 	case IMSG_CTL_SHOW_SET:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(set))
 			errx(1, "wrong imsg len");
+		if (output->set == NULL)
+			break;
 		memcpy(&set, imsg->data, sizeof(set));
 		output->set(&set);
 		break;
 	case IMSG_CTL_SHOW_RTR:
 		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(rtr))
 			errx(1, "wrong imsg len");
+		if (output->rtr == NULL)
+			break;
 		memcpy(&rtr, imsg->data, sizeof(rtr));
 		output->rtr(&rtr);
 		break;
@@ -502,6 +535,8 @@ show(struct imsg *imsg, struct parse_result *res)
 			warnx("got IMSG_CTL_RESULT with wrong len");
 			break;
 		}
+		if (output->result == NULL)
+			break;
 		memcpy(&rescode, imsg->data, sizeof(rescode));
 		output->result(rescode);
 		return (1);
@@ -996,19 +1031,19 @@ fmt_ext_community(uint8_t *data)
 		ext = be64toh(ext) & 0xffffffffffffLL;
 		switch (ext) {
 		case EXT_COMMUNITY_OVS_VALID:
-			snprintf(buf, sizeof(buf), "%s valid ",
+			snprintf(buf, sizeof(buf), "%s valid",
 			    log_ext_subtype(type, subtype));
 			return buf;
 		case EXT_COMMUNITY_OVS_NOTFOUND:
-			snprintf(buf, sizeof(buf), "%s not-found ",
+			snprintf(buf, sizeof(buf), "%s not-found",
 			    log_ext_subtype(type, subtype));
 			return buf;
 		case EXT_COMMUNITY_OVS_INVALID:
-			snprintf(buf, sizeof(buf), "%s invalid ",
+			snprintf(buf, sizeof(buf), "%s invalid",
 			    log_ext_subtype(type, subtype));
 			return buf;
 		default:
-			snprintf(buf, sizeof(buf), "%s 0x%llx ",
+			snprintf(buf, sizeof(buf), "%s 0x%llx",
 			    log_ext_subtype(type, subtype),
 			    (unsigned long long)ext);
 			return buf;
@@ -1076,7 +1111,7 @@ network_bulk(struct parse_result *res)
 			/* Stop processing after a comment */
 			if (*b == '#')
 				break;
-			bzero(&net, sizeof(net));
+			memset(&net, 0, sizeof(net));
 			if (parse_prefix(b, strlen(b), &h, &len) != 1)
 				errx(1, "bad prefix: %s", b);
 			net.prefix = h;
@@ -1145,7 +1180,7 @@ show_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 
 	for (i = 0; i < mr->nentries; i++) {
 		mre = &mr->entries[i];
-		bzero(&ctl, sizeof(ctl));
+		memset(&ctl, 0, sizeof(ctl));
 		ctl.prefix = mr->prefix;
 		ctl.prefixlen = mr->prefixlen;
 		if (mre->originated <= now)
@@ -1228,7 +1263,7 @@ network_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 	now = time(NULL);
 	for (i = 0; i < mr->nentries; i++) {
 		mre = &mr->entries[i];
-		bzero(&ctl, sizeof(ctl));
+		memset(&ctl, 0, sizeof(ctl));
 		ctl.prefix = mr->prefix;
 		ctl.prefixlen = mr->prefixlen;
 		if (mre->originated <= now)
@@ -1269,7 +1304,7 @@ network_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 		    !match_aspath(mre->aspath, mre->aspath_len, &req->as))
 			continue;
 
-		bzero(&net, sizeof(net));
+		memset(&net, 0, sizeof(net));
 		net.prefix = ctl.prefix;
 		net.prefixlen = ctl.prefixlen;
 		net.type = NETWORK_MRTCLONE;
@@ -1339,7 +1374,7 @@ print_afi(u_char *p, uint8_t len)
 	/* safi, 1 byte */
 	memcpy(&safi, p, sizeof(safi));
 	if (afi2aid(afi, safi, &aid) == -1)
-		printf("unkown afi %u safi %u", afi, safi);
+		printf("unknown afi %u safi %u", afi, safi);
 	else
 		printf("%s", aid2str(aid));
 }
@@ -1463,7 +1498,7 @@ show_mrt_capabilities(u_char *p, uint16_t len)
 		len -= capa_len;
 	}
 	if (len != 0) {
-		printf("length missmatch while capability parsing");
+		printf("length mismatch while capability parsing");
 		return (-1);
 	}
 	return (totlen);

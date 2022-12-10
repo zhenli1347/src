@@ -1,4 +1,4 @@
-/*	$OpenBSD: in.c,v 1.175 2022/08/06 15:57:59 bluhm Exp $	*/
+/*	$OpenBSD: in.c,v 1.179 2022/12/06 22:19:39 mvs Exp $	*/
 /*	$NetBSD: in.c,v 1.26 1996/02/13 23:41:39 christos Exp $	*/
 
 /*
@@ -210,11 +210,15 @@ in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 #ifdef MROUTING
 	case SIOCGETVIFCNT:
 	case SIOCGETSGCNT:
+		KERNEL_LOCK();
 		error = mrt_ioctl(so, cmd, data);
+		KERNEL_UNLOCK();
 		break;
 #endif /* MROUTING */
 	default:
+		KERNEL_LOCK();
 		error = in_ioctl(cmd, data, ifp, privileged);
+		KERNEL_UNLOCK();
 		break;
 	}
 
@@ -379,6 +383,7 @@ in_ioctl_set_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 	}
 	if (ia == NULL) {
 		ia = malloc(sizeof *ia, M_IFADDR, M_WAITOK | M_ZERO);
+		refcnt_init_trace(&ia->ia_ifa.ifa_refcnt, DT_REFCNT_IDX_IFADDR);
 		ia->ia_addr.sin_family = AF_INET;
 		ia->ia_addr.sin_len = sizeof(ia->ia_addr);
 		ia->ia_ifa.ifa_addr = sintosa(&ia->ia_addr);
@@ -475,6 +480,8 @@ in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 
 		if (ia == NULL) {
 			ia = malloc(sizeof *ia, M_IFADDR, M_WAITOK | M_ZERO);
+			refcnt_init_trace(&ia->ia_ifa.ifa_refcnt,
+			    DT_REFCNT_IDX_IFADDR);
 			ia->ia_addr.sin_family = AF_INET;
 			ia->ia_addr.sin_len = sizeof(ia->ia_addr);
 			ia->ia_ifa.ifa_addr = sintosa(&ia->ia_addr);
@@ -745,7 +752,6 @@ in_purgeaddr(struct ifaddr *ifa)
 {
 	struct ifnet *ifp = ifa->ifa_ifp;
 	struct in_ifaddr *ia = ifatoia(ifa);
-	extern int ifatrash;
 
 	NET_ASSERT_LOCKED();
 
@@ -760,7 +766,6 @@ in_purgeaddr(struct ifaddr *ifa)
 		ia->ia_allhosts = NULL;
 	}
 
-	ifatrash++;
 	ia->ia_ifp = NULL;
 	ifafree(&ia->ia_ifa);
 }
@@ -828,7 +833,7 @@ in_broadcast(struct in_addr in, u_int rtableid)
 	rdomain = rtable_l2(rtableid);
 
 #define ia (ifatoia(ifa))
-	TAILQ_FOREACH(ifn, &ifnet, if_list) {
+	TAILQ_FOREACH(ifn, &ifnetlist, if_list) {
 		if (ifn->if_rdomain != rdomain)
 			continue;
 		if ((ifn->if_flags & IFF_BROADCAST) == 0)
@@ -880,10 +885,13 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		 */
 		memset(&ifr, 0, sizeof(ifr));
 		memcpy(&ifr.ifr_addr, &inm->inm_sin, sizeof(inm->inm_sin));
+		KERNEL_LOCK();
 		if ((*ifp->if_ioctl)(ifp, SIOCADDMULTI,(caddr_t)&ifr) != 0) {
+			KERNEL_UNLOCK();
 			free(inm, M_IPMADDR, sizeof(*inm));
 			return (NULL);
 		}
+		KERNEL_UNLOCK();
 
 		TAILQ_INSERT_HEAD(&ifp->if_maddrlist, &inm->inm_ifma,
 		    ifma_list);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ndp.c,v 1.103 2021/03/02 05:34:20 jsg Exp $	*/
+/*	$OpenBSD: ndp.c,v 1.106 2022/12/02 15:35:35 kn Exp $	*/
 /*	$KAME: ndp.c,v 1.101 2002/07/17 08:46:33 itojun Exp $	*/
 
 /*
@@ -457,7 +457,10 @@ delete:
 	return 0;
 }
 
-#define W_ADDR	36
+/*
+ * strlen("2001:0db8:3333:4444:5555:6666:7777:8888") == 39
+ */
+#define W_ADDR	39
 #define W_LL	17
 #define W_IF	7
 
@@ -885,14 +888,7 @@ ifinfo(const char *ifname)
 	if (ioctl(s, SIOCGIFINFO_IN6, (caddr_t)&nd) == -1)
 		err(1, "ioctl(SIOCGIFINFO_IN6)");
 
-	if (!nd.ndi.initialized)
-		errx(1, "%s: not initialized yet", ifname);
-
-	printf("basereachable=%ds%dms",
-	    nd.ndi.basereachable / 1000, nd.ndi.basereachable % 1000);
-	printf(", reachable=%ds", nd.ndi.reachable);
-	printf(", retrans=%ds%dms\n", nd.ndi.retrans / 1000,
-	    nd.ndi.retrans % 1000);
+	printf("reachable=%ds\n", nd.ndi.reachable);
 
 	close(s);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_fork.c,v 1.241 2022/07/23 22:10:58 cheloha Exp $	*/
+/*	$OpenBSD: kern_fork.c,v 1.244 2022/11/11 18:09:58 cheloha Exp $	*/
 /*	$NetBSD: kern_fork.c,v 1.29 1996/02/09 18:59:34 christos Exp $	*/
 
 /*
@@ -40,11 +40,9 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/filedesc.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/proc.h>
-#include <sys/exec.h>
 #include <sys/resourcevar.h>
 #include <sys/signalvar.h>
 #include <sys/vnode.h>
@@ -57,7 +55,6 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/atomic.h>
-#include <sys/pledge.h>
 #include <sys/unistd.h>
 
 #include <sys/syscallargs.h>
@@ -201,7 +198,7 @@ process_initialize(struct process *pr, struct proc *p)
 	rw_init(&pr->ps_lock, "pslock");
 	mtx_init(&pr->ps_mtx, IPL_HIGH);
 
-	timeout_set_kclock(&pr->ps_realit_to, realitexpire, pr,
+	timeout_set_flags(&pr->ps_realit_to, realitexpire, pr,
 	    KCLOCK_UPTIME, 0);
 	timeout_set(&pr->ps_rucheck_to, rucheck, pr);
 }
@@ -505,10 +502,8 @@ fork1(struct proc *curp, int flags, void (*func)(void *), void *arg,
 	/*
 	 * Return child pid to parent process
 	 */
-	if (retval != NULL) {
-		retval[0] = pr->ps_pid;
-		retval[1] = 0;
-	}
+	if (retval != NULL)
+		*retval = pr->ps_pid;
 	return (0);
 }
 
@@ -577,8 +572,7 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 	/*
 	 * Return tid to parent thread and copy it out to userspace
 	 */
-	retval[0] = tid = p->p_tid + THREAD_PID_OFFSET;
-	retval[1] = 0;
+	*retval = tid = p->p_tid + THREAD_PID_OFFSET;
 	if (tidptr != NULL) {
 		if (copyout(&tid, tidptr, sizeof(tid)))
 			psignal(curp, SIGSEGV);

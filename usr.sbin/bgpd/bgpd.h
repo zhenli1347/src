@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.h,v 1.449 2022/08/10 14:17:01 claudio Exp $ */
+/*	$OpenBSD: bgpd.h,v 1.455 2022/11/18 10:17:23 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -22,7 +22,6 @@
 #include <sys/socket.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
-#include <net/route.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -41,6 +40,7 @@
 #define	PEER_DESCR_LEN			32
 #define	REASON_LEN			256	/* includes NUL terminator */
 #define	PFTABLE_LEN			32
+#define	ROUTELABEL_LEN			32
 #define	TCP_MD5_KEY_LEN			80
 #define	IPSEC_ENC_KEY_LEN		32
 #define	IPSEC_AUTH_KEY_LEN		20
@@ -263,6 +263,7 @@ struct roa {
 };
 
 RB_HEAD(roa_tree, roa);
+RB_HEAD(aspa_tree, aspa_set);
 
 struct set_table;
 struct as_set;
@@ -284,6 +285,7 @@ struct bgpd_config {
 	struct prefixset_head			 prefixsets;
 	struct prefixset_head			 originsets;
 	struct roa_tree				 roa;
+	struct aspa_tree			 aspa;
 	struct rde_prefixset_head		 rde_prefixsets;
 	struct rde_prefixset_head		 rde_originsets;
 	struct as_set_head			 as_sets;
@@ -547,7 +549,6 @@ enum imsg_type {
 	IMSG_CTL_SHOW_RIB_ATTR,
 	IMSG_CTL_SHOW_NETWORK,
 	IMSG_CTL_SHOW_RIB_MEM,
-	IMSG_CTL_SHOW_RIB_HASH,
 	IMSG_CTL_SHOW_TERSE,
 	IMSG_CTL_SHOW_TIMER,
 	IMSG_CTL_LOG_VERBOSE,
@@ -583,6 +584,10 @@ enum imsg_type {
 	IMSG_RECONF_ORIGIN_SET,
 	IMSG_RECONF_ROA_SET,
 	IMSG_RECONF_ROA_ITEM,
+	IMSG_RECONF_ASPA,
+	IMSG_RECONF_ASPA_TAS,
+	IMSG_RECONF_ASPA_TAS_AID,
+	IMSG_RECONF_ASPA_DONE,
 	IMSG_RECONF_RTR_CONFIG,
 	IMSG_RECONF_DRAIN,
 	IMSG_RECONF_DONE,
@@ -592,6 +597,7 @@ enum imsg_type {
 	IMSG_SESSION_UP,
 	IMSG_SESSION_DOWN,
 	IMSG_SESSION_STALE,
+	IMSG_SESSION_NOGRACE,
 	IMSG_SESSION_FLUSH,
 	IMSG_SESSION_RESTARTED,
 	IMSG_SESSION_DEPENDON,
@@ -705,7 +711,7 @@ struct ktable {
 struct kroute_full {
 	struct bgpd_addr	prefix;
 	struct bgpd_addr	nexthop;
-	char			label[RTLABEL_LEN];
+	char			label[ROUTELABEL_LEN];
 	uint32_t		mplslabel;
 	uint16_t		flags;
 	u_short			ifindex;
@@ -1117,7 +1123,7 @@ struct filter_set {
 		struct nexthop			*nh_ref;
 		struct community		 community;
 		char				 pftable[PFTABLE_LEN];
-		char				 rtlabel[RTLABEL_LEN];
+		char				 rtlabel[ROUTELABEL_LEN];
 		uint8_t				 origin;
 	}				action;
 	enum action_types		type;
@@ -1147,6 +1153,15 @@ struct as_set {
 	struct set_table		*set;
 	time_t				 lastchange;
 	int				 dirty;
+};
+
+struct aspa_set {
+	time_t				 expires;
+	uint32_t			 as;
+	uint32_t			 num;
+	uint32_t			 *tas;
+	uint8_t				 *tas_aid;
+	RB_ENTRY(aspa_set)		 entry;
 };
 
 struct l3vpn {
@@ -1192,7 +1207,6 @@ struct rde_memstats {
 	long long	nexthop_cnt;
 	long long	aspath_cnt;
 	long long	aspath_size;
-	long long	aspath_refs;
 	long long	comm_cnt;
 	long long	comm_nmemb;
 	long long	comm_size;
@@ -1206,15 +1220,6 @@ struct rde_memstats {
 	long long	aset_nmemb;
 	long long	pset_cnt;
 	long long	pset_size;
-};
-
-struct rde_hashstats {
-	char		name[16];
-	long long	num;
-	long long	min;
-	long long	max;
-	long long	sum;
-	long long	sumq;
 };
 
 #define	MRT_FILE_LEN	512
@@ -1280,17 +1285,21 @@ void		free_prefixsets(struct prefixset_head *);
 void		free_rde_prefixsets(struct rde_prefixset_head *);
 void		free_prefixtree(struct prefixset_tree *);
 void		free_roatree(struct roa_tree *);
+void		free_aspa(struct aspa_set *);
+void		free_aspatree(struct aspa_tree *);
 void		free_rtrs(struct rtr_config_head *);
 void		filterlist_free(struct filter_head *);
 int		host(const char *, struct bgpd_addr *, uint8_t *);
 uint32_t	get_bgpid(void);
 void		expand_networks(struct bgpd_config *, struct network_head *);
 RB_PROTOTYPE(prefixset_tree, prefixset_item, entry, prefixset_cmp);
-int		roa_cmp(struct roa *, struct roa *);
 RB_PROTOTYPE(roa_tree, roa, entry, roa_cmp);
+RB_PROTOTYPE(aspa_tree, aspa_set, entry, aspa_cmp);
 
 /* kroute.c */
 int		 kr_init(int *, uint8_t);
+int		 kr_default_prio(void);
+int		 kr_check_prio(long long);
 int		 ktable_update(u_int, char *, int);
 void		 ktable_preload(void);
 void		 ktable_postload(void);

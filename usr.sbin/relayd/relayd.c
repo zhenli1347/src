@@ -1,4 +1,4 @@
-/*	$OpenBSD: relayd.c,v 1.187 2021/07/12 15:09:21 beck Exp $	*/
+/*	$OpenBSD: relayd.c,v 1.190 2022/11/10 00:00:11 mbuhl Exp $	*/
 
 /*
  * Copyright (c) 2007 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -218,8 +218,6 @@ main(int argc, char *argv[])
 	proc_init(ps, procs, nitems(procs), debug, argc0, argv, proc_id);
 
 	log_procinit("parent");
-	if (!debug && daemon(1, 0) == -1)
-		err(1, "failed to daemonize");
 
 	if (ps->ps_noaction == 0)
 		log_info("startup");
@@ -431,7 +429,7 @@ parent_dispatch_pfe(int fd, struct privsep_proc *p, struct imsg *imsg)
 		parent_configure_done(env);
 		break;
 	case IMSG_AGENTXSOCK:
-		(void)agentx_setsock(env, p->p_id);
+		agentx_setsock(env, p->p_id);
 		break;
 	default:
 		return (-1);
@@ -658,11 +656,13 @@ kv_set(struct kv *kv, char *fmt, ...)
 	va_list		  ap;
 	char		*value = NULL;
 	struct kv	*ckv;
+	int		 ret;
 
 	va_start(ap, fmt);
-	if (vasprintf(&value, fmt, ap) == -1)
-		return (-1);
+	ret = vasprintf(&value, fmt, ap);
 	va_end(ap);
+ 	if (ret == -1)
+		return (-1);
 
 	/* Remove all children */
 	while ((ckv = TAILQ_FIRST(&kv->kv_children)) != NULL) {
@@ -683,11 +683,13 @@ kv_setkey(struct kv *kv, char *fmt, ...)
 {
 	va_list  ap;
 	char	*key = NULL;
+	int	 ret;
 
 	va_start(ap, fmt);
-	if (vasprintf(&key, fmt, ap) == -1)
-		return (-1);
+	ret = vasprintf(&key, fmt, ap);
 	va_end(ap);
+	if (ret == -1)
+		return (-1);
 
 	free(kv->kv_key);
 	kv->kv_key = key;

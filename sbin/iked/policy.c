@@ -1,4 +1,4 @@
-/*	$OpenBSD: policy.c,v 1.89 2021/12/01 16:42:13 deraadt Exp $	*/
+/*	$OpenBSD: policy.c,v 1.92 2022/10/10 11:33:55 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2020-2021 Tobias Heider <tobhe@openbsd.org>
@@ -355,8 +355,8 @@ policy_calc_skip_steps(struct iked_policies *policies)
 void
 policy_ref(struct iked *env, struct iked_policy *pol)
 {
-	pol->pol_refcnt++;
-	pol->pol_flags |= IKED_POLICY_REFCNT;
+	if (pol->pol_flags & IKED_POLICY_REFCNT)
+		pol->pol_refcnt++;
 }
 
 void
@@ -414,6 +414,28 @@ sa_state(struct iked *env, struct iked_sa *sa, int state)
 		}
 	}
 
+	if (ostate != sa->sa_state) {
+		switch (sa->sa_state) {
+		case IKEV2_STATE_ESTABLISHED:
+			ikestat_inc(env, ikes_sa_established_total);
+			ikestat_inc(env, ikes_sa_established_current);
+			break;
+		case IKEV2_STATE_CLOSED:
+		case IKEV2_STATE_CLOSING:
+			switch (ostate) {
+			case IKEV2_STATE_ESTABLISHED:
+				ikestat_dec(env, ikes_sa_established_current);
+				break;
+			case IKEV2_STATE_CLOSED:
+			case IKEV2_STATE_CLOSING:
+				break;
+			default:
+				ikestat_inc(env, ikes_sa_established_failures);
+				break;
+			}
+			break;
+		}
+	}
 }
 
 void
@@ -499,12 +521,7 @@ sa_new(struct iked *env, uint64_t ispi, uint64_t rspi,
 	if (pol == NULL && sa->sa_policy == NULL)
 		fatalx("%s: sa %p no policy", __func__, sa);
 	else if (sa->sa_policy == NULL) {
-		/* Increment refcount if the policy has refcounting enabled. */
-		if (pol->pol_flags & IKED_POLICY_REFCNT) {
-			log_info("%s: sa %p old pol %p pol_refcnt %d",
-			    __func__, sa, pol, pol->pol_refcnt);
-			policy_ref(env, pol);
-		}
+		policy_ref(env, pol);
 		sa->sa_policy = pol;
 		TAILQ_INSERT_TAIL(&pol->pol_sapeers, sa, sa_peer_entry);
 	} else
@@ -1216,6 +1233,8 @@ flow_cmp(struct iked_flow *a, struct iked_flow *b)
 		diff = addr_cmp(&a->flow_dst, &b->flow_dst, 1);
 	if (!diff)
 		diff = addr_cmp(&a->flow_src, &b->flow_src, 1);
+	if (!diff)
+		diff = addr_cmp(&a->flow_prenat, &b->flow_prenat, 0);
 
 	return (diff);
 }

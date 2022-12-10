@@ -1,4 +1,4 @@
-/*	$OpenBSD: powerpc64_installboot.c,v 1.3 2021/07/20 14:51:56 kettenis Exp $	*/
+/*	$OpenBSD: powerpc64_installboot.c,v 1.8 2022/11/06 12:33:41 krw Exp $	*/
 
 /*
  * Copyright (c) 2011 Joel Sing <jsing@openbsd.org>
@@ -62,6 +62,8 @@ char	duid[20];
 void
 md_init(void)
 {
+	stages = 1;
+	stage1 = "/usr/mdec/boot";
 }
 
 void
@@ -123,7 +125,7 @@ md_installboot(int devfd, char *dev)
 static int
 create_filesystem(struct disklabel *dl, char part)
 {
-	static char *newfsfmt ="/sbin/newfs_msdos %s >/dev/null";
+	static const char *newfsfmt = "/sbin/newfs -t msdos %s >/dev/null";
 	struct msdosfs_args args;
 	char cmd[60];
 	int rslt;
@@ -143,6 +145,7 @@ create_filesystem(struct disklabel *dl, char part)
 	rslt = snprintf(cmd, sizeof(cmd), newfsfmt, args.fspec);
 	if (rslt >= sizeof(cmd)) {
 		warnx("can't build newfs command");
+		free(args.fspec);
 		rslt = -1;
 		return rslt;
 	}
@@ -154,26 +157,25 @@ create_filesystem(struct disklabel *dl, char part)
 		rslt = system(cmd);
 		if (rslt == -1) {
 			warn("system('%s') failed", cmd);
+			free(args.fspec);
 			return rslt;
 		}
 	}
 
+	free(args.fspec);
 	return 0;
 }
 
 static void
 write_filesystem(struct disklabel *dl, char part)
 {
-	static char *fsckfmt = "/sbin/fsck_msdos %s >/dev/null";
+	static const char *fsckfmt = "/sbin/fsck -t msdos %s >/dev/null";
 	struct msdosfs_args args;
 	char cmd[60];
 	char dir[PATH_MAX];
 	char dst[PATH_MAX];
-	char *src;
-	size_t mntlen, srclen;
+	size_t mntlen;
 	int rslt;
-
-	src = NULL;
 
 	/* Create directory for temporary mount point. */
 	strlcpy(dir, "/tmp/installboot.XXXXXXXXXX", sizeof(dst));
@@ -232,17 +234,11 @@ write_filesystem(struct disklabel *dl, char part)
 		warn("unable to build /boot path");
 		goto umount;
 	}
-	src = fileprefix(root, "/usr/mdec/boot");
-	if (src == NULL) {
-		rslt = -1;
-		goto umount;
-	}
-	srclen = strlen(src);
 	if (verbose)
 		fprintf(stderr, "%s %s to %s\n",
-		    (nowrite ? "would copy" : "copying"), src, dst);
+		    (nowrite ? "would copy" : "copying"), stage1, dst);
 	if (!nowrite) {
-		rslt = filecopy(src, dst);
+		rslt = filecopy(stage1, dst);
 		if (rslt == -1)
 			goto umount;
 	}
@@ -285,8 +281,6 @@ rmdir:
 	dst[mntlen] = '\0';
 	if (rmdir(dir) == -1)
 		err(1, "rmdir('%s') failed", dir);
-
-	free(src);
 
 	if (rslt == -1)
 		exit(1);

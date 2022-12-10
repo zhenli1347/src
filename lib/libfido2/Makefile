@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.7 2021/10/26 21:36:23 djm Exp $
+# $OpenBSD: Makefile,v 1.9 2022/11/13 14:09:17 tb Exp $
 
 .PATH:	${.CURDIR}/man ${.CURDIR}/src
 
@@ -10,6 +10,7 @@ CDIAGFLAGS+=	-Wall -Wextra
 CDIAGFLAGS+=	-Werror
 
 LDADD+=		-L${BSDOBJDIR}/lib/libcbor -lcbor
+LDADD+=		-L${BSDOBJDIR}/lib/libcrypto -lcrypto
 LDADD+=		-L${BSDOBJDIR}/lib/libz -lz
 
 SYMBOL_LIST=	Symbols.list
@@ -20,7 +21,8 @@ LIB=	fido2
 SRCS=	aes256.c assert.c authkey.c bio.c blob.c buf.c cbor.c compress.c
 SRCS+=	config.c cred.c credman.c dev.c ecdh.c eddsa.c err.c es256.c
 SRCS+=	hid.c hid_openbsd.c hid_unix.c info.c io.c iso7816.c largeblob.c
-SRCS+=	log.c pin.c random.c reset.c rs256.c u2f.c
+SRCS+=	log.c nfc.c pin.c random.c reset.c rs1.c rs256.c time.c touch.c
+SRCS+=	tpm.c types.c u2f.c util.c
 
 HDRS=	fido.h fido/bio.h fido/config.h fido/credman.h fido/eddsa.h fido/err.h
 HDRS+=	fido/es256.h fido/param.h fido/rs256.h fido/types.h

@@ -1,4 +1,4 @@
-/*	$OpenBSD: noexec.c,v 1.21 2021/12/13 16:56:50 deraadt Exp $	*/
+/*	$OpenBSD: noexec.c,v 1.23 2022/11/27 15:12:57 anton Exp $	*/
 
 /*
  * Copyright (c) 2002,2003 Michael Shalayeff
@@ -37,16 +37,24 @@
 #include <limits.h>
 #include <errno.h>
 #include <err.h>
+#include <pthread.h>
+
+struct context {
+	char **argv;
+	int argc;
+};
 
 volatile sig_atomic_t fail;
 int page_size;
 char label[64] = "non-exec ";
 
 #define PAD 64*1024
+#define PAGESIZE (1ULL << _MAX_PAGE_SHIFT)
 #define	MAXPAGESIZE 16384
 #define TESTSZ 256	/* assuming the testfly() will fit */
-u_int64_t data[(PAD + TESTSZ + PAD + MAXPAGESIZE) / 8] = { 0 };
-u_int64_t bss[(PAD + TESTSZ + PAD + MAXPAGESIZE) / 8];
+static u_int64_t mutable[(PAD + TESTSZ + PAD + MAXPAGESIZE) / 8]
+	__attribute__((aligned(PAGESIZE)))
+	__attribute__((section(".openbsd.mutable")));
 
 void testfly(void);
 
@@ -177,9 +185,10 @@ usage(void)
 	exit(2);
 }
 
-int
-main(int argc, char *argv[])
+static void *
+worker(void *arg)
 {
+	struct context *ctx = arg;
 	u_int64_t stack[TESTSZ/8];	/* assuming the testfly() will fit */
 	struct sigaction sa;
 	int (*func)(void *, size_t);
@@ -198,23 +207,64 @@ main(int argc, char *argv[])
 	pflags = MAP_PRIVATE|MAP_ANON|MAP_FIXED;
 	func = &noexec;
 	size = TESTSZ;
-	while ((ch = getopt(argc, argv, "TDBHSmps:")) != -1) {
+	while ((ch = getopt(ctx->argc, ctx->argv, "TDBMHSmps:")) != -1) {
 		if (p == NULL) {
 			switch (ch) {
-			case 'T':
-				p = &testfly;
+			case 'T': {
+				u_int64_t *text;
+				size_t textsiz = TESTSZ;
+
+				text = mmap(NULL, textsiz,
+				    PROT_READ | PROT_WRITE,
+				    MAP_PRIVATE | MAP_ANON, -1, 0);
+				if (text == MAP_FAILED)
+					err(1, "mmap");
+				memcpy(text, &testfly, textsiz);
+				if (mprotect(text, textsiz,
+				    PROT_READ | PROT_EXEC) == -1)
+					err(1, "mprotect");
+				p = text;
 				pflags &=~ MAP_FIXED;
 				(void) strlcat(label, "text", sizeof(label));
 				continue;
-			case 'D':
+			}
+
+			case 'D': {
+				u_int64_t *data;
+				size_t datasiz = (PAD + TESTSZ + PAD +
+				    MAXPAGESIZE) / 8;
+
+				data = mmap(NULL, datasiz,
+				    PROT_READ | PROT_WRITE,
+				    MAP_PRIVATE | MAP_ANON, -1, 0);
+				if (data == MAP_FAILED)
+					err(1, "mmap");
 				p = &data[(PAD + page_size) / 8];
 				p = (void *)((long)p & ~(page_size - 1));
 				(void) strlcat(label, "data", sizeof(label));
 				continue;
-			case 'B':
+			}
+
+			case 'B': {
+				u_int64_t *bss;
+				size_t bsssiz = (PAD + TESTSZ + PAD +
+				    MAXPAGESIZE) / 8;
+
+				bss = mmap(NULL, bsssiz,
+				    PROT_READ | PROT_WRITE,
+				    MAP_PRIVATE | MAP_ANON, -1, 0);
+				if (bss == MAP_FAILED)
+					err(1, "mmap");
 				p = &bss[(PAD + page_size) / 8];
 				p = (void *)((long)p & ~(page_size - 1));
 				(void) strlcat(label, "bss", sizeof(label));
+				continue;
+			}
+
+			case 'M':
+				p = &mutable[(PAD + page_size) / 8];
+				p = (void *)((long)p & ~(page_size - 1));
+				(void)strlcat(label, "mutable", sizeof(label));
 				continue;
 			case 'H':
 				p = malloc(size + 2 * page_size);
@@ -267,10 +317,10 @@ main(int argc, char *argv[])
 			usage();
 		}
 	}
-	argc -= optind;
-	argv += optind;
+	ctx->argc -= optind;
+	ctx->argv += optind;
 
-	if (argc > 0)
+	if (ctx->argc > 0)
 		usage();
 
 	if (p == NULL)
@@ -287,4 +337,20 @@ main(int argc, char *argv[])
 	}
 
 	exit((*func)(p, size));
+	/* NOTREACHED */
+	return NULL;
+}
+
+int
+main(int argc, char *argv[])
+{
+	struct context ctx = {.argc = argc, .argv = argv};
+	pthread_t th;
+	int error;
+
+	if ((error = pthread_create(&th, NULL, worker, (void *)&ctx)))
+		errc(1, error, "pthread_create");
+	if ((error = pthread_join(th, NULL)))
+		errc(1, error, "pthread_join");
+	return 0;
 }

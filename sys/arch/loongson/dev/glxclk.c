@@ -1,4 +1,4 @@
-/*	$OpenBSD: glxclk.c,v 1.6 2022/04/06 18:59:26 naddy Exp $	*/
+/*	$OpenBSD: glxclk.c,v 1.8 2022/11/19 16:23:48 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2013 Paul Irofti.
@@ -19,7 +19,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/proc.h>
+#include <sys/kernel.h>
 
 #include <machine/bus.h>
 #include <machine/autoconf.h>
@@ -114,6 +114,9 @@ glxclk_attach(struct device *parent, struct device *self, void *aux)
 	u_int64_t wa;
 	int statint, minint;
 
+	printf(" not configured\n");
+	return;
+
 	glxclk_sc->sc_iot = gaa->gaa_iot;
 	glxclk_sc->sc_ioh = gaa->gaa_ioh;
 
@@ -129,6 +132,13 @@ glxclk_attach(struct device *parent, struct device *self, void *aux)
 		printf(" not configured\n");
 		return;
 	}
+
+	/*
+	 * MFGPT runs on powers of two, adjust the hz value accordingly.
+	 */
+	stathz = hz = 128;
+	tick = 1000000 / hz;
+	tick_nsec = 1000000000 / hz;
 
 	printf(": clock");
 

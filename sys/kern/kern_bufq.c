@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_bufq.c,v 1.33 2019/12/19 17:40:10 mpi Exp $	*/
+/*	$OpenBSD: kern_bufq.c,v 1.35 2022/12/05 23:18:37 deraadt Exp $	*/
 /*
  * Copyright (c) 2010 Thordur I. Bjornsson <thib@openbsd.org>
  * Copyright (c) 2010 David Gwynne <dlg@openbsd.org>
@@ -18,7 +18,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/mutex.h>
@@ -330,7 +329,7 @@ void
 bufq_fifo_destroy(void *data)
 {
 	struct bufq_fifo_head	*head = data;
-	
+
 	free(head, M_DEVBUF, sizeof(*head));
 }
 

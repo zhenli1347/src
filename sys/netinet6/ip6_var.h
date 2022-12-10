@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_var.h,v 1.94 2022/08/12 14:49:15 bluhm Exp $	*/
+/*	$OpenBSD: ip6_var.h,v 1.106 2022/11/12 02:49:34 kn Exp $	*/
 /*	$KAME: ip6_var.h,v 1.33 2000/06/11 14:59:20 jinmei Exp $	*/
 
 /*
@@ -295,10 +295,11 @@ extern int	ip6_dad_count;		/* DupAddrDetectionTransmits */
 extern int	ip6_dad_pending;	/* number of currently running DADs */
 
 extern int ip6_auto_flowlabel;
-extern int ip6_auto_linklocal;
 
 #define	IP6_SOIIKEY_LEN 16
 extern uint8_t	ip6_soiikey[IP6_SOIIKEY_LEN];
+
+extern const struct pr_usrreqs rip6_usrreqs;
 
 struct in6pcb;
 struct inpcb;
@@ -349,10 +350,16 @@ void	rip6_ctlinput(int, struct sockaddr *, u_int, void *);
 int	rip6_ctloutput(int, struct socket *, int, int, struct mbuf *);
 int	rip6_output(struct mbuf *, struct socket *, struct sockaddr *,
 	    struct mbuf *);
-int	rip6_usrreq(struct socket *,
-	    int, struct mbuf *, struct mbuf *, struct mbuf *, struct proc *);
-int	rip6_attach(struct socket *, int);
+int	rip6_attach(struct socket *, int, int);
 int	rip6_detach(struct socket *);
+void	rip6_lock(struct socket *);
+void	rip6_unlock(struct socket *);
+int	rip6_bind(struct socket *, struct mbuf *, struct proc *);
+int	rip6_connect(struct socket *, struct mbuf *);
+int	rip6_disconnect(struct socket *);
+int	rip6_shutdown(struct socket *);
+int	rip6_send(struct socket *, struct mbuf *, struct mbuf *,
+	    struct mbuf *);
 int	rip6_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 
 int	dest6_input(struct mbuf **, int *, int, int);

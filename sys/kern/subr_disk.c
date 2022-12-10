@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_disk.c,v 1.252 2022/08/12 20:05:49 krw Exp $	*/
+/*	$OpenBSD: subr_disk.c,v 1.270 2022/11/11 18:53:29 krw Exp $	*/
 /*	$NetBSD: subr_disk.c,v 1.17 1996/03/16 23:17:08 christos Exp $	*/
 
 /*
@@ -40,7 +40,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/fcntl.h>
 #include <sys/buf.h>
@@ -50,7 +49,6 @@
 #include <sys/time.h>
 #include <sys/disklabel.h>
 #include <sys/conf.h>
-#include <sys/lock.h>
 #include <sys/disk.h>
 #include <sys/reboot.h>
 #include <sys/dkio.h>
@@ -59,7 +57,6 @@
 #include <sys/stdint.h>
 
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 
 #include <net/if.h>
 
@@ -91,6 +88,8 @@ int	disk_change;		/* set if a disk has been attached/detached
 u_char	bootduid[DUID_SIZE];	/* DUID of boot disk. */
 u_char	rootduid[DUID_SIZE];	/* DUID of root disk. */
 
+struct device *rootdv;
+
 /* softraid callback, do not use! */
 void (*softraid_disk_attach)(struct disk *, int);
 
@@ -114,7 +113,8 @@ int gpt_get_hdr(struct buf *, void (*)(struct buf *), struct disklabel *,
     uint64_t, struct gpt_header *);
 int gpt_get_parts(struct buf *, void (*)(struct buf *),
     struct disklabel *, const struct gpt_header *, struct gpt_partition **);
-int gpt_get_fstype(struct uuid *);
+int gpt_get_fstype(const struct uuid *);
+int mbr_get_fstype(const uint8_t);
 
 int duid_equal(u_char *, u_char *);
 
@@ -157,8 +157,6 @@ initdisklabel(struct disklabel *lp)
 	DL_SETBSTART(lp, 0);
 	DL_SETBEND(lp, DL_GETDSIZE(lp));
 	lp->d_version = 1;
-	lp->d_bbsize = 8192;
-	lp->d_sbsize = 64*1024;			/* XXX ? */
 	return (0);
 }
 
@@ -167,12 +165,13 @@ initdisklabel(struct disklabel *lp)
  * a newer version if needed, etc etc.
  */
 int
-checkdisklabel(void *rlp, struct disklabel *lp, u_int64_t boundstart,
+checkdisklabel(dev_t dev, void *rlp, struct disklabel *lp, u_int64_t boundstart,
     u_int64_t boundend)
 {
 	struct disklabel *dlp = rlp;
 	struct __partitionv0 *v0pp;
 	struct partition *pp;
+	const char *blkname;
 	u_int64_t disksize;
 	int error = 0;
 	int i;
@@ -227,9 +226,6 @@ checkdisklabel(void *rlp, struct disklabel *lp, u_int64_t boundstart,
 
 		dlp->d_flags = swap32(dlp->d_flags);
 
-		for (i = 0; i < NDDATA; i++)
-			dlp->d_drivedata[i] = swap32(dlp->d_drivedata[i]);
-
 		dlp->d_secperunith = swap16(dlp->d_secperunith);
 		dlp->d_version = swap16(dlp->d_version);
 
@@ -239,8 +235,6 @@ checkdisklabel(void *rlp, struct disklabel *lp, u_int64_t boundstart,
 		dlp->d_magic2 = swap32(dlp->d_magic2);
 
 		dlp->d_npartitions = swap16(dlp->d_npartitions);
-		dlp->d_bbsize = swap32(dlp->d_bbsize);
-		dlp->d_sbsize = swap32(dlp->d_sbsize);
 
 		for (i = 0; i < MAXPARTITIONS; i++) {
 			pp = &dlp->d_partitions[i];
@@ -270,6 +264,12 @@ checkdisklabel(void *rlp, struct disklabel *lp, u_int64_t boundstart,
 		*lp = *dlp;
 
 	if (lp->d_version == 0) {
+		blkname = findblkname(major(dev));
+		if (blkname == NULL)
+			blkname = findblkname(major(chrtoblk(dev)));
+		printf("%s%d has legacy label, please rewrite using "
+		    "disklabel(8)\n", blkname, DISKUNIT(dev));
+
 		lp->d_version = 1;
 		lp->d_secperunith = 0;
 
@@ -335,30 +335,25 @@ readdoslabel(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 
 #ifdef DEBUG
 	char			 devname[32];
+	const char		*blkname;
 
-	switch (major(bp->b_dev)) {
-	case 13:
-	case 4:
-		snprintf(devname, sizeof(devname), "sd%d",
-		    minor(bp->b_dev) / MAXPARTITIONS);
-		break;
-	case 41:
-	case 14:
-		snprintf(devname, sizeof(devname), "vnd%d",
-		    minor(bp->b_dev) / MAXPARTITIONS);
-		break;
-	default:
-		snprintf(devname, sizeof(devname), "<%d,%d>",
-		    major(bp->b_dev), minor(bp->b_dev));
-		break;
-	}
-	printf("readdoslabel(new) enter: %s, spoofonly %d, partoffp %sNULL\n",
+	blkname = findblkname(major(bp->b_dev));
+	if (blkname == NULL)
+		 blkname = findblkname(major(chrtoblk(bp->b_dev)));
+	if (blkname == NULL)
+		snprintf(devname, sizeof(devname), "<%d, %d>", major(bp->b_dev),
+		    minor(bp->b_dev));
+	else
+		snprintf(devname, sizeof(devname), "%s%d", blkname,
+		    DISKUNIT(bp->b_dev));
+
+	printf("readdoslabel enter: %s, spoofonly %d, partoffp %sNULL\n",
 	    devname, spoofonly, (partoffp == NULL) ? "" : "not ");
 #endif /* DEBUG */
 
 	error = readdisksector(bp, strat, lp, DOSBBSECTOR);
 	if (error) {
-		DPRINTF("readdoslabel(new) return: %s, %d -- lp unchanged, "
+		DPRINTF("readdoslabel return: %s, %d -- lp unchanged, "
 		    "DOSBBSECTOR read error\n", devname, error);
 		return error;
 	}
@@ -377,7 +372,7 @@ readdoslabel(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 	if (nlp.d_magic != DISKMAGIC)
 		spooffat(dosbb, &nlp, &partoff);
 	if (nlp.d_magic != DISKMAGIC) {
-		DPRINTF("readdoslabel(new): N/A -- label partition @ "
+		DPRINTF("readdoslabel: N/A -- label partition @ "
 		    "daddr_t 0 (default)\n");
 		partoff = 0;
 	}
@@ -389,12 +384,12 @@ readdoslabel(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 		 * lp is copied into it. So leave lp alone!
 		 */
 		if (partoff == -1) {
-			DPRINTF("readdoslabel(new) return: %s, ENXIO, lp "
+			DPRINTF("readdoslabel return: %s, ENXIO, lp "
 			    "unchanged, *partoffp unchanged\n", devname);
 			return ENXIO;
 		}
 		*partoffp = partoff;
-		DPRINTF("readdoslabel(new) return: %s, 0, lp unchanged, "
+		DPRINTF("readdoslabel return: %s, 0, lp unchanged, "
 		    "*partoffp set to %lld\n", devname, *partoffp);
 		return 0;
 	}
@@ -405,7 +400,7 @@ readdoslabel(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 	lp->d_checksum = dkcksum(lp);
 
 	if (spoofonly || partoff == -1) {
-		DPRINTF("readdoslabel(new) return: %s, 0, lp spoofed\n",
+		DPRINTF("readdoslabel return: %s, 0, lp spoofed\n",
 		    devname);
 		return 0;
 	}
@@ -413,15 +408,16 @@ readdoslabel(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 	partoff += DOS_LABELSECTOR;
 	error = readdisksector(bp, strat, lp, DL_BLKTOSEC(lp, partoff));
 	if (error) {
-		DPRINTF("readdoslabel(new) return: %s, %d, lp read failed\n",
+		DPRINTF("readdoslabel return: %s, %d, lp read failed\n",
 		    devname, error);
 		return bp->b_error;
 	}
 
 	rlp = (struct disklabel *)(bp->b_data + DL_BLKOFFSET(lp, partoff));
-	error = checkdisklabel(rlp, lp, DL_GETBSTART(rlp), DL_GETBEND(rlp));
+	error = checkdisklabel(bp->b_dev, rlp, lp, DL_GETBSTART(rlp),
+	    DL_GETBEND(rlp));
 
-	DPRINTF("readdoslabel(new) return: %s, %d, checkdisklabel() of daddr_t "
+	DPRINTF("readdoslabel return: %s, %d, checkdisklabel() of daddr_t "
 	    "%lld %s\n", devname, error, partoff, error ? "failed" : "ok");
 
 	return error;
@@ -467,7 +463,6 @@ gpt_get_hdr(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 {
 	struct gpt_header	ngh;
 	int			error;
-	uint64_t		partlba;
 	uint64_t		lbaend, lbastart;
 	uint32_t		csum;
 	uint32_t		size, partsize;
@@ -481,7 +476,6 @@ gpt_get_hdr(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 
 	size = letoh32(ngh.gh_size);
 	partsize = letoh32(ngh.gh_part_size);
-	partlba = letoh64(ngh.gh_part_lba);
 	lbaend = letoh64(ngh.gh_lba_end);
 	lbastart = letoh64(ngh.gh_lba_start);
 
@@ -491,8 +485,7 @@ gpt_get_hdr(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 
 	if (letoh64(ngh.gh_sig) == GPTSIGNATURE &&
 	    letoh32(ngh.gh_rev) == GPTREVISION &&
-	    size == GPTMINHDRSIZE && lbastart < lbaend &&
-	    lbastart < DL_GETDSIZE(lp) && lbaend < DL_GETDSIZE(lp) &&
+	    size == GPTMINHDRSIZE && lbastart <= lbaend &&
 	    partsize == GPTMINPARTSIZE && lp->d_secsize % partsize == 0 &&
 	    csum == ngh.gh_csum)
 		*gh = ngh;
@@ -550,7 +543,7 @@ gpt_get_parts(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 }
 
 int
-gpt_get_fstype(struct uuid *uuid_part)
+gpt_get_fstype(const struct uuid *uuid_part)
 {
 	static int init = 0;
 	static struct uuid uuid_openbsd, uuid_msdos, uuid_chromefs,
@@ -600,17 +593,16 @@ int
 spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
     struct disklabel *lp, daddr_t *partoffp)
 {
-	static const uint8_t	 gpt_uuid_openbsd[] = GPT_UUID_OPENBSD;
 	struct dos_partition	 dp[NDOSPART];
 	struct gpt_header	 gh;
-	struct uuid		 gptype, uuid_openbsd;
+	struct uuid		 gptype;
 	struct gpt_partition	*gp;
 	struct partition	*pp;
-	uint64_t		 lbaend, lbastart;
+	uint64_t		 lbaend, lbastart, labelsec;
 	uint64_t		 gpbytes, end, start;
-	daddr_t			 labeloff, partoff;
+	daddr_t			 partoff;
 	unsigned int		 i, n;
-	int			 error, obsdfound;
+	int			 error, fstype, obsdfound;
 	uint32_t		 partnum;
 	uint16_t		 sig;
 
@@ -644,41 +636,54 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 	partnum = letoh32(gh.gh_part_num);
 
 	n = 'i' - 'a';	/* Start spoofing at 'i', a.k.a. 8. */
-	uuid_dec_be(gpt_uuid_openbsd, &uuid_openbsd);
 
 	DL_SETBSTART(lp, lbastart);
 	DL_SETBEND(lp, lbaend + 1);
 	partoff = DL_SECTOBLK(lp, lbastart);
 	obsdfound = 0;
 	for (i = 0; i < partnum; i++) {
-		start = letoh64(gp[i].gp_lba_start);
-		end = letoh64(gp[i].gp_lba_end) + 1;
-		if (start >= end || start < lbastart || end > lbaend + 1)
+		if (letoh64(gp[i].gp_attrs) & GPTPARTATTR_REQUIRED) {
+			DPRINTF("spoofgpt: Skipping partition %u (REQUIRED)\n",
+			    i);
 			continue;
-		if (obsdfound == 0) {
-			labeloff = partoff + DOS_LABELSECTOR;
-			if (labeloff >= DL_SECTOBLK(lp, start) &&
-			    labeloff < DL_SECTOBLK(lp, end))
+		}
+
+		start = letoh64(gp[i].gp_lba_start);
+		if (start > lbaend || start < lbastart)
+			continue;
+
+		end = letoh64(gp[i].gp_lba_end);
+		if (start > end)
+			continue;
+
+		uuid_dec_le(&gp[i].gp_type, &gptype);
+		fstype = gpt_get_fstype(&gptype);
+		if (obsdfound && fstype == FS_BSDFFS)
+			continue;
+
+		if (fstype == FS_BSDFFS) {
+			obsdfound = 1;
+			partoff = DL_SECTOBLK(lp, start);
+			labelsec = DL_BLKTOSEC(lp, partoff + DOS_LABELSECTOR);
+			if (labelsec > ((end < lbaend) ? end : lbaend))
+				partoff = -1;
+			DL_SETBSTART(lp, start);
+			DL_SETBEND(lp, end + 1);
+			continue;
+		}
+
+		if (partoff != -1) {
+			labelsec = DL_BLKTOSEC(lp, partoff + DOS_LABELSECTOR);
+			if (labelsec >= start && labelsec <= end)
 				partoff = -1;
 		}
 
-		uuid_dec_le(&gp[i].gp_type, &gptype);
-		if (memcmp(&gptype, &uuid_openbsd, sizeof(gptype)) == 0) {
-			if (obsdfound == 0) {
-				obsdfound = 1;
-				partoff = DL_SECTOBLK(lp, start);
-				labeloff = partoff + DOS_LABELSECTOR;
-				if (labeloff >= DL_SECTOBLK(lp, end))
-					partoff = -1;
-				DL_SETBSTART(lp, start);
-				DL_SETBEND(lp, end);
-			}
-		} else if (n < MAXPARTITIONS) {
+		if (n < MAXPARTITIONS && end <= lbaend) {
 			pp = &lp->d_partitions[n];
 			n++;
-			pp->p_fstype = gpt_get_fstype(&gptype);
+			pp->p_fstype = fstype;
 			DL_SETPOFFSET(pp, start);
-			DL_SETPSIZE(pp, end - start);
+			DL_SETPSIZE(pp, end - start + 1);
 		}
 	}
 
@@ -687,7 +692,7 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 	free(gp, M_DEVBUF, gpbytes);
 
 #ifdef DEBUG
-	printf("readdoslabel(new): GPT -- ");
+	printf("readdoslabel: GPT -- ");
 	if (partoff == -1)
 		printf("no label partition\n");
 	else if (obsdfound == 0)
@@ -697,6 +702,34 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 #endif	/* DEBUG */
 
 	return 0;
+}
+
+int
+mbr_get_fstype(const uint8_t dp_typ)
+{
+	switch (dp_typ) {
+	case DOSPTYP_OPENBSD:
+		return FS_BSDFFS;
+	case DOSPTYP_UNUSED:
+		return FS_UNUSED;
+	case DOSPTYP_LINUX:
+		return FS_EXT2FS;
+	case DOSPTYP_NTFS:
+		return FS_NTFS;
+	case DOSPTYP_EFISYS:
+	case DOSPTYP_FAT12:
+	case DOSPTYP_FAT16S:
+	case DOSPTYP_FAT16B:
+	case DOSPTYP_FAT16L:
+	case DOSPTYP_FAT32:
+	case DOSPTYP_FAT32L:
+		return FS_MSDOS;
+	case DOSPTYP_EFI:
+	case DOSPTYP_EXTEND:
+	case DOSPTYP_EXTENDL:
+	default:
+		return FS_OTHER;
+	}
 }
 
 void
@@ -743,12 +776,17 @@ spoofmbr(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 		}
 
 		for (i = 0; i < NDOSPART; i++) {
-			if (letoh32(dp[i].dp_start) > DL_GETDSIZE(lp))
-				continue;
-			if (letoh32(dp[i].dp_size) > DL_GETDSIZE(lp))
-				continue;
 			if (letoh32(dp[i].dp_size) == 0)
 				continue;
+			if (obsdfound && dp[i].dp_typ == DOSPTYP_OPENBSD)
+				continue;
+
+			if (dp[i].dp_typ != DOSPTYP_OPENBSD) {
+				if (letoh32(dp[i].dp_start) > DL_GETDSIZE(lp))
+					continue;
+				if (letoh32(dp[i].dp_size) > DL_GETDSIZE(lp))
+					continue;
+			}
 
 			start = sector + letoh32(dp[i].dp_start);
 			end = start + letoh32(dp[i].dp_size);
@@ -763,15 +801,13 @@ spoofmbr(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 
 			switch (dp[i].dp_typ) {
 			case DOSPTYP_OPENBSD:
-				if (obsdfound == 0) {
-					obsdfound = 1;
-					partoff = DL_SECTOBLK(lp, start);
-					labeloff = partoff + DOS_LABELSECTOR;
-					if (labeloff >= DL_SECTOBLK(lp, end))
-						partoff = -1;
-					DL_SETBSTART(lp, start);
-					DL_SETBEND(lp, end);
-				}
+				obsdfound = 1;
+				partoff = DL_SECTOBLK(lp, start);
+				labeloff = partoff + DOS_LABELSECTOR;
+				if (labeloff >= DL_SECTOBLK(lp, end))
+					partoff = -1;
+				DL_SETBSTART(lp, start);
+				DL_SETBEND(lp, end);
 				continue;
 			case DOSPTYP_EFI:
 				continue;
@@ -784,30 +820,11 @@ spoofmbr(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 				}
 				wander = 1;
 				continue;
-
-			case DOSPTYP_UNUSED:
-				fstype = FS_UNUSED;
-				break;
-			case DOSPTYP_LINUX:
-				fstype = FS_EXT2FS;
-				break;
-			case DOSPTYP_NTFS:
-				fstype = FS_NTFS;
-				break;
-			case DOSPTYP_EFISYS:
-			case DOSPTYP_FAT12:
-			case DOSPTYP_FAT16S:
-			case DOSPTYP_FAT16B:
-			case DOSPTYP_FAT16L:
-			case DOSPTYP_FAT32:
-			case DOSPTYP_FAT32L:
-				fstype = FS_MSDOS;
-				break;
 			default:
-				fstype = FS_OTHER;
 				break;
 			}
 
+			fstype = mbr_get_fstype(dp[i].dp_typ);
 			if (n < MAXPARTITIONS) {
 				pp = &lp->d_partitions[n++];
 				pp->p_fstype = fstype;
@@ -822,7 +839,7 @@ spoofmbr(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 		lp->d_magic = DISKMAGIC;
 		*partoffp = partoff;
 #ifdef DEBUG
-	printf("readdoslabel(new): MBR -- ");
+	printf("readdoslabel: MBR -- ");
 	if (partoff == -1)
 		printf("no label partition\n");
 	else if (obsdfound == 0)
@@ -850,7 +867,7 @@ spooffat(const uint8_t *dosbb, struct disklabel *lp, daddr_t *partoffp)
 		lp->d_partitions['i' - 'a'].p_fstype = FS_MSDOS;
 		*partoffp = -1;
 		lp->d_magic = DISKMAGIC;
-		DPRINTF("readdoslabel(new): FAT -- no label partition\n");
+		DPRINTF("readdoslabel: FAT -- no label partition\n");
 	}
 }
 
@@ -1124,7 +1141,6 @@ disk_attach_callback(void *xdat)
 	/* Read disklabel. */
 	if (disk_readlabel(&dl, dk->dk_devno, errbuf, sizeof(errbuf)) == NULL) {
 		enqueue_randomness(dl.d_checksum);
-		dk->dk_flags |= DKF_LABELVALID;
 	}
 
 done:
@@ -1408,7 +1424,7 @@ setroot(struct device *bootdv, int part, int exitflags)
 {
 	int majdev, unit, len, s, slept = 0;
 	struct swdevt *swp;
-	struct device *rootdv, *dv;
+	struct device *dv;
 	dev_t nrootdev, nswapdev = NODEV, temp = NODEV;
 	struct ifnet *ifp = NULL;
 	struct disk *dk;
@@ -1443,14 +1459,14 @@ setroot(struct device *bootdv, int part, int exitflags)
 		TAILQ_FOREACH(dk, &disklist, dk_link)
 			if (dk->dk_device == bootdv)
 				break;
-		if (dk && (dk->dk_flags & DKF_LABELVALID))
+		if (dk)
 			bcopy(dk->dk_label->d_uid, bootduid, sizeof(bootduid));
 	} else if (bootdv == NULL) {
 		/* Locate boot disk based on the provided DUID. */
 		TAILQ_FOREACH(dk, &disklist, dk_link)
 			if (duid_equal(dk->dk_label->d_uid, bootduid))
 				break;
-		if (dk && (dk->dk_flags & DKF_LABELVALID))
+		if (dk)
 			bootdv = dk->dk_device;
 	}
 	bcopy(bootduid, rootduid, sizeof(rootduid));
@@ -1564,8 +1580,7 @@ gotswap:
 		if (bootdv->dv_class == DV_DISK) {
 			if (!duid_iszero(rootduid)) {
 				TAILQ_FOREACH(dk, &disklist, dk_link)
-					if ((dk->dk_flags & DKF_LABELVALID) &&
-					    dk->dk_label && duid_equal(
+					if (dk->dk_label && duid_equal(
 					    dk->dk_label->d_uid, rootduid))
 						break;
 				if (dk == NULL)
@@ -1665,7 +1680,7 @@ gotswap:
 	printf("\n");
 }
 
-extern struct nam2blk nam2blk[];
+extern const struct nam2blk nam2blk[];
 
 int
 findblkmajor(struct device *dv)
@@ -1791,7 +1806,8 @@ disk_map(char *path, char *mappath, int size, int flags)
 
 	mdk = NULL;
 	TAILQ_FOREACH(dk, &disklist, dk_link) {
-		if ((dk->dk_flags & DKF_LABELVALID) && dk->dk_label &&
+		if (dk->dk_label &&
+		    !duid_iszero(dk->dk_label->d_uid) &&
 		    memcmp(dk->dk_label->d_uid, uid,
 		    sizeof(dk->dk_label->d_uid)) == 0) {
 			/* Fail if there are duplicate UIDs! */

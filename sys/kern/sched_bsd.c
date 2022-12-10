@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched_bsd.c,v 1.71 2022/05/10 22:18:06 solene Exp $	*/
+/*	$OpenBSD: sched_bsd.c,v 1.73 2022/12/05 23:18:37 deraadt Exp $	*/
 /*	$NetBSD: kern_synch.c,v 1.37 1996/04/22 01:38:37 christos Exp $	*/
 
 /*-
@@ -42,7 +42,6 @@
 #include <sys/proc.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
-#include <sys/signalvar.h>
 #include <sys/resourcevar.h>
 #include <uvm/uvm_extern.h>
 #include <sys/sched.h>
@@ -548,7 +547,7 @@ setperf_auto(void *v)
 		speedup = 1;
 		goto faster;
 	}
-		
+
 	if (!idleticks)
 		if (!(idleticks = mallocarray(ncpusfound, sizeof(*idleticks),
 		    M_DEVBUF, M_NOWAIT | M_ZERO)))

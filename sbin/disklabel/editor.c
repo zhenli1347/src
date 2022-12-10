@@ -1,4 +1,4 @@
-/*	$OpenBSD: editor.c,v 1.373 2022/07/31 14:29:19 krw Exp $	*/
+/*	$OpenBSD: editor.c,v 1.380 2022/11/10 15:26:38 krw Exp $	*/
 
 /*
  * Copyright (c) 1997-2000 Todd C. Miller <millert@openbsd.org>
@@ -232,12 +232,6 @@ editor(int f)
 		    "nearest cylinder automatically.");
 	}
 #endif
-
-	/* Set d_bbsize and d_sbsize as necessary */
-	if (newlab.d_bbsize == 0)
-		newlab.d_bbsize = BBSIZE;
-	if (newlab.d_sbsize == 0)
-		newlab.d_sbsize = SBSIZE;
 
 	/* Save the (U|u)ndo labels and mountpoints. */
 	mpcopy(origmountpoints, mountpoints);
@@ -681,9 +675,12 @@ again:
 		/* Everything seems ok so configure the partition. */
 		DL_SETPSIZE(pp, secs);
 		DL_SETPOFFSET(pp, chunkstart);
-		if (ap->mp[0] != '/')
-			pp->p_fstype = FS_SWAP;
-		else {
+		if (ap->mp[0] != '/') {
+			if (strcasecmp(ap->mp, "raid") == 0)
+				pp->p_fstype = FS_RAID;
+			else
+				pp->p_fstype = FS_SWAP;
+		} else {
 			pp->p_fstype = FS_BSDFFS;
 			pp->p_fragblock = 0;
 			if (get_fsize(lp, partno) == 1 ||
@@ -754,7 +751,7 @@ editor_resize(struct disklabel *lp, char *p)
 	}
 
 #ifdef SUN_CYLCHECK
-	if (lp->d_secpercyl & D_VENDOR) {
+	if (lp->d_flags & D_VENDOR) {
 		u_int64_t cylsecs;
 		cylsecs = lp->d_secpercyl;
 		ui = ((ui + cylsecs - 1) / cylsecs) * cylsecs;
@@ -1290,7 +1287,7 @@ void
 edit_parms(struct disklabel *lp)
 {
 	char *p;
-	u_int64_t freesectors, ui;
+	u_int64_t ui;
 	struct disklabel oldlabel = *lp;
 
 	printf("Changing disk type and label description for %s:\n", specname);
@@ -1376,12 +1373,7 @@ getdisktype(struct disklabel *lp, char *banner, char *dev)
 		{ "sd",   "SCSI" },
 		{ "wd",   "IDE" },
 		{ "fd",   "FLOPPY" },
-		{ "xd",   "SMD" },
-		{ "xy",   "SMD" },
-		{ "hd",   "HP-IB" },
 		{ "vnd",  "VND" },
-		{ "svnd", "VND" },
-		{ NULL,   NULL }
 	};
 
 	if ((s = basename(dev)) != NULL) {
@@ -1390,7 +1382,7 @@ getdisktype(struct disklabel *lp, char *banner, char *dev)
 		i = strcspn(s, "0123456789");
 		s[i] = '\0';
 		dev = s;
-		for (i = 0; dtypes[i].dev != NULL; i++) {
+		for (i = 0; i < nitems(dtypes); i++) {
 			if (strcmp(dev, dtypes[i].dev) == 0) {
 				def = dtypes[i].type;
 				break;
@@ -1706,6 +1698,8 @@ mpsave(struct disklabel *lp)
 		for (i = 0; i < MAXPARTITIONS; i++) {
 			j =  mi[i].partno;
 			fstype = lp->d_partitions[j].p_fstype;
+			if (fstype == FS_RAID)
+				continue;
 			if (fstype == FS_SWAP) {
 				fprintf(fp, "%s%c none swap sw\n", bdev, 'a'+j);
 			} else if (mi[i].mountpoint) {
@@ -2171,7 +2165,8 @@ parse_autotable(char *filename)
 
 		buf = line;
 		if ((sa->mp = get_token(&buf)) == NULL ||
-		    (sa->mp[0] != '/' && strcmp(sa->mp, "swap")))
+		    (sa->mp[0] != '/' && strcasecmp(sa->mp, "swap") &&
+		    strcasecmp(sa->mp, "raid")))
 			errx(1, "%s: parse error on line %u", filename, idx);
 		if ((t = get_token(&buf)) == NULL ||
 		    parse_sizerange(t, &sa->minsz, &sa->maxsz) == -1)

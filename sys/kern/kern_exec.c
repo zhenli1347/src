@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.230 2022/02/22 17:14:14 deraadt Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.240 2022/11/23 11:00:27 mbuhl Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -36,7 +36,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/filedesc.h>
-#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/malloc.h>
@@ -50,7 +49,6 @@
 #include <sys/exec_elf.h>
 #include <sys/ktrace.h>
 #include <sys/resourcevar.h>
-#include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/signalvar.h>
 #include <sys/stat.h>
@@ -468,13 +466,13 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 #ifdef MACHINE_STACK_GROWS_UP
 	pr->ps_strings = (vaddr_t)vm->vm_maxsaddr + sgap;
         if (uvm_map_protect(&vm->vm_map, (vaddr_t)vm->vm_maxsaddr,
-            trunc_page(pr->ps_strings), PROT_NONE, TRUE))
+            trunc_page(pr->ps_strings), PROT_NONE, 0, TRUE, FALSE))
                 goto exec_abort;
 #else
 	pr->ps_strings = (vaddr_t)vm->vm_minsaddr - sizeof(arginfo) - sgap;
         if (uvm_map_protect(&vm->vm_map,
             round_page(pr->ps_strings + sizeof(arginfo)),
-            (vaddr_t)vm->vm_minsaddr, PROT_NONE, TRUE))
+            (vaddr_t)vm->vm_minsaddr, PROT_NONE, 0, TRUE, FALSE))
                 goto exec_abort;
 #endif
 
@@ -493,6 +491,8 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	/* Now copy argc, args & environ to new stack */
 	if (!copyargs(&pack, &arginfo, stack, argp))
 		goto exec_abort;
+
+	pr->ps_auxinfo = (vaddr_t)pack.ep_auxinfo;
 
 	/* copy out the process's ps_strings structure */
 	if (copyout(&arginfo, (char *)pr->ps_strings, sizeof(arginfo)))
@@ -681,9 +681,9 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	if (exec_elf_fixup(p, &pack) != 0)
 		goto free_pack_abort;
 #ifdef MACHINE_STACK_GROWS_UP
-	setregs(p, &pack, (u_long)stack + slen, retval);
+	setregs(p, &pack, (u_long)stack + slen, &arginfo);
 #else
-	setregs(p, &pack, (u_long)stack, retval);
+	setregs(p, &pack, (u_long)stack, &arginfo);
 #endif
 
 	/* map the process's signal trampoline code */
@@ -713,7 +713,8 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	atomic_clearbits_int(&pr->ps_flags, PS_INEXEC);
 	single_thread_clear(p, P_SUSPSIG);
 
-	return (0);
+	/* setregs() sets up all the registers, so just 'return' */
+	return EJUSTRETURN;
 
 bad:
 	/* free the vmspace-creation commands, and release their references */
@@ -865,6 +866,8 @@ exec_sigcode_map(struct process *pr)
 		uao_detach(sigobject);
 		return (ENOMEM);
 	}
+	uvm_map_immutable(&pr->ps_vmspace->vm_map, pr->ps_sigcode,
+	    pr->ps_sigcode + round_page(sz), 1);
 
 	/* Calculate PC at point of sigreturn entry */
 	pr->ps_sigcoderet = pr->ps_sigcode + (sigcoderet - sigcode);
@@ -913,6 +916,8 @@ exec_timekeep_map(struct process *pr)
 		uao_detach(timekeep_object);
 		return (ENOMEM);
 	}
+	uvm_map_immutable(&pr->ps_vmspace->vm_map, pr->ps_timekeep,
+	    pr->ps_timekeep + timekeep_sz, 1);
 
 	return (0);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: tty-term.c,v 1.93 2022/06/30 09:55:53 nicm Exp $ */
+/* $OpenBSD: tty-term.c,v 1.96 2022/11/11 08:44:11 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -247,6 +247,7 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_KUP6] = { TTYCODE_STRING, "kUP6" },
 	[TTYC_KUP7] = { TTYCODE_STRING, "kUP7" },
 	[TTYC_MS] = { TTYCODE_STRING, "Ms" },
+	[TTYC_NOBR] = { TTYCODE_STRING, "Nobr" },
 	[TTYC_OL] = { TTYCODE_STRING, "ol" },
 	[TTYC_OP] = { TTYCODE_STRING, "op" },
 	[TTYC_RECT] = { TTYCODE_STRING, "Rect" },
@@ -264,6 +265,7 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_SETRGBF] = { TTYCODE_STRING, "setrgbf" },
 	[TTYC_SETULC] = { TTYCODE_STRING, "Setulc" },
 	[TTYC_SE] = { TTYCODE_STRING, "Se" },
+	[TTYC_SXL] =  { TTYCODE_FLAG, "Sxl" },
 	[TTYC_SGR0] = { TTYCODE_STRING, "sgr0" },
 	[TTYC_SITM] = { TTYCODE_STRING, "sitm" },
 	[TTYC_SMACS] = { TTYCODE_STRING, "smacs" },
@@ -451,6 +453,9 @@ tty_term_apply_overrides(struct tty_term *term)
 			tty_term_apply(term, s + offset, 0);
 		a = options_array_next(a);
 	}
+
+	/* Log the SIXEL flag. */
+	log_debug("SIXEL flag is %d", !!(term->flags & TERM_SIXEL));
 
 	/* Update the RGB flag if the terminal has RGB colours. */
 	if (tty_term_has(term, TTYC_SETRGBF) &&

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvideo.c,v 1.217 2022/07/02 08:50:42 visa Exp $ */
+/*	$OpenBSD: uvideo.c,v 1.219 2022/10/21 18:29:37 kn Exp $ */
 
 /*
  * Copyright (c) 2008 Robert Nagy <robert@openbsd.org>
@@ -64,7 +64,6 @@ struct uvideo_softc {
 
 	struct device				*sc_videodev;
 
-	int					 sc_enabled;
 	int					 sc_max_ctrl_size;
 	int					 sc_max_fbuf_size;
 	int					 sc_negotiated_flag;
@@ -107,14 +106,12 @@ struct uvideo_softc {
 	uint8_t					*sc_uplayer_fbuffer;
 	void					 (*sc_uplayer_intr)(void *);
 
-	struct uvideo_devs			*sc_quirk;
+	const struct uvideo_devs		*sc_quirk;
 	usbd_status				(*sc_decode_stream_header)
 						    (struct uvideo_softc *,
 						    uint8_t *, int);
 };
 
-int		uvideo_enable(void *);
-void		uvideo_disable(void *);
 int		uvideo_open(void *, int, int *, uint8_t *, void (*)(void *),
 		    void *);
 int		uvideo_close(void *);
@@ -306,7 +303,7 @@ const struct video_hw_if uvideo_hw_if = {
 #define UVIDEO_FLAG_REATTACH			0x2
 #define UVIDEO_FLAG_VENDOR_CLASS		0x4
 #define UVIDEO_FLAG_NOATTACH			0x8
-struct uvideo_devs {
+const struct uvideo_devs {
 	struct usb_devno	 uv_dev;
 	char			*ucode_name;
 	usbd_status		 (*ucode_loader)(struct uvideo_softc *);
@@ -389,40 +386,7 @@ struct uvideo_devs {
 	},
 };
 #define uvideo_lookup(v, p) \
-	((struct uvideo_devs *)usb_lookup(uvideo_devs, v, p))
-
-int
-uvideo_enable(void *v)
-{
-	struct uvideo_softc *sc = v;
-
-	DPRINTF(1, "%s: uvideo_enable sc=%p\n", DEVNAME(sc), sc);
-
-	if (usbd_is_dying(sc->sc_udev))
-		return (EIO);
-
-	if (sc->sc_enabled)
-		return (EBUSY);
-
-	sc->sc_enabled = 1;
-
-	return (0);
-}
-
-void
-uvideo_disable(void *v)
-{
-	struct uvideo_softc *sc = v;
-
-	DPRINTF(1, "%s: uvideo_disable sc=%p\n", DEVNAME(sc), sc);
-
-	if (!sc->sc_enabled) {
-		printf("uvideo_disable: already disabled!\n");
-		return;
-	}
-
-	sc->sc_enabled = 0;
-}
+	((const struct uvideo_devs *)usb_lookup(uvideo_devs, v, p))
 
 int
 uvideo_open(void *addr, int flags, int *size, uint8_t *buffer,
@@ -476,7 +440,7 @@ uvideo_match(struct device *parent, void *match, void *aux)
 {
 	struct usb_attach_arg *uaa = aux;
 	usb_interface_descriptor_t *id;
-	struct uvideo_devs *quirk;
+	const struct uvideo_devs *quirk;
 
 	if (uaa->iface == NULL)
 		return (UMATCH_NONE);

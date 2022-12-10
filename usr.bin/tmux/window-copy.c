@@ -1,4 +1,4 @@
-/* $OpenBSD: window-copy.c,v 1.338 2022/08/03 13:27:48 nicm Exp $ */
+/* $OpenBSD: window-copy.c,v 1.340 2022/09/28 07:59:50 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1248,6 +1248,64 @@ window_copy_cmd_cursor_right(struct window_copy_cmd_state *cs)
 		    data->rectflag);
 	}
 	return (WINDOW_COPY_CMD_NOTHING);
+}
+
+/* Scroll line containing the cursor to the given position. */
+static enum window_copy_cmd_action
+window_copy_cmd_scroll_to(struct window_copy_cmd_state *cs, u_int to)
+{
+	struct window_mode_entry	*wme = cs->wme;
+	struct window_copy_mode_data	*data = wme->data;
+	u_int				 oy, delta;
+	int				 scroll_up; /* >0 up, <0 down */
+
+	scroll_up = data->cy - to;
+	delta = abs(scroll_up);
+	oy = screen_hsize(data->backing) - data->oy;
+
+	/*
+	 * oy is the maximum scroll down amount, while data->oy is the maximum
+	 * scroll up amount.
+	 */
+	if (scroll_up > 0 && data->oy >= delta) {
+		window_copy_scroll_up(wme, delta);
+		data->cy -= delta;
+	} else if (scroll_up < 0 && oy >= delta) {
+		window_copy_scroll_down(wme, delta);
+		data->cy += delta;
+	}
+
+	window_copy_update_selection(wme, 0, 0);
+	return (WINDOW_COPY_CMD_REDRAW);
+}
+
+/* Scroll line containing the cursor to the bottom. */
+static enum window_copy_cmd_action
+window_copy_cmd_scroll_bottom(struct window_copy_cmd_state *cs)
+{
+	struct window_copy_mode_data	*data = cs->wme->data;
+	u_int				 bottom;
+
+	bottom = screen_size_y(&data->screen) - 1;
+	return (window_copy_cmd_scroll_to(cs, bottom));
+}
+
+/* Scroll line containing the cursor to the middle. */
+static enum window_copy_cmd_action
+window_copy_cmd_scroll_middle(struct window_copy_cmd_state *cs)
+{
+	struct window_copy_mode_data	*data = cs->wme->data;
+	u_int				 mid_value;
+
+	mid_value = (screen_size_y(&data->screen) - 1) / 2;
+	return (window_copy_cmd_scroll_to(cs, mid_value));
+}
+
+/* Scroll line containing the cursor to the top. */
+static enum window_copy_cmd_action
+window_copy_cmd_scroll_top(struct window_copy_cmd_state *cs)
+{
+	return (window_copy_cmd_scroll_to(cs, 0));
 }
 
 static enum window_copy_cmd_action
@@ -2768,6 +2826,12 @@ static const struct {
 	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
 	  .f = window_copy_cmd_refresh_from_pane
 	},
+	{ .command = "scroll-bottom",
+	  .minargs = 0,
+	  .maxargs = 0,
+	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
+	  .f = window_copy_cmd_scroll_bottom
+	},
 	{ .command = "scroll-down",
 	  .minargs = 0,
 	  .maxargs = 0,
@@ -2779,6 +2843,18 @@ static const struct {
 	  .maxargs = 0,
 	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
 	  .f = window_copy_cmd_scroll_down_and_cancel
+	},
+	{ .command = "scroll-middle",
+	  .minargs = 0,
+	  .maxargs = 0,
+	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
+	  .f = window_copy_cmd_scroll_middle
+	},
+	{ .command = "scroll-top",
+	  .minargs = 0,
+	  .maxargs = 0,
+	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
+	  .f = window_copy_cmd_scroll_top
 	},
 	{ .command = "scroll-up",
 	  .minargs = 0,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_pipe.c,v 1.141 2022/07/09 12:48:21 visa Exp $	*/
+/*	$OpenBSD: sys_pipe.c,v 1.143 2022/12/05 23:18:37 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1996 John S. Dyson
@@ -39,7 +39,6 @@
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
 #include <sys/event.h>
-#include <sys/lock.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -630,7 +629,7 @@ pipe_write(struct file *fp, struct uio *uio, int fflags)
 			if (wpipe->pipe_state & PIPE_EOF) {
 				error = EPIPE;
 				break;
-			}	
+			}
 		}
 	}
 	pipe_iounlock(wpipe);

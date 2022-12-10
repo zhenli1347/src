@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.72 2022/06/10 10:41:09 tb Exp $ */
+/*	$OpenBSD: mft.c,v 1.82 2022/12/01 10:24:28 claudio Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -17,10 +17,8 @@
  */
 
 #include <assert.h>
-#include <ctype.h>
 #include <err.h>
 #include <limits.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,7 +76,7 @@ ASN1_SEQUENCE(FileAndHash) = {
 } ASN1_SEQUENCE_END(FileAndHash);
 
 ASN1_SEQUENCE(Manifest) = {
-	ASN1_IMP_OPT(Manifest, version, ASN1_INTEGER, 0),
+	ASN1_EXP_OPT(Manifest, version, ASN1_INTEGER, 0),
 	ASN1_SIMPLE(Manifest, manifestNumber, ASN1_INTEGER),
 	ASN1_SIMPLE(Manifest, thisUpdate, ASN1_GENERALIZEDTIME),
 	ASN1_SIMPLE(Manifest, nextUpdate, ASN1_GENERALIZEDTIME),
@@ -164,10 +162,14 @@ rtype_from_file_extension(const char *fn)
 		return RTYPE_ROA;
 	if (strcasecmp(fn + sz - 4, ".gbr") == 0)
 		return RTYPE_GBR;
-	if (strcasecmp(fn + sz - 4, ".asa") == 0)
-		return RTYPE_ASPA;
 	if (strcasecmp(fn + sz - 4, ".sig") == 0)
 		return RTYPE_RSC;
+	if (strcasecmp(fn + sz - 4, ".asa") == 0)
+		return RTYPE_ASPA;
+	if (strcasecmp(fn + sz - 4, ".tak") == 0)
+		return RTYPE_TAK;
+	if (strcasecmp(fn + sz - 4, ".csv") == 0)
+		return RTYPE_GEOFEED;
 
 	return RTYPE_INVALID;
 }
@@ -193,8 +195,9 @@ valid_mft_filename(const char *fn, size_t len)
 }
 
 /*
- * Check that the file is an ASPA, CER, CRL, GBR or a ROA.
- * Returns corresponding rtype or RTYPE_INVALID on error.
+ * Check that the file is allowed to be part of a manifest and the parser
+ * for this type is implemented in rpki-client.
+ * Returns corresponding rtype or RTYPE_INVALID to mark the file as unknown.
  */
 static enum rtype
 rtype_from_mftfile(const char *fn)
@@ -203,11 +206,12 @@ rtype_from_mftfile(const char *fn)
 
 	type = rtype_from_file_extension(fn);
 	switch (type) {
-	case RTYPE_ASPA:
 	case RTYPE_CER:
 	case RTYPE_CRL:
 	case RTYPE_GBR:
 	case RTYPE_ROA:
+	case RTYPE_ASPA:
+	case RTYPE_TAK:
 		return type;
 	default:
 		return RTYPE_INVALID;
@@ -365,11 +369,14 @@ mft_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	if (!x509_get_aki(*x509, fn, &p.res->aki))
 		goto out;
+	if (!x509_get_sia(*x509, fn, &p.res->sia))
+		goto out;
 	if (!x509_get_ski(*x509, fn, &p.res->ski))
 		goto out;
-	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
+	if (p.res->aia == NULL || p.res->aki == NULL || p.res->sia == NULL ||
+	    p.res->ski == NULL) {
 		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI or SKI X509 extension", fn);
+		    "missing AIA, AKI, SIA, or SKI X509 extension", fn);
 		goto out;
 	}
 
@@ -386,14 +393,20 @@ mft_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		    "missing CRL distribution point extension", fn);
 		goto out;
 	}
-	if ((crlfile = strrchr(crldp, '/')) == NULL ||
-	    !valid_mft_filename(crlfile + 1, strlen(crlfile + 1)) ||
-	    rtype_from_file_extension(crlfile + 1) != RTYPE_CRL) {
+	crlfile = strrchr(crldp, '/');
+	if (crlfile == NULL) {
+		warnx("%s: RFC 6487 section 4.8.6: "
+		    "invalid CRL distribution point", fn);
+		goto out;
+	}
+	crlfile++;
+	if (!valid_mft_filename(crlfile, strlen(crlfile)) ||
+	    rtype_from_file_extension(crlfile) != RTYPE_CRL) {
 		warnx("%s: RFC 6487 section 4.8.6: CRL: "
 		    "bad CRL distribution point extension", fn);
 		goto out;
 	}
-	if ((p.res->crl = strdup(crlfile + 1)) == NULL)
+	if ((p.res->crl = strdup(crlfile)) == NULL)
 		err(1, NULL);
 
 	if (mft_parse_econtent(cms, cmsz, &p) == 0)
@@ -430,6 +443,7 @@ mft_free(struct mft *p)
 
 	free(p->aia);
 	free(p->aki);
+	free(p->sia);
 	free(p->ski);
 	free(p->path);
 	free(p->files);

@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.70 2022/07/27 21:01:38 kettenis Exp $ */
+/* $OpenBSD: machdep.c,v 1.78 2022/11/26 17:23:15 tobhe Exp $ */
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
@@ -49,7 +49,7 @@
 #include <machine/db_machdep.h>
 #include <ddb/db_extern.h>
 
-#include <dev/acpi/efi.h>
+#include <dev/efi/efi.h>
 
 #include "softraid.h"
 #if NSOFTRAID > 0
@@ -71,6 +71,7 @@ void (*cpuresetfn)(void);
 void (*powerdownfn)(void);
 
 int cold = 1;
+int lid_action = 0;
 
 struct vm_map *exec_map = NULL;
 struct vm_map *phys_map = NULL;
@@ -315,10 +316,16 @@ cpu_switchto(struct proc *old, struct proc *new)
 
 extern uint64_t cpu_id_aa64isar0;
 extern uint64_t cpu_id_aa64isar1;
+extern uint64_t cpu_id_aa64pfr0;
+extern uint64_t cpu_id_aa64pfr1;
 
 /*
  * machine dependent system variables.
  */
+
+const struct sysctl_bounded_args cpuctl_vars[] = {
+	{ CPU_LIDACTION, &lid_action, 0, 2 },
+};
 
 int
 cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
@@ -326,6 +333,7 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 {
 	char *compatible;
 	int node, len, error;
+	uint64_t value;
 
 	/* all sysctl names at this level are terminal */
 	if (namelen != 1)
@@ -344,11 +352,33 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		free(compatible, M_TEMP, len);
 		return error;
 	case CPU_ID_AA64ISAR0:
-		return sysctl_rdquad(oldp, oldlenp, newp, cpu_id_aa64isar0);
+		value = cpu_id_aa64isar0 & ID_AA64ISAR0_MASK;
+		value &= ~ID_AA64ISAR0_TLB_MASK;
+		return sysctl_rdquad(oldp, oldlenp, newp, value);
 	case CPU_ID_AA64ISAR1:
-		return sysctl_rdquad(oldp, oldlenp, newp, cpu_id_aa64isar1);
+		value = cpu_id_aa64isar1 & ID_AA64ISAR1_MASK;
+		value &= ~ID_AA64ISAR1_SPECRES_MASK;
+		return sysctl_rdquad(oldp, oldlenp, newp, value);
+	case CPU_ID_AA64PFR0:
+		value = 0;
+		value |= cpu_id_aa64pfr0 & ID_AA64PFR0_FP_MASK;
+		value |= cpu_id_aa64pfr0 & ID_AA64PFR0_ADV_SIMD_MASK;
+		value |= cpu_id_aa64pfr0 & ID_AA64PFR0_DIT_MASK;
+		return sysctl_rdquad(oldp, oldlenp, newp, value);
+	case CPU_ID_AA64PFR1:
+		value = 0;
+		value |= cpu_id_aa64pfr1 & ID_AA64PFR1_SBSS_MASK;
+		return sysctl_rdquad(oldp, oldlenp, newp, value);
+	case CPU_ID_AA64ISAR2:
+	case CPU_ID_AA64MMFR0:
+	case CPU_ID_AA64MMFR1:
+	case CPU_ID_AA64MMFR2:
+	case CPU_ID_AA64SMFR0:
+	case CPU_ID_AA64ZFR0:
+		return sysctl_rdquad(oldp, oldlenp, newp, 0);
 	default:
-		return (EOPNOTSUPP);
+		return (sysctl_bounded_arr(cpuctl_vars, nitems(cpuctl_vars),
+		    name, namelen, oldp, oldlenp, newp, newlen));
 	}
 	/* NOTREACHED */
 }
@@ -419,7 +449,7 @@ doreset:
 
 void
 setregs(struct proc *p, struct exec_package *pack, u_long stack,
-    register_t *retval)
+    struct ps_strings *arginfo)
 {
 	struct pcb *pcb = &p->p_addr->u_pcb;
 	struct trapframe *tf = pcb->pcb_tf;
@@ -429,13 +459,11 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 	pcb->pcb_flags &= ~PCB_FPU;
 	fpu_drop();
 
-	memset (tf,0, sizeof(*tf));
+	memset(tf, 0, sizeof *tf);
 	tf->tf_sp = stack;
 	tf->tf_lr = pack->ep_entry;
 	tf->tf_elr = pack->ep_entry; /* ??? */
-	tf->tf_spsr = PSR_M_EL0t;
-
-	retval[1] = 0;
+	tf->tf_spsr = PSR_M_EL0t | PSR_DIT;
 }
 
 void
@@ -783,7 +811,9 @@ initarm(struct arm64_bootparams *abp)
 	long kernbase = (long)_start & ~PAGE_MASK;
 	long kvo = abp->kern_delta;
 	paddr_t memstart, memend;
-	vaddr_t vstart;
+	paddr_t startpa, endpa, pa;
+	vaddr_t vstart, va;
+	struct fdt_head *fh;
 	void *config = abp->arg2;
 	void *fdt = NULL;
 	struct fdt_reg reg;
@@ -800,10 +830,35 @@ initarm(struct arm64_bootparams *abp)
 	__asm volatile("mov x18, %0\n"
 	    "msr tpidr_el1, %0" :: "r"(&cpu_info_primary));
 
-	pmap_map_early((paddr_t)config, PAGE_SIZE);
-	if (!fdt_init(config) || fdt_get_size(config) == 0)
-		panic("initarm: no FDT");
-	pmap_map_early((paddr_t)config, round_page(fdt_get_size(config)));
+	cache_setup();
+
+	/* The bootloader has loaded us into a 64MB block. */
+	memstart = KERNBASE + kvo;
+	memend = memstart + 64 * 1024 * 1024;
+
+	/* Bootstrap enough of pmap to enter the kernel proper. */
+	vstart = pmap_bootstrap(kvo, abp->kern_l1pt,
+	    kernbase, esym, memstart, memend);
+
+	/* Map the FDT header to determine its size. */
+	va = vstart;
+	startpa = trunc_page((paddr_t)config);
+	endpa = round_page((paddr_t)config + sizeof(struct fdt_head));
+	for (pa = startpa; pa < endpa; pa += PAGE_SIZE, va += PAGE_SIZE)
+		pmap_kenter_cache(va, pa, PROT_READ, PMAP_CACHE_WB);
+	fh = (void *)(vstart + ((paddr_t)config - startpa));
+	if (betoh32(fh->fh_magic) != FDT_MAGIC || betoh32(fh->fh_size) == 0)
+		panic("%s: no FDT", __func__);
+
+	/* Map the remainder of the FDT. */
+	endpa = round_page((paddr_t)config + betoh32(fh->fh_size));
+	for (; pa < endpa; pa += PAGE_SIZE, va += PAGE_SIZE)
+		pmap_kenter_cache(va, pa, PROT_READ, PMAP_CACHE_WB);
+	config = (void *)(vstart + ((paddr_t)config - startpa));
+	vstart = va;
+
+	if (!fdt_init(config))
+		panic("%s: corrupt FDT", __func__);
 
 	node = fdt_find_node("/chosen");
 	if (node != NULL) {
@@ -869,17 +924,7 @@ initarm(struct arm64_bootparams *abp)
 		}
 	}
 
-	cache_setup();
-
 	process_kernel_args();
-
-	/* The bootloader has loaded us into a 64MB block. */
-	memstart = KERNBASE + kvo;
-	memend = memstart + 64 * 1024 * 1024;
-
-	/* Bootstrap enough of pmap to enter the kernel proper. */
-	vstart = pmap_bootstrap(kvo, abp->kern_l1pt,
-	    kernbase, esym, memstart, memend);
 
 	proc0paddr = (struct user *)abp->kern_stack;
 
@@ -963,19 +1008,19 @@ initarm(struct arm64_bootparams *abp)
 		/*
 		 * Load all memory marked as EfiConventionalMemory,
 		 * EfiBootServicesCode or EfiBootServicesData.
-		 * Don't bother with blocks smaller than 64KB.  The
-		 * initial 64MB memory block should be marked as
+		 * The initial 64MB memory block should be marked as
 		 * EfiLoaderData so it won't be added here.
 		 */
 		for (i = 0; i < mmap_size / mmap_desc_size; i++) {
+#ifdef MMAP_DEBUG
 			printf("type 0x%x pa 0x%llx va 0x%llx pages 0x%llx attr 0x%llx\n",
 			    desc->Type, desc->PhysicalStart,
 			    desc->VirtualStart, desc->NumberOfPages,
 			    desc->Attribute);
-			if ((desc->Type == EfiConventionalMemory ||
-			     desc->Type == EfiBootServicesCode ||
-			     desc->Type == EfiBootServicesData) &&
-			    desc->NumberOfPages >= 16) {
+#endif
+			if (desc->Type == EfiConventionalMemory ||
+			    desc->Type == EfiBootServicesCode ||
+			    desc->Type == EfiBootServicesData) {
 				reg.addr = desc->PhysicalStart;
 				reg.size = ptoa(desc->NumberOfPages);
 				memreg_add(&reg);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: validate.c,v 1.40 2022/06/10 10:36:43 tb Exp $ */
+/*	$OpenBSD: validate.c,v 1.51 2022/11/30 08:17:21 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -15,15 +15,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/socket.h>
-
 #include <arpa/inet.h>
 #include <assert.h>
 #include <ctype.h>
 #include <err.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -106,28 +103,12 @@ valid_ski_aki(const char *fn, struct auth_tree *auths,
 }
 
 /*
- * Authenticate a trust anchor by making sure its resources are not
- * inheriting and that the SKI is unique.
+ * Validate a trust anchor by making sure that the SKI is unique.
  * Returns 1 if valid, 0 otherwise.
  */
 int
 valid_ta(const char *fn, struct auth_tree *auths, const struct cert *cert)
 {
-	size_t	 i;
-
-	/* AS and IP resources must not inherit. */
-	if (cert->asz && cert->as[0].type == CERT_AS_INHERIT) {
-		warnx("%s: RFC 6487 (trust anchor): "
-		    "inheriting AS resources", fn);
-		return 0;
-	}
-	for (i = 0; i < cert->ipsz; i++)
-		if (cert->ips[i].type == CERT_IP_INHERIT) {
-			warnx("%s: RFC 6487 (trust anchor): "
-			    "inheriting IP resources", fn);
-			return 0;
-		}
-
 	/* SKI must not be a dupe. */
 	if (auth_find(auths, cert->ski) != NULL) {
 		warnx("%s: RFC 6487: duplicate SKI", fn);
@@ -150,11 +131,8 @@ valid_cert(const char *fn, struct auth *a, const struct cert *cert)
 	char		 buf1[64], buf2[64];
 
 	for (i = 0; i < cert->asz; i++) {
-		if (cert->as[i].type == CERT_AS_INHERIT) {
-			if (cert->purpose == CERT_PURPOSE_BGPSEC_ROUTER)
-				return 0; /* BGPsec doesn't permit inheriting */
+		if (cert->as[i].type == CERT_AS_INHERIT)
 			continue;
-		}
 		min = cert->as[i].type == CERT_AS_ID ?
 		    cert->as[i].id : cert->as[i].range.min;
 		max = cert->as[i].type == CERT_AS_ID ?
@@ -201,19 +179,19 @@ valid_cert(const char *fn, struct auth *a, const struct cert *cert)
  * Returns 1 if valid, 0 otherwise.
  */
 int
-valid_roa(const char *fn, struct auth *a, struct roa *roa)
+valid_roa(const char *fn, struct cert *cert, struct roa *roa)
 {
 	size_t	 i;
 	char	 buf[64];
 
 	for (i = 0; i < roa->ipsz; i++) {
-		if (valid_ip(a, roa->ips[i].afi, roa->ips[i].min,
-		    roa->ips[i].max))
+		if (ip_addr_check_covered(roa->ips[i].afi, roa->ips[i].min,
+		    roa->ips[i].max, cert->ips, cert->ipsz) > 0)
 			continue;
-		ip_addr_print(&roa->ips[i].addr,
-		    roa->ips[i].afi, buf, sizeof(buf));
-		warnx("%s: RFC 6482: uncovered IP: "
-		    "%s", fn, buf);
+
+		ip_addr_print(&roa->ips[i].addr, roa->ips[i].afi, buf,
+		    sizeof(buf));
+		warnx("%s: RFC 6482: uncovered IP: %s", fn, buf);
 		return 0;
 	}
 
@@ -309,6 +287,8 @@ valid_uri(const char *uri, size_t usz, const char *proto)
 
 	if (proto != NULL) {
 		s = strlen(proto);
+		if (s >= usz)
+			return 0;
 		if (strncasecmp(uri, proto, s) != 0)
 			return 0;
 	}
@@ -384,20 +364,22 @@ build_crls(const struct crl *crl, STACK_OF(X509_CRL) **crls)
 }
 
 /*
- * Validate the X509 certificate.  If crl is NULL don't check CRL.
- * Returns 1 for valid certificates, returns 0 if there is a verify error
+ * Validate the X509 certificate. Returns 1 for valid certificates,
+ * returns 0 if there is a verify error and sets *errstr to the error
+ * returned by X509_verify_cert_error_string().
  */
 int
 valid_x509(char *file, X509_STORE_CTX *store_ctx, X509 *x509, struct auth *a,
-    struct crl *crl, int nowarn)
+    struct crl *crl, const char **errstr)
 {
 	X509_VERIFY_PARAM	*params;
 	ASN1_OBJECT		*cp_oid;
 	STACK_OF(X509)		*chain;
 	STACK_OF(X509_CRL)	*crls = NULL;
 	unsigned long		 flags;
-	int			 c;
+	int			 error;
 
+	*errstr = NULL;
 	build_chain(a, &chain);
 	build_crls(crl, &crls);
 
@@ -422,9 +404,8 @@ valid_x509(char *file, X509_STORE_CTX *store_ctx, X509 *x509, struct auth *a,
 	X509_STORE_CTX_set0_crls(store_ctx, crls);
 
 	if (X509_verify_cert(store_ctx) <= 0) {
-		c = X509_STORE_CTX_get_error(store_ctx);
-		if (!nowarn || verbose > 1)
-			warnx("%s: %s", file, X509_verify_cert_error_string(c));
+		error = X509_STORE_CTX_get_error(store_ctx);
+		*errstr = X509_verify_cert_error_string(error);
 		X509_STORE_CTX_cleanup(store_ctx);
 		sk_X509_free(chain);
 		sk_X509_CRL_free(crls);
@@ -442,24 +423,19 @@ valid_x509(char *file, X509_STORE_CTX *store_ctx, X509 *x509, struct auth *a,
  * Returns 1 if valid, 0 otherwise.
  */
 int
-valid_rsc(const char *fn, struct auth *a, struct rsc *rsc)
+valid_rsc(const char *fn, struct cert *cert, struct rsc *rsc)
 {
 	size_t		i;
 	uint32_t	min, max;
 	char		buf1[64], buf2[64];
 
 	for (i = 0; i < rsc->asz; i++) {
-		if (rsc->as[i].type == CERT_AS_INHERIT) {
-			warnx("%s: RSC ResourceBlock: illegal inherit", fn);
-			return 0;
-		}
-
 		min = rsc->as[i].type == CERT_AS_RANGE ? rsc->as[i].range.min
 		    : rsc->as[i].id;
 		max = rsc->as[i].type == CERT_AS_RANGE ? rsc->as[i].range.max
 		    : rsc->as[i].id;
 
-		if (valid_as(a, min, max))
+		if (as_check_covered(min, max, cert->as, cert->asz) > 0)
 			continue;
 
 		switch (rsc->as[i].type) {
@@ -478,13 +454,8 @@ valid_rsc(const char *fn, struct auth *a, struct rsc *rsc)
 	}
 
 	for (i = 0; i < rsc->ipsz; i++) {
-		if (rsc->ips[i].type == CERT_IP_INHERIT) {
-			warnx("%s: RSC ResourceBlock: illegal inherit", fn);
-			return 0;
-		}
-
-		if (valid_ip(a, rsc->ips[i].afi, rsc->ips[i].min,
-		    rsc->ips[i].max))
+		if (ip_addr_check_covered(rsc->ips[i].afi, rsc->ips[i].min,
+		    rsc->ips[i].max, cert->ips, cert->ipsz) > 0)
 			continue;
 
 		switch (rsc->ips[i].type) {
@@ -532,4 +503,46 @@ valid_econtent_version(const char *fn, const ASN1_INTEGER *aint)
 		warnx("%s: version %ld not supported (yet)", fn, version);
 		return 0;
 	}
+}
+
+/*
+ * Validate the ASPA: check that the customerASID is contained.
+ * Returns 1 if valid, 0 otherwise.
+ */
+int
+valid_aspa(const char *fn, struct cert *cert, struct aspa *aspa)
+{
+
+	if (as_check_covered(aspa->custasid, aspa->custasid,
+	    cert->as, cert->asz) > 0)
+		return 1;
+
+	warnx("%s: ASPA: uncovered Customer ASID: %u", fn, aspa->custasid);
+
+	return 0;
+}
+
+/*
+ * Validate Geofeed prefixes: check that the prefixes are contained.
+ * Returns 1 if valid, 0 otherwise.
+ */
+int
+valid_geofeed(const char *fn, struct cert *cert, struct geofeed *g)
+{
+	size_t	 i;
+	char	 buf[64];
+
+	for (i = 0; i < g->geoipsz; i++) {
+		if (ip_addr_check_covered(g->geoips[i].ip->afi,
+		    g->geoips[i].ip->min, g->geoips[i].ip->max, cert->ips,
+		    cert->ipsz) > 0)
+			continue;
+
+		ip_addr_print(&g->geoips[i].ip->ip, g->geoips[i].ip->afi, buf,
+		    sizeof(buf));
+		warnx("%s: Geofeed: uncovered IP: %s", fn, buf);
+		return 0;
+	}
+
+	return 1;
 }

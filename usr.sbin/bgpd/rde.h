@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.h,v 1.262 2022/08/03 08:56:23 claudio Exp $ */
+/*	$OpenBSD: rde.h,v 1.273 2022/09/23 15:49:20 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org> and
@@ -70,17 +70,13 @@ struct rib {
  * How do we identify peers between the session handler and the rde?
  * Currently I assume that we can do that with the neighbor_ip...
  */
-LIST_HEAD(rde_peer_head, rde_peer);
-LIST_HEAD(aspath_list, aspath);
-LIST_HEAD(attr_list, attr);
-LIST_HEAD(aspath_head, rde_aspath);
+RB_HEAD(peer_tree, rde_peer);
 RB_HEAD(prefix_tree, prefix);
 RB_HEAD(prefix_index, prefix);
 struct iq;
 
 struct rde_peer {
-	LIST_ENTRY(rde_peer)		 hash_l; /* hash list over all peers */
-	LIST_ENTRY(rde_peer)		 peer_l; /* list of all peers */
+	RB_ENTRY(rde_peer)		 entry;
 	SIMPLEQ_HEAD(, iq)		 imsg_queue;
 	struct peer_config		 conf;
 	struct bgpd_addr		 remote_addr;
@@ -103,6 +99,7 @@ struct rde_peer {
 	uint32_t			 remote_bgpid; /* host byte order! */
 	uint32_t			 up_nlricnt;
 	uint32_t			 up_wcnt;
+	uint32_t			 path_id_tx;
 	enum peer_state			 state;
 	enum export_type		 export_type;
 	uint16_t			 loc_rib_id;
@@ -123,9 +120,7 @@ struct rde_peer {
 #define ASPATH_HEADER_SIZE	(offsetof(struct aspath, data))
 
 struct aspath {
-	LIST_ENTRY(aspath)	entry;
 	uint32_t		source_as;	/* cached source_as */
-	int			refcnt;	/* reference count */
 	uint16_t		len;	/* total length of aspath in octets */
 	uint16_t		ascnt;	/* number of AS hops in data */
 	u_char			data[1]; /* placeholder for actual data */
@@ -166,9 +161,8 @@ enum attrtypes {
 #define ATTR_WELL_KNOWN		ATTR_TRANSITIVE
 
 struct attr {
-	LIST_ENTRY(attr)		 entry;
+	RB_ENTRY(attr)			 entry;
 	u_char				*data;
-	uint64_t			 hash;
 	int				 refcnt;
 	uint16_t			 len;
 	uint8_t				 flags;
@@ -183,9 +177,9 @@ struct mpattr {
 };
 
 struct rde_community {
-	LIST_ENTRY(rde_community)	entry;
-	size_t				size;
-	size_t				nentries;
+	RB_ENTRY(rde_community)		entry;
+	int				size;
+	int				nentries;
 	int				flags;
 	int				refcnt;
 	struct community		*communities;
@@ -219,20 +213,17 @@ struct rde_community {
 #define DEFAULT_LPREF		100
 
 struct rde_aspath {
-	LIST_ENTRY(rde_aspath)		 path_l;
+	RB_ENTRY(rde_aspath)		 entry;
 	struct attr			**others;
 	struct aspath			*aspath;
-	uint64_t			 hash;
 	int				 refcnt;
 	uint32_t			 flags;		/* internally used */
-#define	aspath_hashstart	med
 	uint32_t			 med;		/* multi exit disc */
 	uint32_t			 lpref;		/* local pref */
 	uint32_t			 weight;	/* low prio lpref */
 	uint16_t			 rtlabelid;	/* route label id */
 	uint16_t			 pftableid;	/* pf table id */
 	uint8_t				 origin;
-#define	aspath_hashend		others_len
 	uint8_t				 others_len;
 };
 
@@ -244,7 +235,7 @@ enum nexthop_state {
 };
 
 struct nexthop {
-	LIST_ENTRY(nexthop)	nexthop_l;
+	RB_ENTRY(nexthop)	entry;
 	TAILQ_ENTRY(nexthop)	runner_l;
 	struct prefix_list	prefix_h;
 	struct prefix		*next_prefix;
@@ -382,8 +373,7 @@ extern struct rde_memstats rdemem;
 
 /* prototypes */
 /* mrt.c */
-int		mrt_dump_v2_hdr(struct mrt *, struct bgpd_config *,
-		    struct rde_peer_head *);
+int		mrt_dump_v2_hdr(struct mrt *, struct bgpd_config *);
 void		mrt_dump_upcall(struct rib_entry *, void *);
 
 /* rde.c */
@@ -400,7 +390,8 @@ void		rde_pftable_del(uint16_t, struct prefix *);
 
 int		rde_evaluate_all(void);
 void		rde_generate_updates(struct rib *, struct prefix *,
-		    struct prefix *, enum eval_mode);
+		    struct prefix *, struct prefix *, struct prefix *,
+		    enum eval_mode);
 uint32_t	rde_local_as(void);
 int		rde_decisionflags(void);
 void		rde_peer_send_rrefresh(struct rde_peer *, uint8_t, uint8_t);
@@ -411,17 +402,17 @@ int		 peer_has_as4byte(struct rde_peer *);
 int		 peer_has_add_path(struct rde_peer *, uint8_t, int);
 int		 peer_has_open_policy(struct rde_peer *, uint8_t *);
 int		 peer_accept_no_as_set(struct rde_peer *);
-void		 peer_init(uint32_t);
+void		 peer_init(void);
 void		 peer_shutdown(void);
 void		 peer_foreach(void (*)(struct rde_peer *, void *), void *);
 struct rde_peer	*peer_get(uint32_t);
 struct rde_peer *peer_match(struct ctl_neighbor *, uint32_t);
 struct rde_peer	*peer_add(uint32_t, struct peer_config *);
 
-int		 peer_up(struct rde_peer *, struct session_up *);
+void		 peer_up(struct rde_peer *, struct session_up *);
 void		 peer_down(struct rde_peer *, void *);
 void		 peer_flush(struct rde_peer *, uint8_t, time_t);
-void		 peer_stale(struct rde_peer *, uint8_t);
+void		 peer_stale(struct rde_peer *, uint8_t, int);
 void		 peer_dump(struct rde_peer *, uint8_t);
 void		 peer_begin_rrefresh(struct rde_peer *, uint8_t);
 
@@ -430,29 +421,26 @@ int		 peer_imsg_pop(struct rde_peer *, struct imsg *);
 int		 peer_imsg_pending(void);
 void		 peer_imsg_flush(struct rde_peer *);
 
+RB_PROTOTYPE(peer_tree, rde_peer, entry, peer_cmp);
+
 /* rde_attr.c */
 int		 attr_write(void *, uint16_t, uint8_t, uint8_t, void *,
 		    uint16_t);
 int		 attr_writebuf(struct ibuf *, uint8_t, uint8_t, void *,
 		    uint16_t);
-void		 attr_init(uint32_t);
 void		 attr_shutdown(void);
-void		 attr_hash_stats(struct rde_hashstats *);
 int		 attr_optadd(struct rde_aspath *, uint8_t, uint8_t,
 		    void *, uint16_t);
 struct attr	*attr_optget(const struct rde_aspath *, uint8_t);
 void		 attr_copy(struct rde_aspath *, const struct rde_aspath *);
 int		 attr_compare(struct rde_aspath *, struct rde_aspath *);
-uint64_t	 attr_hash(struct rde_aspath *);
 void		 attr_freeall(struct rde_aspath *);
 void		 attr_free(struct rde_aspath *, struct attr *);
 #define		 attr_optlen(x)	\
     ((x)->len > 255 ? (x)->len + 4 : (x)->len + 3)
 
-void		 aspath_init(uint32_t);
-void		 aspath_shutdown(void);
-void		 aspath_hash_stats(struct rde_hashstats *);
 struct aspath	*aspath_get(void *, uint16_t);
+struct aspath	*aspath_copy(struct aspath *);
 void		 aspath_put(struct aspath *);
 u_char		*aspath_deflate(u_char *, uint16_t *, int *);
 void		 aspath_merge(struct rde_aspath *, struct attr *);
@@ -486,9 +474,7 @@ int	community_large_write(struct rde_community *, void *, uint16_t);
 int	community_ext_write(struct rde_community *, int, void *, uint16_t);
 int	community_writebuf(struct ibuf *, struct rde_community *);
 
-void			 communities_init(uint32_t);
 void			 communities_shutdown(void);
-void			 communities_hash_stats(struct rde_hashstats *);
 struct rde_community	*communities_lookup(struct rde_community *);
 struct rde_community	*communities_link(struct rde_community *);
 void			 communities_unlink(struct rde_community *);
@@ -586,6 +572,11 @@ int		 rib_dump_new(uint16_t, uint8_t, unsigned int, void *,
 		    void (*)(struct rib_entry *, void *),
 		    void (*)(void *, uint8_t),
 		    int (*)(void *));
+int		 rib_dump_subtree(uint16_t, struct bgpd_addr *, uint8_t,
+		    unsigned int count, void *arg,
+		    void (*)(struct rib_entry *, void *),
+		    void (*)(void *, uint8_t),
+		    int (*)(void *));
 void		 rib_dump_terminate(void *);
 
 static inline struct rib *
@@ -594,10 +585,7 @@ re_rib(struct rib_entry *re)
 	return rib_byid(re->rib_id);
 }
 
-void		 path_init(uint32_t);
 void		 path_shutdown(void);
-void		 path_hash_stats(struct rde_hashstats *);
-int		 path_compare(struct rde_aspath *, struct rde_aspath *);
 uint32_t	 path_remove_stale(struct rde_aspath *, uint8_t, time_t);
 struct rde_aspath *path_copy(struct rde_aspath *, const struct rde_aspath *);
 struct rde_aspath *path_prep(struct rde_aspath *);
@@ -630,6 +618,10 @@ void		 prefix_adjout_dump(struct rde_peer *, void *,
 		    void (*)(struct prefix *, void *));
 int		 prefix_dump_new(struct rde_peer *, uint8_t, unsigned int,
 		    void *, void (*)(struct prefix *, void *),
+		    void (*)(void *, uint8_t), int (*)(void *));
+int		 prefix_dump_subtree(struct rde_peer *, struct bgpd_addr *,
+		    uint8_t, unsigned int, void *,
+		    void (*)(struct prefix *, void *),
 		    void (*)(void *, uint8_t), int (*)(void *));
 int		 prefix_write(u_char *, int, struct bgpd_addr *, uint8_t, int);
 int		 prefix_writebuf(struct ibuf *, struct bgpd_addr *, uint8_t);
@@ -690,7 +682,6 @@ prefix_re(struct prefix *p)
 	return (p->entry.list.re);
 }
 
-void		 nexthop_init(uint32_t);
 void		 nexthop_shutdown(void);
 int		 nexthop_pending(void);
 void		 nexthop_runner(void);
@@ -710,6 +701,9 @@ void		 up_generate_updates(struct filter_head *, struct rde_peer *,
 		    struct prefix *, struct prefix *);
 void		 up_generate_addpath(struct filter_head *, struct rde_peer *,
 		    struct prefix *, struct prefix *);
+void		 up_generate_addpath_all(struct filter_head *,
+		    struct rde_peer *, struct prefix *, struct prefix *,
+		    struct prefix *);
 void		 up_generate_default(struct filter_head *, struct rde_peer *,
 		    uint8_t);
 int		 up_is_eor(struct rde_peer *, uint8_t);

@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_rsa.c,v 1.45 2022/06/30 09:08:35 tb Exp $ */
+/* $OpenBSD: ssl_rsa.c,v 1.49 2022/11/26 16:08:56 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -64,7 +64,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
-#include "ssl_locl.h"
+#include "ssl_local.h"
 
 static int ssl_get_password_cb_and_arg(SSL_CTX *ctx, SSL *ssl,
     pem_password_cb **passwd_cb, void **passwd_arg);
@@ -184,9 +184,17 @@ ssl_set_pkey(SSL_CTX *ctx, SSL *ssl, EVP_PKEY *pkey)
 
 	if (c->pkeys[i].x509 != NULL) {
 		EVP_PKEY *pktmp;
-		pktmp = X509_get_pubkey(c->pkeys[i].x509);
+
+		if ((pktmp = X509_get0_pubkey(c->pkeys[i].x509)) == NULL)
+			return 0;
+
+		/*
+		 * Callers of EVP_PKEY_copy_parameters() can't distinguish
+		 * errors from the absence of a param_copy() method. So
+		 * pretend it can never fail.
+		 */
 		EVP_PKEY_copy_parameters(pktmp, pkey);
-		EVP_PKEY_free(pktmp);
+
 		ERR_clear_error();
 
 		/*
@@ -209,7 +217,7 @@ ssl_set_pkey(SSL_CTX *ctx, SSL *ssl, EVP_PKEY *pkey)
 	c->key = &(c->pkeys[i]);
 
 	c->valid = 0;
-	return (1);
+	return 1;
 }
 
 int

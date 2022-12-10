@@ -1,4 +1,4 @@
-/* $OpenBSD: softraid.c,v 1.425 2022/04/16 19:19:58 naddy Exp $ */
+/* $OpenBSD: softraid.c,v 1.427 2022/09/11 19:34:40 miod Exp $ */
 /*
  * Copyright (c) 2007, 2008, 2009 Marco Peereboom <marco@peereboom.us>
  * Copyright (c) 2008 Chris Kuethe <ckuethe@openbsd.org>
@@ -2593,9 +2593,11 @@ sr_ioctl_vol(struct sr_softc *sc, struct bioc_vol *bv)
 		bv->bv_nodisk = sd->sd_meta->ssdi.ssd_chunk_no;
 
 #ifdef CRYPTO
-		if ((sd->sd_meta->ssdi.ssd_level == 'C' ||
-		    sd->sd_meta->ssdi.ssd_level == 0x1C) &&
+		if (sd->sd_meta->ssdi.ssd_level == 'C' &&
 		    sd->mds.mdd_crypto.key_disk != NULL)
+			bv->bv_nodisk++;
+		else if (sd->sd_meta->ssdi.ssd_level == 0x1C &&
+		    sd->mds.mdd_raid1c.sr1c_crypto.key_disk != NULL)
 			bv->bv_nodisk++;
 #endif
 		if (bv->bv_status == BIOC_SVREBUILD)
@@ -2650,9 +2652,12 @@ sr_ioctl_disk(struct sr_softc *sc, struct bioc_disk *bd)
 			src = sd->sd_vol.sv_chunks[bd->bd_diskid];
 #ifdef CRYPTO
 		else if (bd->bd_diskid == sd->sd_meta->ssdi.ssd_chunk_no &&
-		    (sd->sd_meta->ssdi.ssd_level == 'C' ||
-		    sd->sd_meta->ssdi.ssd_level == 0x1C) &&
+		    sd->sd_meta->ssdi.ssd_level == 'C' &&
 		    sd->mds.mdd_crypto.key_disk != NULL)
+			src = sd->mds.mdd_crypto.key_disk;
+		else if (bd->bd_diskid == sd->sd_meta->ssdi.ssd_chunk_no &&
+		    sd->sd_meta->ssdi.ssd_level == 0x1C &&
+		    sd->mds.mdd_raid1c.sr1c_crypto.key_disk != NULL)
 			src = sd->mds.mdd_crypto.key_disk;
 #endif
 		else
@@ -3685,13 +3690,11 @@ sr_ioctl_installboot(struct sr_softc *sc, struct sr_discipline *sd,
 		}
 	}
 
-	bzero(duid, sizeof(duid));
 	TAILQ_FOREACH(dk, &disklist,  dk_link)
 		if (!strncmp(dk->dk_name, bb->bb_dev, sizeof(bb->bb_dev)))
 			break;
 	if (dk == NULL || dk->dk_label == NULL ||
-	    (dk->dk_flags & DKF_LABELVALID) == 0 ||
-	    bcmp(dk->dk_label->d_uid, &duid, sizeof(duid)) == 0) {
+	    duid_iszero(dk->dk_label->d_uid)) {
 		sr_error(sc, "failed to get DUID for softraid volume");
 		goto done;
 	}

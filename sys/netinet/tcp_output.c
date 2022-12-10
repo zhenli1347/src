@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_output.c,v 1.132 2022/08/11 09:13:21 claudio Exp $	*/
+/*	$OpenBSD: tcp_output.c,v 1.134 2022/11/07 11:22:55 yasuoka Exp $	*/
 /*	$NetBSD: tcp_output.c,v 1.16 1997/06/03 16:17:09 kml Exp $	*/
 
 /*
@@ -203,6 +203,7 @@ tcp_output(struct tcpcb *tp)
 	int idle, sendalot = 0;
 	int i, sack_rxmit = 0;
 	struct sackhole *p;
+	uint32_t now;
 #ifdef TCP_SIGNATURE
 	unsigned int sigoff;
 #endif /* TCP_SIGNATURE */
@@ -221,6 +222,8 @@ tcp_output(struct tcpcb *tp)
 		return (EINVAL);
 #endif /* defined(TCP_SIGNATURE) && defined(DIAGNOSTIC) */
 
+	now = tcp_now();
+
 	/*
 	 * Determine length of data that should be transmitted,
 	 * and flags that will be used.
@@ -228,7 +231,7 @@ tcp_output(struct tcpcb *tp)
 	 * to send, then transmit; otherwise, investigate further.
 	 */
 	idle = (tp->t_flags & TF_LASTIDLE) || (tp->snd_max == tp->snd_una);
-	if (idle && (tcp_now - tp->t_rcvtime) >= tp->t_rxtcur)
+	if (idle && (now - tp->t_rcvtime) >= tp->t_rxtcur)
 		/*
 		 * We have been idle for "a while" and no acks are
 		 * expected to clock out any data we send --
@@ -539,14 +542,14 @@ send:
 
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = htonl(tcp_now + tp->ts_modulate);
+		*lp++ = htonl(now + tp->ts_modulate);
 		*lp   = htonl(tp->ts_recent);
 		optlen += TCPOLEN_TSTAMP_APPA;
-
-		/* Set receive buffer autosizing timestamp. */
-		if (tp->rfbuf_ts == 0)
-			tp->rfbuf_ts = tcp_now;
-
+	}
+	/* Set receive buffer autosizing timestamp. */
+	if (tp->rfbuf_ts == 0) {
+		tp->rfbuf_ts = now;
+		tp->rfbuf_cnt = 0;
 	}
 
 #ifdef TCP_SIGNATURE
@@ -691,7 +694,7 @@ send:
 		 */
 		if (off + len == so->so_snd.sb_cc && !soissending(so))
 			flags |= TH_PUSH;
-		tp->t_sndtime = tcp_now;
+		tp->t_sndtime = now;
 	} else {
 		if (tp->t_flags & TF_ACKNOW)
 			tcpstat_inc(tcps_sndacks);
@@ -924,7 +927,7 @@ send:
 			 * not currently timing anything.
 			 */
 			if (tp->t_rtttime == 0) {
-				tp->t_rtttime = tcp_now;
+				tp->t_rtttime = now;
 				tp->t_rtseq = startseq;
 				tcpstat_inc(tcps_segstimed);
 			}
@@ -1102,7 +1105,7 @@ out:
 
 		/* Restart the delayed ACK timer, if necessary. */
 		if (TCP_TIMER_ISARMED(tp, TCPT_DELACK))
-			TCP_TIMER_ARM_MSEC(tp, TCPT_DELACK, tcp_delack_msecs);
+			TCP_TIMER_ARM(tp, TCPT_DELACK, tcp_delack_msecs);
 
 		return (error);
 	}
@@ -1123,7 +1126,7 @@ out:
 	if (win > 0 && SEQ_GT(tp->rcv_nxt+win, tp->rcv_adv))
 		tp->rcv_adv = tp->rcv_nxt + win;
 	tp->last_ack_sent = tp->rcv_nxt;
-	tp->t_sndacktime = tcp_now;
+	tp->t_sndacktime = now;
 	tp->t_flags &= ~TF_ACKNOW;
 	TCP_TIMER_DISARM(tp, TCPT_DELACK);
 	if (sendalot)
@@ -1135,7 +1138,7 @@ void
 tcp_setpersist(struct tcpcb *tp)
 {
 	int t = ((tp->t_srtt >> 2) + tp->t_rttvar) >> (1 + TCP_RTT_BASE_SHIFT);
-	int nticks;
+	int msec;
 
 	if (TCP_TIMER_ISARMED(tp, TCPT_REXMT))
 		panic("tcp_output REXMT");
@@ -1144,9 +1147,9 @@ tcp_setpersist(struct tcpcb *tp)
 	 */
 	if (t < tp->t_rttmin)
 		t = tp->t_rttmin;
-	TCPT_RANGESET(nticks, t * tcp_backoff[tp->t_rxtshift],
+	TCPT_RANGESET(msec, t * tcp_backoff[tp->t_rxtshift],
 	    TCPTV_PERSMIN, TCPTV_PERSMAX);
-	TCP_TIMER_ARM(tp, TCPT_PERSIST, nticks);
+	TCP_TIMER_ARM(tp, TCPT_PERSIST, msec);
 	if (tp->t_rxtshift < TCP_MAXRXTSHIFT)
 		tp->t_rxtshift++;
 }

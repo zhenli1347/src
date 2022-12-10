@@ -103,7 +103,6 @@
 ./usr/include/dev/acpi/amd_iommu.h
 ./usr/include/dev/acpi/amltypes.h
 ./usr/include/dev/acpi/dsdt.h
-./usr/include/dev/acpi/efi.h
 ./usr/include/dev/acpi/smbus.h
 ./usr/include/dev/adb
 ./usr/include/dev/adb/adb.h
@@ -132,6 +131,8 @@
 ./usr/include/dev/dec/mcclockvar.h
 ./usr/include/dev/dt
 ./usr/include/dev/dt/dtvar.h
+./usr/include/dev/efi
+./usr/include/dev/efi/efi.h
 ./usr/include/dev/eisa
 ./usr/include/dev/eisa/eisadevs.h
 ./usr/include/dev/eisa/eisadevs_data.h
@@ -158,6 +159,7 @@
 ./usr/include/dev/gpio/gpiovar.h
 ./usr/include/dev/hid
 ./usr/include/dev/hid/hid.h
+./usr/include/dev/hid/hidccvar.h
 ./usr/include/dev/hid/hidkbdsc.h
 ./usr/include/dev/hid/hidkbdvar.h
 ./usr/include/dev/hid/hidmsvar.h
@@ -738,11 +740,13 @@
 ./usr/include/dev/tc/zs_ioasicvar.h
 ./usr/include/dev/usb
 ./usr/include/dev/usb/dwc2
+./usr/include/dev/usb/dwc2/bitmap.h
 ./usr/include/dev/usb/dwc2/dwc2.h
 ./usr/include/dev/usb/dwc2/dwc2_core.h
 ./usr/include/dev/usb/dwc2/dwc2_hcd.h
 ./usr/include/dev/usb/dwc2/dwc2_hw.h
 ./usr/include/dev/usb/dwc2/dwc2var.h
+./usr/include/dev/usb/dwc2/gcd.h
 ./usr/include/dev/usb/dwc2/list.h
 ./usr/include/dev/usb/ehcireg.h
 ./usr/include/dev/usb/ehcivar.h
@@ -860,7 +864,6 @@
 ./usr/include/dev/x86emu/x86emu.h
 ./usr/include/dev/x86emu/x86emu_regs.h
 ./usr/include/dirent.h
-./usr/include/disktab.h
 ./usr/include/dlfcn.h
 ./usr/include/elf.h
 ./usr/include/elf_abi.h
@@ -1213,8 +1216,6 @@
 ./usr/include/rpcsvc/nfs_prot.x
 ./usr/include/rpcsvc/nlm_prot.h
 ./usr/include/rpcsvc/nlm_prot.x
-./usr/include/rpcsvc/rex.h
-./usr/include/rpcsvc/rex.x
 ./usr/include/rpcsvc/rnusers.h
 ./usr/include/rpcsvc/rnusers.x
 ./usr/include/rpcsvc/rquota.h
@@ -1284,6 +1285,7 @@
 ./usr/include/sys/cdefs.h
 ./usr/include/sys/cdio.h
 ./usr/include/sys/chio.h
+./usr/include/sys/clockintr.h
 ./usr/include/sys/conf.h
 ./usr/include/sys/core.h
 ./usr/include/sys/ctf.h
@@ -1659,6 +1661,7 @@
 ./usr/share/man/man2/listen.2
 ./usr/share/man/man2/lseek.2
 ./usr/share/man/man2/madvise.2
+./usr/share/man/man2/mimmutable.2
 ./usr/share/man/man2/minherit.2
 ./usr/share/man/man2/mkdir.2
 ./usr/share/man/man2/mkfifo.2
@@ -1801,6 +1804,7 @@
 ./usr/share/man/man3/BN_BLINDING_new.3
 ./usr/share/man/man3/BN_CTX_new.3
 ./usr/share/man/man3/BN_CTX_start.3
+./usr/share/man/man3/BN_GF2m_add.3
 ./usr/share/man/man3/BN_add.3
 ./usr/share/man/man3/BN_add_word.3
 ./usr/share/man/man3/BN_bn2bin.3
@@ -1808,10 +1812,13 @@
 ./usr/share/man/man3/BN_copy.3
 ./usr/share/man/man3/BN_generate_prime.3
 ./usr/share/man/man3/BN_get0_nist_prime_521.3
+./usr/share/man/man3/BN_kronecker.3
 ./usr/share/man/man3/BN_mod_inverse.3
 ./usr/share/man/man3/BN_mod_mul_montgomery.3
 ./usr/share/man/man3/BN_mod_mul_reciprocal.3
+./usr/share/man/man3/BN_mod_sqrt.3
 ./usr/share/man/man3/BN_new.3
+./usr/share/man/man3/BN_nist_mod_521.3
 ./usr/share/man/man3/BN_num_bytes.3
 ./usr/share/man/man3/BN_rand.3
 ./usr/share/man/man3/BN_set_bit.3
@@ -3068,6 +3075,7 @@
 ./usr/share/man/man9/bufq_init.9
 ./usr/share/man/man9/bus_dma.9
 ./usr/share/man/man9/bus_space.9
+./usr/share/man/man9/clockintr.9
 ./usr/share/man/man9/cond_init.9
 ./usr/share/man/man9/config_attach.9
 ./usr/share/man/man9/config_defer.9

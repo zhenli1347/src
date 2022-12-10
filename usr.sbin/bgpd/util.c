@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.70 2022/07/19 13:03:09 claudio Exp $ */
+/*	$OpenBSD: util.c,v 1.73 2022/11/09 14:23:53 claudio Exp $ */
 
 /*
  * Copyright (c) 2006 Claudio Jeker <claudio@openbsd.org>
@@ -60,7 +60,7 @@ log_in6addr(const struct in6_addr *addr)
 {
 	struct sockaddr_in6	sa_in6;
 
-	bzero(&sa_in6, sizeof(sa_in6));
+	memset(&sa_in6, 0, sizeof(sa_in6));
 	sa_in6.sin6_family = AF_INET6;
 	memcpy(&sa_in6.sin6_addr, addr, sizeof(sa_in6.sin6_addr));
 
@@ -131,7 +131,9 @@ log_rd(uint64_t rd)
 		snprintf(buf, sizeof(buf), "rd %s:%hu", inet_ntoa(addr), u16);
 		break;
 	default:
-		return ("rd ?");
+		snprintf(buf, sizeof(buf), "rd #%016llx",
+		    (unsigned long long)rd);
+		break;
 	}
 	return (buf);
 }
@@ -184,7 +186,7 @@ log_rtr_error(enum rtr_error err)
 	case UNSUPP_PDU_TYPE:
 		return "Unsupported PDU Type";
 	case UNK_REC_WDRAWL:
-		return "Withdrawl of Unknown Record";
+		return "Withdrawal of Unknown Record";
 	case DUP_REC_RECV:
 		return "Duplicate Announcement Received";
 	case UNEXP_PROTOCOL_VERS:
@@ -531,7 +533,7 @@ nlri_get_prefix(u_char *p, uint16_t len, struct bgpd_addr *prefix,
 	pfxlen = *p++;
 	len--;
 
-	bzero(prefix, sizeof(struct bgpd_addr));
+	memset(prefix, 0, sizeof(struct bgpd_addr));
 	prefix->aid = AID_INET;
 	*prefixlen = pfxlen;
 
@@ -557,7 +559,7 @@ nlri_get_prefix6(u_char *p, uint16_t len, struct bgpd_addr *prefix,
 	pfxlen = *p++;
 	len--;
 
-	bzero(prefix, sizeof(struct bgpd_addr));
+	memset(prefix, 0, sizeof(struct bgpd_addr));
 	prefix->aid = AID_INET6;
 	*prefixlen = pfxlen;
 
@@ -585,7 +587,7 @@ nlri_get_vpn4(u_char *p, uint16_t len, struct bgpd_addr *prefix,
 	p += 1;
 	plen = 1;
 
-	bzero(prefix, sizeof(struct bgpd_addr));
+	memset(prefix, 0, sizeof(struct bgpd_addr));
 
 	/* label stack */
 	do {
@@ -596,6 +598,7 @@ nlri_get_vpn4(u_char *p, uint16_t len, struct bgpd_addr *prefix,
 			return (-1);
 		if (withdraw) {
 			/* on withdraw ignore the labelstack all together */
+			p += 3;
 			plen += 3;
 			pfxlen -= 3 * 8;
 			break;
@@ -659,6 +662,7 @@ nlri_get_vpn6(u_char *p, uint16_t len, struct bgpd_addr *prefix,
 			return (-1);
 		if (withdraw) {
 			/* on withdraw ignore the labelstack all together */
+			p += 3;
 			plen += 3;
 			pfxlen -= 3 * 8;
 			break;
@@ -796,7 +800,7 @@ inet6applymask(struct in6_addr *dest, const struct in6_addr *src, int prefixlen)
 	struct in6_addr	mask;
 	int		i;
 
-	bzero(&mask, sizeof(mask));
+	memset(&mask, 0, sizeof(mask));
 	for (i = 0; i < prefixlen / 8; i++)
 		mask.s6_addr[i] = 0xff;
 	i = prefixlen % 8;
@@ -898,7 +902,7 @@ addr2sa(const struct bgpd_addr *addr, uint16_t port, socklen_t *len)
 	if (addr == NULL || addr->aid == AID_UNSPEC)
 		return (NULL);
 
-	bzero(&ss, sizeof(ss));
+	memset(&ss, 0, sizeof(ss));
 	switch (addr->aid) {
 	case AID_INET:
 	case AID_VPN_IPv4:
@@ -927,7 +931,7 @@ sa2addr(struct sockaddr *sa, struct bgpd_addr *addr, uint16_t *port)
 	struct sockaddr_in		*sa_in = (struct sockaddr_in *)sa;
 	struct sockaddr_in6		*sa_in6 = (struct sockaddr_in6 *)sa;
 
-	bzero(addr, sizeof(*addr));
+	memset(addr, 0, sizeof(*addr));
 	switch (sa->sa_family) {
 	case AF_INET:
 		addr->aid = AID_INET;

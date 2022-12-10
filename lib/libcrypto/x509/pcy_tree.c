@@ -1,4 +1,4 @@
-/* $OpenBSD: pcy_tree.c,v 1.2 2021/11/01 20:53:08 tb Exp $ */
+/* $OpenBSD: pcy_tree.c,v 1.4 2022/11/26 16:08:54 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 2004.
  */
@@ -60,7 +60,7 @@
 #include <openssl/x509v3.h>
 
 #include "pcy_int.h"
-#include "x509_lcl.h"
+#include "x509_local.h"
 
 /* Enable this to print out the complete policy tree at various point during
  * evaluation.
@@ -657,6 +657,7 @@ X509_policy_tree_free(X509_POLICY_TREE *tree)
 	free(tree->levels);
 	free(tree);
 }
+LCRYPTO_ALIAS(X509_policy_tree_free)
 
 /* Application policy checking function.
  * Return codes:
@@ -769,3 +770,4 @@ error:
 
 	return 0;
 }
+LCRYPTO_ALIAS(X509_policy_check)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_syscalls.c,v 1.199 2022/07/18 04:42:37 deraadt Exp $	*/
+/*	$OpenBSD: uipc_syscalls.c,v 1.207 2022/12/07 01:02:28 deraadt Exp $	*/
 /*	$NetBSD: uipc_syscalls.c,v 1.19 1996/02/09 19:00:48 christos Exp $	*/
 
 /*
@@ -42,7 +42,6 @@
 #include <sys/kernel.h>
 #include <sys/file.h>
 #include <sys/vnode.h>
-#include <sys/ioctl.h>
 #include <sys/malloc.h>
 #include <sys/event.h>
 #include <sys/mbuf.h>
@@ -51,8 +50,6 @@
 #include <sys/socketvar.h>
 #include <sys/signalvar.h>
 #include <sys/pledge.h>
-#include <sys/unpcb.h>
-#include <sys/un.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -63,7 +60,10 @@
 
 #include <sys/domain.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <net/route.h>
+#include <netinet/in_pcb.h>
+#include <net/rtable.h>
 
 int	copyaddrout(struct proc *, struct mbuf *, struct sockaddr *, socklen_t,
 	    socklen_t *);
@@ -609,6 +609,95 @@ done:
 }
 
 int
+sys_sendmmsg(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_sendmmsg_args /* {
+		syscallarg(int)			s;
+		syscallarg(struct mmsghdr *)	mmsg;
+		syscallarg(unsigned int)	vlen;
+		syscallarg(int)			flags;
+	} */ *uap = v;
+	struct mmsghdr mmsg, *mmsgp;
+	struct iovec aiov[UIO_SMALLIOV], *iov = aiov, *uiov;
+	size_t iovlen = UIO_SMALLIOV;
+	register_t retsnd;
+	unsigned int vlen, dgrams;
+	int error = 0, flags, s;
+
+	s = SCARG(uap, s);
+	flags = SCARG(uap, flags);
+
+	/* Arbitrarily capped at 1024 datagrams. */
+	vlen = SCARG(uap, vlen);
+	if (vlen > 1024)
+		vlen = 1024;
+
+	mmsgp = SCARG(uap, mmsg);
+	for (dgrams = 0; dgrams < vlen; dgrams++) {
+		error = copyin(&mmsgp[dgrams], &mmsg, sizeof(mmsg));
+		if (error)
+			break;
+
+#ifdef KTRACE
+		if (KTRPOINT(p, KTR_STRUCT))
+			ktrmmsghdr(p, &mmsg);
+#endif
+
+		if (mmsg.msg_hdr.msg_iovlen > IOV_MAX) {
+			error = EMSGSIZE;
+			break;
+		}
+
+		if (mmsg.msg_hdr.msg_iovlen > iovlen) {
+			if (iov != aiov)
+				free(iov, M_IOV, iovlen *
+				    sizeof(struct iovec));
+
+			iovlen = mmsg.msg_hdr.msg_iovlen;
+			iov = mallocarray(iovlen, sizeof(struct iovec),
+			    M_IOV, M_WAITOK);
+		}
+
+		if (mmsg.msg_hdr.msg_iovlen > 0) {
+			error = copyin(mmsg.msg_hdr.msg_iov, iov,
+			    mmsg.msg_hdr.msg_iovlen * sizeof(struct iovec));
+			if (error)
+				break;
+		}
+
+#ifdef KTRACE
+		if (mmsg.msg_hdr.msg_iovlen && KTRPOINT(p, KTR_STRUCT))
+			ktriovec(p, iov, mmsg.msg_hdr.msg_iovlen);
+#endif
+
+		uiov = mmsg.msg_hdr.msg_iov;
+		mmsg.msg_hdr.msg_iov = iov;
+		mmsg.msg_hdr.msg_flags = 0;
+
+		error = sendit(p, s, &mmsg.msg_hdr, flags, &retsnd);
+		if (error)
+			break;
+
+		mmsg.msg_hdr.msg_iov = uiov;
+		mmsg.msg_len = retsnd;
+
+		error = copyout(&mmsg, &mmsgp[dgrams], sizeof(mmsg));
+		if (error)
+			break;
+	}
+
+	if (iov != aiov)
+		free(iov, M_IOV, sizeof(struct iovec) * iovlen);
+
+	*retval = dgrams;
+
+	if (error && dgrams > 0)
+		error = 0;
+
+	return (error);
+}
+
+int
 sendit(struct proc *p, int s, struct msghdr *mp, int flags, register_t *retsize)
 {
 	struct file *fp;
@@ -804,6 +893,141 @@ sys_recvmsg(struct proc *p, void *v, register_t *retval)
 done:
 	if (iov != aiov)
 		free(iov, M_IOV, sizeof(struct iovec) * msg.msg_iovlen);
+	return (error);
+}
+
+int
+sys_recvmmsg(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_recvmmsg_args /* {
+		syscallarg(int)			s;
+		syscallarg(struct mmsghdr *)	mmsg;
+		syscallarg(unsigned int)	vlen;
+		syscallarg(int)			flags;
+		syscallarg(struct timespec *)	timeout;
+	} */ *uap = v;
+	struct mmsghdr mmsg, *mmsgp;
+	struct timespec ts, now, *timeout;
+	struct iovec aiov[UIO_SMALLIOV], *uiov, *iov = aiov;
+	size_t iovlen = UIO_SMALLIOV;
+	register_t retrec;
+	unsigned int vlen, dgrams;
+	int error = 0, flags, s;
+
+	timeout = SCARG(uap, timeout);
+	if (timeout != NULL) {
+		error = copyin(timeout, &ts, sizeof(ts));
+		if (error)
+			return (error);
+#ifdef KTRACE
+		if (KTRPOINT(p, KTR_STRUCT))
+			ktrreltimespec(p, &ts);
+#endif
+		if (!timespecisvalid(&ts))
+			return (EINVAL);
+
+		getnanotime(&now);
+		timespecadd(&now, &ts, &ts);
+	}
+
+	s = SCARG(uap, s);
+	flags = SCARG(uap, flags);
+
+	/* Arbitrarily capped at 1024 datagrams. */
+	vlen = SCARG(uap, vlen);
+	if (vlen > 1024)
+		vlen = 1024;
+
+	mmsgp = SCARG(uap, mmsg);
+	for (dgrams = 0; dgrams < vlen;) {
+		error = copyin(&mmsgp[dgrams], &mmsg, sizeof(mmsg));
+		if (error)
+			break;
+
+		if (mmsg.msg_hdr.msg_iovlen > IOV_MAX) {
+			error = EMSGSIZE;
+			break;
+		}
+
+		if (mmsg.msg_hdr.msg_iovlen > iovlen) {
+			if (iov != aiov)
+				free(iov, M_IOV, iovlen *
+				    sizeof(struct iovec));
+
+			iovlen = mmsg.msg_hdr.msg_iovlen;
+			iov = mallocarray(iovlen, sizeof(struct iovec),
+			    M_IOV, M_WAITOK);
+		}
+
+		if (mmsg.msg_hdr.msg_iovlen > 0) {
+			error = copyin(mmsg.msg_hdr.msg_iov, iov,
+			    mmsg.msg_hdr.msg_iovlen * sizeof(struct iovec));
+			if (error)
+				break;
+		}
+
+		uiov = mmsg.msg_hdr.msg_iov;
+		mmsg.msg_hdr.msg_iov = iov;
+		mmsg.msg_hdr.msg_flags = flags & ~MSG_WAITFORONE;
+
+		error = recvit(p, s, &mmsg.msg_hdr, NULL, &retrec);
+		if (error) {
+			if (error == EAGAIN && dgrams > 0)
+				error = 0;
+			break;
+		}
+
+		if (flags & MSG_WAITFORONE)
+			flags |= MSG_DONTWAIT;
+
+		mmsg.msg_hdr.msg_iov = uiov;
+		mmsg.msg_len = retrec;
+#ifdef KTRACE
+		if (KTRPOINT(p, KTR_STRUCT)) {
+			ktrmmsghdr(p, &mmsg);
+			if (mmsg.msg_hdr.msg_iovlen)
+				ktriovec(p, iov, mmsg.msg_hdr.msg_iovlen);
+		}
+#endif
+
+		error = copyout(&mmsg, &mmsgp[dgrams], sizeof(mmsg));
+		if (error)
+			break;
+
+		dgrams++;
+		if (mmsg.msg_hdr.msg_flags & MSG_OOB)
+			break;
+
+		if (timeout != NULL) {
+			getnanotime(&now);
+			timespecsub(&now, &ts, &now);
+			if (now.tv_sec > 0)
+				break;
+		}
+	}
+
+	if (iov != aiov)
+		free(iov, M_IOV, iovlen * sizeof(struct iovec));
+
+	*retval = dgrams;
+
+	/*
+	 * If we succeeded at least once, return 0, hopefully so->so_error
+	 * will catch it next time.
+	 */
+	if (error && dgrams > 0) {
+		struct file *fp;
+		struct socket *so;
+
+		if (getsock(p, s, &fp) == 0) {
+			so = (struct socket *)fp->f_data;
+			so->so_error = error;
+
+			FRELE(fp, p);
+		}
+		error = 0;
+	}
+
 	return (error);
 }
 
@@ -1047,9 +1271,9 @@ sys_getsockopt(struct proc *p, void *v, register_t *retval)
 		valsize = 0;
 	m = m_get(M_WAIT, MT_SOOPTS);
 	so = fp->f_data;
-	solock(so);
+	solock_shared(so);
 	error = sogetopt(so, SCARG(uap, level), SCARG(uap, name), m);
-	sounlock(so);
+	sounlock_shared(so);
 	if (error == 0 && SCARG(uap, val) && valsize && m != NULL) {
 		if (valsize > m->m_len)
 			valsize = m->m_len;
@@ -1099,9 +1323,9 @@ sys_getsockname(struct proc *p, void *v, register_t *retval)
 		goto bad;
 	}
 	m = m_getclr(M_WAIT, MT_SONAME);
-	solock(so);
-	error = (*so->so_proto->pr_usrreq)(so, PRU_SOCKADDR, NULL, m, NULL, p);
-	sounlock(so);
+	solock_shared(so);
+	error = pru_sockaddr(so, m);
+	sounlock_shared(so);
 	if (error)
 		goto bad;
 	error = copyaddrout(p, m, SCARG(uap, asa), len, SCARG(uap, alen));
@@ -1146,9 +1370,9 @@ sys_getpeername(struct proc *p, void *v, register_t *retval)
 	if (error)
 		goto bad;
 	m = m_getclr(M_WAIT, MT_SONAME);
-	solock(so);
-	error = (*so->so_proto->pr_usrreq)(so, PRU_PEERADDR, NULL, m, NULL, p);
-	sounlock(so);
+	solock_shared(so);
+	error = pru_peeraddr(so, m);
+	sounlock_shared(so);
 	if (error)
 		goto bad;
 	error = copyaddrout(p, m, SCARG(uap, asa), len, SCARG(uap, alen));
@@ -1415,18 +1639,23 @@ out:
 	error = socreate(AF_INET, &so, SCARG(uap, type), 0);
 	if (error)
 		return (error);
-	
+
 	error = ypsockargs(&nam, &ypsin, sizeof ypsin, MT_SONAME);
 	if (error) {
 		soclose(so, MSG_DONTWAIT);
 		return (error);
 	}
-	
+
 #ifdef KTRACE
 	if (KTRPOINT(p, KTR_STRUCT))
 		ktrsockaddr(p, mtod(nam, caddr_t), sizeof(struct sockaddr_in));
 #endif
 	solock(so);
+
+	/* Secure YP maps require reserved ports */
+	if (suser(p) == 0)
+		sotoinpcb(so)->inp_flags |= INP_LOWPORT;
+
 	error = soconnect(so, nam);
 	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0) {
 		error = sosleep_nsec(so, &so->so_timeo, PSOCK | PCATCH,

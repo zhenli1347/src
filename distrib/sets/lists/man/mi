@@ -1233,6 +1233,7 @@
 ./usr/share/man/man4/arc.4
 ./usr/share/man/man4/arcofi.4
 ./usr/share/man/man4/arm64
+./usr/share/man/man4/arm64/agintc.4
 ./usr/share/man/man4/arm64/agtimer.4
 ./usr/share/man/man4/arm64/ampintc.4
 ./usr/share/man/man4/arm64/aplaudio.4
@@ -1251,6 +1252,7 @@
 ./usr/share/man/man4/arm64/aplpinctrl.4
 ./usr/share/man/man4/arm64/aplpmgr.4
 ./usr/share/man/man4/arm64/aplpmu.4
+./usr/share/man/man4/arm64/aplpwm.4
 ./usr/share/man/man4/arm64/aplsart.4
 ./usr/share/man/man4/arm64/aplsmc.4
 ./usr/share/man/man4/arm64/aplspi.4
@@ -1518,6 +1520,7 @@
 ./usr/share/man/man4/i386/wdt.4
 ./usr/share/man/man4/iatp.4
 ./usr/share/man/man4/iavf.4
+./usr/share/man/man4/icc.4
 ./usr/share/man/man4/ichiic.4
 ./usr/share/man/man4/ichwdt.4
 ./usr/share/man/man4/icmp.4
@@ -1785,6 +1788,7 @@
 ./usr/share/man/man4/pfsync.4
 ./usr/share/man/man4/pgt.4
 ./usr/share/man/man4/piixpm.4
+./usr/share/man/man4/pijuice.4
 ./usr/share/man/man4/pinctrl.4
 ./usr/share/man/man4/pipex.4
 ./usr/share/man/man4/plgpio.4
@@ -1812,7 +1816,18 @@
 ./usr/share/man/man4/pwdog.4
 ./usr/share/man/man4/pwmbl.4
 ./usr/share/man/man4/pwmfan.4
+./usr/share/man/man4/pwmleds.4
 ./usr/share/man/man4/pwmreg.4
+./usr/share/man/man4/qcdwusb.4
+./usr/share/man/man4/qcgpio.4
+./usr/share/man/man4/qciic.4
+./usr/share/man/man4/qcpdc.4
+./usr/share/man/man4/qcpmic.4
+./usr/share/man/man4/qcpmicgpio.4
+./usr/share/man/man4/qcpon.4
+./usr/share/man/man4/qcpwm.4
+./usr/share/man/man4/qcrtc.4
+./usr/share/man/man4/qcspmi.4
 ./usr/share/man/man4/qla.4
 ./usr/share/man/man4/qle.4
 ./usr/share/man/man4/qlw.4
@@ -1980,6 +1995,7 @@
 ./usr/share/man/man4/sximmc.4
 ./usr/share/man/man4/sxipio.4
 ./usr/share/man/man4/sxipwm.4
+./usr/share/man/man4/sxirintc.4
 ./usr/share/man/man4/sxirsb.4
 ./usr/share/man/man4/sxirtc.4
 ./usr/share/man/man4/sxisid.4
@@ -2600,6 +2616,7 @@
 ./usr/share/man/man8/smtpd.8
 ./usr/share/man/man8/sndiod.8
 ./usr/share/man/man8/snmpd.8
+./usr/share/man/man8/snmpd_metrics.8
 ./usr/share/man/man8/spamd-setup.8
 ./usr/share/man/man8/spamd.8
 ./usr/share/man/man8/spamdb.8

@@ -1,4 +1,4 @@
-/*	$OpenBSD: specialreg.h,v 1.92 2022/04/26 08:35:30 claudio Exp $	*/
+/*	$OpenBSD: specialreg.h,v 1.95 2022/10/24 00:56:33 cheloha Exp $	*/
 /*	$NetBSD: specialreg.h,v 1.1 2003/04/26 18:39:48 fvdl Exp $	*/
 /*	$NetBSD: x86/specialreg.h,v 1.2 2003/04/25 21:54:30 fvdl Exp $	*/
 
@@ -51,23 +51,6 @@
 #define CR0_AM	0x00040000	/* Alignment Mask (set to enable AC flag) */
 #define	CR0_NW	0x20000000	/* Not Write-through */
 #define	CR0_CD	0x40000000	/* Cache Disable */
-
-/*
- * Cyrix 486 DLC special registers, accessible as IO ports.
- */
-#define CCR0	0xc0		/* configuration control register 0 */
-#define CCR0_NC0	0x01	/* first 64K of each 1M memory region is non-cacheable */
-#define CCR0_NC1	0x02	/* 640K-1M region is non-cacheable */
-#define CCR0_A20M	0x04	/* enables A20M# input pin */
-#define CCR0_KEN	0x08	/* enables KEN# input pin */
-#define CCR0_FLUSH	0x10	/* enables FLUSH# input pin */
-#define CCR0_BARB	0x20	/* flushes internal cache when entering hold state */
-#define CCR0_CO		0x40	/* cache org: 1=direct mapped, 0=2x set assoc */
-#define CCR0_SUSPEND	0x80	/* enables SUSP# and SUSPA# pins */
-
-#define CCR1	0xc1		/* configuration control register 1 */
-#define CCR1_RPL	0x01	/* enables RPLSET and RPLVAL# pins */
-/* the remaining 7 bits of this register are reserved */
 
 /*
  * bits in CR3
@@ -557,6 +540,10 @@
  */
 #define	MSR_HWCR	0xc0010015
 #define		HWCR_FFDIS		0x00000040
+#define		HWCR_TSCFREQSEL		0x01000000
+
+#define	MSR_PSTATEDEF(_n)	(0xc0010064 + (_n))
+#define		PSTATEDEF_EN		0x8000000000000000ULL
 
 #define	MSR_NB_CFG	0xc001001f
 #define		NB_CFG_DISIOREQLOCK	0x0000000000000004ULL
@@ -1273,6 +1260,7 @@
 #define AMD_SVM_NESTED_PAGING_CAP	(1 << 0)
 #define AMD_SVM_VMCB_CLEAN_CAP		(1 << 5)
 #define AMD_SVM_FLUSH_BY_ASID_CAP	(1 << 6)
+#define AMD_SVM_DECODE_ASSIST_CAP	(1 << 7)
 #define AMD_SVMDIS			0x10
 
 #define SVM_TLB_CONTROL_FLUSH_NONE	0

@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwpcie.c,v 1.36 2021/10/24 17:52:26 mpi Exp $	*/
+/*	$OpenBSD: dwpcie.c,v 1.39 2022/11/27 22:04:59 kettenis Exp $	*/
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -18,6 +18,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
+#include <sys/evcount.h>
 #include <sys/extent.h>
 #include <sys/malloc.h>
 
@@ -55,6 +56,12 @@
 #define  PCIE_LINK_WIDTH_SPEED_CTRL_LANES_4		(0x4 << 8)
 #define  PCIE_LINK_WIDTH_SPEED_CTRL_LANES_8		(0x8 << 8)
 #define  PCIE_LINK_WIDTH_SPEED_CTRL_CHANGE		(1 << 17)
+
+#define PCIE_MSI_ADDR_LO	0x820
+#define PCIE_MSI_ADDR_HI	0x824
+#define PCIE_MSI_INTR0_ENABLE	0x828
+#define PCIE_MSI_INTR0_MASK	0x82c
+#define PCIE_MSI_INTR0_STATUS	0x830
 
 #define MISC_CONTROL_1		0x8bc
 #define  MISC_CONTROL_1_DBI_RO_WR_EN	(1 << 0)
@@ -179,6 +186,18 @@ struct dwpcie_range {
 	uint64_t		size;
 };
 
+#define DWPCIE_NUM_MSI		32
+
+struct dwpcie_msi {
+	int			(*dm_func)(void *);
+	void			*dm_arg;
+	int			dm_ipl;
+	int			dm_flags;
+	int			dm_vec;
+	struct evcount		dm_count;
+	char			*dm_name;
+};
+
 struct dwpcie_softc {
 	struct device		sc_dev;
 	bus_space_tag_t		sc_iot;
@@ -195,6 +214,10 @@ struct dwpcie_softc {
 	bus_addr_t		sc_glue_base;
 	bus_size_t		sc_glue_size;
 	bus_space_handle_t	sc_glue_ioh;
+
+	bus_addr_t		sc_atu_base;
+	bus_size_t		sc_atu_size;
+	bus_space_handle_t	sc_atu_ioh;
 
 	bus_addr_t		sc_io_base;
 	bus_addr_t		sc_io_bus_addr;
@@ -221,14 +244,19 @@ struct dwpcie_softc {
 	int			sc_bus;
 
 	int			sc_num_viewport;
-	bus_addr_t		sc_atu_base;
 	int			sc_atu_unroll;
+	int			sc_atu_viewport;
 
 	void			*sc_ih;
+
+	uint64_t		sc_msi_addr;
+	struct dwpcie_msi	sc_msi[DWPCIE_NUM_MSI];
 };
 
 struct dwpcie_intr_handle {
 	struct machine_intr_handle pih_ih;
+	struct dwpcie_softc	*pih_sc;
+	struct dwpcie_msi	*pih_dm;
 	bus_dma_tag_t		pih_dmat;
 	bus_dmamap_t		pih_map;
 };
@@ -250,14 +278,17 @@ dwpcie_match(struct device *parent, void *match, void *aux)
 	struct fdt_attach_args *faa = aux;
 
 	return (OF_is_compatible(faa->fa_node, "amlogic,g12a-pcie") ||
-	    OF_is_compatible(faa->fa_node, "marvell,armada8k-pcie") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx8mm-pcie") ||
 	    OF_is_compatible(faa->fa_node, "fsl,imx8mq-pcie") ||
+	    OF_is_compatible(faa->fa_node, "marvell,armada8k-pcie") ||
+	    OF_is_compatible(faa->fa_node, "qcom,pcie-sc8280xp") ||
+	    OF_is_compatible(faa->fa_node, "rockchip,rk3568-pcie") ||
 	    OF_is_compatible(faa->fa_node, "sifive,fu740-pcie"));
 }
 
 void	dwpcie_attach_deferred(struct device *);
 
+void	dwpcie_atu_disable(struct dwpcie_softc *, int);
 void	dwpcie_atu_config(struct dwpcie_softc *, int, int,
 	    uint64_t, uint64_t, uint64_t);
 void	dwpcie_link_config(struct dwpcie_softc *);
@@ -274,6 +305,8 @@ int	dwpcie_imx8mq_init(struct dwpcie_softc *);
 int	dwpcie_imx8mq_intr(void *);
 
 int	dwpcie_fu740_init(struct dwpcie_softc *);
+int	dwpcie_rk3568_init(struct dwpcie_softc *);
+int	dwpcie_sc8280xp_init(struct dwpcie_softc *);
 
 void	dwpcie_attach_hook(struct device *, struct device *,
 	    struct pcibus_attach_args *);
@@ -307,7 +340,7 @@ dwpcie_attach(struct device *parent, struct device *self, void *aux)
 	struct fdt_attach_args *faa = aux;
 	uint32_t *ranges;
 	int i, j, nranges, rangeslen;
-	int config, glue;
+	int atu, config, ctrl, glue;
 
 	if (faa->fa_nreg < 2) {
 		printf(": no registers\n");
@@ -317,6 +350,12 @@ dwpcie_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_ctrl_base = faa->fa_reg[0].addr;
 	sc->sc_ctrl_size = faa->fa_reg[0].size;
 
+	ctrl = OF_getindex(faa->fa_node, "dbi", "reg-names");
+	if (ctrl >= 0 && ctrl < faa->fa_nreg) {
+		sc->sc_ctrl_base = faa->fa_reg[ctrl].addr;
+		sc->sc_ctrl_size = faa->fa_reg[ctrl].size;
+	}
+
 	config = OF_getindex(faa->fa_node, "config", "reg-names");
 	if (config < 0 || config >= faa->fa_nreg) {
 		printf(": no config registers\n");
@@ -325,6 +364,15 @@ dwpcie_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_conf_base = faa->fa_reg[config].addr;
 	sc->sc_conf_size = faa->fa_reg[config].size;
+
+	sc->sc_atu_base = sc->sc_ctrl_base + 0x300000;
+	sc->sc_atu_size = sc->sc_ctrl_size - 0x300000;
+
+	atu = OF_getindex(faa->fa_node, "atu", "reg-names");
+	if (atu >= 0 && atu < faa->fa_nreg) {
+		sc->sc_atu_base = faa->fa_reg[atu].addr;
+		sc->sc_atu_size = faa->fa_reg[atu].size;
+	}
 
 	if (OF_is_compatible(faa->fa_node, "amlogic,g12a-pcie")) {
 		glue = OF_getindex(faa->fa_node, "cfg", "reg-names");
@@ -433,6 +481,10 @@ dwpcie_attach_deferred(struct device *self)
 	if (OF_is_compatible(sc->sc_node, "fsl,imx8mm-pcie") ||
 	    OF_is_compatible(sc->sc_node, "fsl,imx8mq-pcie"))
 		error = dwpcie_imx8mq_init(sc);
+	if (OF_is_compatible(sc->sc_node, "qcom,pcie-sc8280xp"))
+		error = dwpcie_sc8280xp_init(sc);
+	if (OF_is_compatible(sc->sc_node, "rockchip,rk3568-pcie"))
+		error = dwpcie_rk3568_init(sc);
 	if (OF_is_compatible(sc->sc_node, "sifive,fu740-pcie"))
 		error = dwpcie_fu740_init(sc);
 	if (error != 0) {
@@ -445,9 +497,21 @@ dwpcie_attach_deferred(struct device *self)
 		return;
 	}
 
+	sc->sc_atu_viewport = -1;
 	if (HREAD4(sc, IATU_VIEWPORT) == 0xffffffff) {
-		sc->sc_atu_base = 0x300000;
 		sc->sc_atu_unroll = 1;
+		if (bus_space_map(sc->sc_iot, sc->sc_atu_base,
+		    sc->sc_atu_size, 0, &sc->sc_atu_ioh)) {
+			bus_space_unmap(sc->sc_iot, sc->sc_conf_ioh,
+			    sc->sc_conf_size);
+			bus_space_unmap(sc->sc_iot, sc->sc_ioh,
+			    sc->sc_ctrl_size);
+			free(sc->sc_ranges, M_TEMP, sc->sc_nranges *
+			    sizeof(struct dwpcie_range));
+			printf("%s: can't map atu registers\n",
+			    sc->sc_dev.dv_xname);
+			return;
+		}
 	}
 
 	/* Set up address translation for I/O space. */
@@ -483,6 +547,9 @@ dwpcie_attach_deferred(struct device *self)
 	 */
 	if (sc->sc_num_viewport < 4)
 		sc->sc_pmem_size = 0;
+
+	for (i = 0; i < sc->sc_num_viewport; i++)
+		dwpcie_atu_disable(sc, i);
 
 	dwpcie_atu_config(sc, IATU_VIEWPORT_INDEX0,
 	    IATU_REGION_CTRL_1_TYPE_MEM, sc->sc_mem_base,
@@ -605,7 +672,9 @@ dwpcie_attach_deferred(struct device *self)
 	pba.pba_pc = &sc->sc_pc;
 	pba.pba_domain = pci_ndomains++;
 	pba.pba_bus = sc->sc_bus;
-	if (OF_is_compatible(sc->sc_node, "marvell,armada8k-pcie"))
+	if (OF_is_compatible(sc->sc_node, "marvell,armada8k-pcie") ||
+	    OF_is_compatible(sc->sc_node, "rockchip,rk3568-pcie") ||
+	    sc->sc_msi_addr)
 		pba.pba_flags |= PCI_FLAGS_MSI_ENABLED;
 
 	config_found(self, &pba, NULL);
@@ -654,6 +723,104 @@ dwpcie_link_config(struct dwpcie_softc *sc)
 	reg = HREAD4(sc, PCIE_LINK_WIDTH_SPEED_CTRL);
 	reg |= PCIE_LINK_WIDTH_SPEED_CTRL_CHANGE;
 	HWRITE4(sc, PCIE_LINK_WIDTH_SPEED_CTRL, reg);
+}
+
+int
+dwpcie_msi_intr(void *arg)
+{
+	struct dwpcie_softc *sc = arg;
+	struct dwpcie_msi *dm;
+	uint32_t status;
+	int vec, s;
+
+	status = HREAD4(sc, PCIE_MSI_INTR0_STATUS);
+	if (status == 0)
+		return 0;
+
+	HWRITE4(sc, PCIE_MSI_INTR0_STATUS, status);
+	while (status) {
+		vec = ffs(status) - 1;
+		status &= ~(1U << vec);
+
+		dm = &sc->sc_msi[vec];
+		if (dm->dm_func == NULL)
+			continue;
+
+		if ((dm->dm_flags & IPL_MPSAFE) == 0)
+			KERNEL_LOCK();
+		s = splraise(dm->dm_ipl);
+		if (dm->dm_func(dm->dm_arg))
+			dm->dm_count.ec_count++;
+		splx(s);
+		if ((dm->dm_flags & IPL_MPSAFE) == 0)
+			KERNEL_UNLOCK();
+	}
+
+	return 1;
+}
+
+int
+dwpcie_msi_init(struct dwpcie_softc *sc)
+{
+	bus_dma_segment_t seg;
+	bus_dmamap_t map;
+	uint64_t addr;
+	int error, rseg;
+
+	/*
+	 * Allocate some DMA memory such that we have a "safe" target
+	 * address for MSIs.
+	 */
+	error = bus_dmamem_alloc(sc->sc_dmat, sizeof(uint32_t),
+	    sizeof(uint32_t), 0, &seg, 1, &rseg, BUS_DMA_WAITOK);
+	if (error)
+		return error;
+
+	/*
+	 * Translate the CPU address into a bus address that we can
+	 * program into the hardware.
+	 */
+	error = bus_dmamap_create(sc->sc_dmat, sizeof(uint32_t), 1,
+	    sizeof(uint32_t), 0, BUS_DMA_WAITOK, &map);
+	if (error) {
+		bus_dmamem_free(sc->sc_dmat, &seg, 1);
+		return error;
+	}
+	error = bus_dmamap_load_raw(sc->sc_dmat, map, &seg, 1,
+	    sizeof(uint32_t), BUS_DMA_WAITOK);
+	if (error) {
+		bus_dmamap_destroy(sc->sc_dmat, map);
+		bus_dmamem_free(sc->sc_dmat, &seg, 1);
+		return error;
+	}
+
+	addr = map->dm_segs[0].ds_addr;
+	HWRITE4(sc, PCIE_MSI_ADDR_LO, addr);
+	HWRITE4(sc, PCIE_MSI_ADDR_HI, addr >> 32);
+
+	bus_dmamap_unload(sc->sc_dmat, map);
+	bus_dmamap_destroy(sc->sc_dmat, map);
+
+	/* Enable, mask and clear all MSIs. */
+	HWRITE4(sc, PCIE_MSI_INTR0_ENABLE, 0xffffffff);
+	HWRITE4(sc, PCIE_MSI_INTR0_MASK, 0xffffffff);
+	HWRITE4(sc, PCIE_MSI_INTR0_STATUS, 0xffffffff);
+
+	KASSERT(sc->sc_ih == NULL);
+	sc->sc_ih = fdt_intr_establish(sc->sc_node, IPL_BIO | IPL_MPSAFE,
+	    dwpcie_msi_intr, sc, sc->sc_dev.dv_xname);
+	if (sc->sc_ih == NULL) {
+		bus_dmamem_free(sc->sc_dmat, &seg, 1);
+		return EINVAL;
+	}
+
+	/*
+	 * Hold on to the DMA memory such that nobody can use it to
+	 * actually do DMA transfers.
+	 */
+
+	sc->sc_msi_addr = addr;
+	return 0;
 }
 
 int
@@ -751,7 +918,7 @@ dwpcie_g12a_init(struct dwpcie_softc *sc)
 	uint32_t *reset_gpio;
 	ssize_t reset_gpiolen;
 	uint32_t reg;
-	int timo;
+	int error, timo;
 
 	reset_gpiolen = OF_getproplen(sc->sc_node, "reset-gpios");
 	if (reset_gpiolen <= 0)
@@ -798,6 +965,10 @@ dwpcie_g12a_init(struct dwpcie_softc *sc)
 	}
 	if (timo == 0)
 		return ETIMEDOUT;
+
+	error = dwpcie_msi_init(sc);
+	if (error)
+		return error;
 
 	return 0;
 }
@@ -1053,29 +1224,80 @@ dwpcie_fu740_init(struct dwpcie_softc *sc)
 	return 0;
 }
 
+int
+dwpcie_rk3568_init(struct dwpcie_softc *sc)
+{
+	sc->sc_num_viewport = 8;
+
+	return 0;
+}
+
+int
+dwpcie_sc8280xp_init(struct dwpcie_softc *sc)
+{
+	sc->sc_num_viewport = 8;
+
+	return 0;
+}
+
+void
+dwpcie_atu_write(struct dwpcie_softc *sc, int index, off_t reg,
+    uint32_t val)
+{
+	if (sc->sc_atu_unroll) {
+		bus_space_write_4(sc->sc_iot, sc->sc_atu_ioh,
+		    IATU_OFFSET_UNROLL(index) + reg, val);
+		return;
+	}
+
+	if (sc->sc_atu_viewport != index) {
+		HWRITE4(sc, IATU_VIEWPORT, index);
+		sc->sc_atu_viewport = index;
+	}
+
+	HWRITE4(sc, IATU_OFFSET_VIEWPORT + reg, val);
+}
+
+uint32_t
+dwpcie_atu_read(struct dwpcie_softc *sc, int index, off_t reg)
+{
+	if (sc->sc_atu_unroll) {
+		return bus_space_read_4(sc->sc_iot, sc->sc_atu_ioh,
+		    IATU_OFFSET_UNROLL(index) + reg);
+	}
+
+	if (sc->sc_atu_viewport != index) {
+		HWRITE4(sc, IATU_VIEWPORT, index);
+		sc->sc_atu_viewport = index;
+	}
+
+	return HREAD4(sc, IATU_OFFSET_VIEWPORT + reg);
+}
+
+void
+dwpcie_atu_disable(struct dwpcie_softc *sc, int index)
+{
+	dwpcie_atu_write(sc, index, IATU_REGION_CTRL_2, 0);
+}
+
 void
 dwpcie_atu_config(struct dwpcie_softc *sc, int index, int type,
     uint64_t cpu_addr, uint64_t pci_addr, uint64_t size)
 {
-	uint32_t reg, off;
+	uint32_t reg;
 	int timo;
 
-	off = sc->sc_atu_base + IATU_OFFSET_UNROLL(index);
-	if (!sc->sc_atu_unroll) {
-		off = IATU_OFFSET_VIEWPORT;
-		HWRITE4(sc, IATU_VIEWPORT, index);
-	}
-
-	HWRITE4(sc, off + IATU_LWR_BASE_ADDR, cpu_addr);
-	HWRITE4(sc, off + IATU_UPPER_BASE_ADDR, cpu_addr >> 32);
-	HWRITE4(sc, off + IATU_LIMIT_ADDR, cpu_addr + size - 1);
-	HWRITE4(sc, off + IATU_LWR_TARGET_ADDR, pci_addr);
-	HWRITE4(sc, off + IATU_UPPER_TARGET_ADDR, pci_addr >> 32);
-	HWRITE4(sc, off + IATU_REGION_CTRL_1, type);
-	HWRITE4(sc, off + IATU_REGION_CTRL_2, IATU_REGION_CTRL_2_REGION_EN);
+	dwpcie_atu_write(sc, index, IATU_LWR_BASE_ADDR, cpu_addr);
+	dwpcie_atu_write(sc, index, IATU_UPPER_BASE_ADDR, cpu_addr >> 32);
+	dwpcie_atu_write(sc, index, IATU_LIMIT_ADDR, cpu_addr + size - 1);
+	dwpcie_atu_write(sc, index, IATU_LWR_TARGET_ADDR, pci_addr);
+	dwpcie_atu_write(sc, index, IATU_UPPER_TARGET_ADDR, pci_addr >> 32);
+	dwpcie_atu_write(sc, index, IATU_REGION_CTRL_1, type);
+	dwpcie_atu_write(sc, index, IATU_REGION_CTRL_2,
+	    IATU_REGION_CTRL_2_REGION_EN);
 
 	for (timo = 5; timo > 0; timo--) {
-		reg = HREAD4(sc, off + IATU_REGION_CTRL_2);
+		reg = dwpcie_atu_read(sc, index, IATU_REGION_CTRL_2);
 		if (reg & IATU_REGION_CTRL_2_REGION_EN)
 			break;
 		delay(9000);
@@ -1251,52 +1473,113 @@ dwpcie_intr_string(void *v, pci_intr_handle_t ih)
 	return "intx";
 }
 
+struct dwpcie_msi *
+dwpcie_msi_establish(struct dwpcie_softc *sc, int level,
+    int (*func)(void *), void *arg, char *name)
+{
+	struct dwpcie_msi *dm;
+	int vec;
+
+	for (vec = 0; vec < DWPCIE_NUM_MSI; vec++) {
+		dm = &sc->sc_msi[vec];
+		if (dm->dm_func == NULL)
+			break;
+	}
+	if (vec == DWPCIE_NUM_MSI)
+		return NULL;
+
+	dm->dm_func = func;
+	dm->dm_arg = arg;
+	dm->dm_ipl = level & IPL_IRQMASK;
+	dm->dm_flags = level & IPL_FLAGMASK;
+	dm->dm_vec = vec;
+	dm->dm_name = name;
+	if (name != NULL)
+		evcount_attach(&dm->dm_count, name, &dm->dm_vec);
+
+	/* Unmask the MSI. */
+	HCLR4(sc, PCIE_MSI_INTR0_MASK, (1U << vec));
+
+	return dm;
+}
+
+void
+dwpcie_msi_disestablish(struct dwpcie_softc *sc, struct dwpcie_msi *dm)
+{
+	/* Mask the MSI. */
+	HSET4(sc, PCIE_MSI_INTR0_MASK, (1U << dm->dm_vec));
+
+	if (dm->dm_name)
+		evcount_detach(&dm->dm_count);
+	dm->dm_func = NULL;
+}
+
 void *
 dwpcie_intr_establish(void *v, pci_intr_handle_t ih, int level,
     struct cpu_info *ci, int (*func)(void *), void *arg, char *name)
 {
 	struct dwpcie_softc *sc = v;
 	struct dwpcie_intr_handle *pih;
-	bus_dma_segment_t seg;
-	void *cookie;
+	void *cookie = NULL;
 
 	KASSERT(ih.ih_type != PCI_NONE);
 
 	if (ih.ih_type != PCI_INTX) {
+		struct dwpcie_msi *dm = NULL;
+		bus_dma_tag_t dmat = ih.ih_dmat;
+		bus_dma_segment_t seg;
+		bus_dmamap_t map;
 		uint64_t addr, data;
 
-		/* Assume hardware passes Requester ID as sideband data. */
-		data = pci_requester_id(ih.ih_pc, ih.ih_tag);
-		cookie = fdt_intr_establish_msi_cpu(sc->sc_node, &addr,
-		    &data, level, ci, func, arg, (void *)name);
-		if (cookie == NULL)
-			return NULL;
+		if (sc->sc_msi_addr) {
+			dm = dwpcie_msi_establish(sc, level, func, arg, name);
+			if (dm == NULL)
+				return NULL;
+			addr = sc->sc_msi_addr;
+			data = dm->dm_vec;
+		} else {
+			/*
+			 * Assume hardware passes Requester ID as
+			 * sideband data.
+			 */
+			data = pci_requester_id(ih.ih_pc, ih.ih_tag);
+			cookie = fdt_intr_establish_msi_cpu(sc->sc_node, &addr,
+			    &data, level, ci, func, arg, (void *)name);
+			if (cookie == NULL)
+				return NULL;
+		}
 
-		pih = malloc(sizeof(*pih), M_DEVBUF, M_WAITOK);
+		pih = malloc(sizeof(*pih), M_DEVBUF, M_WAITOK | M_ZERO);
 		pih->pih_ih.ih_ic = &dwpcie_ic;
 		pih->pih_ih.ih_ih = cookie;
-		pih->pih_dmat = ih.ih_dmat;
+		pih->pih_sc = sc;
+		pih->pih_dm = dm;
 
-		if (bus_dmamap_create(pih->pih_dmat, sizeof(uint32_t), 1,
-		    sizeof(uint32_t), 0, BUS_DMA_WAITOK, &pih->pih_map)) {
-			free(pih, M_DEVBUF, sizeof(*pih));
-			fdt_intr_disestablish(cookie);
-			return NULL;
+		if (sc->sc_msi_addr == 0) {
+			if (bus_dmamap_create(dmat, sizeof(uint32_t), 1,
+			    sizeof(uint32_t), 0, BUS_DMA_WAITOK, &map)) {
+				free(pih, M_DEVBUF, sizeof(*pih));
+				fdt_intr_disestablish(cookie);
+				return NULL;
+			}
+
+			memset(&seg, 0, sizeof(seg));
+			seg.ds_addr = addr;
+			seg.ds_len = sizeof(uint32_t);
+
+			if (bus_dmamap_load_raw(dmat, map, &seg, 1,
+			    sizeof(uint32_t), BUS_DMA_WAITOK)) {
+				bus_dmamap_destroy(dmat, map);
+				free(pih, M_DEVBUF, sizeof(*pih));
+				fdt_intr_disestablish(cookie);
+				return NULL;
+			}
+
+			addr = map->dm_segs[0].ds_addr;
+			pih->pih_dmat = dmat;
+			pih->pih_map = map;
 		}
 
-		memset(&seg, 0, sizeof(seg));
-		seg.ds_addr = addr;
-		seg.ds_len = sizeof(uint32_t);
-
-		if (bus_dmamap_load_raw(pih->pih_dmat, pih->pih_map,
-		    &seg, 1, sizeof(uint32_t), BUS_DMA_WAITOK)) {
-			bus_dmamap_destroy(pih->pih_dmat, pih->pih_map);
-			free(pih, M_DEVBUF, sizeof(*pih));
-			fdt_intr_disestablish(cookie);
-			return NULL;
-		}
-
-		addr = pih->pih_map->dm_segs[0].ds_addr;
 		if (ih.ih_type == PCI_MSIX) {
 			pci_msix_enable(ih.ih_pc, ih.ih_tag,
 			    &sc->sc_bus_memt, ih.ih_intrpin, addr, data);
@@ -1317,10 +1600,9 @@ dwpcie_intr_establish(void *v, pci_intr_handle_t ih, int level,
 		if (cookie == NULL)
 			return NULL;
 
-		pih = malloc(sizeof(*pih), M_DEVBUF, M_WAITOK);
+		pih = malloc(sizeof(*pih), M_DEVBUF, M_WAITOK | M_ZERO);
 		pih->pih_ih.ih_ic = &dwpcie_ic;
 		pih->pih_ih.ih_ih = cookie;
-		pih->pih_dmat = NULL;
 	}
 
 	return pih;
@@ -1331,11 +1613,16 @@ dwpcie_intr_disestablish(void *v, void *cookie)
 {
 	struct dwpcie_intr_handle *pih = cookie;
 
-	fdt_intr_disestablish(pih->pih_ih.ih_ih);
+	if (pih->pih_dm)
+		dwpcie_msi_disestablish(pih->pih_sc, pih->pih_dm);
+	else
+		fdt_intr_disestablish(pih->pih_ih.ih_ih);
+
 	if (pih->pih_dmat) {
 		bus_dmamap_unload(pih->pih_dmat, pih->pih_map);
 		bus_dmamap_destroy(pih->pih_dmat, pih->pih_map);
 	}
+
 	free(pih, M_DEVBUF, sizeof(*pih));
 }
 

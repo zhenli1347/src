@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.h,v 1.75 2022/03/12 08:11:07 mpi Exp $	*/
+/*	$OpenBSD: uvm_map.h,v 1.81 2022/11/17 23:26:07 deraadt Exp $	*/
 /*	$NetBSD: uvm_map.h,v 1.24 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
@@ -265,8 +265,6 @@ RBT_PROTOTYPE(uvm_map_addr, vm_map_entry, daddrs.addr_entry,
  */
 struct vm_map {
 	struct pmap		*pmap;		/* [I] Physical map */
-	struct rwlock		lock;		/* Non-intrsafe lock */
-	struct mutex		mtx;		/* Intrsafe lock */
 	u_long			sserial;	/* [v] # stack changes */
 	u_long			wserial;	/* [v] # PROT_WRITE increases */
 
@@ -275,7 +273,6 @@ struct vm_map {
 	vsize_t			size;		/* virtual size */
 	int			ref_count;	/* [a] Reference count */
 	int			flags;		/* flags */
-	struct mutex		flags_lock;	/* flags lock */
 	unsigned int		timestamp;	/* Version number */
 
 	vaddr_t			min_offset;	/* [I] First address in map. */
@@ -311,6 +308,14 @@ struct vm_map {
 	struct uvm_addr_state	*uaddr_exe;	/* Executable selector. */
 	struct uvm_addr_state	*uaddr_any[4];	/* More selectors. */
 	struct uvm_addr_state	*uaddr_brk_stack; /* Brk/stack selector. */
+
+	/*
+	 * XXX struct mutex changes size because of compile options, so place
+	 * place after fields which are inspected by libkvm / procmap(8)
+	 */
+	struct rwlock		lock;		/* Non-intrsafe lock */
+	struct mutex		mtx;		/* Intrsafe lock */
+	struct mutex		flags_lock;	/* flags lock */
 };
 
 /* vm_map flags */
@@ -350,11 +355,12 @@ struct vm_map *	uvm_map_create(pmap_t, vaddr_t, vaddr_t, int);
 vaddr_t		uvm_map_pie(vaddr_t);
 vaddr_t		uvm_map_hint(struct vmspace *, vm_prot_t, vaddr_t, vaddr_t);
 int		uvm_map_syscall(struct vm_map *, vaddr_t, vaddr_t);
+int		uvm_map_immutable(struct vm_map *, vaddr_t, vaddr_t, int);
 int		uvm_map_inherit(struct vm_map *, vaddr_t, vaddr_t, vm_inherit_t);
 int		uvm_map_advice(struct vm_map *, vaddr_t, vaddr_t, int);
 void		uvm_map_init(void);
 boolean_t	uvm_map_lookup_entry(struct vm_map *, vaddr_t, vm_map_entry_t *);
-boolean_t	uvm_map_is_stack_remappable(struct vm_map *, vaddr_t, vsize_t);
+boolean_t	uvm_map_is_stack_remappable(struct vm_map *, vaddr_t, vsize_t, int);
 int		uvm_map_remap_as_stack(struct proc *, vaddr_t, vsize_t);
 int		uvm_map_replace(struct vm_map *, vaddr_t, vaddr_t,
 		    vm_map_entry_t, int);
@@ -365,8 +371,8 @@ int		uvm_map_submap(struct vm_map *, vaddr_t, vaddr_t,
 		    struct vm_map *);
 void		uvm_unmap(struct vm_map *, vaddr_t, vaddr_t);
 void		uvm_unmap_detach(struct uvm_map_deadq *, int);
-void		uvm_unmap_remove(struct vm_map*, vaddr_t, vaddr_t,
-		    struct uvm_map_deadq *, boolean_t, boolean_t);
+int		uvm_unmap_remove(struct vm_map*, vaddr_t, vaddr_t,
+		    struct uvm_map_deadq *, boolean_t, boolean_t, boolean_t);
 void		uvm_map_set_uaddr(struct vm_map*, struct uvm_addr_state**,
 		    struct uvm_addr_state*);
 int		uvm_map_mquery(struct vm_map*, vaddr_t*, vsize_t, voff_t, int);
@@ -419,6 +425,8 @@ void		vm_map_downgrade_ln(struct vm_map*, char*, int);
 void		vm_map_upgrade_ln(struct vm_map*, char*, int);
 void		vm_map_busy_ln(struct vm_map*, char*, int);
 void		vm_map_unbusy_ln(struct vm_map*, char*, int);
+void		vm_map_assert_anylock_ln(struct vm_map*, char*, int);
+void		vm_map_assert_wrlock_ln(struct vm_map*, char*, int);
 
 #ifdef DIAGNOSTIC
 #define vm_map_lock_try(map)	vm_map_lock_try_ln(map, __FILE__, __LINE__)
@@ -430,6 +438,10 @@ void		vm_map_unbusy_ln(struct vm_map*, char*, int);
 #define vm_map_upgrade(map)	vm_map_upgrade_ln(map, __FILE__, __LINE__)
 #define vm_map_busy(map)	vm_map_busy_ln(map, __FILE__, __LINE__)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, __FILE__, __LINE__)
+#define vm_map_assert_anylock(map)	\
+		vm_map_assert_anylock_ln(map, __FILE__, __LINE__)
+#define vm_map_assert_wrlock(map)	\
+		vm_map_assert_wrlock_ln(map, __FILE__, __LINE__)
 #else
 #define vm_map_lock_try(map)	vm_map_lock_try_ln(map, NULL, 0)
 #define vm_map_lock(map)	vm_map_lock_ln(map, NULL, 0)
@@ -440,6 +452,8 @@ void		vm_map_unbusy_ln(struct vm_map*, char*, int);
 #define vm_map_upgrade(map)	vm_map_upgrade_ln(map, NULL, 0)
 #define vm_map_busy(map)	vm_map_busy_ln(map, NULL, 0)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, NULL, 0)
+#define vm_map_assert_anylock(map)	vm_map_assert_anylock_ln(map, NULL, 0)
+#define vm_map_assert_wrlock(map)	vm_map_assert_wrlock_ln(map, NULL, 0)
 #endif
 
 void		uvm_map_lock_entry(struct vm_map_entry *);

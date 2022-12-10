@@ -20,14 +20,15 @@ use warnings;
 my %internal = (
     asn1 => [qw(
 	ASN1_ENCODING
-	ASN1_OBJECT_FLAG_CRITICAL ASN1_OBJECT_FLAG_DYNAMIC
-	ASN1_OBJECT_FLAG_DYNAMIC_DATA ASN1_OBJECT_FLAG_DYNAMIC_STRINGS
 	ASN1_STRING_FLAG_BITS_LEFT ASN1_STRING_FLAG_CONT
 	ASN1_STRING_FLAG_MSTRING ASN1_STRING_FLAG_NDEF
 	CHARTYPE_FIRST_ESC_2253 CHARTYPE_LAST_ESC_2253 CHARTYPE_PRINTABLESTRING
     )],
     bn => [qw(
-	BN_MUL_COMBA BN_RECURSION BN_SQR_COMBA
+	BN_BITS BN_BITS4 BN_BYTES
+	BN_DEC_CONV BN_DEC_FMT1 BN_DEC_FMT2 BN_DEC_NUM BN_LLONG BN_LONG
+	BN_MASK2 BN_MASK2h BN_MASK2h1 BN_MASK2l BN_MUL_COMBA
+	BN_RECURSION BN_SQR_COMBA BN_TBIT BN_ULLONG
     )],
     objects => [qw(
 	OBJ_bsearch OBJ_bsearch_ OBJ_bsearch_ex OBJ_bsearch_ex_
@@ -40,26 +41,24 @@ my %internal = (
 
 my %obsolete = (
     asn1 => [qw(
-	ASN1_const_CTX ASN1_CTX
 	ASN1_dup ASN1_d2i_bio ASN1_d2i_bio_of ASN1_d2i_fp ASN1_d2i_fp_of
 	ASN1_i2d_bio ASN1_i2d_bio_of ASN1_i2d_bio_of_const
 	ASN1_i2d_fp ASN1_i2d_fp_of ASN1_i2d_fp_of_const
 	ASN1_LONG_UNDEF
-	d2i_NETSCAPE_X509 i2d_NETSCAPE_X509
-	NETSCAPE_X509 NETSCAPE_X509_free NETSCAPE_X509_new
 	ub_title
 	V_ASN1_PRIMATIVE_TAG
 	X509_algor_st
+    )],
+    bn => [qw(
+	BN_FLG_EXP_CONSTTIME BN_FLG_FREE BN_get_params
+	BN_HEX_FMT1 BN_HEX_FMT2 BN_MASK
+	BN_options BN_prime_checks BN_set_params
     )],
     objects => [qw(
 	_DECLARE_OBJ_BSEARCH_CMP_FN
 	DECLARE_OBJ_BSEARCH_CMP_FN DECLARE_OBJ_BSEARCH_GLOBAL_CMP_FN
 	IMPLEMENT_OBJ_BSEARCH_CMP_FN IMPLEMENT_OBJ_BSEARCH_GLOBAL_CMP_FN
     )],
-    x509 => [qw(
-	X509_EX_V_INIT X509_EX_V_NETSCAPE_HACK
-	X509_EXT_PACK_STRING X509_EXT_PACK_UNKNOWN
-    )]
 );
 
 my %postponed = (
@@ -104,7 +103,8 @@ my $in_define = 0;
 my $in_function = 0;
 my $in_struct = 0;
 my $in_typedef_struct = 0;
-my %undoc = ();
+my %expect_undoc = ();
+my %found_undoc = ();
 my $verbose = 0;
 
 if (defined $ARGV[0] && $ARGV[0] eq '-v') {
@@ -115,9 +115,9 @@ $#ARGV == 0 or die "usage: $0 [-v] headername";
 $hfile .= "/$ARGV[0].h";
 open my $in_fh, '<', $hfile or die "$hfile: $!";
 
-$undoc{$_} = 1 foreach @{$internal{$ARGV[0]}};
-$undoc{$_} = 1 foreach @{$obsolete{$ARGV[0]}};
-$undoc{$_} = 1 foreach @{$postponed{$ARGV[0]}};
+$expect_undoc{$_} = 1 foreach @{$internal{$ARGV[0]}};
+$expect_undoc{$_} = 1 foreach @{$obsolete{$ARGV[0]}};
+$expect_undoc{$_} = 1 foreach @{$postponed{$ARGV[0]}};
 
 while (<$in_fh>) {
 try_again:
@@ -170,13 +170,13 @@ try_again:
 		$in_typedef_struct = 0;
 		my ($id) = /^\s*(\w+);$/
 		    or die "at end of typedef struct: $_";
-		unless (system "$MANW -k Vt=$id > /dev/null 2>&1") {
+		unless (system "$MANW -k 'Vt~^$id\$' > /dev/null 2>&1") {
 			print "Vt $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "V- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -242,7 +242,12 @@ try_again:
 
 	if (my ($id) = /^#\s*define\s+(\w+)\s+\S/) {
 		/\\$/ and $in_define = 1;
-		unless (system "$MANW -k Dv=$id > /dev/null 2>&1") {
+		if ($id eq 'BN_ULONG' &&
+		    not system "$MANW -k 'Vt~^$id\$' > /dev/null 2>&1") {
+			print "Vt $line\n" if $verbose;
+			next;
+		}
+		unless (system "$MANW -k 'Dv~^$id\$' > /dev/null 2>&1") {
 			print "Dv $line\n" if $verbose;
 			next;
 		}
@@ -271,9 +276,9 @@ try_again:
 			print "D- $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "D- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -294,9 +299,9 @@ try_again:
 			print "F- $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "F- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -307,9 +312,9 @@ try_again:
 		next;
 	}
 	if (my ($id) = /^#\s*define\s+(\w+)$/) {
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "-- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -323,7 +328,7 @@ try_again:
 	# Handle global variables.
 
 	if (my ($id) = /^extern\s+int\s+(\w+);$/) {
-		unless (system "$MANW -k Va=$id > /dev/null 2>&1") {
+		unless (system "$MANW -k 'Va~^$id\$' > /dev/null 2>&1") {
 			print "Va $line\n" if $verbose;
 			next;
 		}
@@ -338,13 +343,13 @@ try_again:
 	# Handle variable type declarations.
 
 	if (my ($id) = /^struct\s+(\w+);$/) {
-		unless (system "$MANW -k Vt=$id > /dev/null 2>&1") {
+		unless (system "$MANW -k 'Vt~^$id\$' > /dev/null 2>&1") {
 			print "Vt $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "V- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -356,13 +361,13 @@ try_again:
 	}
 
 	if (my ($id) = /^typedef\s+(?:const\s+)?(?:struct\s+)?\S+\s+(\w+);$/) {
-		unless (system "$MANW -k Vt=$id > /dev/null 2>&1") {
+		unless (system "$MANW -k 'Vt~^$id\$' > /dev/null 2>&1") {
 			print "Vt $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "V- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($verbose) {
@@ -409,9 +414,9 @@ try_again:
 			print "F- $line\n" if $verbose;
 			next;
 		}
-		if ($undoc{$id}) {
+		if ($expect_undoc{$id}) {
 			print "F- $line\n" if $verbose;
-			delete $undoc{$id};
+			$found_undoc{$id} = 1;
 			next;
 		}
 		if ($id =~ /^ASN1_PCTX_\w+$/) {
@@ -436,5 +441,8 @@ try_again:
 	die "parse error: $_";
 }
 close $in_fh;
-warn "expected as undocumented but not found: $_" foreach keys %undoc;
+foreach (keys %expect_undoc) {
+	warn "expected as undocumented but not found: $_"
+	    unless $found_undoc{$_};
+}
 exit 0;

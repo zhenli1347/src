@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.34 2021/10/15 15:01:29 naddy Exp $	*/
+/*	$OpenBSD: parse.y,v 1.36 2022/10/13 04:55:33 jmatthew Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -108,6 +108,7 @@ typedef struct {
 %token	USER GROUP TO EXPIRE HOME SHELL GECOS UID GID INTERVAL
 %token	PASSWD NAME FIXED LIST GROUPNAME GROUPPASSWD GROUPGID MAP
 %token	INCLUDE DIRECTORY CLASS PORT ERROR GROUPMEMBERS LDAPS TLS CAFILE
+%token	BIND LOCAL PORTMAP BINDEXT CERTFILE KEYFILE
 %token	<v.string>	STRING
 %token  <v.number>	NUMBER
 %type	<v.number>	opcode attribute
@@ -212,6 +213,11 @@ attribute	: NAME					{ $$ = 0; }
 		;
 
 diropt		: BINDDN STRING				{
+			if (idm->idm_bindext != 0) {
+				yyerror("can't specify multiple bind types");
+				free($2);
+				YYERROR;
+			}
 			idm->idm_flags |= F_NEEDAUTH;
 			if (strlcpy(idm->idm_binddn, $2,
 			    sizeof(idm->idm_binddn)) >=
@@ -223,6 +229,11 @@ diropt		: BINDDN STRING				{
 			free($2);
 		}
 		| BINDCRED STRING			{
+			if (idm->idm_bindext != 0) {
+				yyerror("can't specify multiple bind types");
+				free($2);
+				YYERROR;
+			}
 			idm->idm_flags |= F_NEEDAUTH;
 			if (strlcpy(idm->idm_bindcred, $2,
 			    sizeof(idm->idm_bindcred)) >=
@@ -232,6 +243,64 @@ diropt		: BINDDN STRING				{
 				YYERROR;
 			}
 			free($2);
+		}
+		| BINDEXT STRING			{
+			if (idm->idm_flags & F_NEEDAUTH) {
+				yyerror("can't specify multiple bind types");
+				free($2);
+				YYERROR;
+			}
+			idm->idm_flags |= F_NEEDAUTH;
+			idm->idm_bindext = 1;
+			if (strlcpy(idm->idm_bindextid, $2,
+			    sizeof(idm->idm_bindextid)) >=
+			    sizeof(idm->idm_bindextid)) {
+				yyerror("directory bindext truncated");
+				free($2);
+				YYERROR;
+			}
+			free($2);
+		}
+		| BINDEXT				{
+			if (idm->idm_flags & F_NEEDAUTH) {
+				yyerror("can't specify multiple bind types");
+				YYERROR;
+			}
+			idm->idm_flags |= F_NEEDAUTH;
+			idm->idm_bindext = 1;
+			idm->idm_bindextid[0] = '\0';
+		}
+		| CERTFILE STRING			{
+			if (idm->idm_tls_config == NULL) {
+				yyerror("can't set cert file without tls"
+				    " enabled");
+				free($2);
+				YYERROR;
+			}
+			if (tls_config_set_cert_file(idm->idm_tls_config, $2)
+			    == -1) {
+				yyerror("tls set cert file failed: %s",
+				    tls_config_error(
+				    idm->idm_tls_config));
+				free($2);
+				YYERROR;
+			}
+		}
+		| KEYFILE STRING			{
+			if (idm->idm_tls_config == NULL) {
+				yyerror("can't set key file without tls"
+				    " enabled");
+				free($2);
+				YYERROR;
+			}
+			if (tls_config_set_key_file(idm->idm_tls_config, $2)
+			    == -1) {
+				yyerror("tls set key file failed: %s",
+				    tls_config_error(
+				    idm->idm_tls_config));
+				free($2);
+				YYERROR;
+			}
 		}
 		| BASEDN STRING			{
 			if (strlcpy(idm->idm_basedn, $2,
@@ -407,7 +476,13 @@ main		: INTERVAL NUMBER			{
 		| CAFILE STRING				{
 			free(conf->sc_cafile);
 			conf->sc_cafile = $2;
-		} 
+		}
+		| BIND LOCAL				{
+			conf->sc_bind_mode = BIND_MODE_LOCAL;
+		}
+		| BIND PORTMAP				{
+			conf->sc_bind_mode = BIND_MODE_PORTMAP;
+		}
 		;
 
 diropts		: diropts diropt nl
@@ -450,9 +525,12 @@ lookup(char *s)
 	static const struct keywords keywords[] = {
 		{ "attribute",		ATTRIBUTE },
 		{ "basedn",		BASEDN },
+		{ "bind",		BIND },
 		{ "bindcred",		BINDCRED },
 		{ "binddn",		BINDDN },
+		{ "bindext",		BINDEXT },
 		{ "cafile",		CAFILE },
+		{ "certfile",		CERTFILE },
 		{ "change",		CHANGE },
 		{ "class",		CLASS },
 		{ "directory",		DIRECTORY },
@@ -471,13 +549,16 @@ lookup(char *s)
 		{ "home",		HOME },
 		{ "include",		INCLUDE },
 		{ "interval",		INTERVAL },
+		{ "keyfile",		KEYFILE },
 		{ "ldaps",		LDAPS },
 		{ "list",		LIST },
+		{ "local",		LOCAL },
 		{ "map",		MAP },
 		{ "maps",		MAPS },
 		{ "name",		NAME },
 		{ "passwd",		PASSWD },
 		{ "port",		PORT },
+		{ "portmap",		PORTMAP },
 		{ "provide",		PROVIDE },
 		{ "server",		SERVER },
 		{ "shell",		SHELL },
@@ -850,6 +931,7 @@ parse_config(struct env *x_conf, const char *filename, int opts)
 		log_warn("%s", __func__);
 		return (-1);
 	}
+	conf->sc_bind_mode = BIND_MODE_PORTMAP;
 
 	errors = 0;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pager.c,v 1.87 2022/08/07 19:40:48 miod Exp $	*/
+/*	$OpenBSD: uvm_pager.c,v 1.89 2022/08/19 05:53:19 mpi Exp $	*/
 /*	$NetBSD: uvm_pager.c,v 1.36 2000/11/27 18:26:41 chs Exp $	*/
 
 /*
@@ -40,8 +40,6 @@
 #include <sys/atomic.h>
 
 #include <uvm/uvm.h>
-
-struct pool *uvm_aiobuf_pool;
 
 const struct uvm_pagerops *uvmpagerops[] = {
 	&aobj_pager,
@@ -211,6 +209,7 @@ uvm_pseg_release(vaddr_t segaddr)
 	struct uvm_pseg *pseg;
 	vaddr_t va = 0;
 
+	mtx_enter(&uvm_pseg_lck);
 	for (pseg = &psegs[0]; pseg != &psegs[PSEG_NUMSEGS]; pseg++) {
 		if (pseg->start <= segaddr &&
 		    segaddr < pseg->start + MAX_PAGER_SEGS * MAXBSIZE)
@@ -224,7 +223,6 @@ uvm_pseg_release(vaddr_t segaddr)
 	/* test for no remainder */
 	KDASSERT(segaddr == pseg->start + id * MAXBSIZE);
 
-	mtx_enter(&uvm_pseg_lck);
 
 	KASSERT(UVM_PSEG_INUSE(pseg, id));
 

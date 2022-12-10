@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.279 2022/08/07 23:56:06 guenther Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.284 2022/11/29 21:41:39 guenther Exp $	*/
 /*	$NetBSD: machdep.c,v 1.3 2003/05/07 22:58:18 fvdl Exp $	*/
 
 /*-
@@ -126,6 +126,11 @@ extern int db_console;
 #include <dev/ic/comreg.h>
 #endif
 
+#include "efi.h"
+#if NEFI > 0
+#include <dev/efi/efi.h>
+#endif
+
 #include "softraid.h"
 #if NSOFTRAID > 0
 #include <dev/softraidvar.h>
@@ -165,6 +170,11 @@ int	cpureset_delay = CPURESET_DELAY;
 #else
 int     cpureset_delay = 0;
 #endif
+
+char *ssym = 0, *esym = 0;	/* start and end of symbol table */
+dev_t bootdev = 0;		/* device we booted from */
+int biosbasemem = 0;		/* base memory reported by BIOS */
+u_int bootapiver = 0;		/* /boot API version */
 
 int	physmem;
 u_int64_t	dumpmem_low;
@@ -243,6 +253,10 @@ bios_memmap_t	*bios_memmap;
 u_int32_t	bios_cksumlen;
 bios_efiinfo_t	*bios_efiinfo;
 bios_ucode_t	*bios_ucode;
+
+#if NEFI > 0
+EFI_MEMORY_DESCRIPTOR *mmap;
+#endif
 
 /*
  * Size of memory segments, before any memory is stolen.
@@ -439,7 +453,6 @@ bios_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
     size_t newlen, struct proc *p)
 {
 	bios_diskinfo_t *pdi;
-	extern dev_t bootdev;
 	int biosdev;
 
 	/* all sysctl names at this level except diskinfo are terminal */
@@ -1129,7 +1142,7 @@ reset_segs(void)
  */
 void
 setregs(struct proc *p, struct exec_package *pack, u_long stack,
-    register_t *retval)
+    struct ps_strings *arginfo)
 {
 	struct trapframe *tf;
 
@@ -1152,28 +1165,12 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 	p->p_addr->u_pcb.pcb_fsbase = 0;
 
 	tf = p->p_md.md_regs;
-	tf->tf_rdi = 0;
-	tf->tf_rsi = 0;
-	tf->tf_rbp = 0;
-	tf->tf_rbx = 0;
-	tf->tf_rdx = 0;
-	tf->tf_rcx = 0;
-	tf->tf_rax = 0;
-	tf->tf_r8 = 0;
-	tf->tf_r9 = 0;
-	tf->tf_r10 = 0;
-	tf->tf_r11 = 0;
-	tf->tf_r12 = 0;
-	tf->tf_r13 = 0;
-	tf->tf_r14 = 0;
-	tf->tf_r15 = 0;
+	memset(tf, 0, sizeof *tf);
 	tf->tf_rip = pack->ep_entry;
 	tf->tf_cs = GSEL(GUCODE_SEL, SEL_UPL);
 	tf->tf_rflags = PSL_USERSET;
 	tf->tf_rsp = stack;
 	tf->tf_ss = GSEL(GUDATA_SEL, SEL_UPL);
-
-	retval[1] = 0;
 }
 
 /*
@@ -1182,7 +1179,7 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 
 struct gate_descriptor *idt;
 char idt_allocmap[NIDT];
-extern  struct user *proc0paddr;
+struct user *proc0paddr = NULL;
 
 void
 setgate(struct gate_descriptor *gd, void *func, int ist, int type, int dpl,
@@ -1537,6 +1534,16 @@ init_x86_64(paddr_t first_avail)
 	 * We must do this before loading pages into the VM system.
 	 */
 	first_avail = pmap_bootstrap(first_avail, trunc_page(avail_end));
+
+#if NEFI > 0
+	/* Relocate the EFI memory map. */
+	if (bios_efiinfo && bios_efiinfo->mmap_start) {
+		mmap = (EFI_MEMORY_DESCRIPTOR *)PMAP_DIRECT_MAP(first_avail);
+		memcpy(mmap, (void *)PMAP_DIRECT_MAP(bios_efiinfo->mmap_start),
+		    bios_efiinfo->mmap_size);
+		first_avail += round_page(bios_efiinfo->mmap_size);
+	}
+#endif
 
 	/* Allocate these out of the 640KB base memory */
 	if (avail_start != PAGE_SIZE)
@@ -2068,4 +2075,24 @@ check_context(const struct reg *regs, struct trapframe *tf)
 		return EINVAL;
 
 	return 0;
+}
+
+int amd64_delay_quality;
+
+void
+delay_init(void(*fn)(int), int fn_quality)
+{
+	if (fn_quality > amd64_delay_quality) {
+		delay_func = fn;
+		amd64_delay_quality = fn_quality;
+	}
+}
+
+void
+delay_fini(void (*fn)(int))
+{
+	if (fn == delay_func) {
+		delay_func = i8254_delay;
+		amd64_delay_quality = 0;
+	}
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_xxx.c,v 1.38 2021/12/09 00:26:10 guenther Exp $	*/
+/*	$OpenBSD: kern_xxx.c,v 1.41 2022/12/05 23:18:37 deraadt Exp $	*/
 /*	$NetBSD: kern_xxx.c,v 1.32 1996/04/22 01:38:41 christos Exp $	*/
 
 /*
@@ -34,9 +34,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/reboot.h>
-#include <sys/sysctl.h>
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
 
@@ -140,14 +138,17 @@ scdebug_ret(struct proc *p, register_t code, int error,
 	if (!(scdebug & SCDEBUG_ALL || code < 0 || code >= SYS_MAXSYSCALL ||
 	    sysent[code].sy_call == sys_nosys))
 		return;
-		
+
 	pr = p->p_p;
 	printf("proc %d (%s): num ", pr->ps_pid, pr->ps_comm);
 	if (code < 0 || code >= SYS_MAXSYSCALL)
 		printf("OUT OF RANGE (%ld)", code);
+	else if (code == SYS_lseek)
+		printf("%ld ret: err = %d, rv = 0x%llx", code,
+		    error, *(off_t *)retval);
 	else
-		printf("%ld ret: err = %d, rv = 0x%lx,0x%lx", code,
-		    error, retval[0], retval[1]);
+		printf("%ld ret: err = %d, rv = 0x%lx", code,
+		    error, *retval);
 	printf("\n");
 }
 #endif /* SYSCALL_DEBUG */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: filemode.c,v 1.7 2022/05/11 14:42:01 job Exp $ */
+/*	$OpenBSD: filemode.c,v 1.18 2022/11/29 10:33:09 claudio Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -34,10 +34,13 @@
 #include <openssl/asn1.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
 #include "extern.h"
+
+extern int		 verbose;
 
 static X509_STORE_CTX	*ctx;
 static struct auth_tree	 auths = RB_INITIALIZER(&auths);
@@ -138,6 +141,7 @@ parse_load_certchain(char *uri)
 	struct cert *cert;
 	struct crl *crl;
 	struct auth *a;
+	const char *errstr;
 	int i;
 
 	for (i = 0; i < MAX_CERT_DEPTH; i++) {
@@ -168,9 +172,12 @@ parse_load_certchain(char *uri)
 		uri = filestack[i];
 
 		crl = crl_get(&crlt, a);
-		if (!valid_x509(uri, ctx, cert->x509, a, crl, 0) ||
-		    !valid_cert(uri, a, cert))
+		if (!valid_x509(uri, ctx, cert->x509, a, crl, &errstr) ||
+		    !valid_cert(uri, a, cert)) {
+			if (errstr != NULL)
+				warnx("%s: %s", uri, errstr);
 			goto fail;
+		}
 		cert->talid = a->cert->talid;
 		a = auth_insert(&auths, cert, a);
 		stack[i] = NULL;
@@ -265,6 +272,9 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	struct gbr *gbr = NULL;
 	struct tal *tal = NULL;
 	struct rsc *rsc = NULL;
+	struct aspa *aspa = NULL;
+	struct tak *tak = NULL;
+	struct geofeed *geofeed = NULL;
 	char *aia = NULL, *aki = NULL;
 	char filehash[SHA256_DIGEST_LENGTH];
 	char *hash;
@@ -272,9 +282,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	int is_ta = 0;
 
 	if (num++ > 0) {
-		if (outformats & FORMAT_JSON)
-			printf("\n");
-		else
+		if ((outformats & FORMAT_JSON) == 0)
 			printf("--\n");
 	}
 
@@ -297,8 +305,8 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		printf("{\n\t\"file\": \"%s\",\n", file);
 		printf("\t\"hash_id\": \"%s\",\n", hash);
 	} else {
-		printf("File: %s\n", file);
-		printf("Hash identifier: %s\n", hash);
+		printf("File:                     %s\n", file);
+		printf("Hash identifier:          %s\n", hash);
 	}
 
 	free(hash);
@@ -366,6 +374,30 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		aia = rsc->aia;
 		aki = rsc->aki;
 		break;
+	case RTYPE_ASPA:
+		aspa = aspa_parse(&x509, file, buf, len);
+		if (aspa == NULL)
+			break;
+		aspa_print(x509, aspa);
+		aia = aspa->aia;
+		aki = aspa->aki;
+		break;
+	case RTYPE_TAK:
+		tak = tak_parse(&x509, file, buf, len);
+		if (tak == NULL)
+			break;
+		tak_print(x509, tak);
+		aia = tak->aia;
+		aki = tak->aki;
+		break;
+	case RTYPE_GEOFEED:
+		geofeed = geofeed_parse(&x509, file, buf, len);
+		if (geofeed == NULL)
+			break;
+		geofeed_print(x509, geofeed);
+		aia = geofeed->aia;
+		aki = geofeed->aki;
+		break;
 	default:
 		printf("%s: unsupported file type\n", file);
 		break;
@@ -379,6 +411,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	if (aia != NULL) {
 		struct auth *a;
 		struct crl *c;
+		const char *errstr;
 		char *crl_uri;
 		int status;
 
@@ -390,16 +423,31 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		a = auth_find(&auths, aki);
 		c = crl_get(&crlt, a);
 
-		if ((status = valid_x509(file, ctx, x509, a, c, 0))) {
-			if (type == RTYPE_ROA)
-				status = valid_roa(file, a, roa);
-			else if (type == RTYPE_RSC)
-				status = valid_rsc(file, a, rsc);
+		if ((status = valid_x509(file, ctx, x509, a, c, &errstr))) {
+			switch (type) {
+			case RTYPE_ROA:
+				status = roa->valid;
+				break;
+			case RTYPE_RSC:
+				status = rsc->valid;
+				break;
+			case RTYPE_ASPA:
+				status = aspa->valid;
+				break;
+			case RTYPE_GEOFEED:
+				status = geofeed->valid;
+				break;
+			default:
+				break;
+			}
 		}
 		if (status)
 			printf("OK");
-		else
+		else {
 			printf("Failed");
+			if (errstr != NULL)
+				printf(", %s", errstr);
+		}
 	} else if (is_ta) {
 		if ((tal = find_tal(cert)) != NULL) {
 			cert = ta_parse(file, cert, tal->pkey, tal->pkeysz);
@@ -420,10 +468,27 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\"\n}");
-	else
+		printf("\"\n}\n");
+	else {
 		printf("\n");
 
+		if (x509 == NULL)
+			goto out;
+		if (type == RTYPE_TAL || type == RTYPE_CRL)
+			goto out;
+
+		if (verbose) {
+			if (!X509_print_fp(stdout, x509))
+				errx(1, "X509_print_fp");
+		}
+
+		if (verbose > 1) {
+			if (!PEM_write_X509(stdout, x509))
+				errx(1, "PEM_write_X509");
+		}
+	}
+
+ out:
 	X509_free(x509);
 	cert_free(cert);
 	crl_free(crl);
@@ -431,6 +496,10 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	roa_free(roa);
 	gbr_free(gbr);
 	tal_free(tal);
+	rsc_free(rsc);
+	aspa_free(aspa);
+	tak_free(tak);
+	geofeed_free(geofeed);
 }
 
 /*
@@ -555,8 +624,11 @@ proc_filemode(int fd)
 		entity_free(entp);
 	}
 
-	/* XXX free auths and crl tree */
+	auth_tree_free(&auths);
+	crl_tree_free(&crlt);
+
 	X509_STORE_CTX_free(ctx);
+	ibuf_free(inbuf);
 
 	exit(0);
 }

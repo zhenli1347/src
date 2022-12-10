@@ -1,4 +1,4 @@
-/*	$OpenBSD: ecp_nistz256.c,v 1.10 2021/09/08 17:29:21 tb Exp $	*/
+/*	$OpenBSD: ecp_nistz256.c,v 1.14 2022/11/26 16:08:52 tb Exp $	*/
 /* Copyright (c) 2014, Intel Corporation.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
@@ -46,7 +46,7 @@
 #include <openssl/ec.h>
 #include <openssl/err.h>
 
-#include "ec_lcl.h"
+#include "ec_local.h"
 
 #if BN_BITS2 != 64
 #define	TOBN(hi,lo)	lo,hi
@@ -310,7 +310,7 @@ is_one(const BIGNUM *z)
 static int
 ecp_nistz256_set_words(BIGNUM *a, BN_ULONG words[P256_LIMBS])
 {
-	if (bn_wexpand(a, P256_LIMBS) == NULL) {
+	if (!bn_wexpand(a, P256_LIMBS)) {
 		ECerror(ERR_R_MALLOC_FAILURE);
 		return 0;
 	}
@@ -573,12 +573,12 @@ ecp_nistz256_windowed_mul(const EC_GROUP *group, P256_POINT *r,
 }
 
 /* Coordinates of G, for which we have precomputed tables */
-const static BN_ULONG def_xG[P256_LIMBS] = {
+static const BN_ULONG def_xG[P256_LIMBS] = {
 	TOBN(0x79e730d4, 0x18a9143c), TOBN(0x75ba95fc, 0x5fedb601),
 	TOBN(0x79fb732b, 0x77622510), TOBN(0x18905f76, 0xa53755c6)
 };
 
-const static BN_ULONG def_yG[P256_LIMBS] = {
+static const BN_ULONG def_yG[P256_LIMBS] = {
 	TOBN(0xddf25357, 0xce95560a), TOBN(0x8b4ab8e4, 0xba19e45c),
 	TOBN(0xd2e88688, 0xdd21f325), TOBN(0x8571ff18, 0x25885d85)
 };
@@ -897,7 +897,7 @@ ecp_nistz256_points_mul(const EC_GROUP *group, EC_POINT *r,
 			 */
 			BN_ULONG infty;
 			infty = (p.p.X[0] | p.p.X[1] | p.p.X[2] | p.p.X[3] |
-			         p.p.Y[0] | p.p.Y[1] | p.p.Y[2] | p.p.Y[3]);
+				 p.p.Y[0] | p.p.Y[1] | p.p.Y[2] | p.p.Y[3]);
 			if (P256_LIMBS == 8)
 				infty |=
 				    (p.p.X[4] | p.p.X[5] | p.p.X[6] | p.p.X[7] |

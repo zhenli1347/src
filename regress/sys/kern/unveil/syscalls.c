@@ -1,4 +1,4 @@
-/*	$OpenBSD: syscalls.c,v 1.32 2022/01/09 10:36:52 claudio Exp $	*/
+/*	$OpenBSD: syscalls.c,v 1.35 2022/09/05 05:34:25 anton Exp $	*/
 
 /*
  * Copyright (c) 2017-2019 Bob Beck <beck@openbsd.org>
@@ -16,62 +16,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <err.h>
 #include <fcntl.h>
-#include <errno.h>
-#include <sys/errno.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
 #include <sys/mount.h>
 
-pid_t child;
-char uv_dir1[] = "/tmp/uvdir1.XXXXXX"; /* unveiled */
-char uv_dir2[] = "/tmp/uvdir2.XXXXXX"; /* not unveiled */
-char uv_file1[] = "/tmp/uvfile1.XXXXXX"; /* unveiled */
-char uv_file2[] = "/tmp/uvfile2.XXXXXX"; /* not unveiled */
-
-#define UV_SHOULD_SUCCEED(A, B) do {					\
-	if (A) {							\
-		err(1, "%s:%d - %s", __FILE__, __LINE__, B);		\
-	}								\
-} while (0)
-
-#define UV_SHOULD_ENOENT(A, B) do {					\
-	if (A) {				 			\
-		if (do_uv && errno != ENOENT)				\
-			err(1, "%s:%d - %s", __FILE__, __LINE__, B);	\
-	} else {							\
-		if (do_uv)						\
-			errx(1, "%s:%d - %s worked when it should not "	\
-			    "have",  __FILE__, __LINE__, B);		\
-	}								\
-} while(0)
-
-#define UV_SHOULD_EACCES(A, B) do {					\
-	if (A) {				 			\
-		if (do_uv && errno != EACCES)				\
-			err(1, "%s:%d - %s", __FILE__, __LINE__, B);	\
-	} else {							\
-		if (do_uv)						\
-			errx(1, "%s:%d - %s worked when it should not "	\
-			    "have",  __FILE__, __LINE__, B);		\
-	}								\
-} while(0)
-
-#define UV_SHOULD_EPERM(A, B) do {					\
-	if (A) {				 			\
-		if (do_uv && errno != EPERM)				\
-			err(1, "%s:%d - %s", __FILE__, __LINE__, B);	\
-	} else {							\
-		if (do_uv)						\
-			errx(1, "%s:%d - %s worked when it should not "	\
-			    "have",  __FILE__, __LINE__, B);		\
-	}								\
-} while(0)
+#include "unveil.h"
 
 /* all the things unless we override */
 const char *uv_flags = "rwxc";
@@ -91,54 +42,6 @@ do_unveil2(void)
 	if (unveil(uv_dir1, uv_flags) == -1)
                 err(1, "%s:%d - unveil", __FILE__, __LINE__);
 }
-
-static int
-runcompare_internal(int (*func)(int), int fail_ok)
-{
-	int unveil = 0, nonunveil = 0, status;
-	pid_t pid = fork();
-	if (pid == 0) {
-		exit(func(0));
-	}
-	status = 0;
-	waitpid(pid, &status, 0);
-	if (WIFEXITED(status))
-		nonunveil = WEXITSTATUS(status);
-	if (WIFSIGNALED(status)) {
-		printf("[FAIL] nonunveil exited with signal %d\n", WTERMSIG(status));
-		goto fail;
-	}
-	pid = fork();
-	if (pid == 0) {
-		exit(func(1));
-	}
-	status = 0;
-	waitpid(pid, &status, 0);
-	if (WIFEXITED(status))
-		unveil = WEXITSTATUS(status);
-	if (WIFSIGNALED(status)) {
-		printf("[FAIL] nonunveil exited with signal %d\n", WTERMSIG(status));
-		goto fail;
-	}
-	if (!fail_ok && (unveil || nonunveil)) {
-		printf("[FAIL] unveil = %d, nonunveil = %d\n", unveil, nonunveil);
-		goto fail;
-	}
-	if (unveil == nonunveil) {
-		printf("[SUCCESS] unveil = %d, nonunveil = %d\n", unveil, nonunveil);
-		return 0;
-	}
-	printf("[FAIL] unveil = %d, nonunveil = %d\n", unveil, nonunveil);
- fail:
-	return 1;
-}
-
-static int
-runcompare(int (*func)(int))
-{
-	return runcompare_internal(func, 1);
-}
-
 
 static int
 test_openat(int do_uv)
@@ -1007,22 +910,11 @@ test_noaccess_node(int do_uv)
 }
 
 int
-main (int argc, char *argv[])
+main(int argc, char *argv[])
 {
-	int fd1, fd2, failures = 0;
-	char filename[256];
+	int failures = 0;
 
-	UV_SHOULD_SUCCEED((mkdtemp(uv_dir1) == NULL), "mkdtmp");
-	UV_SHOULD_SUCCEED((mkdtemp(uv_dir2) == NULL), "mkdtmp");
-	UV_SHOULD_SUCCEED(((fd1 = mkstemp(uv_file1)) == -1), "mkstemp");
-	close(fd1);
-	UV_SHOULD_SUCCEED((chmod(uv_file1, S_IRWXU) == -1), "chmod");
-	UV_SHOULD_SUCCEED(((fd2 = mkstemp(uv_file2)) == -1), "mkstemp");
-	(void) snprintf(filename, sizeof(filename), "/%s/subdir", uv_dir1);
-	UV_SHOULD_SUCCEED((mkdir(filename, 0777) == -1), "mkdir");
-	(void) snprintf(filename, sizeof(filename), "/%s/subdir", uv_dir2);
-	UV_SHOULD_SUCCEED((mkdir(filename, 0777) == -1), "mkdir");
-	close(fd2);
+	test_setup();
 
 	failures += runcompare(test_open);
 	failures += runcompare(test_openat);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.h,v 1.160 2022/03/02 11:10:43 florian Exp $	*/
+/*	$OpenBSD: httpd.h,v 1.162 2022/10/24 15:02:01 jmc Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -44,7 +44,6 @@
 #endif
 
 #define CONF_FILE		"/etc/httpd.conf"
-#define HTTPD_SOCKET		"/var/run/httpd.sock"
 #define HTTPD_USER		"www"
 #define HTTPD_SERVERNAME	"OpenBSD httpd"
 #define HTTPD_DOCROOT		"/htdocs"
@@ -332,8 +331,8 @@ struct client {
 	struct bufferevent	*clt_bev;
 	struct evbuffer		*clt_output;
 	struct event		 clt_ev;
-	void			*clt_descreq;
-	void			*clt_descresp;
+	struct http_descriptor	*clt_descreq;
+	struct http_descriptor	*clt_descresp;
 	int			 clt_sndbufsiz;
 	uint64_t		 clt_boundary;
 

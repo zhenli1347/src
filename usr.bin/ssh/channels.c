@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.c,v 1.419 2022/05/05 00:56:58 djm Exp $ */
+/* $OpenBSD: channels.c,v 1.421 2022/11/18 19:47:40 mbuhl Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -4032,7 +4032,7 @@ int
 channel_request_remote_forwarding(struct ssh *ssh, struct Forward *fwd)
 {
 	int r, success = 0, idx = -1;
-	char *host_to_connect, *listen_host, *listen_path;
+	const char *host_to_connect, *listen_host, *listen_path;
 	int port_to_connect, listen_port;
 
 	/* Send the forward request to the remote side. */
@@ -4063,18 +4063,17 @@ channel_request_remote_forwarding(struct ssh *ssh, struct Forward *fwd)
 		host_to_connect = listen_host = listen_path = NULL;
 		port_to_connect = listen_port = 0;
 		if (fwd->connect_path != NULL) {
-			host_to_connect = xstrdup(fwd->connect_path);
+			host_to_connect = fwd->connect_path;
 			port_to_connect = PORT_STREAMLOCAL;
 		} else {
-			host_to_connect = xstrdup(fwd->connect_host);
+			host_to_connect = fwd->connect_host;
 			port_to_connect = fwd->connect_port;
 		}
 		if (fwd->listen_path != NULL) {
-			listen_path = xstrdup(fwd->listen_path);
+			listen_path = fwd->listen_path;
 			listen_port = PORT_STREAMLOCAL;
 		} else {
-			if (fwd->listen_host != NULL)
-				listen_host = xstrdup(fwd->listen_host);
+			listen_host = fwd->listen_host;
 			listen_port = fwd->listen_port;
 		}
 		idx = permission_set_add(ssh, FORWARD_USER, FORWARD_LOCAL,
@@ -4354,13 +4353,15 @@ connect_next(struct channel_connect *cctx)
 			if (getnameinfo(cctx->ai->ai_addr, cctx->ai->ai_addrlen,
 			    ntop, sizeof(ntop), strport, sizeof(strport),
 			    NI_NUMERICHOST|NI_NUMERICSERV) != 0) {
-				error("connect_next: getnameinfo failed");
+				error_f("getnameinfo failed");
 				continue;
 			}
 			break;
 		default:
 			continue;
 		}
+		debug_f("start for host %.100s ([%.100s]:%s)",
+		    cctx->host, ntop, strport);
 		if ((sock = socket(cctx->ai->ai_family, cctx->ai->ai_socktype,
 		    cctx->ai->ai_protocol)) == -1) {
 			if (cctx->ai->ai_next == NULL)
@@ -4373,9 +4374,8 @@ connect_next(struct channel_connect *cctx)
 			fatal_f("set_nonblock(%d)", sock);
 		if (connect(sock, cctx->ai->ai_addr,
 		    cctx->ai->ai_addrlen) == -1 && errno != EINPROGRESS) {
-			debug("connect_next: host %.100s ([%.100s]:%s): "
-			    "%.100s", cctx->host, ntop, strport,
-			    strerror(errno));
+			debug_f("host %.100s ([%.100s]:%s): %.100s",
+			    cctx->host, ntop, strport, strerror(errno));
 			saved_errno = errno;
 			close(sock);
 			errno = saved_errno;
@@ -4383,8 +4383,8 @@ connect_next(struct channel_connect *cctx)
 		}
 		if (cctx->ai->ai_family != AF_UNIX)
 			set_nodelay(sock);
-		debug("connect_next: host %.100s ([%.100s]:%s) "
-		    "in progress, fd=%d", cctx->host, ntop, strport, sock);
+		debug_f("connect host %.100s ([%.100s]:%s) in progress, fd=%d",
+		    cctx->host, ntop, strport, sock);
 		cctx->ai = cctx->ai->ai_next;
 		return sock;
 	}

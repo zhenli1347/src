@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolvd.c,v 1.26 2022/05/21 13:54:19 deraadt Exp $	*/
+/*	$OpenBSD: resolvd.c,v 1.32 2022/12/09 18:22:35 tb Exp $	*/
 /*
  * Copyright (c) 2021 Florian Obser <florian@openbsd.org>
  * Copyright (c) 2021 Theo de Raadt <deraadt@openbsd.org>
@@ -65,7 +65,7 @@ void		route_receive(int);
 void		handle_route_message(struct rt_msghdr *, struct sockaddr **);
 void		get_rtaddrs(int, struct sockaddr *, struct sockaddr **);
 void		solicit_dns_proposals(int);
-void		regen_resolvconf(char *reason);
+void		regen_resolvconf(const char *reason);
 int		cmp(const void *, const void *);
 int		findslot(struct rdns_proposal *);
 void		zeroslot(struct rdns_proposal *);
@@ -193,8 +193,11 @@ main(int argc, char *argv[])
 		errx(1, "need root privileges");
 
 	lockfd = open(_PATH_LOCKFILE, O_CREAT|O_RDWR|O_EXLOCK|O_NONBLOCK, 0600);
-	if (lockfd == -1)
-		errx(1, "already running");
+	if (lockfd == -1) {
+		if (errno == EAGAIN)
+			errx(1, "already running");
+		err(1, "%s", _PATH_LOCKFILE);
+	}
 
 	if (!debug)
 		daemon(0, 0);
@@ -223,7 +226,7 @@ main(int argc, char *argv[])
 	if (unveil(_PATH_RESCONF_NEW, "rwc") == -1)
 		lerr(1, "unveil " _PATH_RESCONF_NEW);
 #ifndef SMALL
-	if (unveil(_PATH_UNWIND_SOCKET, "r") == -1)
+	if (unveil(_PATH_UNWIND_SOCKET, "w") == -1)
 		lerr(1, "unveil " _PATH_UNWIND_SOCKET);
 #endif
 
@@ -503,17 +506,24 @@ handle_route_message(struct rt_msghdr *rtm, struct sockaddr **rti_info)
 		return;
 	}
 
-	/* Sort proposals, based upon priority and IP */
-	qsort(learning, ASR_MAXNS, sizeof(learning[0]), cmp);
+	/* Sort proposals, based upon priority */
+	if (mergesort(learning, ASR_MAXNS, sizeof(learning[0]), cmp) == -1) {
+		lwarn("mergesort");
+		return;
+	}
 
-	/* Eliminate duplicates */
+	/* Eliminate duplicate IPs per interface */
 	for (i = 0; i < ASR_MAXNS - 1; i++) {
+		int j;
+
 		if (learning[i].prio == 0)
 			continue;
-		if (learning[i].if_index == learning[i+1].if_index &&
-		    strcmp(learning[i].ip, learning[i+1].ip) == 0) {
-			zeroslot(&learning[i + 1]);
-			i--;	/* backup and re-check */
+
+		for (j = i + 1; j < ASR_MAXNS; j++) {
+			if (learning[i].if_index == learning[j].if_index &&
+			    strcmp(learning[i].ip, learning[j].ip) == 0) {
+				zeroslot(&learning[j]);
+			}
 		}
 	}
 
@@ -567,9 +577,10 @@ solicit_dns_proposals(int routesock)
 }
 
 void
-regen_resolvconf(char *why)
+regen_resolvconf(const char *why)
 {
-	int	 i, fd;
+	struct iovec	 iov[UIO_MAXIOV];
+	int		 i, fd, len, iovcnt = 0;
 
 	linfo("rebuilding: %s", why);
 
@@ -578,9 +589,18 @@ regen_resolvconf(char *why)
 		return;
 	}
 
+	memset(iov, 0, sizeof(iov));
+
 #ifndef SMALL
-	if (unwind_running)
-		dprintf(fd, "nameserver 127.0.0.1 # resolvd: unwind\n");
+	if (unwind_running) {
+		len = asprintf((char **)&iov[iovcnt].iov_base,
+		    "nameserver 127.0.0.1 # resolvd: unwind\n");
+		if (len < 0) {
+			lwarn("asprintf");
+			goto err;
+		}
+		iov[iovcnt++].iov_len = len;
+	}
 
 #endif /* SMALL */
 	for (i = 0; i < ASR_MAXNS; i++) {
@@ -589,7 +609,8 @@ regen_resolvconf(char *why)
 
 			ifnam = if_indextoname(learned[i].if_index,
 			    ifnambuf);
-			dprintf(fd, "%snameserver %s # resolvd: %s\n",
+			len = asprintf((char **)&iov[iovcnt].iov_base,
+			    "%snameserver %s # resolvd: %s\n",
 #ifndef SMALL
 			    unwind_running ? "#" : "",
 #else
@@ -597,6 +618,11 @@ regen_resolvconf(char *why)
 #endif
 			    learned[i].ip,
 			    ifnam ? ifnam : "");
+			if (len < 0) {
+				lwarn("asprintf");
+				goto err;
+			}
+			iov[iovcnt++].iov_len = len;
 		}
 	}
 
@@ -624,30 +650,59 @@ regen_resolvconf(char *why)
 				*end = '\0';
 			if (strstr(line, "# resolvd: "))
 				continue;
-			dprintf(fd, "%s\n", line);
+			len = asprintf((char **)&iov[iovcnt].iov_base, "%s\n",
+			    line);
+			if (len < 0) {
+				lwarn("asprintf");
+				free(line);
+				fclose(fp);
+				goto err;
+			}
+			iov[iovcnt++].iov_len = len;
+			if (iovcnt >= UIO_MAXIOV) {
+				lwarnx("too many user-managed lines");
+				free(line);
+				fclose(fp);
+				goto err;
+			}
 		}
 		free(line);
 		fclose(fp);
 	}
 
+	if (iovcnt > 0) {
+		if (writev(fd, iov, iovcnt) == -1) {
+			lwarn("writev");
+			goto err;
+		}
+	}
+
+	if (fsync(fd) == -1) {
+		lwarn("fsync");
+		goto err;
+	}
 	if (rename(_PATH_RESCONF_NEW, _PATH_RESCONF) == -1)
 		goto err;
 
 	if (resolvfd == -1) {
 		close(fd);
-		resolvfd = open(_PATH_RESCONF, O_RDWR | O_CREAT);
+		resolvfd = open(_PATH_RESCONF, O_RDWR);
 	} else {
 		dup2(fd, resolvfd);
 		close(fd);
 	}
 
 	newkevent = 1;
-	return;
+	goto out;
 
  err:
 	if (fd != -1)
 		close(fd);
 	unlink(_PATH_RESCONF_NEW);
+ out:
+	for (i = 0; i < iovcnt; i++)
+		free(iov[i].iov_base);
+
 }
 
 int
@@ -655,10 +710,7 @@ cmp(const void *a, const void *b)
 {
 	const struct rdns_proposal	*rpa = a, *rpb = b;
 
-	if (rpa->prio == rpb->prio)
-		return strcmp(rpa->ip, rpb->ip);
-	else
-		return rpa->prio < rpb->prio ? -1 : 1;
+	return (rpa->prio < rpb->prio) ? -1 : (rpa->prio > rpb->prio);
 }
 
 #ifndef SMALL

@@ -1,4 +1,4 @@
-/*	$OpenBSD: http.c,v 1.64 2022/08/09 09:02:26 claudio Exp $ */
+/*	$OpenBSD: http.c,v 1.73 2022/11/02 16:50:51 claudio Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -91,6 +91,7 @@ enum http_state {
 	STATE_RESPONSE_HEADER,
 	STATE_RESPONSE_DATA,
 	STATE_RESPONSE_CHUNKED_HEADER,
+	STATE_RESPONSE_CHUNKED_CRLF,
 	STATE_RESPONSE_CHUNKED_TRAILER,
 	STATE_WRITE_DATA,
 	STATE_IDLE,
@@ -205,6 +206,39 @@ http_info(const char *uri)
 		memcpy(buf + sizeof buf - 4, "...", 4);
 	}
 
+	return buf;
+}
+
+/*
+ * Return IP address in presentation format.
+ */
+static const char *
+ip_info(const struct http_connection *conn)
+{
+	static char	ipbuf[NI_MAXHOST];
+
+	if (conn->res == NULL)
+		return "unknown";
+
+	if (getnameinfo(conn->res->ai_addr, conn->res->ai_addrlen, ipbuf,
+	    sizeof(ipbuf), NULL, 0, NI_NUMERICHOST) != 0)
+		return "unknown";
+
+	return ipbuf;
+}
+
+static const char *
+conn_info(const struct http_connection *conn)
+{
+	static char	 buf[100 + NI_MAXHOST];
+	const char	*uri;
+
+	if (conn->req == NULL)
+		uri = conn->host;
+	else
+		uri = conn->req->uri;
+
+	snprintf(buf, sizeof(buf), "%s (%s)", http_info(uri), ip_info(conn));
 	return buf;
 }
 
@@ -353,7 +387,7 @@ recode_credentials(const char *userinfo)
 static void
 proxy_parse_uri(char *uri)
 {
-	char *host, *port = NULL, *cred, *cookie = NULL;
+	char *fullhost, *host, *port = NULL, *cred, *cookie = NULL;
 
 	if (uri == NULL)
 		return;
@@ -362,10 +396,10 @@ proxy_parse_uri(char *uri)
 		errx(1, "%s: http_proxy not using http schema", http_info(uri));
 
 	host = uri + 7;
-	if ((host = strndup(host, strcspn(host, "/"))) == NULL)
+	if ((fullhost = strndup(host, strcspn(host, "/"))) == NULL)
 		err(1, NULL);
 
-	cred = host;
+	cred = fullhost;
 	host = strchr(cred, '@');
 	if (host != NULL)
 		*host++ = '\0';
@@ -405,9 +439,13 @@ proxy_parse_uri(char *uri)
 		if ((cookie = strdup("")) == NULL)
 			err(1, NULL);
 
-	proxy.proxyhost = host;
-	proxy.proxyport = port;
+	if ((proxy.proxyhost = strdup(host)) == NULL)
+		err(1, NULL);
+	if ((proxy.proxyport = strdup(port)) == NULL)
+		err(1, NULL);
 	proxy.proxyauth = cookie;
+
+	free(fullhost);
 }
 
 /*
@@ -786,8 +824,7 @@ http_do(struct http_connection *conn, enum res (*f)(struct http_connection *))
 		conn->events = POLLOUT;
 		break;
 	default:
-		errx(1, "%s: unexpected function return",
-		    http_info(conn->host));
+		errx(1, "%s: unexpected function return", conn_info(conn));
 	}
 }
 
@@ -797,10 +834,6 @@ http_do(struct http_connection *conn, enum res (*f)(struct http_connection *))
 static enum res
 http_connect_done(struct http_connection *conn)
 {
-	freeaddrinfo(conn->res0);
-	conn->res0 = NULL;
-	conn->res = NULL;
-
 	if (proxy.proxyhost != NULL)
 		return proxy_connect(conn);
 	return http_tls_connect(conn);
@@ -813,6 +846,7 @@ static enum res
 http_connect(struct http_connection *conn)
 {
 	const char *cause = NULL;
+	struct addrinfo *res;
 
 	assert(conn->fd == -1);
 	conn->state = STATE_CONNECT;
@@ -823,9 +857,9 @@ http_connect(struct http_connection *conn)
 	else
 		conn->res = conn->res->ai_next;
 	for (; conn->res != NULL; conn->res = conn->res->ai_next) {
-		struct addrinfo *res = conn->res;
 		int fd, save_errno;
 
+		res = conn->res;
 		fd = socket(res->ai_family,
 		    res->ai_socktype | SOCK_NONBLOCK, res->ai_protocol);
 		if (fd == -1) {
@@ -864,8 +898,10 @@ http_connect(struct http_connection *conn)
 	}
 
 	if (conn->fd == -1) {
-		if (cause != NULL)
-			warn("%s: %s", http_info(conn->req->uri), cause);
+		if (cause != NULL) {
+			conn->res = res;
+			warn("%s: %s", conn_info(conn), cause);
+		}
 		return http_failed(conn);
 	}
 
@@ -883,22 +919,16 @@ http_finish_connect(struct http_connection *conn)
 
 	len = sizeof(error);
 	if (getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &error, &len) == -1) {
-		warn("%s: getsockopt SO_ERROR", http_info(conn->req->uri));
-		goto fail;
+		warn("%s: getsockopt SO_ERROR", conn_info(conn));
+		return http_connect_failed(conn);
 	}
 	if (error != 0) {
 		errno = error;
-		warn("%s: connect", http_info(conn->req->uri));
-		goto fail;
+		warn("%s: connect", conn_info(conn));
+		return http_connect_failed(conn);
 	}
 
 	return http_connect_done(conn);
-
-fail:
-	close(conn->fd);
-	conn->fd = -1;
-
-	return http_connect(conn);
 }
 
 /*
@@ -915,12 +945,12 @@ http_tls_connect(struct http_connection *conn)
 		return http_failed(conn);
 	}
 	if (tls_configure(conn->tls, tls_config) == -1) {
-		warnx("%s: TLS configuration: %s\n", http_info(conn->req->uri),
+		warnx("%s: TLS configuration: %s\n", conn_info(conn),
 		    tls_error(conn->tls));
 		return http_failed(conn);
 	}
 	if (tls_connect_socket(conn->tls, conn->fd, conn->host) == -1) {
-		warnx("%s: TLS connect: %s\n", http_info(conn->req->uri),
+		warnx("%s: TLS connect: %s\n", conn_info(conn),
 		    tls_error(conn->tls));
 		return http_failed(conn);
 	}
@@ -936,7 +966,7 @@ http_tls_handshake(struct http_connection *conn)
 {
 	switch (tls_handshake(conn->tls)) {
 	case -1:
-		warnx("%s: TLS handshake: %s", http_info(conn->req->uri),
+		warnx("%s: TLS handshake: %s", conn_info(conn),
 		    tls_error(conn->tls));
 		return http_failed(conn);
 	case TLS_WANT_POLLIN:
@@ -1068,7 +1098,7 @@ http_parse_status(struct http_connection *conn, char *buf)
 
 	cp = strchr(buf, ' ');
 	if (cp == NULL) {
-		warnx("Improper response from %s", http_info(conn->host));
+		warnx("Improper response from %s", conn_info(conn));
 		return -1;
 	} else
 		cp++;
@@ -1077,7 +1107,7 @@ http_parse_status(struct http_connection *conn, char *buf)
 	status = strtonum(ststr, 100, 599, &errstr);
 	if (errstr != NULL) {
 		strnvis(gerror, cp, sizeof gerror, VIS_SAFE);
-		warnx("Error retrieving %s: %s", http_info(conn->host),
+		warnx("Error retrieving %s: %s", conn_info(conn),
 		    gerror);
 		return -1;
 	}
@@ -1090,7 +1120,7 @@ http_parse_status(struct http_connection *conn, char *buf)
 	case 308:	/* Redirect: permanent redirect */
 		if (conn->req->redirect_loop++ > 10) {
 			warnx("%s: Too many redirections requested",
-			    http_info(conn->host));
+			    conn_info(conn));
 			return -1;
 		}
 		/* FALLTHROUGH */
@@ -1104,7 +1134,7 @@ http_parse_status(struct http_connection *conn, char *buf)
 		break;
 	default:
 		strnvis(gerror, cp, sizeof gerror, VIS_SAFE);
-		warnx("Error retrieving %s: %s", http_info(conn->host),
+		warnx("Error retrieving %s: %s", conn_info(conn),
 		    gerror);
 		return -1;
 	}
@@ -1161,11 +1191,11 @@ http_redirect(struct http_connection *conn)
 static int
 http_parse_header(struct http_connection *conn, char *buf)
 {
-#define CONTENTLEN "Content-Length: "
-#define LOCATION "Location: "
-#define CONNECTION "Connection: "
-#define TRANSFER_ENCODING "Transfer-Encoding: "
-#define LAST_MODIFIED "Last-Modified: "
+#define CONTENTLEN "Content-Length:"
+#define LOCATION "Location:"
+#define CONNECTION "Connection:"
+#define TRANSFER_ENCODING "Transfer-Encoding:"
+#define LAST_MODIFIED "Last-Modified:"
 	const char *errstr;
 	char *cp, *redirurl;
 	char *locbase, *loctail;
@@ -1175,19 +1205,19 @@ http_parse_header(struct http_connection *conn, char *buf)
 	if (*cp == '\0')
 		return 0;
 	else if (strncasecmp(cp, CONTENTLEN, sizeof(CONTENTLEN) - 1) == 0) {
-		size_t s;
 		cp += sizeof(CONTENTLEN) - 1;
-		if ((s = strcspn(cp, " \t")) != 0)
-			*(cp + s) = 0;
+		cp += strspn(cp, " \t");
+		cp[strcspn(cp, " \t")] = '\0';
 		conn->iosz = strtonum(cp, 0, MAX_CONTENTLEN, &errstr);
 		if (errstr != NULL) {
 			warnx("Content-Length of %s is %s",
-			    http_info(conn->req->uri), errstr);
+			    conn_info(conn), errstr);
 			return -1;
 		}
 	} else if (http_isredirect(conn) &&
 	    strncasecmp(cp, LOCATION, sizeof(LOCATION) - 1) == 0) {
 		cp += sizeof(LOCATION) - 1;
+		cp += strspn(cp, " \t");
 		/*
 		 * If there is a colon before the first slash, this URI
 		 * is not relative. RFC 3986 4.2
@@ -1229,11 +1259,13 @@ http_parse_header(struct http_connection *conn, char *buf)
 	} else if (strncasecmp(cp, TRANSFER_ENCODING,
 	    sizeof(TRANSFER_ENCODING) - 1) == 0) {
 		cp += sizeof(TRANSFER_ENCODING) - 1;
+		cp += strspn(cp, " \t");
 		cp[strcspn(cp, " \t")] = '\0';
 		if (strcasecmp(cp, "chunked") == 0)
 			conn->chunked = 1;
 	} else if (strncasecmp(cp, CONNECTION, sizeof(CONNECTION) - 1) == 0) {
 		cp += sizeof(CONNECTION) - 1;
+		cp += strspn(cp, " \t");
 		cp[strcspn(cp, " \t")] = '\0';
 		if (strcasecmp(cp, "close") == 0)
 			conn->keep_alive = 0;
@@ -1242,6 +1274,7 @@ http_parse_header(struct http_connection *conn, char *buf)
 	} else if (strncasecmp(cp, LAST_MODIFIED,
 	    sizeof(LAST_MODIFIED) - 1) == 0) {
 		cp += sizeof(LAST_MODIFIED) - 1;
+		cp += strspn(cp, " \t");
 		free(conn->last_modified);
 		if ((conn->last_modified = strdup(cp)) == NULL)
 			err(1, NULL);
@@ -1267,8 +1300,10 @@ http_get_line(struct http_connection *conn)
 		return NULL;
 
 	len = end - conn->buf;
-	while (len > 0 && conn->buf[len - 1] == '\r')
+	while (len > 0 && (conn->buf[len - 1] == '\r' ||
+	    conn->buf[len - 1] == ' ' || conn->buf[len - 1] == '\t'))
 		--len;
+
 	if ((line = strndup(conn->buf, len)) == NULL)
 		err(1, NULL);
 
@@ -1283,7 +1318,6 @@ http_get_line(struct http_connection *conn)
 /*
  * Parse the header between data chunks during chunked transfers.
  * Returns 0 if a new chunk size could be correctly read.
- * Returns 1 for the empty trailer lines.
  * If the chuck size could not be converted properly -1 is returned.
  */
 static int
@@ -1293,12 +1327,8 @@ http_parse_chunked(struct http_connection *conn, char *buf)
 	char *end;
 	unsigned long chunksize;
 
-	/* empty lines are used as trailer */
-	if (*header == '\0')
-		return 1;
-
-	/* strip CRLF and any optional chunk extension */
-	header[strcspn(header, ";\r\n")] = '\0';
+	/* strip any optional chunk extension */
+	header[strcspn(header, "; \t")] = '\0';
 	errno = 0;
 	chunksize = strtoul(header, &end, 16);
 	if (header[0] == '\0' || *end != '\0' || (errno == ERANGE &&
@@ -1323,7 +1353,7 @@ read_more:
 	s = tls_read(conn->tls, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
-		warnx("%s: TLS read: %s", http_info(conn->host),
+		warnx("%s: TLS read: %s", conn_info(conn),
 		    tls_error(conn->tls));
 		return http_failed(conn);
 	} else if (s == TLS_WANT_POLLIN) {
@@ -1335,7 +1365,7 @@ read_more:
 	if (s == 0) {
 		if (conn->req)
 			warnx("%s: short read, connection closed",
-			    http_info(conn->req->uri));
+			    conn_info(conn));
 		return http_failed(conn);
 	}
 
@@ -1425,7 +1455,7 @@ again:
 		    conn->iosz > (off_t)conn->bufpos)
 			goto read_more;
 
-		/* got a full buffer full of data */
+		/* got a buffer full of data */
 		if (conn->req == NULL) {
 			/*
 			 * After redirects all data needs to be discarded.
@@ -1438,7 +1468,7 @@ again:
 				conn->bufpos = 0;
 			}
 			if (conn->chunked)
-				conn->state = STATE_RESPONSE_CHUNKED_TRAILER;
+				conn->state = STATE_RESPONSE_CHUNKED_CRLF;
 			else
 				conn->state = STATE_RESPONSE_DATA;
 			goto read_more;
@@ -1453,7 +1483,7 @@ again:
 		if (buf == NULL)
 			goto read_more;
 		if (http_parse_chunked(conn, buf) != 0) {
-			warnx("%s: bad chunk encoding", http_info(conn->host));
+			warnx("%s: bad chunk encoding", conn_info(conn));
 			free(buf);
 			return http_failed(conn);
 		}
@@ -1463,31 +1493,36 @@ again:
 		 * check if transfer is done, in which case the last trailer
 		 * still needs to be processed.
 		 */
-		if (conn->iosz == 0) {
-			conn->chunked = 0;
+		if (conn->iosz == 0)
 			conn->state = STATE_RESPONSE_CHUNKED_TRAILER;
-			goto again;
+		else
+			conn->state = STATE_RESPONSE_DATA;
+		goto again;
+	case STATE_RESPONSE_CHUNKED_CRLF:
+		buf = http_get_line(conn);
+		if (buf == NULL)
+			goto read_more;
+		/* expect empty line to finish a chunk of data */
+		if (*buf != '\0') {
+			warnx("%s: bad chunk encoding", conn_info(conn));
+			free(buf);
+			return http_failed(conn);
 		}
-
-		conn->state = STATE_RESPONSE_DATA;
+		free(buf);
+		conn->state = STATE_RESPONSE_CHUNKED_HEADER;
 		goto again;
 	case STATE_RESPONSE_CHUNKED_TRAILER:
 		buf = http_get_line(conn);
 		if (buf == NULL)
 			goto read_more;
-		if (http_parse_chunked(conn, buf) != 1) {
-			warnx("%s: bad chunk encoding", http_info(conn->host));
+		/* the trailer may include extra headers, just ignore them */
+		if (*buf != '\0') {
 			free(buf);
-			return http_failed(conn);
+			goto again;
 		}
 		free(buf);
-
-		/* if chunked got cleared then the transfer is over */
-		if (conn->chunked == 0)
-			return http_done(conn, HTTP_OK);
-
-		conn->state = STATE_RESPONSE_CHUNKED_HEADER;
-		goto again;
+		conn->chunked = 0;
+		return http_done(conn, HTTP_OK);
 	default:
 		errx(1, "unexpected http state");
 	}
@@ -1507,7 +1542,7 @@ http_write(struct http_connection *conn)
 		s = tls_write(conn->tls, conn->buf + conn->bufpos,
 		    conn->bufsz - conn->bufpos);
 		if (s == -1) {
-			warnx("%s: TLS write: %s", http_info(conn->host),
+			warnx("%s: TLS write: %s", conn_info(conn),
 			    tls_error(conn->tls));
 			return http_failed(conn);
 		} else if (s == TLS_WANT_POLLIN) {
@@ -1542,14 +1577,14 @@ proxy_read(struct http_connection *conn)
 	s = read(conn->fd, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
-		warn("%s: read", http_info(conn->host));
+		warn("%s: read", conn_info(conn));
 		return http_failed(conn);
 	}
 
 	if (s == 0) {
 		if (conn->req)
 			warnx("%s: short read, connection closed",
-			    http_info(conn->host));
+			    conn_info(conn));
 		return http_failed(conn);
 	}
 
@@ -1603,7 +1638,7 @@ proxy_write(struct http_connection *conn)
 	s = write(conn->fd, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
-		warn("%s: write", http_info(conn->host));
+		warn("%s: write", conn_info(conn));
 		return http_failed(conn);
 	}
 	conn->bufpos += s;
@@ -1666,13 +1701,13 @@ data_write(struct http_connection *conn)
 
 	s = write(conn->req->outfd, conn->buf, bsz);
 	if (s == -1) {
-		warn("%s: data write", http_info(conn->req->uri));
+		warn("%s: data write", conn_info(conn));
 		return http_failed(conn);
 	}
 
 	conn->totalsz += s;
 	if (conn->totalsz > MAX_CONTENTLEN) {
-		warn("%s: too much data offered", http_info(conn->req->uri));
+		warn("%s: too much data offered", conn_info(conn));
 		return http_failed(conn);
 	}
 
@@ -1687,7 +1722,7 @@ data_write(struct http_connection *conn)
 	/* all data written, switch back to read */
 	if (conn->bufpos == 0 || conn->iosz == 0) {
 		if (conn->chunked && conn->iosz == 0)
-			conn->state = STATE_RESPONSE_CHUNKED_TRAILER;
+			conn->state = STATE_RESPONSE_CHUNKED_CRLF;
 		else
 			conn->state = STATE_RESPONSE_DATA;
 		return http_read(conn);
@@ -1726,6 +1761,7 @@ http_handle(struct http_connection *conn)
 	case STATE_RESPONSE_HEADER:
 	case STATE_RESPONSE_DATA:
 	case STATE_RESPONSE_CHUNKED_HEADER:
+	case STATE_RESPONSE_CHUNKED_CRLF:
 	case STATE_RESPONSE_CHUNKED_TRAILER:
 		return http_read(conn);
 	case STATE_WRITE_DATA:
@@ -1920,11 +1956,11 @@ proc_http(char *bind_addr, int fd)
 			else if (conn->io_time <= now) {
 				if (conn->state == STATE_CONNECT) {
 					warnx("%s: connect timeout",
-					    http_info(conn->host));
+					    conn_info(conn));
 					http_do(conn, http_connect_failed);
 				} else {
 					warnx("%s: timeout, connection closed",
-					    http_info(conn->host));
+					    conn_info(conn));
 					http_do(conn, http_failed);
 				}
 			}

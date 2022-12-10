@@ -1,4 +1,4 @@
-/* $OpenBSD: asn1object.c,v 1.8 2022/06/22 09:54:19 tb Exp $ */
+/* $OpenBSD: asn1object.c,v 1.10 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2017, 2021, 2022 Joel Sing <jsing@openbsd.org>
  *
@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "asn1_locl.h"
+#include "asn1_local.h"
 
 static void
 hexdump(const unsigned char *buf, size_t len)
@@ -41,7 +41,7 @@ asn1_compare_bytes(const char *label, const unsigned char *d1, int len1,
 {
 	if (len1 != len2) {
 		fprintf(stderr, "FAIL: %s - byte lengths differ "
-		    "(%i != %i)\n", label, len1, len2);
+		    "(%d != %d)\n", label, len1, len2);
 		fprintf(stderr, "Got:\n");
 		hexdump(d1, len1);
 		fprintf(stderr, "Want:\n");

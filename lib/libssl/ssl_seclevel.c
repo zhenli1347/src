@@ -1,4 +1,4 @@
-/*	$OpenBSD: ssl_seclevel.c,v 1.24 2022/07/30 17:26:01 tb Exp $ */
+/*	$OpenBSD: ssl_seclevel.c,v 1.27 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2020-2022 Theo Buehler <tb@openbsd.org>
  *
@@ -28,7 +28,7 @@
 #include <openssl/x509v3.h>
 
 #include "bytestring.h"
-#include "ssl_locl.h"
+#include "ssl_local.h"
 
 static int
 ssl_security_normalize_level(const SSL_CTX *ctx, const SSL *ssl, int *out_level)
@@ -224,8 +224,8 @@ ssl_security_default_cb(const SSL *ssl, const SSL_CTX *ctx, int secop, int bits,
 static int
 ssl_ctx_security(const SSL_CTX *ctx, int secop, int bits, int nid, void *other)
 {
-	return ctx->internal->cert->security_cb(NULL, ctx, secop, bits, nid,
-	    other, ctx->internal->cert->security_ex_data);
+	return ctx->cert->security_cb(NULL, ctx, secop, bits, nid,
+	    other, ctx->cert->security_ex_data);
 }
 
 static int
@@ -438,8 +438,8 @@ ssl_security_cert_chain(const SSL *ssl, STACK_OF(X509) *sk, X509 *x509,
 	return 1;
 }
 
-int
-ssl_security_supported_group(const SSL *ssl, uint16_t group_id)
+static int
+ssl_security_group(const SSL *ssl, uint16_t group_id, int secop)
 {
 	CBB cbb;
 	int bits, nid;
@@ -457,5 +457,17 @@ ssl_security_supported_group(const SSL *ssl, uint16_t group_id)
 	if (!CBB_finish(&cbb, NULL, NULL))
 		return 0;
 
-	return ssl_security(ssl, SSL_SECOP_CURVE_SUPPORTED, bits, nid, group);
+	return ssl_security(ssl, secop, bits, nid, group);
+}
+
+int
+ssl_security_shared_group(const SSL *ssl, uint16_t group_id)
+{
+	return ssl_security_group(ssl, group_id, SSL_SECOP_CURVE_SHARED);
+}
+
+int
+ssl_security_supported_group(const SSL *ssl, uint16_t group_id)
+{
+	return ssl_security_group(ssl, group_id, SSL_SECOP_CURVE_SUPPORTED);
 }

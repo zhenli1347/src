@@ -1,4 +1,4 @@
-/* $OpenBSD: input.c,v 1.207 2022/08/02 11:09:26 nicm Exp $ */
+/* $OpenBSD: input.c,v 1.212 2022/11/11 08:37:55 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1345,8 +1345,8 @@ input_csi_dispatch(struct input_ctx *ictx)
 	if (ictx->flags & INPUT_DISCARD)
 		return (0);
 
-	log_debug("%s: '%c' \"%s\" \"%s\"",
-	    __func__, ictx->ch, ictx->interm_buf, ictx->param_buf);
+	log_debug("%s: '%c' \"%s\" \"%s\"", __func__, ictx->ch,
+	    ictx->interm_buf, ictx->param_buf);
 
 	if (input_split(ictx) != 0)
 		return (0);
@@ -1755,7 +1755,6 @@ static void
 input_csi_dispatch_sm_private(struct input_ctx *ictx)
 {
 	struct screen_write_ctx	*sctx = &ictx->ctx;
-	struct window_pane	*wp = ictx->wp;
 	struct grid_cell	*gc = &ictx->cell.cell;
 	u_int			 i;
 
@@ -1797,17 +1796,7 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 			screen_write_mode_set(sctx, MODE_MOUSE_ALL);
 			break;
 		case 1004:
-			if (sctx->s->mode & MODE_FOCUSON)
-				break;
 			screen_write_mode_set(sctx, MODE_FOCUSON);
-			if (wp == NULL)
-				break;
-			if (!options_get_number(global_options, "focus-events"))
-				break;
-			if (wp->flags & PANE_FOCUSED)
-				bufferevent_write(wp->event, "\033[I", 3);
-			else
-				bufferevent_write(wp->event, "\033[O", 3);
 			break;
 		case 1005:
 			screen_write_mode_set(sctx, MODE_MOUSE_UTF8);
@@ -1899,7 +1888,7 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 			}
 			break;
 		case 18:
-			input_reply(ictx, "\033[8;%u;%ut", x, y);
+			input_reply(ictx, "\033[8;%u;%ut", y, x);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);
@@ -2242,7 +2231,6 @@ static int
 input_dcs_dispatch(struct input_ctx *ictx)
 {
 	struct window_pane	*wp = ictx->wp;
-	struct options		*oo = wp->options;
 	struct screen_write_ctx	*sctx = &ictx->ctx;
 	u_char			*buf = ictx->input_buf;
 	size_t			 len = ictx->input_len;
@@ -2254,7 +2242,8 @@ input_dcs_dispatch(struct input_ctx *ictx)
 		return (0);
 	if (ictx->flags & INPUT_DISCARD)
 		return (0);
-	allow_passthrough = options_get_number(oo, "allow-passthrough");
+	allow_passthrough = options_get_number(wp->options,
+	    "allow-passthrough");
 	if (!allow_passthrough)
 		return (0);
 	log_debug("%s: \"%s\"", __func__, buf);

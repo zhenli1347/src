@@ -1,4 +1,4 @@
-/*	$OpenBSD: tal.c,v 1.35 2022/05/15 16:43:35 tb Exp $ */
+/*	$OpenBSD: tal.c,v 1.38 2022/11/30 09:02:58 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -15,9 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <netinet/in.h>
 #include <assert.h>
-#include <ctype.h>
 #include <err.h>
 #include <libgen.h>
 #include <stdio.h>
@@ -119,7 +117,7 @@ tal_parse_buffer(const char *fn, char *buf, size_t len)
 	}
 
 	if (tal->urisz == 0) {
-		warnx("%s: no URIs in manifest part", fn);
+		warnx("%s: no URIs in TAL file", fn);
 		goto out;
 	}
 

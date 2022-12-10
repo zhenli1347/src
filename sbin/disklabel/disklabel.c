@@ -1,4 +1,4 @@
-/*	$OpenBSD: disklabel.c,v 1.241 2022/07/31 14:29:19 krw Exp $	*/
+/*	$OpenBSD: disklabel.c,v 1.246 2022/12/04 23:50:46 cheloha Exp $	*/
 
 /*
  * Copyright (c) 1987, 1993
@@ -186,7 +186,6 @@ main(int argc, char *argv[])
 		case 'v':
 			verbose = 1;
 			break;
-		case '?':
 		default:
 			usage();
 		}
@@ -418,9 +417,6 @@ makedisktab(FILE *f, struct disklabel *lp)
 	 * XXX We do not print have disktab information yet for
 	 * XXX DL_GETBSTART DL_GETBEND
 	 */
-	for (i = 0; i < NDDATA; i++)
-		if (lp->d_drivedata[i])
-			(void)fprintf(f, "d%d#%u", i, lp->d_drivedata[i]);
 	pp = lp->d_partitions;
 	for (i = 0; i < lp->d_npartitions; i++, pp++) {
 		if (DL_GETPSIZE(pp)) {
@@ -556,7 +552,7 @@ canonical_unit(struct disklabel *lp, char unit)
 void
 display(FILE *f, struct disklabel *lp, char unit, int all)
 {
-	int i, j;
+	int i;
 	double d;
 
 	unit = canonical_unit(lp, unit);
@@ -575,8 +571,6 @@ display(FILE *f, struct disklabel *lp, char unit, int all)
 	    lp->d_uid[0], lp->d_uid[1], lp->d_uid[2], lp->d_uid[3],
 	    lp->d_uid[4], lp->d_uid[5], lp->d_uid[6], lp->d_uid[7]);
 	fprintf(f, "flags:");
-	if (lp->d_flags & D_BADSECT)
-		fprintf(f, " badsect");
 	if (lp->d_flags & D_VENDOR)
 		fprintf(f, " vendor");
 	putc('\n', f);
@@ -595,15 +589,6 @@ display(FILE *f, struct disklabel *lp, char unit, int all)
 
 	fprintf(f, "boundstart: %llu\n", DL_GETBSTART(lp));
 	fprintf(f, "boundend: %llu\n", DL_GETBEND(lp));
-	fprintf(f, "drivedata: ");
-	for (i = NDDATA - 1; i >= 0; i--)
-		if (lp->d_drivedata[i])
-			break;
-	if (i < 0)
-		i = 0;
-	for (j = 0; j <= i; j++)
-		fprintf(f, "%d ", lp->d_drivedata[j]);
-	fprintf(f, "\n");
 	if (all) {
 		fprintf(f, "\n%hu partitions:\n", lp->d_npartitions);
 		fprintf(f, "#    %16.16s %16.16s  fstype [fsize bsize   cpg]\n",
@@ -824,8 +809,6 @@ getasciilabel(FILE *f, struct disklabel *lp)
 	unsigned int part;
 
 	lp->d_version = 1;
-	lp->d_bbsize = BBSIZE;				/* XXX */
-	lp->d_sbsize = SBSIZE;				/* XXX */
 
 	if (!(omountpoints = calloc(MAXPARTITIONS, sizeof(char *))))
 		errx(4, "out of memory");
@@ -879,7 +862,7 @@ getasciilabel(FILE *f, struct disklabel *lp)
 			for (v = 0; (cp = tp) && *cp != '\0';) {
 				tp = word(cp);
 				if (!strcmp(cp, "badsect"))
-					v |= D_BADSECT;
+					; /* Ignore obsolete flag. */
 				else if (!strcmp(cp, "vendor"))
 					v |= D_VENDOR;
 				else {
@@ -889,19 +872,6 @@ getasciilabel(FILE *f, struct disklabel *lp)
 				}
 			}
 			lp->d_flags = v;
-			continue;
-		}
-		if (!strcmp(cp, "drivedata")) {
-			int i;
-
-			for (i = 0; (cp = tp) && *cp != '\0' && i < NDDATA;) {
-				v = GETNUM(lp->d_drivedata[i], cp, 0, &errstr);
-				if (errstr)
-					warnx("line %d: bad drivedata %s",
-					    lineno, cp);
-				lp->d_drivedata[i++] = v;
-				tp = word(cp);
-			}
 			continue;
 		}
 		if (sscanf(cp, "%d partitions", &v) == 1) {
@@ -931,13 +901,14 @@ getasciilabel(FILE *f, struct disklabel *lp)
 			continue;
 		}
 
-		/* Ignore fields that are no longer in the disklabel. */
+		/* Ignore fields that are no longer used. */
 		if (!strcmp(cp, "rpm") ||
 		    !strcmp(cp, "interleave") ||
 		    !strcmp(cp, "trackskew") ||
 		    !strcmp(cp, "cylinderskew") ||
 		    !strcmp(cp, "headswitch") ||
-		    !strcmp(cp, "track-to-track seek"))
+		    !strcmp(cp, "track-to-track seek") ||
+		    !strcmp(cp, "drivedata"))
 			continue;
 
 		/* Ignore fields that are forcibly set when label is read. */
@@ -1086,16 +1057,6 @@ checklabel(struct disklabel *lp)
 		lp->d_secpercyl = lp->d_nsectors * lp->d_ntracks;
 	if (DL_GETDSIZE(lp) == 0)
 		DL_SETDSIZE(lp, (u_int64_t)lp->d_secpercyl * lp->d_ncylinders);
-	if (lp->d_bbsize == 0) {
-		warnx("boot block size %d", lp->d_bbsize);
-		errors++;
-	} else if (lp->d_bbsize % lp->d_secsize)
-		warnx("warning, boot block size %% sector-size != 0");
-	if (lp->d_sbsize == 0) {
-		warnx("super block size %d", lp->d_sbsize);
-		errors++;
-	} else if (lp->d_sbsize % lp->d_secsize)
-		warnx("warning, super block size %% sector-size != 0");
 	if (lp->d_npartitions > MAXPARTITIONS)
 		warnx("warning, number of partitions (%d) > MAXPARTITIONS (%d)",
 		    lp->d_npartitions, MAXPARTITIONS);
@@ -1126,9 +1087,9 @@ checklabel(struct disklabel *lp)
 		if (DL_GETPOFFSET(pp) > DL_GETDSIZE(lp)) {
 			warnx("partition %c: offset past end of unit", part);
 			errors++;
-		}
-		if (DL_GETPOFFSET(pp) + DL_GETPSIZE(pp) > DL_GETDSIZE(lp)) {
-			warnx("partition %c: partition extends past end of unit",
+		} else if (DL_GETPOFFSET(pp) + DL_GETPSIZE(pp) >
+		    DL_GETDSIZE(lp)) {
+			warnx("partition %c: extends past end of unit",
 			    part);
 			errors++;
 		}
@@ -1160,8 +1121,6 @@ cmplabel(struct disklabel *lp1, struct disklabel *lp2)
 	lab1.d_magic = lab2.d_magic;
 	lab1.d_magic2 = lab2.d_magic2;
 	lab1.d_checksum = lab2.d_checksum;
-	lab1.d_bbsize = lab2.d_bbsize;
-	lab1.d_sbsize = lab2.d_sbsize;
 	lab1.d_bstart = lab2.d_bstart;
 	lab1.d_bstarth = lab2.d_bstarth;
 	lab1.d_bend = lab2.d_bend;

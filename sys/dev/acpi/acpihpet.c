@@ -1,4 +1,4 @@
-/* $OpenBSD: acpihpet.c,v 1.26 2022/04/06 18:59:27 naddy Exp $ */
+/* $OpenBSD: acpihpet.c,v 1.30 2022/11/08 14:54:47 cheloha Exp $ */
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -18,9 +18,11 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
+#include <sys/stdint.h>
 #include <sys/timetc.h>
 
 #include <machine/bus.h>
+#include <machine/cpu.h>
 
 #include <dev/acpi/acpireg.h>
 #include <dev/acpi/acpivar.h>
@@ -31,7 +33,7 @@ int acpihpet_attached;
 int acpihpet_match(struct device *, void *, void *);
 void acpihpet_attach(struct device *, struct device *, void *);
 int acpihpet_activate(struct device *, int);
-
+void acpihpet_delay(int);
 u_int acpihpet_gettime(struct timecounter *tc);
 
 uint64_t	acpihpet_r(bus_space_tag_t _iot, bus_space_handle_t _ioh,
@@ -107,6 +109,8 @@ acpihpet_activate(struct device *self, int act)
 
 	switch (act) {
 	case DVACT_SUSPEND:
+		delay_fini(acpihpet_delay);
+
 		/* stop, then save */
 		bus_space_write_4(sc->sc_iot, sc->sc_ioh,
 		    HPET_CONFIGURATION, sc->sc_conf);
@@ -167,6 +171,8 @@ acpihpet_activate(struct device *self, int act)
 		    HPET_TIMER2_COMPARE, sc->sc_save.timers[2].compare);
 		bus_space_write_4(sc->sc_iot, sc->sc_ioh,
 		    HPET_CONFIGURATION, sc->sc_conf | 1);
+
+		delay_init(acpihpet_delay, 2000);
 		break;
 	}
 
@@ -262,15 +268,36 @@ acpihpet_attach(struct device *parent, struct device *self, void *aux)
 	freq = 1000000000000000ull / period;
 	printf(": %lld Hz\n", freq);
 
-	hpet_timecounter.tc_frequency = (uint32_t)freq;
+	hpet_timecounter.tc_frequency = freq;
 	hpet_timecounter.tc_priv = sc;
 	hpet_timecounter.tc_name = sc->sc_dev.dv_xname;
 	tc_init(&hpet_timecounter);
+
+	delay_init(acpihpet_delay, 2000);
+
 #if defined(__amd64__)
 	extern void cpu_recalibrate_tsc(struct timecounter *);
 	cpu_recalibrate_tsc(&hpet_timecounter);
 #endif
 	acpihpet_attached++;
+}
+
+void
+acpihpet_delay(int usecs)
+{
+	uint64_t count = 0, cycles;
+	struct acpihpet_softc *sc = hpet_timecounter.tc_priv;
+	uint32_t val1, val2;
+
+	val2 = bus_space_read_4(sc->sc_iot, sc->sc_ioh, HPET_MAIN_COUNTER);
+	cycles = usecs * hpet_timecounter.tc_frequency / 1000000;
+	while (count < cycles) {
+		CPU_BUSY_CYCLE();
+		val1 = val2;
+		val2 = bus_space_read_4(sc->sc_iot, sc->sc_ioh,
+		    HPET_MAIN_COUNTER);
+		count += val2 - val1;
+	}
 }
 
 u_int

@@ -557,6 +557,10 @@ static bfd *reldyn_sorting_bfd;
 #define MIPS_ELF_DYN_SIZE(abfd) \
   (get_elf_backend_data (abfd)->s->sizeof_dyn)
 
+/* The size of the rld_map pointer.  */
+#define MIPS_ELF_RLD_MAP_SIZE(abfd) \
+  (get_elf_backend_data (abfd)->s->arch_size / 8)
+
 /* The size of a GOT entry.  */
 #define MIPS_ELF_GOT_SIZE(abfd) \
   (get_elf_backend_data (abfd)->s->arch_size / 8)
@@ -5943,7 +5947,7 @@ _bfd_mips_elf_create_dynamic_sections (bfd *abfd, struct bfd_link_info *info)
     }
 
   if ((IRIX_COMPAT (abfd) == ict_irix5 || IRIX_COMPAT (abfd) == ict_none)
-      && !info->shared
+      && info->executable
       && bfd_get_section_by_name (abfd, ".rld_map") == NULL)
     {
       s = bfd_make_section_with_flags (abfd, ".rld_map",
@@ -6020,6 +6024,11 @@ _bfd_mips_elf_create_dynamic_sections (bfd *abfd, struct bfd_link_info *info)
 
       if (! bfd_elf_link_record_dynamic_symbol (info, h))
 	return FALSE;
+    }
+
+  if (info->executable)
+    {
+      const char *name;
 
       if (! mips_elf_hash_table (info)->use_rld_obj_head)
 	{
@@ -7421,13 +7430,13 @@ _bfd_mips_elf_size_dynamic_sections (bfd *output_bfd,
 	     of .text section.  So put a dummy.  XXX  */
 	  s->size += htab->function_stub_size;
 	}
-      else if (! info->shared
+      else if (info->executable
 	       && ! mips_elf_hash_table (info)->use_rld_obj_head
 	       && strncmp (name, ".rld_map", 8) == 0)
 	{
 	  /* We add a room for __rld_map.  It will be filled in by the
 	     rtld to contain a pointer to the _r_debug structure.  */
-	  s->size += 4;
+	  s->size += MIPS_ELF_RLD_MAP_SIZE (output_bfd);
 	}
       else if (SGI_COMPAT (output_bfd)
 	       && strncmp (name, ".compact_rel", 12) == 0)
@@ -7489,6 +7498,16 @@ _bfd_mips_elf_size_dynamic_sections (bfd *output_bfd,
 	  /* SGI object has the equivalence of DT_DEBUG in the
 	     DT_MIPS_RLD_MAP entry.  */
 	  if (!MIPS_ELF_ADD_DYNAMIC_ENTRY (info, DT_MIPS_RLD_MAP, 0))
+	    return FALSE;
+	  if (!SGI_COMPAT (output_bfd))
+	    {
+	      if (!MIPS_ELF_ADD_DYNAMIC_ENTRY (info, DT_DEBUG, 0))
+		return FALSE;
+	    }
+	}
+      else if (info->pie)
+        {
+	  if (!MIPS_ELF_ADD_DYNAMIC_ENTRY (info, DT_MIPS_RLD_MAP_REL, 0))
 	    return FALSE;
 	  if (!SGI_COMPAT (output_bfd))
 	    {
@@ -8246,7 +8265,7 @@ _bfd_mips_elf_finish_dynamic_symbol (bfd *output_bfd,
   if (IRIX_COMPAT (output_bfd) == ict_irix6)
     mips_elf_irix6_finish_dynamic_symbol (output_bfd, name, sym);
 
-  if (! info->shared)
+  if (info->executable)
     {
       if (! mips_elf_hash_table (info)->use_rld_obj_head
 	  && (strcmp (name, "__rld_map") == 0
@@ -8696,6 +8715,16 @@ _bfd_mips_elf_finish_dynamic_sections (bfd *output_bfd,
 
 	    case DT_MIPS_RLD_MAP:
 	      dyn.d_un.d_ptr = mips_elf_hash_table (info)->rld_value;
+	      break;
+
+	    case DT_MIPS_RLD_MAP_REL:
+	      {
+		bfd_vma dt_addr;
+
+		dt_addr = (sdyn->output_section->vma + sdyn->output_offset
+			   + (b - sdyn->contents));
+	        dyn.d_un.d_val = mips_elf_hash_table (info)->rld_value - dt_addr;
+	      }
 	      break;
 
 	    case DT_MIPS_OPTIONS:

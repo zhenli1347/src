@@ -1,4 +1,4 @@
-/* $OpenBSD: pfkeyv2.c,v 1.234 2022/06/06 14:45:41 claudio Exp $ */
+/* $OpenBSD: pfkeyv2.c,v 1.254 2022/10/17 14:49:01 mvs Exp $ */
 
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) 17 January 1995
@@ -169,12 +169,15 @@ static int npromisc = 0;
 
 void pfkey_init(void);
 
-int pfkeyv2_attach(struct socket *, int);
+int pfkeyv2_attach(struct socket *, int, int);
 int pfkeyv2_detach(struct socket *);
-int pfkeyv2_usrreq(struct socket *, int, struct mbuf *, struct mbuf *,
-    struct mbuf *, struct proc *);
-int pfkeyv2_output(struct mbuf *, struct socket *, struct sockaddr *,
+int pfkeyv2_disconnect(struct socket *);
+int pfkeyv2_shutdown(struct socket *);
+int pfkeyv2_send(struct socket *, struct mbuf *, struct mbuf *,
     struct mbuf *);
+int pfkeyv2_sockaddr(struct socket *, struct mbuf *);
+int pfkeyv2_peeraddr(struct socket *, struct mbuf *);
+int pfkeyv2_output(struct mbuf *, struct socket *);
 int pfkey_sendup(struct pkpcb *, struct mbuf *, int);
 int pfkeyv2_sa_flush(struct tdb *, void *, int);
 int pfkeyv2_policy_flush(struct ipsec_policy *, void *, unsigned int);
@@ -199,16 +202,23 @@ pfdatatopacket(void *data, int len, struct mbuf **packet)
 	return (0);
 }
 
+const struct pr_usrreqs pfkeyv2_usrreqs = {
+	.pru_attach	= pfkeyv2_attach,
+	.pru_detach	= pfkeyv2_detach,
+	.pru_disconnect	= pfkeyv2_disconnect,
+	.pru_shutdown	= pfkeyv2_shutdown,
+	.pru_send	= pfkeyv2_send,
+	.pru_sockaddr	= pfkeyv2_sockaddr,
+	.pru_peeraddr	= pfkeyv2_peeraddr,
+};
+
 const struct protosw pfkeysw[] = {
 {
   .pr_type      = SOCK_RAW,
   .pr_domain    = &pfkeydomain,
   .pr_protocol  = PF_KEY_V2,
   .pr_flags     = PR_ATOMIC | PR_ADDR,
-  .pr_output    = pfkeyv2_output,
-  .pr_usrreq    = pfkeyv2_usrreq,
-  .pr_attach    = pfkeyv2_attach,
-  .pr_detach    = pfkeyv2_detach,
+  .pr_usrreqs   = &pfkeyv2_usrreqs,
   .pr_sysctl    = pfkeyv2_sysctl,
 }
 };
@@ -257,7 +267,7 @@ pfkey_init(void)
  * Attach a new PF_KEYv2 socket.
  */
 int
-pfkeyv2_attach(struct socket *so, int proto)
+pfkeyv2_attach(struct socket *so, int proto, int wait)
 {
 	struct pkpcb *kp;
 	int error;
@@ -269,7 +279,10 @@ pfkeyv2_attach(struct socket *so, int proto)
 	if (error)
 		return (error);
 
-	kp = pool_get(&pkpcb_pool, PR_WAITOK|PR_ZERO);
+	kp = pool_get(&pkpcb_pool, (wait == M_WAIT ? PR_WAITOK : PR_NOWAIT) |
+	    PR_ZERO);
+	if (kp == NULL)
+		return (ENOBUFS);
 	so->so_pcb = kp;
 	refcnt_init(&kp->kcb_refcnt);
 	kp->kcb_socket = so;
@@ -329,86 +342,64 @@ pfkeyv2_detach(struct socket *so)
 }
 
 int
-pfkeyv2_usrreq(struct socket *so, int req, struct mbuf *m,
-    struct mbuf *nam, struct mbuf *control, struct proc *p)
+pfkeyv2_disconnect(struct socket *so)
 {
-	struct pkpcb *kp;
-	int error = 0;
+	soisdisconnected(so);
+	return (0);
+}
 
-	if (req == PRU_CONTROL)
-		return (EOPNOTSUPP);
+int
+pfkeyv2_shutdown(struct socket *so)
+{
+	socantsendmore(so);
+	return (0);
+}
+
+int
+pfkeyv2_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
+    struct mbuf *control)
+{
+	int error;
 
 	soassertlocked(so);
 
 	if (control && control->m_len) {
 		error = EOPNOTSUPP;
-		goto release;
+		goto out;
+	}
+	
+	if (nam) {
+		error = EISCONN;
+		goto out;
 	}
 
-	kp = sotokeycb(so);
-	if (kp == NULL) {
-		error = EINVAL;
-		goto release;
-	}
+	error = pfkeyv2_output(m, so);
+	m = NULL;
 
-	switch (req) {
-	/* no connect, bind, accept. Socket is connected from the start */
-	case PRU_CONNECT:
-	case PRU_BIND:
-	case PRU_CONNECT2:
-	case PRU_LISTEN:
-	case PRU_ACCEPT:
-		error = EOPNOTSUPP;
-		break;
+out:
+	m_freem(control);
+	m_freem(m);
 
-	case PRU_DISCONNECT:
-	case PRU_ABORT:
-		soisdisconnected(so);
-		break;
-	case PRU_SHUTDOWN:
-		socantsendmore(so);
-		break;
-	case PRU_SENSE:
-		/* stat: don't bother with a blocksize. */
-		break;
-
-	/* minimal support, just implement a fake peer address */
-	case PRU_SOCKADDR:
-		error = EINVAL;
-		break;
-	case PRU_PEERADDR:
-		bcopy(&pfkey_addr, mtod(nam, caddr_t), pfkey_addr.sa_len);
-		nam->m_len = pfkey_addr.sa_len;
-		break;
-
-	case PRU_RCVOOB:
-	case PRU_RCVD:
-	case PRU_SENDOOB:
-		error = EOPNOTSUPP;
-		break;
-	case PRU_SEND:
-		if (nam) {
-			error = EISCONN;
-			break;
-		}
-		error = (*so->so_proto->pr_output)(m, so, NULL, NULL);
-		m = NULL;
-		break;
-	default:
-		panic("pfkeyv2_usrreq");
-	}
-
- release:
-	if (req != PRU_RCVD && req != PRU_RCVOOB && req != PRU_SENSE) {
-		m_freem(control);
-		m_freem(m);
-	}
 	return (error);
 }
 
 int
-pfkeyv2_output(struct mbuf *mbuf, struct socket *so,
-    struct sockaddr *dstaddr, struct mbuf *control)
+pfkeyv2_sockaddr(struct socket *so, struct mbuf *nam)
+{
+	return (EINVAL);
+}
+
+int
+pfkeyv2_peeraddr(struct socket *so, struct mbuf *nam)
+{
+	/* minimal support, just implement a fake peer address */
+	bcopy(&pfkey_addr, mtod(nam, caddr_t), pfkey_addr.sa_len);
+	nam->m_len = pfkey_addr.sa_len;
+	return (0);
+}
+
+int
+pfkeyv2_output(struct mbuf *mbuf, struct socket *so)
 {
 	void *message;
 	int error = 0;
@@ -439,7 +430,7 @@ pfkeyv2_output(struct mbuf *mbuf, struct socket *so,
 	 */
 
 	sounlock(so);
-	error = pfkeyv2_send(so, message, mbuf->m_pkthdr.len);
+	error = pfkeyv2_dosend(so, message, mbuf->m_pkthdr.len);
 	solock(so);
 
 ret:
@@ -1121,7 +1112,7 @@ pfkeyv2_get_proto_alg(u_int8_t satype, u_int8_t *sproto, int *alg)
  * Handle all messages from userland to kernel.
  */
 int
-pfkeyv2_send(struct socket *so, void *message, int len)
+pfkeyv2_dosend(struct socket *so, void *message, int len)
 {
 	int i, j, rval = 0, mode = PFKEYV2_SENDMESSAGE_BROADCAST;
 	int delflag = 0;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_prov_static.c,v 1.14 2022/06/28 09:32:27 bluhm Exp $ */
+/*	$OpenBSD: dt_prov_static.c,v 1.17 2022/09/11 19:05:44 dv Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -75,6 +75,7 @@ DT_STATIC_PROBE4(vfs, cleaner, "long", "int", "long", "long");
  */
 DT_STATIC_PROBE2(vmm, guest_enter, "void *", "void *");
 DT_STATIC_PROBE3(vmm, guest_exit, "void *", "void *", "uint64_t");
+DT_STATIC_PROBE4(vmm, inout, "void *", "uint16_t", "uint8_t", "uint32_t");
 #endif /* __amd64__ */
 
 /*
@@ -88,9 +89,10 @@ DT_STATIC_PROBE0(smr, wakeup);
 DT_STATIC_PROBE2(smr, thread, "uint64_t", "uint64_t");
 
 /*
- * reference counting
+ * reference counting, keep in sync with sys/refcnt.h
  */
 DT_STATIC_PROBE0(refcnt, none);
+DT_STATIC_PROBE3(refcnt, ifaddr, "void *", "int", "int");
 DT_STATIC_PROBE3(refcnt, inpcb, "void *", "int", "int");
 DT_STATIC_PROBE3(refcnt, tdb, "void *", "int", "int");
 
@@ -125,6 +127,7 @@ struct dt_probe *const dtps_static[] = {
 	/* VMM */
 	&_DT_STATIC_P(vmm, guest_enter),
 	&_DT_STATIC_P(vmm, guest_exit),
+	&_DT_STATIC_P(vmm, inout),
 #endif /* __amd64__ */
 	/* SMR */
 	&_DT_STATIC_P(smr, call),
@@ -135,6 +138,7 @@ struct dt_probe *const dtps_static[] = {
 	&_DT_STATIC_P(smr, thread),
 	/* refcnt */
 	&_DT_STATIC_P(refcnt, none),
+	&_DT_STATIC_P(refcnt, ifaddr),
 	&_DT_STATIC_P(refcnt, inpcb),
 	&_DT_STATIC_P(refcnt, tdb),
 };

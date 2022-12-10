@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmd.h,v 1.109 2022/05/03 21:39:18 dv Exp $	*/
+/*	$OpenBSD: vmd.h,v 1.111 2022/10/31 14:02:11 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -18,6 +18,7 @@
 
 #include <sys/types.h>
 #include <sys/queue.h>
+#include <sys/un.h>
 #include <sys/socket.h>
 
 #include <machine/vmmvar.h>
@@ -64,11 +65,6 @@
 #define VM_START_RATE_SEC	6	/* min. seconds since last reboot */
 #define VM_START_RATE_LIMIT	3	/* max. number of fast reboots */
 
-/* default user instance limits */
-#define VM_DEFAULT_USER_MAXCPU	4
-#define VM_DEFAULT_USER_MAXMEM	2048
-#define VM_DEFAULT_USER_MAXIFS	8
-
 /* vmd -> vmctl error codes */
 #define VMD_BIOS_MISSING	1001
 #define VMD_DISK_MISSING	1002
@@ -77,6 +73,8 @@
 #define VMD_CDROM_MISSING	1005
 #define VMD_CDROM_INVALID	1006
 #define VMD_PARENT_INVALID	1007
+
+#define IMSG_AGENTX_PEERID	(uint32_t)-2
 
 /* Image file signatures */
 #define VM_MAGIC_QCOW		"QFI\xfb"
@@ -284,7 +282,6 @@ struct vmd_vm {
 	struct imsgev		 vm_iev;
 	uid_t			 vm_uid;
 	int			 vm_receive_fd;
-	struct vmd_user		*vm_user;
 	unsigned int		 vm_state;
 /* When set, VM is running now (PROC_PARENT only) */
 #define VM_STATE_RUNNING	0x01
@@ -304,17 +301,6 @@ struct vmd_vm {
 };
 TAILQ_HEAD(vmlist, vmd_vm);
 
-struct vmd_user {
-	struct vmop_owner	 usr_id;
-	uint64_t		 usr_maxcpu;
-	uint64_t		 usr_maxmem;
-	uint64_t		 usr_maxifs;
-	int			 usr_refcnt;
-
-	TAILQ_ENTRY(vmd_user)	 usr_entry;
-};
-TAILQ_HEAD(userlist, vmd_user);
-
 struct name2id {
 	char			name[VMM_MAX_NAME_LEN];
 	int			uid;
@@ -330,6 +316,17 @@ struct address {
 };
 TAILQ_HEAD(addresslist, address);
 
+#define SUN_PATH_LEN		(sizeof(((struct sockaddr_un *)NULL)->sun_path))
+struct vmd_agentx {
+	int			 ax_enabled;
+	char			 ax_path[SUN_PATH_LEN];
+	/*
+	 * SNMP-VIEW-BASED-ACM-MIB:vacmContextName
+	 * Should probably be a define in agentx.h
+	 */
+	char			 ax_context[32 + 1];
+};
+
 struct vmd_config {
 	unsigned int		 cfg_flags;
 #define VMD_CFG_INET6		0x01
@@ -340,6 +337,7 @@ struct vmd_config {
 	int			 parallelism;
 	struct address		 cfg_localprefix;
 	struct address		 cfg_localprefix6;
+	struct vmd_agentx	 cfg_agentx;
 };
 
 struct vmd {
@@ -358,7 +356,6 @@ struct vmd {
 	struct name2idlist	*vmd_known;
 	uint32_t		 vmd_nswitches;
 	struct switchlist	*vmd_switches;
-	struct userlist		*vmd_users;
 
 	int			 vmd_fd;
 	int			 vmd_fd6;
@@ -430,10 +427,6 @@ int	 vm_opentty(struct vmd_vm *);
 void	 vm_closetty(struct vmd_vm *);
 void	 switch_remove(struct vmd_switch *);
 struct vmd_switch *switch_getbyname(const char *);
-struct vmd_user *user_get(uid_t);
-void	 user_put(struct vmd_user *);
-void	 user_inc(struct vm_create_params *, struct vmd_user *, int);
-int	 user_checklimit(struct vmd_user *, struct vm_create_params *);
 char	*get_string(uint8_t *, size_t);
 uint32_t prefixlen2mask(uint8_t);
 void	 prefixlen2mask6(u_int8_t, struct in6_addr *);
@@ -480,6 +473,10 @@ int	 config_getvm(struct privsep *, struct imsg *);
 int	 config_getdisk(struct privsep *, struct imsg *);
 int	 config_getif(struct privsep *, struct imsg *);
 int	 config_getcdrom(struct privsep *, struct imsg *);
+
+/* vm_agentx.c */
+void vm_agentx(struct privsep *, struct privsep_proc *);
+void vm_agentx_shutdown(void);
 
 /* parse.y */
 int	 parse_config(const char *);

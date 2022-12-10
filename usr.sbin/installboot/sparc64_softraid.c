@@ -1,4 +1,4 @@
-/*	$OpenBSD: sparc64_softraid.c,v 1.5 2020/06/08 19:17:12 kn Exp $	*/
+/*	$OpenBSD: sparc64_softraid.c,v 1.9 2022/11/08 12:08:53 kn Exp $	*/
 /*
  * Copyright (c) 2012 Joel Sing <jsing@openbsd.org>
  *
@@ -15,19 +15,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/disklabel.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #include <dev/biovar.h>
-#include <dev/softraidvar.h>
 
 #include <err.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <util.h>
 #include <unistd.h>
 
 #include "installboot.h"
@@ -41,35 +36,13 @@ sr_install_bootblk(int devfd, int vol, int disk)
 	int diskfd;
 	char part;
 
-	/* Get device name for this disk/chunk. */
-	memset(&bd, 0, sizeof(bd));
-	bd.bd_volid = vol;
-	bd.bd_diskid = disk;
-	if (ioctl(devfd, BIOCDISK, &bd) == -1)
-		err(1, "BIOCDISK");
-
-	/* Check disk status. */
-	if (bd.bd_status != BIOC_SDONLINE && bd.bd_status != BIOC_SDREBUILD) {
-		fprintf(stderr, "softraid chunk %u not online - skipping...\n",
-		    disk);
+	diskfd = sr_open_chunk(devfd, vol, disk, &bd, &realdev, &part);
+	if (diskfd == -1)
 		return;
-	}
-
-	if (strlen(bd.bd_vendor) < 1)
-		errx(1, "invalid disk name");
-	part = bd.bd_vendor[strlen(bd.bd_vendor) - 1];
-	if (part < 'a' || part >= 'a' + MAXPARTITIONS)
-		errx(1, "invalid partition %c\n", part);
-	bd.bd_vendor[strlen(bd.bd_vendor) - 1] = '\0';
-
-	/* Open device. */
-	if ((diskfd = opendev(bd.bd_vendor, (nowrite ? O_RDONLY : O_RDWR),
-	    OPENDEV_PART, &realdev)) == -1)
-		err(1, "open: %s", realdev);
 
 	if (verbose)
-		fprintf(stderr, "%s%c: installing boot blocks on %s\n",
-		    bd.bd_vendor, part, realdev);
+		fprintf(stderr, "%s%c: %s boot blocks on %s\n", bd.bd_vendor,
+		    part, (nowrite ? "would install" : "installing"), realdev);
 
 	/* Write boot blocks to device. */
 	md_installboot(diskfd, realdev);
@@ -91,10 +64,10 @@ sr_install_bootldr(int devfd, char *dev)
 	bb.bb_bootldr = ldrstore;
 	bb.bb_bootldr_size = ldrsize;
 	strncpy(bb.bb_dev, dev, sizeof(bb.bb_dev));
+	if (verbose)
+		fprintf(stderr, "%s: %s boot loader on softraid volume\n", dev,
+		    (nowrite ? "would install" : "installing"));
 	if (!nowrite) {
-		if (verbose)
-			fprintf(stderr, "%s: installing boot loader on "
-			    "softraid volume\n", dev);
 		if (ioctl(devfd, BIOCINSTALLBOOT, &bb) == -1)
 			errx(1, "softraid installboot failed");
 		sr_status(&bb.bb_bio.bio_status);

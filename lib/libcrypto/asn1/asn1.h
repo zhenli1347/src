@@ -1,4 +1,4 @@
-/* $OpenBSD: asn1.h,v 1.68 2022/07/12 14:42:48 kn Exp $ */
+/* $OpenBSD: asn1.h,v 1.72 2022/11/13 13:59:46 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -547,8 +547,6 @@ int ASN1_TYPE_cmp(const ASN1_TYPE *a, const ASN1_TYPE *b);
 ASN1_OBJECT *ASN1_OBJECT_new(void);
 void ASN1_OBJECT_free(ASN1_OBJECT *a);
 int i2d_ASN1_OBJECT(const ASN1_OBJECT *a, unsigned char **pp);
-ASN1_OBJECT *c2i_ASN1_OBJECT(ASN1_OBJECT **a, const unsigned char **pp,
-    long length);
 ASN1_OBJECT *d2i_ASN1_OBJECT(ASN1_OBJECT **a, const unsigned char **pp,
     long length);
 
@@ -577,9 +575,6 @@ void ASN1_BIT_STRING_free(ASN1_BIT_STRING *a);
 ASN1_BIT_STRING *d2i_ASN1_BIT_STRING(ASN1_BIT_STRING **a, const unsigned char **in, long len);
 int i2d_ASN1_BIT_STRING(ASN1_BIT_STRING *a, unsigned char **out);
 extern const ASN1_ITEM ASN1_BIT_STRING_it;
-int i2c_ASN1_BIT_STRING(ASN1_BIT_STRING *a, unsigned char **pp);
-ASN1_BIT_STRING *c2i_ASN1_BIT_STRING(ASN1_BIT_STRING **a,
-    const unsigned char **pp, long length);
 int ASN1_BIT_STRING_set(ASN1_BIT_STRING *a, unsigned char *d, int length);
 int ASN1_BIT_STRING_set_bit(ASN1_BIT_STRING *a, int n, int value);
 int ASN1_BIT_STRING_get_bit(const ASN1_BIT_STRING *a, int n);
@@ -599,9 +594,6 @@ void ASN1_INTEGER_free(ASN1_INTEGER *a);
 ASN1_INTEGER *d2i_ASN1_INTEGER(ASN1_INTEGER **a, const unsigned char **in, long len);
 int i2d_ASN1_INTEGER(ASN1_INTEGER *a, unsigned char **out);
 extern const ASN1_ITEM ASN1_INTEGER_it;
-int i2c_ASN1_INTEGER(ASN1_INTEGER *a, unsigned char **pp);
-ASN1_INTEGER *c2i_ASN1_INTEGER(ASN1_INTEGER **a, const unsigned char **pp,
-    long length);
 ASN1_INTEGER *d2i_ASN1_UINTEGER(ASN1_INTEGER **a, const unsigned char **pp,
     long length);
 ASN1_INTEGER *	ASN1_INTEGER_dup(const ASN1_INTEGER *x);
@@ -846,6 +838,7 @@ int ASN1_STRING_print(BIO *bp, const ASN1_STRING *v);
 int ASN1_STRING_print_ex(BIO *out, const ASN1_STRING *str, unsigned long flags);
 int ASN1_bn_print(BIO *bp, const char *number, const BIGNUM *num,
     unsigned char *buf, int off);
+int ASN1_buf_print(BIO *bp, const unsigned char *buf, size_t buflen, int indent);
 int ASN1_parse(BIO *bp, const unsigned char *pp, long len, int indent);
 int ASN1_parse_dump(BIO *bp, const unsigned char *pp, long len, int indent, int dump);
 #endif
@@ -1180,6 +1173,7 @@ void ERR_load_ASN1_strings(void);
 #define ASN1_R_TOO_LONG					 155
 #define ASN1_R_TOO_SMALL				 224
 #define ASN1_R_TYPE_NOT_CONSTRUCTED			 156
+#define ASN1_R_TYPE_NOT_PRIMITIVE			 231
 #define ASN1_R_UNABLE_TO_DECODE_RSA_KEY			 157
 #define ASN1_R_UNABLE_TO_DECODE_RSA_PRIVATE_KEY		 158
 #define ASN1_R_UNEXPECTED_EOC				 159

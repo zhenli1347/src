@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh.c,v 1.575 2022/07/01 00:36:30 djm Exp $ */
+/* $OpenBSD: ssh.c,v 1.581 2022/12/09 00:22:29 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -235,6 +235,7 @@ static struct addrinfo *
 resolve_host(const char *name, int port, int logerr, char *cname, size_t clen)
 {
 	char strport[NI_MAXSERV];
+	const char *errstr = NULL;
 	struct addrinfo hints, *res;
 	int gaierr;
 	LogLevel loglevel = SYSLOG_LEVEL_DEBUG1;
@@ -260,7 +261,10 @@ resolve_host(const char *name, int port, int logerr, char *cname, size_t clen)
 		return NULL;
 	}
 	if (cname != NULL && res->ai_canonname != NULL) {
-		if (strlcpy(cname, res->ai_canonname, clen) >= clen) {
+		if (!valid_domain(res->ai_canonname, 0, &errstr)) {
+			error("ignoring bad CNAME \"%s\" for host \"%s\": %s",
+			    res->ai_canonname, name, errstr);
+		} else if (strlcpy(cname, res->ai_canonname, clen) >= clen) {
 			error_f("host \"%s\" cname \"%s\" too long (max %lu)",
 			    name,  res->ai_canonname, (u_long)clen);
 			if (clen > 0)
@@ -500,14 +504,22 @@ resolve_canonicalize(char **hostp, int port)
 }
 
 /*
- * Check the result of hostkey loading, ignoring some errors and
- * fatal()ing for others.
+ * Check the result of hostkey loading, ignoring some errors and either
+ * discarding the key or fatal()ing for others.
  */
 static void
-check_load(int r, const char *path, const char *message)
+check_load(int r, struct sshkey **k, const char *path, const char *message)
 {
 	switch (r) {
 	case 0:
+		/* Check RSA keys size and discard if undersized */
+		if (k != NULL && *k != NULL &&
+		    (r = sshkey_check_rsa_length(*k,
+		    options.required_rsa_size)) != 0) {
+			error_r(r, "load %s \"%s\"", message, path);
+			free(*k);
+			*k = NULL;
+		}
 		break;
 	case SSH_ERR_INTERNAL_ERROR:
 	case SSH_ERR_ALLOC_FAIL:
@@ -645,7 +657,7 @@ main(int ac, char **av)
 	 * writable only by the owner, which is ok for all files for which we
 	 * don't set the modes explicitly.
 	 */
-	umask(022);
+	umask(022 | umask(077));
 
 	setlocale(LC_CTYPE, "");
 
@@ -1548,27 +1560,34 @@ main(int ac, char **av)
 	sensitive_data.nkeys = 0;
 	sensitive_data.keys = NULL;
 	if (options.hostbased_authentication) {
+		int loaded = 0;
+
 		sensitive_data.nkeys = 10;
 		sensitive_data.keys = xcalloc(sensitive_data.nkeys,
-		    sizeof(struct sshkey));
+		    sizeof(*sensitive_data.keys));
 
 		/* XXX check errors? */
 #define L_PUBKEY(p,o) do { \
 	if ((o) >= sensitive_data.nkeys) \
 		fatal_f("pubkey out of array bounds"); \
 	check_load(sshkey_load_public(p, &(sensitive_data.keys[o]), NULL), \
-	    p, "pubkey"); \
-	if (sensitive_data.keys[o] != NULL) \
+	    &(sensitive_data.keys[o]), p, "pubkey"); \
+	if (sensitive_data.keys[o] != NULL) { \
 		debug2("hostbased key %d: %s key from \"%s\"", o, \
 		    sshkey_ssh_name(sensitive_data.keys[o]), p); \
+		loaded++; \
+	} \
 } while (0)
 #define L_CERT(p,o) do { \
 	if ((o) >= sensitive_data.nkeys) \
 		fatal_f("cert out of array bounds"); \
-	check_load(sshkey_load_cert(p, &(sensitive_data.keys[o])), p, "cert"); \
-	if (sensitive_data.keys[o] != NULL) \
+	check_load(sshkey_load_cert(p, &(sensitive_data.keys[o])), \
+	    &(sensitive_data.keys[o]), p, "cert"); \
+	if (sensitive_data.keys[o] != NULL) { \
 		debug2("hostbased key %d: %s cert from \"%s\"", o, \
 		    sshkey_ssh_name(sensitive_data.keys[o]), p); \
+		loaded++; \
+	} \
 } while (0)
 
 		if (options.hostbased_authentication == 1) {
@@ -1582,6 +1601,9 @@ main(int ac, char **av)
 			L_PUBKEY(_PATH_HOST_DSA_KEY_FILE, 7);
 			L_CERT(_PATH_HOST_XMSS_KEY_FILE, 8);
 			L_PUBKEY(_PATH_HOST_XMSS_KEY_FILE, 9);
+			if (loaded == 0)
+				debug("HostbasedAuthentication enabled but no "
+				   "local public host keys could be loaded.");
 		}
 	}
 
@@ -1998,7 +2020,7 @@ ssh_session2_setup(struct ssh *ssh, int id, int success, void *arg)
 	char *proto = NULL, *data = NULL;
 
 	if (!success)
-		return; /* No need for error message, channels code sens one */
+		return; /* No need for error message, channels code sends one */
 
 	display = getenv("DISPLAY");
 	if (display == NULL && options.forward_x11)
@@ -2244,7 +2266,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 		filename = default_client_percent_dollar_expand(cp, cinfo);
 		free(cp);
 		check_load(sshkey_load_public(filename, &public, NULL),
-		    filename, "pubkey");
+		    &public, filename, "pubkey");
 		debug("identity file %s type %d", filename,
 		    public ? public->type : -1);
 		free(options.identity_files[i]);
@@ -2263,7 +2285,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 			continue;
 		xasprintf(&cp, "%s-cert", filename);
 		check_load(sshkey_load_public(cp, &public, NULL),
-		    filename, "pubkey");
+		    &public, filename, "pubkey");
 		debug("identity file %s type %d", cp,
 		    public ? public->type : -1);
 		if (public == NULL) {
@@ -2294,7 +2316,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 		free(cp);
 
 		check_load(sshkey_load_public(filename, &public, NULL),
-		    filename, "certificate");
+		    &public, filename, "certificate");
 		debug("certificate file %s type %d", filename,
 		    public ? public->type : -1);
 		free(options.certificate_files[i]);

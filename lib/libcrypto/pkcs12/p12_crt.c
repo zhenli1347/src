@@ -1,4 +1,4 @@
-/* $OpenBSD: p12_crt.c,v 1.19 2022/08/03 20:16:06 tb Exp $ */
+/* $OpenBSD: p12_crt.c,v 1.21 2022/11/12 13:03:28 beck Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project.
  */
@@ -60,6 +60,8 @@
 
 #include <openssl/err.h>
 #include <openssl/pkcs12.h>
+
+#include "pkcs12_local.h"
 
 static int pkcs12_add_bag(STACK_OF(PKCS12_SAFEBAG) **pbags,
     PKCS12_SAFEBAG *bag);
@@ -181,6 +183,7 @@ err:
 		sk_PKCS12_SAFEBAG_pop_free(bags, PKCS12_SAFEBAG_free);
 	return NULL;
 }
+LCRYPTO_ALIAS(PKCS12_create)
 
 PKCS12_SAFEBAG *
 PKCS12_add_cert(STACK_OF(PKCS12_SAFEBAG) **pbags, X509 *cert)
@@ -218,6 +221,7 @@ err:
 
 	return NULL;
 }
+LCRYPTO_ALIAS(PKCS12_add_cert)
 
 PKCS12_SAFEBAG *
 PKCS12_add_key(STACK_OF(PKCS12_SAFEBAG) **pbags, EVP_PKEY *key, int key_usage,
@@ -258,6 +262,7 @@ err:
 
 	return NULL;
 }
+LCRYPTO_ALIAS(PKCS12_add_key)
 
 int
 PKCS12_add_safe(STACK_OF(PKCS7) **psafes, STACK_OF(PKCS12_SAFEBAG) *bags,
@@ -301,6 +306,7 @@ err:
 
 	return 0;
 }
+LCRYPTO_ALIAS(PKCS12_add_safe)
 
 static int
 pkcs12_add_bag(STACK_OF(PKCS12_SAFEBAG) **pbags, PKCS12_SAFEBAG *bag)
@@ -347,3 +353,4 @@ PKCS12_add_safes(STACK_OF(PKCS7) *safes, int nid_p7)
 
 	return p12;
 }
+LCRYPTO_ALIAS(PKCS12_add_safes)

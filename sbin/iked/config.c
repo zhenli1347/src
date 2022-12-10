@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.86 2022/07/08 19:51:11 tobhe Exp $	*/
+/*	$OpenBSD: config.c,v 1.91 2022/12/03 22:34:35 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -60,6 +60,7 @@ config_new_sa(struct iked *env, int initiator)
 	gettimeofday(&sa->sa_timecreated, NULL);
 	memcpy(&sa->sa_timeused, &sa->sa_timecreated, sizeof(sa->sa_timeused));
 
+	ikestat_inc(env, ikes_sa_created);
 	return (sa);
 }
 
@@ -181,6 +182,11 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
 	free(sa->sa_cp_dns);
 
 	free(sa->sa_tag);
+
+	if (sa->sa_state == IKEV2_STATE_ESTABLISHED)
+		ikestat_dec(env, ikes_sa_established_current);
+	ikestat_inc(env, ikes_sa_removed);
+
 	free(sa);
 }
 
@@ -211,10 +217,15 @@ config_free_policy(struct iked *env, struct iked_policy *pol)
 	if (pol->pol_flags & IKED_POLICY_REFCNT)
 		goto remove;
 
+	/*
+	 * Remove policy from the sc_policies list, but increment
+	 * refcount for every SA linked for the policy.
+	 */
+	pol->pol_flags |= IKED_POLICY_REFCNT;
+
 	TAILQ_REMOVE(&env->sc_policies, pol, pol_entry);
 
 	TAILQ_FOREACH(sa, &pol->pol_sapeers, sa_peer_entry) {
-		/* Remove from the policy list, but keep for existing SAs */
 		if (sa->sa_policy == pol)
 			policy_ref(env, pol);
 		else
@@ -333,6 +344,7 @@ config_free_childsas(struct iked *env, struct iked_childsas *head,
 			childsa_free(ipcomp);
 		}
 		childsa_free(csa);
+		ikestat_inc(env, ikes_csa_removed);
 	}
 }
 
@@ -938,11 +950,11 @@ config_setocsp(struct iked *env)
 int
 config_getocsp(struct iked *env, struct imsg *imsg)
 {
-	size_t			 have, need;
-	u_int8_t		*ptr;
+	size_t		 have, need;
+	uint8_t		*ptr;
 
 	free(env->sc_ocsp_url);
-	ptr = (u_int8_t *)imsg->data;
+	ptr = (uint8_t *)imsg->data;
 	have = IMSG_DATA_SIZE(imsg);
 
 	/* get tolerate */

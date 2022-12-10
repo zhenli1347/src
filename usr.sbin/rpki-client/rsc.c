@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsc.c,v 1.12 2022/06/10 10:41:09 tb Exp $ */
+/*	$OpenBSD: rsc.c,v 1.19 2022/11/26 17:14:40 job Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
@@ -42,7 +42,7 @@ struct	parse {
 extern ASN1_OBJECT	*rsc_oid;
 
 /*
- * Types and templates for RSC eContent - draft-ietf-sidrops-rpki-rsc-08
+ * Types and templates for RSC eContent - RFC 9323
  */
 
 typedef struct {
@@ -114,7 +114,7 @@ typedef struct {
 } RpkiSignedChecklist;
 
 ASN1_SEQUENCE(RpkiSignedChecklist) = {
-	ASN1_IMP_OPT(RpkiSignedChecklist, version, ASN1_INTEGER, 0),
+	ASN1_EXP_OPT(RpkiSignedChecklist, version, ASN1_INTEGER, 0),
 	ASN1_SIMPLE(RpkiSignedChecklist, resources, ResourceBlock),
 	ASN1_SIMPLE(RpkiSignedChecklist, digestAlgorithm, X509_ALGOR),
 	ASN1_SEQUENCE_OF(RpkiSignedChecklist, checkList, FileNameAndHash),
@@ -263,7 +263,7 @@ rsc_check_digesttype(struct parse *p, const X509_ALGOR *alg)
 }
 
 /*
- * Parse the FileNameAndHash sequence, draft-ietf-sidrops-rpki-rsc, section 4.4.
+ * Parse the FileNameAndHash sequence, RFC 9323, section 4.4.
  * Return zero on failure, non-zero on success.
  */
 static int
@@ -319,7 +319,7 @@ rsc_parse_checklist(struct parse *p, const STACK_OF(FileNameAndHash) *checkList)
 
 /*
  * Parses the eContent segment of an RSC file
- * draft-ietf-sidrops-rpki-rsc, section 4
+ * RFC 9323, section 4
  * Returns zero on failure, non-zero on success.
  */
 static int
@@ -330,7 +330,7 @@ rsc_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 	int			 rc = 0;
 
 	/*
-	 * draft-ietf-sidrops-rpki-rsc section 4
+	 * RFC 9323 section 4
 	 */
 
 	if ((rsc = d2i_RpkiSignedChecklist(NULL, &d, dsz)) == NULL) {
@@ -368,7 +368,7 @@ rsc_parse_econtent(const unsigned char *d, size_t dsz, struct parse *p)
 }
 
 /*
- * Parse a full draft-ietf-sidrops-rpki-rsc file.
+ * Parse a full RFC 9323 file.
  * Returns the RSC or NULL if the object was malformed.
  */
 struct rsc *
@@ -378,6 +378,7 @@ rsc_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 	unsigned char		*cms;
 	size_t			 cmsz;
 	const ASN1_TIME		*at;
+	struct cert		*cert = NULL;
 	int			 rc = 0;
 
 	memset(&p, 0, sizeof(struct parse));
@@ -407,13 +408,28 @@ rsc_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_get0_notAfter failed", fn);
 		goto out;
 	}
-	if (x509_get_time(at, &p.res->expires) == -1) {
+	if (!x509_get_time(at, &p.res->expires)) {
 		warnx("%s: ASN1_time_parse failed", fn);
+		goto out;
+	}
+
+	if (X509_get_ext_by_NID(*x509, NID_sinfo_access, -1) != -1) {
+		warnx("%s: RSC: EE cert must not have an SIA extension", fn);
+		goto out;
+	}
+
+	if (x509_any_inherits(*x509)) {
+		warnx("%s: inherit elements not allowed in EE cert", fn);
 		goto out;
 	}
 
 	if (!rsc_parse_econtent(cms, cmsz, &p))
 		goto out;
+
+	if ((cert = cert_parse_ee_cert(fn, *x509)) == NULL)
+		goto out;
+
+	p.res->valid = valid_rsc(fn, cert, p.res);
 
 	rc = 1;
  out:
@@ -423,6 +439,7 @@ rsc_parse(X509 **x509, const char *fn, const unsigned char *der, size_t len)
 		X509_free(*x509);
 		*x509 = NULL;
 	}
+	cert_free(cert);
 	free(cms);
 	return p.res;
 }

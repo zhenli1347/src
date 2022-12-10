@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofdev.c,v 1.26 2021/03/11 11:16:59 jsg Exp $	*/
+/*	$OpenBSD: ofdev.c,v 1.28 2022/10/12 09:23:45 kn Exp $	*/
 /*	$NetBSD: ofdev.c,v 1.1 1997/04/16 20:29:20 thorpej Exp $	*/
 
 /*
@@ -55,7 +55,6 @@ char opened_name[256];
 
 /*
  * this function is passed [device specifier]:[kernel]
- * however a device specifier may contain a ':'
  */
 static int
 parsename(char *str, char **file)
@@ -128,6 +127,7 @@ devclose(struct open_file *of)
 
 	OF_close(op->handle);
 	free(op, sizeof *op);
+	return 0;
 }
 
 struct devsw devsw[1] = {

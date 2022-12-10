@@ -1,4 +1,4 @@
-/*	$OpenBSD: if.c,v 1.662 2022/08/06 15:57:58 bluhm Exp $	*/
+/*	$OpenBSD: if.c,v 1.683 2022/11/23 16:57:37 kn Exp $	*/
 /*	$NetBSD: if.c,v 1.35 1996/05/07 05:26:04 thorpej Exp $	*/
 
 /*
@@ -87,6 +87,7 @@
 #include <sys/proc.h>
 #include <sys/stdint.h>	/* uintptr_t */
 #include <sys/rwlock.h>
+#include <sys/smr.h>
 
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -132,7 +133,6 @@
 #include <sys/device.h>
 
 void	if_attachsetup(struct ifnet *);
-void	if_attachdomain(struct ifnet *);
 void	if_attach_common(struct ifnet *);
 void	if_remove(struct ifnet *);
 int	if_createrdomain(int, struct ifnet *);
@@ -191,45 +191,42 @@ void	if_qstart_compat(struct ifqueue *);
  * if_get(0) returns NULL.
  */
 
-void if_ifp_dtor(void *, void *);
-void if_map_dtor(void *, void *);
 struct ifnet *if_ref(struct ifnet *);
-
-/*
- * struct if_map
- *
- * bounded array of ifnet srp pointers used to fetch references of live
- * interfaces with if_get().
- */
-
-struct if_map {
-	unsigned long		 limit;
-	/* followed by limit ifnet srp pointers */
-};
 
 /*
  * struct if_idxmap
  *
  * infrastructure to manage updates and accesses to the current if_map.
+ *
+ * interface index 0 is special and represents "no interface", so we
+ * use the 0th slot in map to store the length of the array.
  */
 
 struct if_idxmap {
-	unsigned int		 serial;
-	unsigned int		 count;
-	struct srp		 map;
-	struct rwlock		 lock;
-	unsigned char		*usedidx;	/* bitmap of indices in use */
+	unsigned int		  serial;
+	unsigned int		  count;
+	struct ifnet		**map;		/* SMR protected */
+	struct rwlock		  lock;
+	unsigned char		 *usedidx;	/* bitmap of indices in use */
+};
+
+struct if_idxmap_dtor {
+	struct smr_entry	  smr;
+	struct ifnet		**map;
 };
 
 void	if_idxmap_init(unsigned int);
+void	if_idxmap_free(void *);
 void	if_idxmap_alloc(struct ifnet *);
 void	if_idxmap_insert(struct ifnet *);
 void	if_idxmap_remove(struct ifnet *);
 
-TAILQ_HEAD(, ifg_group) ifg_head = TAILQ_HEAD_INITIALIZER(ifg_head);
+TAILQ_HEAD(, ifg_group) ifg_head =
+    TAILQ_HEAD_INITIALIZER(ifg_head);	/* [N] list of interface groups */
 
-LIST_HEAD(, if_clone) if_cloners = LIST_HEAD_INITIALIZER(if_cloners);
-int if_cloners_count;
+LIST_HEAD(, if_clone) if_cloners =
+    LIST_HEAD_INITIALIZER(if_cloners);	/* [I] list of clonable interfaces */
+int if_cloners_count;	/* [I] number of clonable interfaces */
 
 struct rwlock if_cloners_lock = RWLOCK_INITIALIZER("clonelk");
 
@@ -264,7 +261,7 @@ ifinit(void)
 	 * most machines boot with 4 or 5 interfaces, so size the initial map
 	 * to accommodate this
 	 */
-	if_idxmap_init(8);
+	if_idxmap_init(8); /* 8 is a nice power of 2 for malloc */
 
 	for (i = 0; i < NET_TASKQ; i++) {
 		nettqmp[i] = taskq_create("softnet", 1, IPL_NET, TASKQ_MPSAFE);
@@ -273,48 +270,48 @@ ifinit(void)
 	}
 }
 
-static struct if_idxmap if_idxmap = {
-	0,
-	0,
-	SRP_INITIALIZER(),
-	RWLOCK_INITIALIZER("idxmaplk"),
-	NULL,
-};
+static struct if_idxmap if_idxmap;
 
-struct srp_gc if_ifp_gc = SRP_GC_INITIALIZER(if_ifp_dtor, NULL);
-struct srp_gc if_map_gc = SRP_GC_INITIALIZER(if_map_dtor, NULL);
+struct ifnet_head ifnetlist = TAILQ_HEAD_INITIALIZER(ifnetlist);
 
-struct ifnet_head ifnet = TAILQ_HEAD_INITIALIZER(ifnet);
+static inline unsigned int
+if_idxmap_limit(struct ifnet **if_map)
+{
+	return ((uintptr_t)if_map[0]);
+}
+
+static inline size_t
+if_idxmap_usedidx_size(unsigned int limit)
+{
+	return (max(howmany(limit, NBBY), sizeof(struct if_idxmap_dtor)));
+}
 
 void
 if_idxmap_init(unsigned int limit)
 {
-	struct if_map *if_map;
-	struct srp *map;
-	unsigned int i;
+	struct ifnet **if_map;
 
-	if_idxmap.serial = 1; /* skip ifidx 0 so it can return NULL */
+	rw_init(&if_idxmap.lock, "idxmaplk");
+	if_idxmap.serial = 1; /* skip ifidx 0 */
 
-	if_map = malloc(sizeof(*if_map) + limit * sizeof(*map),
-	    M_IFADDR, M_WAITOK);
+	if_map = mallocarray(limit, sizeof(*if_map), M_IFADDR,
+	    M_WAITOK | M_ZERO);
 
-	if_map->limit = limit;
-	map = (struct srp *)(if_map + 1);
-	for (i = 0; i < limit; i++)
-		srp_init(&map[i]);
+	if_map[0] = (struct ifnet *)(uintptr_t)limit;
 
-	if_idxmap.usedidx = malloc(howmany(limit, NBBY),
+	if_idxmap.usedidx = malloc(if_idxmap_usedidx_size(limit),
 	    M_IFADDR, M_WAITOK | M_ZERO);
+	setbit(if_idxmap.usedidx, 0); /* blacklist ifidx 0 */
 
 	/* this is called early so there's nothing to race with */
-	srp_update_locked(&if_map_gc, &if_idxmap.map, if_map);
+	SMR_PTR_SET_LOCKED(&if_idxmap.map, if_map);
 }
 
 void
 if_idxmap_alloc(struct ifnet *ifp)
 {
-	struct if_map *if_map;
-	struct srp *map;
+	struct ifnet **if_map;
+	unsigned int limit;
 	unsigned int index, i;
 
 	refcnt_init(&ifp->if_refcnt);
@@ -324,49 +321,50 @@ if_idxmap_alloc(struct ifnet *ifp)
 	if (++if_idxmap.count >= USHRT_MAX)
 		panic("too many interfaces");
 
-	if_map = srp_get_locked(&if_idxmap.map);
-	map = (struct srp *)(if_map + 1);
+	if_map = SMR_PTR_GET_LOCKED(&if_idxmap.map);
+	limit = if_idxmap_limit(if_map);
 
 	index = if_idxmap.serial++ & USHRT_MAX;
 
-	if (index >= if_map->limit) {
-		struct if_map *nif_map;
-		struct srp *nmap;
-		unsigned int nlimit;
-		struct ifnet *nifp;
+	if (index >= limit) {
+		struct if_idxmap_dtor *dtor;
+		struct ifnet **oif_map;
+		unsigned int olimit;
 		unsigned char *nusedidx;
 
-		nlimit = if_map->limit * 2;
-		nif_map = malloc(sizeof(*nif_map) + nlimit * sizeof(*nmap),
-		    M_IFADDR, M_WAITOK);
-		nmap = (struct srp *)(nif_map + 1);
+		oif_map = if_map;
+		olimit = limit;
 
-		nif_map->limit = nlimit;
-		for (i = 0; i < if_map->limit; i++) {
-			srp_init(&nmap[i]);
-			nifp = srp_get_locked(&map[i]);
-			if (nifp != NULL) {
-				srp_update_locked(&if_ifp_gc, &nmap[i],
-				    if_ref(nifp));
-			}
+		limit = olimit * 2;
+		if_map = mallocarray(limit, sizeof(*if_map), M_IFADDR,
+		    M_WAITOK | M_ZERO);
+		if_map[0] = (struct ifnet *)(uintptr_t)limit;
+		
+		for (i = 1; i < olimit; i++) {
+			struct ifnet *oifp = SMR_PTR_GET_LOCKED(&oif_map[i]);
+			if (oifp == NULL)
+				continue;
+
+			/*
+			 * nif_map isn't visible yet, so don't need
+			 * SMR_PTR_SET_LOCKED and its membar.
+			 */
+			if_map[i] = if_ref(oifp);
 		}
 
-		while (i < nlimit) {
-			srp_init(&nmap[i]);
-			i++;
-		}
-
-		nusedidx = malloc(howmany(nlimit, NBBY),
+		nusedidx = malloc(if_idxmap_usedidx_size(limit),
 		    M_IFADDR, M_WAITOK | M_ZERO);
-		memcpy(nusedidx, if_idxmap.usedidx,
-		    howmany(if_map->limit, NBBY));
-		free(if_idxmap.usedidx, M_IFADDR,
-		    howmany(if_map->limit, NBBY));
+		memcpy(nusedidx, if_idxmap.usedidx, howmany(olimit, NBBY));
+
+		/* use the old usedidx bitmap as an smr_entry for the if_map */
+		dtor = (struct if_idxmap_dtor *)if_idxmap.usedidx;
 		if_idxmap.usedidx = nusedidx;
 
-		srp_update_locked(&if_map_gc, &if_idxmap.map, nif_map);
-		if_map = nif_map;
-		map = nmap;
+		SMR_PTR_SET_LOCKED(&if_idxmap.map, if_map);
+
+		dtor->map = oif_map;
+		smr_init(&dtor->smr);
+		smr_call(&dtor->smr, if_idxmap_free, dtor);
 	}
 
 	/* pick the next free index */
@@ -376,7 +374,7 @@ if_idxmap_alloc(struct ifnet *ifp)
 
 		index = if_idxmap.serial++ & USHRT_MAX;
 	}
-	KASSERT(index != 0 && index < if_map->limit);
+	KASSERT(index != 0 && index < limit);
 	KASSERT(isclr(if_idxmap.usedidx, index));
 
 	setbit(if_idxmap.usedidx, index);
@@ -386,22 +384,38 @@ if_idxmap_alloc(struct ifnet *ifp)
 }
 
 void
+if_idxmap_free(void *arg)
+{
+	struct if_idxmap_dtor *dtor = arg;
+	struct ifnet **oif_map = dtor->map;
+	unsigned int olimit = if_idxmap_limit(oif_map);
+	unsigned int i;
+
+	for (i = 1; i < olimit; i++)
+		if_put(oif_map[i]);
+
+	free(oif_map, M_IFADDR, olimit * sizeof(*oif_map));
+	free(dtor, M_IFADDR, if_idxmap_usedidx_size(olimit));
+}
+
+void
 if_idxmap_insert(struct ifnet *ifp)
 {
-	struct if_map *if_map;
-	struct srp *map;
+	struct ifnet **if_map;
 	unsigned int index = ifp->if_index;
 
 	rw_enter_write(&if_idxmap.lock);
 
-	if_map = srp_get_locked(&if_idxmap.map);
-	map = (struct srp *)(if_map + 1);
+	if_map = SMR_PTR_GET_LOCKED(&if_idxmap.map);
 
-	KASSERT(index != 0 && index < if_map->limit);
+	KASSERTMSG(index != 0 && index < if_idxmap_limit(if_map),
+	    "%s(%p) index %u vs limit %u", ifp->if_xname, ifp, index,
+	    if_idxmap_limit(if_map));
+	KASSERT(SMR_PTR_GET_LOCKED(&if_map[index]) == NULL);
 	KASSERT(isset(if_idxmap.usedidx, index));
 
 	/* commit */
-	srp_update_locked(&if_ifp_gc, &map[index], if_ref(ifp));
+	SMR_PTR_SET_LOCKED(&if_map[index], if_ref(ifp));
 
 	rw_exit_write(&if_idxmap.lock);
 }
@@ -409,51 +423,27 @@ if_idxmap_insert(struct ifnet *ifp)
 void
 if_idxmap_remove(struct ifnet *ifp)
 {
-	struct if_map *if_map;
-	struct srp *map;
-	unsigned int index;
-
-	index = ifp->if_index;
+	struct ifnet **if_map;
+	unsigned int index = ifp->if_index;
 
 	rw_enter_write(&if_idxmap.lock);
 
-	if_map = srp_get_locked(&if_idxmap.map);
-	KASSERT(index < if_map->limit);
+	if_map = SMR_PTR_GET_LOCKED(&if_idxmap.map);
 
-	map = (struct srp *)(if_map + 1);
-	KASSERT(ifp == (struct ifnet *)srp_get_locked(&map[index]));
-
-	srp_update_locked(&if_ifp_gc, &map[index], NULL);
-	if_idxmap.count--;
-
+	KASSERT(index != 0 && index < if_idxmap_limit(if_map));
+	KASSERT(SMR_PTR_GET_LOCKED(&if_map[index]) == ifp);
 	KASSERT(isset(if_idxmap.usedidx, index));
+
+	SMR_PTR_SET_LOCKED(&if_map[index], NULL);
+
+	if_idxmap.count--;
 	clrbit(if_idxmap.usedidx, index);
 	/* end of if_idxmap modifications */
 
 	rw_exit_write(&if_idxmap.lock);
-}
 
-void
-if_ifp_dtor(void *null, void *ifp)
-{
+	smr_barrier();
 	if_put(ifp);
-}
-
-void
-if_map_dtor(void *null, void *m)
-{
-	struct if_map *if_map = m;
-	struct srp *map = (struct srp *)(if_map + 1);
-	unsigned int i;
-
-	/*
-	 * dont need to serialize the use of update_locked since this is
-	 * the last reference to this map. there's nothing to race against.
-	 */
-	for (i = 0; i < if_map->limit; i++)
-		srp_update_locked(&if_ifp_gc, &map[i], NULL);
-
-	free(if_map, M_IFADDR, sizeof(*if_map) + if_map->limit * sizeof(*map));
 }
 
 /*
@@ -469,7 +459,10 @@ if_attachsetup(struct ifnet *ifp)
 
 	if_addgroup(ifp, IFG_ALL);
 
-	if_attachdomain(ifp);
+#ifdef INET6
+	nd6_ifattach(ifp);
+#endif
+
 #if NPF > 0
 	pfi_attach_ifnet(ifp);
 #endif
@@ -543,30 +536,11 @@ if_free_sadl(struct ifnet *ifp)
 }
 
 void
-if_attachdomain(struct ifnet *ifp)
-{
-	const struct domain *dp;
-	int i, s;
-
-	s = splnet();
-
-	/* address family dependent data region */
-	bzero(ifp->if_afdata, sizeof(ifp->if_afdata));
-	for (i = 0; (dp = domains[i]) != NULL; i++) {
-		if (dp->dom_ifattach)
-			ifp->if_afdata[dp->dom_family] =
-			    (*dp->dom_ifattach)(ifp);
-	}
-
-	splx(s);
-}
-
-void
 if_attachhead(struct ifnet *ifp)
 {
 	if_attach_common(ifp);
 	NET_LOCK();
-	TAILQ_INSERT_HEAD(&ifnet, ifp, if_list);
+	TAILQ_INSERT_HEAD(&ifnetlist, ifp, if_list);
 	if_attachsetup(ifp);
 	NET_UNLOCK();
 }
@@ -576,7 +550,7 @@ if_attach(struct ifnet *ifp)
 {
 	if_attach_common(ifp);
 	NET_LOCK();
-	TAILQ_INSERT_TAIL(&ifnet, ifp, if_list);
+	TAILQ_INSERT_TAIL(&ifnetlist, ifp, if_list);
 	if_attachsetup(ifp);
 	NET_UNLOCK();
 }
@@ -1014,7 +988,7 @@ if_remove(struct ifnet *ifp)
 {
 	/* Remove the interface from the list of all interfaces. */
 	NET_LOCK();
-	TAILQ_REMOVE(&ifnet, ifp, if_list);
+	TAILQ_REMOVE(&ifnetlist, ifp, if_list);
 	NET_UNLOCK();
 
 	/* Remove the interface from the interface index map. */
@@ -1063,7 +1037,6 @@ if_detach(struct ifnet *ifp)
 {
 	struct ifaddr *ifa;
 	struct ifg_list *ifg;
-	const struct domain *dp;
 	int i, s;
 
 	/* Undo pseudo-driver changes. */
@@ -1131,11 +1104,9 @@ if_detach(struct ifnet *ifp)
 	KASSERT(TAILQ_EMPTY(&ifp->if_linkstatehooks));
 	KASSERT(TAILQ_EMPTY(&ifp->if_detachhooks));
 
-	for (i = 0; (dp = domains[i]) != NULL; i++) {
-		if (dp->dom_ifdetach && ifp->if_afdata[dp->dom_family])
-			(*dp->dom_ifdetach)(ifp,
-			    ifp->if_afdata[dp->dom_family]);
-	}
+#ifdef INET6
+	nd6_ifdetach(ifp);
+#endif
 
 	/* Announce that the interface is gone. */
 	rtm_ifannounce(ifp, IFAN_DEPARTURE);
@@ -1256,7 +1227,7 @@ if_clone_destroy(const char *name)
 
 	rw_enter_write(&if_cloners_lock);
 
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (strcmp(ifp->if_xname, name) == 0)
 			break;
 	}
@@ -1422,7 +1393,7 @@ ifa_ifwithaddr(struct sockaddr *addr, u_int rtableid)
 
 	rdomain = rtable_l2(rtableid);
 	KERNEL_LOCK();
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp->if_rdomain != rdomain)
 			continue;
 
@@ -1451,7 +1422,7 @@ ifa_ifwithdstaddr(struct sockaddr *addr, u_int rdomain)
 
 	rdomain = rtable_l2(rdomain);
 	KERNEL_LOCK();
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp->if_rdomain != rdomain)
 			continue;
 		if (ifp->if_flags & IFF_POINTOPOINT) {
@@ -1608,7 +1579,7 @@ if_downall(void)
 	struct ifnet *ifp;
 
 	NET_LOCK();
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if ((ifp->if_flags & IFF_UP) == 0)
 			continue;
 		if_down(ifp);
@@ -1763,7 +1734,7 @@ if_unit(const char *name)
 
 	KERNEL_ASSERT_LOCKED();
 
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (strcmp(ifp->if_xname, name) == 0) {
 			if_ref(ifp);
 			return (ifp);
@@ -1779,22 +1750,22 @@ if_unit(const char *name)
 struct ifnet *
 if_get(unsigned int index)
 {
-	struct srp_ref sr;
-	struct if_map *if_map;
-	struct srp *map;
+	struct ifnet **if_map;
 	struct ifnet *ifp = NULL;
 
-	if_map = srp_enter(&sr, &if_idxmap.map);
-	if (index < if_map->limit) {
-		map = (struct srp *)(if_map + 1);
+	if (index == 0)
+		return (NULL);
 
-		ifp = srp_follow(&sr, &map[index]);
+	smr_read_enter();
+	if_map = SMR_PTR_GET(&if_idxmap.map);
+	if (index < if_idxmap_limit(if_map)) {
+		ifp = SMR_PTR_GET(&if_map[index]);
 		if (ifp != NULL) {
 			KASSERT(ifp->if_index == index);
 			if_ref(ifp);
 		}
 	}
-	srp_leave(&sr);
+	smr_read_leave();
 
 	return (ifp);
 }
@@ -1942,19 +1913,25 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCIFCREATE:
 		if ((error = suser(p)) != 0)
 			return (error);
+		KERNEL_LOCK();
 		error = if_clone_create(ifr->ifr_name, 0);
+		KERNEL_UNLOCK();
 		return (error);
 	case SIOCIFDESTROY:
 		if ((error = suser(p)) != 0)
 			return (error);
+		KERNEL_LOCK();
 		error = if_clone_destroy(ifr->ifr_name);
+		KERNEL_UNLOCK();
 		return (error);
 	case SIOCSIFGATTR:
 		if ((error = suser(p)) != 0)
 			return (error);
+		KERNEL_LOCK();
 		NET_LOCK();
 		error = if_setgroupattribs(data);
 		NET_UNLOCK();
+		KERNEL_UNLOCK();
 		return (error);
 	case SIOCGIFCONF:
 	case SIOCIFGCLONERS:
@@ -1973,12 +1950,17 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCGIFRDOMAIN:
 	case SIOCGIFGROUP:
 	case SIOCGIFLLPRIO:
-		return (ifioctl_get(cmd, data));
+		error = ifioctl_get(cmd, data);
+		return (error);
 	}
 
+	KERNEL_LOCK();
+
 	ifp = if_unit(ifr->ifr_name);
-	if (ifp == NULL)
+	if (ifp == NULL) {
+		KERNEL_UNLOCK();
 		return (ENXIO);
+	}
 	oif_flags = ifp->if_flags;
 	oif_xflags = ifp->if_xflags;
 
@@ -2360,9 +2342,7 @@ forceup:
 			break;
 		/* FALLTHROUGH */
 	default:
-		error = ((*so->so_proto->pr_usrreq)(so, PRU_CONTROL,
-			(struct mbuf *) cmd, (struct mbuf *) data,
-			(struct mbuf *) ifp, p));
+		error = pru_control(so, cmd, data, ifp);
 		if (error != EOPNOTSUPP)
 			break;
 		switch (cmd) {
@@ -2398,6 +2378,8 @@ forceup:
 
 	if (((oif_flags ^ ifp->if_flags) & IFF_UP) != 0)
 		getmicrotime(&ifp->if_lastchange);
+
+	KERNEL_UNLOCK();
 
 	if_put(ifp);
 
@@ -2441,9 +2423,13 @@ ifioctl_get(u_long cmd, caddr_t data)
 		return (error);
 	}
 
+	KERNEL_LOCK();
+
 	ifp = if_unit(ifr->ifr_name);
-	if (ifp == NULL)
+	if (ifp == NULL) {
+		KERNEL_UNLOCK();
 		return (ENXIO);
+	}
 
 	NET_LOCK_SHARED();
 
@@ -2514,6 +2500,8 @@ ifioctl_get(u_long cmd, caddr_t data)
 	}
 
 	NET_UNLOCK_SHARED();
+
+	KERNEL_UNLOCK();
 
 	if_put(ifp);
 
@@ -2617,7 +2605,7 @@ ifconf(caddr_t data)
 
 	/* If ifc->ifc_len is 0, fill it in with the needed size and return. */
 	if (space == 0) {
-		TAILQ_FOREACH(ifp, &ifnet, if_list) {
+		TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 			struct sockaddr *sa;
 
 			if (TAILQ_EMPTY(&ifp->if_addrlist))
@@ -2637,7 +2625,7 @@ ifconf(caddr_t data)
 	}
 
 	ifrp = ifc->ifc_req;
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (space < sizeof(ifr))
 			break;
 		bcopy(ifp->if_xname, ifr.ifr_name, IFNAMSIZ);
@@ -3175,7 +3163,7 @@ ifa_print_all(void)
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 			char addr[INET6_ADDRSTRLEN];
 

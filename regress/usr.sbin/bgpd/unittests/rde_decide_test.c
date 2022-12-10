@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_decide_test.c,v 1.12 2022/07/26 06:48:18 claudio Exp $ */
+/*	$OpenBSD: rde_decide_test.c,v 1.14 2022/09/24 11:29:16 claudio Exp $ */
 
 /*
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -63,9 +63,7 @@ struct rde_peer peer1_i = {
 union a {
 	struct aspath	a;
 	struct {
-		LIST_ENTRY(aspath) entry;
 		uint32_t source_as;
-		int refcnt;
 		uint16_t len;
 		uint16_t ascnt;
 		uint8_t d[6];
@@ -356,7 +354,8 @@ rib_byid(uint16_t id)
 }
 
 void
-rde_generate_updates(struct rib *rib, struct prefix *new, struct prefix *old,
+rde_generate_updates(struct rib *rib, struct prefix *newbest,
+    struct prefix *oldbest, struct prefix *newpath, struct prefix *oldpath,
     enum eval_mode mode)
 {
 	/* maybe we want to do something here */

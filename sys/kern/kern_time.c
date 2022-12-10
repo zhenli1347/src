@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_time.c,v 1.156 2022/05/05 09:45:15 bluhm Exp $	*/
+/*	$OpenBSD: kern_time.c,v 1.159 2022/12/05 23:18:37 deraadt Exp $	*/
 /*	$NetBSD: kern_time.c,v 1.20 1996/02/18 11:57:06 fvdl Exp $	*/
 
 /*
@@ -33,14 +33,12 @@
  */
 
 #include <sys/param.h>
-#include <sys/resourcevar.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
 #include <sys/proc.h>
 #include <sys/ktrace.h>
-#include <sys/vnode.h>
 #include <sys/signalvar.h>
 #include <sys/stdint.h>
 #include <sys/pledge.h>
@@ -445,7 +443,7 @@ sys_adjtime(struct proc *p, void *v, register_t *retval)
 	struct timeval atv;
 	const struct timeval *delta = SCARG(uap, delta);
 	struct timeval *olddelta = SCARG(uap, olddelta);
-	int64_t adjustment, remaining;	
+	int64_t adjustment, remaining;
 	int error;
 
 	error = pledge_adjtime(p, delta);
@@ -953,7 +951,9 @@ resettodr(void)
 void
 todr_attach(struct todr_chip_handle *todr)
 {
-	todr_handle = todr;
+	if (todr_handle == NULL ||
+	    todr->todr_quality > todr_handle->todr_quality)
+		todr_handle = todr;
 }
 
 #define RESETTODR_PERIOD	1800

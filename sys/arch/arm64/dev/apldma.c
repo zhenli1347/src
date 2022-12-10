@@ -1,4 +1,4 @@
-/*	$OpenBSD: apldma.c,v 1.2 2022/07/27 20:18:46 kettenis Exp $	*/
+/*	$OpenBSD: apldma.c,v 1.5 2022/11/26 21:35:22 kettenis Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -32,13 +32,6 @@
 #include <arm64/dev/apldma.h>
 
 /*
- * This driver is based on preliminary device tree bindings and will
- * almost certainly need changes once the official bindings land in
- * mainline Linux.  Support for these preliminary bindings will be
- * dropped as soon as official bindings are available.
- */
-
-/*
  * The device tree bindings for this hardware use separate Tx and Rx
  * channels with Tx channels using even channel numbers and Rx
  * channels using odd channel numbers.
@@ -46,14 +39,14 @@
 
 #define DMA_TX_EN			0x0000
 #define DMA_TX_EN_CLR			0x0004
-#define DMA_TX_INTR			0x0034
+#define DMA_TX_INTR(irq)		(0x0030 + (irq) * 4)
 
 #define DMA_TX_CTL(chan)		(0x8000 + ((chan) / 2) * 0x400)
 #define  DMA_TX_CTL_RESET_RINGS		(1 << 0)
-#define DMA_TX_INTRSTAT(chan)		(0x8014 + ((chan) / 2) * 0x400)
+#define DMA_TX_INTRSTAT(chan, irq)	(0x8010 + ((chan) / 2) * 0x400 + ((irq) * 4))
 #define  DMA_TX_INTRSTAT_DESC_DONE	(1 << 0)
 #define  DMA_TX_INTRSTAT_ERR		(1 << 6)
-#define DMA_TX_INTRMASK(chan)		(0x8024 + ((chan) / 2) * 0x400)
+#define DMA_TX_INTRMASK(chan, irq)	(0x8020 + ((chan) / 2) * 0x400 + ((irq) * 4))
 #define  DMA_TX_INTRMASK_DESC_DONE	(1 << 0)
 #define  DMA_TX_INTRMASK_ERR		(1 << 6)
 #define DMA_TX_BUS_WIDTH(chan)		(0x8040 + ((chan) / 2) * 0x400)
@@ -107,6 +100,7 @@ struct apldma_softc {
 	bus_dma_tag_t		sc_dmat;
 	int			sc_node;
 	void			*sc_ih;
+	int			sc_irq;
 
 	int			sc_nchannels;
 	struct apldma_channel	**sc_ac;
@@ -140,6 +134,7 @@ apldma_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct apldma_softc *sc = (struct apldma_softc *)self;
 	struct fdt_attach_args *faa = aux;
+	int irq;
 
 	if (faa->fa_nreg < 1) {
 		printf(": no registers\n");
@@ -159,19 +154,36 @@ apldma_attach(struct device *parent, struct device *self, void *aux)
 		goto unmap;
 	}
 	sc->sc_ac = mallocarray(sc->sc_nchannels,
-	    sizeof(struct apldma_channel), M_DEVBUF, M_WAITOK | M_ZERO);
+	    sizeof(struct apldma_channel *), M_DEVBUF, M_WAITOK | M_ZERO);
 
 	sc->sc_dmat = faa->fa_dmat;
 	sc->sc_node = faa->fa_node;
 
 	power_domain_enable(sc->sc_node);
 
-	sc->sc_ih = fdt_intr_establish(faa->fa_node, IPL_AUDIO | IPL_MPSAFE,
-	    apldma_intr, sc, sc->sc_dev.dv_xname);
+	/*
+	 * The hardware supports multiple interrupts; pick the first
+	 * one that is actually connected.
+	 */
+	for (irq = 0; irq < DMA_NUM_INTERRUPTS; irq++) {
+		sc->sc_ih = fdt_intr_establish_idx(faa->fa_node, irq,
+		    IPL_AUDIO | IPL_MPSAFE, apldma_intr, sc,
+		    sc->sc_dev.dv_xname);
+		if (sc->sc_ih)
+			break;
+	}
 	if (sc->sc_ih == NULL) {
 		printf(": can't establish interrupt\n");
 		goto free;
 	}
+
+	/*
+	 * The preliminary device tree bindings used a special
+	 * property to describe which interrupt was actually
+	 * connected.  Remove this in the near future.
+	 */
+	sc->sc_irq = OF_getpropint(faa->fa_node,
+	    "apple,internal-irq-destination", irq);
 
 	printf("\n");
 
@@ -180,7 +192,7 @@ apldma_attach(struct device *parent, struct device *self, void *aux)
 
 free:
 	free(sc->sc_ac, M_DEVBUF,
-	    sc->sc_nchannels * sizeof(struct apldma_channel));
+	    sc->sc_nchannels * sizeof(struct apldma_channel *));
 unmap:
 	bus_space_unmap(sc->sc_iot, sc->sc_ioh, faa->fa_reg[0].size);
 }
@@ -217,13 +229,13 @@ apldma_intr(void *arg)
 	uint32_t intr, intrstat;
 	unsigned int chan, i;
 
-	intr = HREAD4(sc, DMA_TX_INTR);
+	intr = HREAD4(sc, DMA_TX_INTR(sc->sc_irq));
 	for (chan = 0; chan < sc->sc_nchannels; chan += 2) {
 		if ((intr & (1 << (chan / 2))) == 0)
 			continue;
 
-		intrstat = HREAD4(sc, DMA_TX_INTRSTAT(chan));
-		HWRITE4(sc, DMA_TX_INTRSTAT(chan), intrstat);
+		intrstat = HREAD4(sc, DMA_TX_INTRSTAT(chan, sc->sc_irq));
+		HWRITE4(sc, DMA_TX_INTRSTAT(chan, sc->sc_irq), intrstat);
 
 		if ((intrstat & DMA_TX_INTRSTAT_DESC_DONE) == 0)
 			continue;
@@ -259,7 +271,7 @@ apldma_alloc_channel(unsigned int chan)
 	struct apldma_softc *sc = apldma_sc;
 	struct apldma_channel *ac;
 
-	if (chan >= sc->sc_nchannels)
+	if (sc == NULL || chan >= sc->sc_nchannels)
 		return NULL;
 
 	/* We only support Tx channels for now. */
@@ -367,9 +379,9 @@ apldma_trigger_output(struct apldma_channel *ac, void *start, void *end,
 	HWRITE4(sc, DMA_TX_CTL(ac->ac_chan), 0);
 
 	/* Clear and unmask interrupts. */
-	HWRITE4(sc, DMA_TX_INTRSTAT(ac->ac_chan),
+	HWRITE4(sc, DMA_TX_INTRSTAT(ac->ac_chan, sc->sc_irq),
 	   DMA_TX_INTRSTAT_DESC_DONE | DMA_TX_INTRSTAT_ERR);
-	HWRITE4(sc, DMA_TX_INTRMASK(ac->ac_chan),
+	HWRITE4(sc, DMA_TX_INTRMASK(ac->ac_chan, sc->sc_irq),
 	   DMA_TX_INTRMASK_DESC_DONE | DMA_TX_INTRMASK_ERR);
 
 	apldma_fill_descriptors(ac);
@@ -389,7 +401,7 @@ apldma_halt_output(struct apldma_channel *ac)
 	HWRITE4(sc, DMA_TX_EN_CLR, 1 << (ac->ac_chan / 2));
 
 	/* Mask all interrupts. */
-	HWRITE4(sc, DMA_TX_INTRMASK(ac->ac_chan), 0);
+	HWRITE4(sc, DMA_TX_INTRMASK(ac->ac_chan, sc->sc_irq), 0);
 
 	return 0;
 }

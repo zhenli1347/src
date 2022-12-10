@@ -1,4 +1,4 @@
-/*	$OpenBSD: autoconf.c,v 1.24 2020/02/20 06:12:14 jsg Exp $	*/
+/*	$OpenBSD: autoconf.c,v 1.29 2022/12/10 02:41:56 aoyama Exp $	*/
 /*
  * Copyright (c) 1998 Steve Murphree, Jr.
  * Copyright (c) 1996 Nivas Madhur
@@ -61,10 +61,8 @@
 void	dumpconf(void);
 void	get_autoboot_device(void);
 
-int cold = 1;	/* 1 if still booting */
-
-void *bootaddr;
-int bootpart;
+int cold = 1;		/* 1 if still booting */
+dev_t bootdev;		/* set by bootloader, retrieved in locore0.S */
 struct device *bootdv;	/* set by device drivers (if found) */
 
 /*
@@ -103,7 +101,7 @@ diskconf(void)
 }
 
 /*
- * Get 'auto-boot' information from NVRAM
+ * Get 'auto-boot' information
  *
  * XXX Right now we can not handle network boot.
  */
@@ -121,6 +119,38 @@ get_autoboot_device(void)
 	int i, len, part;
 	extern char *nvram_by_symbol(char *);		/* machdep.c */
 
+	if ((bootdev & B_MAGICMASK) == B_DEVMAGIC) {
+#ifdef DEBUG
+		printf("bootdev = 0x%08x (t:%d, a:%d, c:%d, u:%d, p:%d)\n",
+		    bootdev, B_TYPE(bootdev), B_ADAPTOR(bootdev),
+		    B_CONTROLLER(bootdev), B_UNIT(bootdev),
+		    B_PARTITION(bootdev));
+#endif
+		switch (B_TYPE(bootdev)) {
+		case 0:
+			snprintf(autoboot.cont, sizeof(autoboot.cont),
+			    "spc%d", B_CONTROLLER(bootdev));
+			break;
+#if 0	/* not yet */
+		case 1:
+			snprintf(autoboot.cont, sizeof(autoboot.cont),
+			    "le%d", B_CONTROLLER(bootdev));
+			break;
+#endif
+		default:
+			goto use_nvram_info;
+		}
+		autoboot.targ = B_UNIT(bootdev);
+		autoboot.part = B_PARTITION(bootdev);
+		return;
+	}
+
+use_nvram_info:
+	/*
+	 * Use old method if we can not get bootdev information
+	 */
+	printf("%s: no bootdev information, use NVRAM setting\n", __func__);
+
 	/* Assume default controller is internal spc (spc0) */
 	strlcpy(autoboot.cont, "spc0", sizeof(autoboot.cont));
 
@@ -130,12 +160,10 @@ get_autoboot_device(void)
 		len = strlen(value);
 		if (len == 1) {
 			c = value[0];
-		} else if (len == 2) {
-			if (value[0] == '1') {
-				/* External spc (spc1) */
-				strlcpy(autoboot.cont, "spc1", sizeof(autoboot.cont));
-				c = value[1];
-			}
+		} else if (len == 2 && value[0] == '1') {
+			/* External spc (spc1) */
+			strlcpy(autoboot.cont, "spc1", sizeof(autoboot.cont));
+			c = value[1];
 		} else
 			c = -1;
 
@@ -171,13 +199,12 @@ device_register(struct device *dev, void *aux)
 		    sa->sa_sc_link->target == autoboot.targ &&
 		    sa->sa_sc_link->lun == 0) {
 			bootdv = dev;
-			bootpart = autoboot.part;
 			return;
 		}
 	}
 }
 
-struct nam2blk nam2blk[] = {
+const struct nam2blk nam2blk[] = {
 	{ "sd",		4 },
 	{ "cd",		6 },
 	{ "rd",		7 },

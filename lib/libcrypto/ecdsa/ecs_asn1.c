@@ -1,4 +1,4 @@
-/* $OpenBSD: ecs_asn1.c,v 1.10 2022/01/05 20:39:04 tb Exp $ */
+/* $OpenBSD: ecs_asn1.c,v 1.12 2022/11/26 16:08:52 tb Exp $ */
 /* ====================================================================
  * Copyright (c) 2000-2002 The OpenSSL Project.  All rights reserved.
  *
@@ -53,7 +53,7 @@
  *
  */
 
-#include "ecs_locl.h"
+#include "ecs_local.h"
 #include <openssl/err.h>
 #include <openssl/asn1t.h>
 
@@ -63,14 +63,14 @@ static const ASN1_TEMPLATE ECDSA_SIG_seq_tt[] = {
 		.tag = 0,
 		.offset = offsetof(ECDSA_SIG, r),
 		.field_name = "r",
-		.item = &CBIGNUM_it,
+		.item = &BIGNUM_it,
 	},
 	{
 		.flags = 0,
 		.tag = 0,
 		.offset = offsetof(ECDSA_SIG, s),
 		.field_name = "s",
-		.item = &CBIGNUM_it,
+		.item = &BIGNUM_it,
 	},
 };
 

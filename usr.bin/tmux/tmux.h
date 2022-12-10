@@ -1,4 +1,4 @@
-/* $OpenBSD: tmux.h,v 1.1179 2022/08/02 11:09:26 nicm Exp $ */
+/* $OpenBSD: tmux.h,v 1.1186 2022/12/07 09:44:44 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -137,6 +137,7 @@ struct winlink;
 #define KEYC_IMPLIED_META    0x08000000000000ULL
 #define KEYC_BUILD_MODIFIERS 0x10000000000000ULL
 #define KEYC_VI              0x20000000000000ULL
+#define KEYC_EXTENDED        0x40000000000000ULL
 
 /* Masks for key bits. */
 #define KEYC_MASK_MODIFIERS  0x00f00000000000ULL
@@ -514,6 +515,7 @@ enum tty_code_code {
 	TTYC_KUP6,
 	TTYC_KUP7,
 	TTYC_MS,
+	TTYC_NOBR,
 	TTYC_OL,
 	TTYC_OP,
 	TTYC_RECT,
@@ -541,6 +543,7 @@ enum tty_code_code {
 	TTYC_SMUL,
 	TTYC_SMULX,
 	TTYC_SMXX,
+	TTYC_SXL,
 	TTYC_SS,
 	TTYC_SWD,
 	TTYC_SYNC,
@@ -666,6 +669,14 @@ struct colour_palette {
 #define GRID_LINE_EXTENDED 0x2
 #define GRID_LINE_DEAD 0x4
 
+/* Grid string flags. */
+#define GRID_STRING_WITH_SEQUENCES 0x1
+#define GRID_STRING_ESCAPE_SEQUENCES 0x2
+#define GRID_STRING_TRIM_SPACES 0x4
+#define GRID_STRING_USED_ONLY 0x8
+#define GRID_STRING_EMPTY_CELLS 0x10
+
+/* Cell positions. */
 #define CELL_INSIDE 0
 #define CELL_TOPBOTTOM 1
 #define CELL_LEFTRIGHT 2
@@ -680,6 +691,7 @@ struct colour_palette {
 #define CELL_JOIN 11
 #define CELL_OUTSIDE 12
 
+/* Cell borders. */
 #define CELL_BORDERS " xqlkmjwvtun~"
 #define SIMPLE_BORDERS " |-+++++++++."
 #define PADDED_BORDERS "             "
@@ -1338,6 +1350,7 @@ struct tty_term {
 #define TERM_DECFRA 0x8
 #define TERM_RGBCOLOURS 0x10
 #define TERM_VT100LIKE 0x20
+#define TERM_SIXEL 0x40
 	int		 flags;
 
 	LIST_ENTRY(tty_term) entry;
@@ -1394,9 +1407,10 @@ struct tty {
 #define TTY_OPENED 0x20
 #define TTY_OSC52QUERY 0x40
 #define TTY_BLOCK 0x80
-#define TTY_HAVEDA 0x100
+#define TTY_HAVEDA 0x100 /* Primary DA. */
 #define TTY_HAVEXDA 0x200
 #define TTY_SYNCING 0x400
+#define TTY_HAVEDA2 0x800 /* Seconday DA. */
 	int		 flags;
 
 	struct tty_term	*term;
@@ -2153,6 +2167,7 @@ void	notify_winlink(const char *, struct winlink *);
 void	notify_session_window(const char *, struct session *, struct window *);
 void	notify_window(const char *, struct window *);
 void	notify_pane(const char *, struct window_pane *);
+void	notify_paste_buffer(const char *, int);
 
 /* options.c */
 struct options	*options_create(struct options *);
@@ -2535,6 +2550,7 @@ u_int		 cmdq_next(struct client *);
 struct cmdq_item *cmdq_running(struct client *);
 void		 cmdq_guard(struct cmdq_item *, const char *, int);
 void printflike(2, 3) cmdq_print(struct cmdq_item *, const char *, ...);
+void 		 cmdq_print_data(struct cmdq_item *, int, struct evbuffer *);
 void printflike(2, 3) cmdq_error(struct cmdq_item *, const char *, ...);
 
 /* cmd-wait-for.c */
@@ -2781,7 +2797,7 @@ void	 grid_clear_lines(struct grid *, u_int, u_int, u_int);
 void	 grid_move_lines(struct grid *, u_int, u_int, u_int, u_int);
 void	 grid_move_cells(struct grid *, u_int, u_int, u_int, u_int, u_int);
 char	*grid_string_cells(struct grid *, u_int, u_int, u_int,
-	     struct grid_cell **, int, int, int, struct screen *);
+	     struct grid_cell **, int, struct screen *);
 void	 grid_duplicate_lines(struct grid *, u_int, struct grid *, u_int,
 	     u_int);
 void	 grid_reflow(struct grid *, u_int);
@@ -3173,6 +3189,8 @@ void	control_notify_session_renamed(struct session *);
 void	control_notify_session_created(struct session *);
 void	control_notify_session_closed(struct session *);
 void	control_notify_session_window_changed(struct session *);
+void	control_notify_paste_buffer_changed(const char *);
+void	control_notify_paste_buffer_deleted(const char *);
 
 /* session.c */
 extern struct sessions sessions;

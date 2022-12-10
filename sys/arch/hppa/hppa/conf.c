@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.73 2022/04/20 14:21:56 deraadt Exp $	*/
+/*	$OpenBSD: conf.c,v 1.75 2022/10/15 10:12:13 jsg Exp $	*/
 
 /*-
  * Copyright (c) 1991 The Regents of the University of California.
@@ -208,7 +208,7 @@ int mem_no = 2;		/* major device number of memory special file */
  */
 dev_t   swapdev = makedev(0, 0);
 
-int chrtoblktbl[] = {
+const int chrtoblktbl[] = {
 	/*VCHR*/	/*VBLK*/
 	/*  0 */	NODEV,
 	/*  1 */	NODEV,
@@ -251,20 +251,19 @@ int chrtoblktbl[] = {
 	/* 38 */	NODEV,
 	/* 39 */	8,		/* wd */
 };
-int nchrtoblktbl = nitems(chrtoblktbl);
+const int nchrtoblktbl = nitems(chrtoblktbl);
 
 /*
  * Returns true if dev is /dev/zero.
  */
 int
-iszerodev(dev)
-	dev_t dev;
+iszerodev(dev_t dev)
 {
 	return (major(dev) == mem_no && minor(dev) == 12);
 }
 
 dev_t
-getnulldev()
+getnulldev(void)
 {
 	return makedev(mem_no, 2);
 }
@@ -273,8 +272,7 @@ getnulldev()
  * Returns true if dev is /dev/mem or /dev/kmem.
  */
 int
-iskmemdev(dev)
-	dev_t dev;
+iskmemdev(dev_t dev)
 {
 	return (major(dev) == mem_no && minor(dev) < 2);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.158 2022/08/12 02:20:36 cheloha Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.163 2022/11/29 21:41:39 guenther Exp $	*/
 /* $NetBSD: cpu.c,v 1.1 2003/04/26 18:39:26 fvdl Exp $ */
 
 /*-
@@ -149,6 +149,19 @@ void	replacemds(void);
 
 extern long _stac;
 extern long _clac;
+
+int cpuid_level = 0;		/* cpuid(0).eax */
+char cpu_vendor[16] = { 0 };	/* cpuid(0).e[bdc]x, \0 */
+int cpu_id = 0;			/* cpuid(1).eax */
+int cpu_ebxfeature = 0;		/* cpuid(1).ebx */
+int cpu_ecxfeature = 0;		/* cpuid(1).ecx */
+int cpu_feature = 0;		/* cpuid(1).edx */
+int cpu_perf_eax = 0;		/* cpuid(0xa).eax */
+int cpu_perf_ebx = 0;		/* cpuid(0xa).ebx */
+int cpu_perf_edx = 0;		/* cpuid(0xa).edx */
+int cpu_apmi_edx = 0;		/* cpuid(0x80000007).edx */
+int ecpu_ecxfeature = 0;	/* cpuid(0x80000001).ecx */
+int cpu_meltdown = 0;
 
 void
 replacesmap(void)
@@ -601,6 +614,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 #endif
 		cpu_tsx_disable(ci);
 		identifycpu(ci);
+		cpu_fix_msrs(ci);
 #ifdef MTRR
 		mem_range_attach();
 #endif /* MTRR */
@@ -615,6 +629,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 		    CPUF_PRESENT | CPUF_BSP | CPUF_PRIMARY);
 		cpu_intr_init(ci);
 		identifycpu(ci);
+		cpu_fix_msrs(ci);
 #ifdef MTRR
 		mem_range_attach();
 #endif /* MTRR */
@@ -854,16 +869,6 @@ cpu_start_secondary(struct cpu_info *ci)
 		printf("dropping into debugger; continue from here to resume boot\n");
 		db_enter();
 #endif
-	} else {
-		/*
-		 * Test if TSCs are synchronized.  Invalidate cache to
-		 * minimize possible cache effects.  Disable interrupts to
-		 * try to rule out external interference.
-		 */
-		s = intr_disable();
-		wbinvd();
-		tsc_test_sync_bp(ci);
-		intr_restore(s);
 	}
 
 	if ((ci->ci_flags & CPUF_IDENTIFIED) == 0) {
@@ -876,6 +881,18 @@ cpu_start_secondary(struct cpu_info *ci)
 		if (ci->ci_flags & CPUF_IDENTIFY)
 			printf("%s: failed to identify\n",
 			    ci->ci_dev->dv_xname);
+	}
+
+	if (ci->ci_flags & CPUF_IDENTIFIED) {
+		/*
+		 * Test if TSCs are synchronized.  Invalidate cache to
+		 * minimize possible cache effects.  Disable interrupts to
+		 * try to rule out external interference.
+		 */
+		s = intr_disable();
+		wbinvd();
+		tsc_test_sync_bp(curcpu());
+		intr_restore(s);
 	}
 
 	CPU_START_CLEANUP(ci);
@@ -905,7 +922,7 @@ cpu_boot_secondary(struct cpu_info *ci)
 		/* Test if TSCs are synchronized again. */
 		s = intr_disable();
 		wbinvd();
-		tsc_test_sync_bp(ci);
+		tsc_test_sync_bp(curcpu());
 		intr_restore(s);
 	}
 }
@@ -930,17 +947,9 @@ cpu_hatch(void *v)
 	if (ci->ci_flags & CPUF_PRESENT)
 		panic("%s: already running!?", ci->ci_dev->dv_xname);
 #endif
-
-	/*
-	 * Test if our TSC is synchronized for the first time.
-	 * Note that interrupts are off at this point.
-	 */
-	wbinvd();
 	atomic_setbits_int(&ci->ci_flags, CPUF_PRESENT);
-	tsc_test_sync_ap(ci);
 
 	lapic_enable();
-	lapic_startclock();
 	cpu_ucode_apply(ci);
 	cpu_tsx_disable(ci);
 
@@ -959,6 +968,16 @@ cpu_hatch(void *v)
 		/* Prevent identifycpu() from running again */
 		atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFIED);
 	}
+
+	/* These have to run after identifycpu() */ 
+	cpu_fix_msrs(ci);
+
+	/*
+	 * Test if our TSC is synchronized for the first time.
+	 * Note that interrupts are off at this point.
+	 */
+	wbinvd();
+	tsc_test_sync_ap(ci);
 
 	while ((ci->ci_flags & CPUF_GO) == 0)
 		delay(10);
@@ -996,6 +1015,8 @@ cpu_hatch(void *v)
 
 	nanouptime(&ci->ci_schedstate.spc_runtime);
 	splx(s);
+
+	lapic_startclock();
 
 	SCHED_LOCK(s);
 	cpu_switchto(NULL, sched_chooseproc());
@@ -1093,9 +1114,6 @@ extern vector Xsyscall_meltdown, Xsyscall, Xsyscall32;
 void
 cpu_init_msrs(struct cpu_info *ci)
 {
-	uint64_t msr;
-	int family;
-
 	wrmsr(MSR_STAR,
 	    ((uint64_t)GSEL(GCODE_SEL, SEL_KPL) << 32) |
 	    ((uint64_t)GSEL(GUCODE32_SEL, SEL_UPL) << 48));
@@ -1107,18 +1125,63 @@ cpu_init_msrs(struct cpu_info *ci)
 	wrmsr(MSR_FSBASE, 0);
 	wrmsr(MSR_GSBASE, (u_int64_t)ci);
 	wrmsr(MSR_KERNELGSBASE, 0);
+	patinit(ci);
+}
 
-	family = ci->ci_family;
-	if (strcmp(cpu_vendor, "GenuineIntel") == 0 &&
-	    (family > 6 || (family == 6 && ci->ci_model >= 0xd)) &&
-	    rdmsr_safe(MSR_MISC_ENABLE, &msr) == 0 &&
-	    (msr & MISC_ENABLE_FAST_STRINGS) == 0) {
-		msr |= MISC_ENABLE_FAST_STRINGS;
-		wrmsr(MSR_MISC_ENABLE, msr);
-		DPRINTF("%s: enabled fast strings\n", ci->ci_dev->dv_xname);
+void
+cpu_fix_msrs(struct cpu_info *ci)
+{
+	int family = ci->ci_family;
+	uint64_t msr;
+
+	if (!strcmp(cpu_vendor, "GenuineIntel")) {
+		if ((family > 6 || (family == 6 && ci->ci_model >= 0xd)) &&
+		    rdmsr_safe(MSR_MISC_ENABLE, &msr) == 0 &&
+		    (msr & MISC_ENABLE_FAST_STRINGS) == 0) {
+			msr |= MISC_ENABLE_FAST_STRINGS;
+			wrmsr(MSR_MISC_ENABLE, msr);
+			DPRINTF("%s: enabled fast strings\n", ci->ci_dev->dv_xname);
+	
+		/*
+		 * Attempt to disable Silicon Debug and lock the configuration
+		 * if it's enabled and unlocked.
+		 */
+		if (cpu_ecxfeature & CPUIDECX_SDBG) {
+			msr = rdmsr(IA32_DEBUG_INTERFACE);
+			if ((msr & IA32_DEBUG_INTERFACE_ENABLE) &&
+			    (msr & IA32_DEBUG_INTERFACE_LOCK) == 0) {
+				msr &= IA32_DEBUG_INTERFACE_MASK;
+				msr |= IA32_DEBUG_INTERFACE_LOCK;
+				wrmsr(IA32_DEBUG_INTERFACE, msr);
+			} else if (msr & IA32_DEBUG_INTERFACE_ENABLE)
+				printf("%s: cannot disable silicon debug\n",
+				    ci->ci_dev->dv_xname);
+			}
+		}
 	}
 
-	patinit(ci);
+	if (!strcmp(cpu_vendor, "AuthenticAMD")) {
+		/* Apply AMD errata */
+		amd64_errata(ci);
+
+		/*
+		 * "Mitigation G-2" per AMD's Whitepaper "Software Techniques
+		 * for Managing Speculation on AMD Processors"
+		 *
+		 * By setting MSR C001_1029[1]=1, LFENCE becomes a dispatch
+		 * serializing instruction.
+		 *
+		 * This MSR is available on all AMD families >= 10h, except 11h
+		 * where LFENCE is always serializing.
+		 */
+		if (family >= 0x10 && family != 0x11) {
+			msr = rdmsr(MSR_DE_CFG);
+			if ((msr & DE_CFG_SERIALIZE_LFENCE) == 0) {
+				msr |= DE_CFG_SERIALIZE_LFENCE;
+				wrmsr(MSR_DE_CFG, msr);
+			}
+		}
+	}
 }
 
 void

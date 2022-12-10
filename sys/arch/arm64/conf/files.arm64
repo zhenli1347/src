@@ -1,4 +1,4 @@
-# $OpenBSD: files.arm64,v 1.58 2022/08/03 13:42:16 kettenis Exp $
+# $OpenBSD: files.arm64,v 1.64 2022/11/21 21:48:06 kettenis Exp $
 
 maxpartitions	16
 maxusers	2 8 128
@@ -65,7 +65,7 @@ file	arch/arm64/dev/simplebus.c		simplebus
 
 device	efi {}
 attach	efi at fdt
-file	arch/arm64/dev/efi.c			efi
+file	arch/arm64/dev/efi_machdep.c		efi needs-flag
 
 device	smbios
 attach	smbios at efi
@@ -151,6 +151,16 @@ device	apldart
 attach	apldart at fdt
 file	arch/arm64/dev/apldart.c		apldart
 
+device	apldc: fdt
+attach	apldc at fdt
+device	apldchidev {}
+attach	apldchidev at fdt
+device	apldckbd: hid, hidkbd, wskbddev
+attach	apldckbd at apldchidev
+device	apldcms: hid, hidms, wsmousedev
+attach	apldcms at apldchidev
+file	arch/arm64/dev/apldc.c			apldc | aplhidev | apldckbd | apldcms needs-flag
+
 device	apldma
 attach	apldma at fdt
 file	arch/arm64/dev/apldma.c			apldma
@@ -199,6 +209,14 @@ device	aplpmgr
 attach	aplpmgr at fdt
 file	arch/arm64/dev/aplpmgr.c		aplpmgr
 
+device	aplpwm
+attach	aplpwm at fdt
+file	arch/arm64/dev/aplpwm.c			aplpwm
+
+device	aplrtk
+attach	aplrtk at fdt
+file	arch/arm64/dev/aplrtk.c			aplrtk
+
 # Apple NVME Storage
 device	aplns {}: rtkit
 attach	aplns at fdt
@@ -207,13 +225,12 @@ file	arch/arm64/dev/aplns.c			aplns | nvme_ans
 
 device	aplsart
 attach	aplsart at fdt
-file	arch/arm64/dev/aplsart.c			aplsart | aplns
+file	arch/arm64/dev/aplsart.c		aplsart | aplns
 
 device	aplsmc
 attach	aplsmc at fdt
 file	arch/arm64/dev/aplsmc.c			aplsmc
 
-define	spmi {}
 device	aplpmu
 attach	aplpmu at spmi
 file	arch/arm64/dev/aplpmu.c			aplpmu

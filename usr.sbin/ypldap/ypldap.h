@@ -1,4 +1,4 @@
-/*	$OpenBSD: ypldap.h,v 1.21 2021/01/27 07:21:55 deraadt Exp $ */
+/*	$OpenBSD: ypldap.h,v 1.23 2022/10/13 04:55:33 jmatthew Exp $ */
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -101,7 +101,9 @@ struct idm {
 	u_int32_t			 idm_list;
 	struct ypldap_addr_list		 idm_addr;
 	in_port_t			 idm_port;
+	int				 idm_bindext;
 	char				 idm_binddn[LINE_WIDTH];
+	char				 idm_bindextid[LINE_WIDTH];
 	char				 idm_bindcred[LINE_WIDTH];
 	char				 idm_basedn[LINE_WIDTH];
 	char				 idm_groupdn[LINE_WIDTH];
@@ -146,6 +148,11 @@ struct imsgev {
 	short			 events;
 };
 
+enum bind_mode {
+	BIND_MODE_PORTMAP,
+	BIND_MODE_LOCAL
+};
+
 struct env {
 #define YPLDAP_OPT_VERBOSE		 0x01
 #define YPLDAP_OPT_NOACTION		 0x02
@@ -162,6 +169,7 @@ struct env {
 	u_int32_t			 sc_maxid;
 
 	char				 sc_domainname[HOST_NAME_MAX+1];
+	enum bind_mode			 sc_bind_mode;
 	struct timeval			 sc_conf_tv;
 	struct event			 sc_conf_ev;
 	char				*sc_cafile;

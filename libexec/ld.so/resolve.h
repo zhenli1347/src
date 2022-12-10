@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolve.h,v 1.100 2022/01/28 05:01:28 guenther Exp $ */
+/*	$OpenBSD: resolve.h,v 1.103 2022/12/04 15:42:07 deraadt Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -76,6 +76,12 @@ struct object_vector {
 	elf_object_t 	**vec;
 };
 void	object_vec_grow(struct object_vector *_vec, int _more);
+
+struct mutate {
+	vaddr_t start;
+	vaddr_t end;
+	int valid;
+};
 
 /*
  *  Structure describing a loaded object.
@@ -163,6 +169,7 @@ struct elf_object {
 #define	OBJTYPE_LIB	3
 #define	OBJTYPE_DLO	4
 	int		obj_flags;	/* c.f. <sys/exec_elf.h> DF_1_* */
+	int		nodelete;
 
 	/* shared by ELF and GNU hash */
 	u_int32_t	nbuckets;
@@ -231,6 +238,10 @@ struct elf_object {
 
 	/* nonzero if trace enabled for this object */
 	int traced;
+
+#define MAXMUT 40
+	struct mutate imut[MAXMUT];
+	struct mutate mut[MAXMUT];
 };
 
 struct dep_node {
@@ -255,8 +266,11 @@ elf_object_t *_dl_finalize_object(const char *objname, Elf_Dyn *dynp,
 void	_dl_remove_object(elf_object_t *object);
 void	_dl_cleanup_objects(void);
 
-elf_object_t *_dl_load_shlib(const char *, elf_object_t *, int, int);
-elf_object_t *_dl_tryload_shlib(const char *libname, int type, int flags);
+void _dl_handle_already_loaded(elf_object_t *_object, int _flags);
+elf_object_t *_dl_load_shlib(const char *, elf_object_t *,
+    int, int, int nodelete);
+elf_object_t *_dl_tryload_shlib(const char *libname, int type,
+    int flags, int nodelete);
 
 int _dl_md_reloc(elf_object_t *object, int rel, int relsz);
 int _dl_md_reloc_got(elf_object_t *object, int lazy);
@@ -314,6 +328,11 @@ void _dl_run_all_dtors(void);
 int	_dl_match_file(struct sod *sodp, const char *name, int namelen);
 char	*_dl_find_shlib(struct sod *sodp, char **searchpath, int nohints);
 void	_dl_load_list_free(struct load_list *load_list);
+
+void _dl_find_immutables(int type, elf_object_t *object, Elf_Ehdr *);
+void _dl_defer_mut(struct mutate *m, vaddr_t start, vsize_t len);
+void _dl_defer_immut(struct mutate *m, vaddr_t start, vsize_t len);
+void _dl_apply_immutable(elf_object_t *object);
 
 typedef void lock_cb(int);
 void	_dl_thread_kern_go(lock_cb *);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6.c,v 1.247 2022/08/06 15:57:59 bluhm Exp $	*/
+/*	$OpenBSD: in6.c,v 1.259 2022/12/06 22:19:39 mvs Exp $	*/
 /*	$KAME: in6.c,v 1.372 2004/06/14 08:14:21 itojun Exp $	*/
 
 /*
@@ -207,7 +207,9 @@ in6_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 #ifdef MROUTING
 	case SIOCGETSGCNT_IN6:
 	case SIOCGETMIFCNT_IN6:
+		KERNEL_LOCK();
 		error = mrt6_ioctl(so, cmd, data);
+		KERNEL_UNLOCK();
 		break;
 #endif /* MROUTING */
 	default:
@@ -292,6 +294,7 @@ in6_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp)
 			return (error);
 	}
 
+	KERNEL_LOCK();
 	NET_LOCK();
 
 	if (sa6 != NULL) {
@@ -398,6 +401,7 @@ in6_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp)
 
 err:
 	NET_UNLOCK();
+	KERNEL_UNLOCK();
 	return (error);
 }
 
@@ -647,6 +651,8 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 	if (ia6 == NULL) {
 		hostIsNew = 1;
 		ia6 = malloc(sizeof(*ia6), M_IFADDR, M_WAITOK | M_ZERO);
+		refcnt_init_trace(&ia6->ia_ifa.ifa_refcnt,
+		    DT_REFCNT_IDX_IFADDR);
 		LIST_INIT(&ia6->ia6_memberships);
 		/* Initialize the address and masks, and put time stamp */
 		ia6->ia_ifa.ifa_addr = sin6tosa(&ia6->ia_addr);
@@ -938,7 +944,6 @@ void
 in6_unlink_ifa(struct in6_ifaddr *ia6, struct ifnet *ifp)
 {
 	struct ifaddr *ifa = &ia6->ia_ifa;
-	extern int ifatrash;
 	int plen;
 
 	NET_ASSERT_LOCKED();
@@ -953,9 +958,8 @@ in6_unlink_ifa(struct in6_ifaddr *ia6, struct ifnet *ifp)
 	rt_ifa_purge(ifa);
 	ifa_del(ifp, ifa);
 
-	ifatrash++;
 	ia6->ia_ifp = NULL;
-	ifafree(&ia6->ia_ifa);
+	ifafree(ifa);
 }
 
 /*
@@ -1059,7 +1063,9 @@ in6_addmulti(struct in6_addr *maddr6, struct ifnet *ifp, int *errorp)
 		 * filter appropriately for the new address.
 		 */
 		memcpy(&ifr.ifr_addr, &in6m->in6m_sin, sizeof(in6m->in6m_sin));
+		KERNEL_LOCK();
 		*errorp = (*ifp->if_ioctl)(ifp, SIOCADDMULTI, (caddr_t)&ifr);
+		KERNEL_UNLOCK();
 		if (*errorp) {
 			free(in6m, M_IPMADDR, sizeof(*in6m));
 			return (NULL);
@@ -1344,7 +1350,7 @@ in6_ifawithscope(struct ifnet *oifp, struct in6_addr *dst, u_int rdomain)
 	}
 
 	/* We search for all addresses on all interfaces from the beginning. */
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp->if_rdomain != rdomain)
 			continue;
 #if NCARP > 0
@@ -1592,26 +1598,4 @@ in6if_do_dad(struct ifnet *ifp)
 
 		return (1);
 	}
-}
-
-void *
-in6_domifattach(struct ifnet *ifp)
-{
-	struct in6_ifextra *ext;
-
-	ext = malloc(sizeof(*ext), M_IFADDR, M_WAITOK | M_ZERO);
-
-	ext->nd_ifinfo = nd6_ifattach(ifp);
-	ext->nprefixes = 0;
-	ext->ndefrouters = 0;
-	return ext;
-}
-
-void
-in6_domifdetach(struct ifnet *ifp, void *aux)
-{
-	struct in6_ifextra *ext = (struct in6_ifextra *)aux;
-
-	nd6_ifdetach(ext->nd_ifinfo);
-	free(ext, M_IFADDR, sizeof(*ext));
 }

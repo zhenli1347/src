@@ -1,4 +1,4 @@
-/* $OpenBSD: trap.c,v 1.39 2022/01/01 18:52:36 kettenis Exp $ */
+/* $OpenBSD: trap.c,v 1.42 2022/11/07 09:43:04 mpi Exp $ */
 /*-
  * Copyright (c) 2014 Andrew Turner
  * All rights reserved.
@@ -36,10 +36,6 @@
 #include <sys/signalvar.h>
 #include <sys/user.h>
 
-#ifdef KDB
-#include <sys/kdb.h>
-#endif
-
 #include <uvm/uvm.h>
 #include <uvm/uvm_extern.h>
 
@@ -48,11 +44,6 @@
 #include <machine/frame.h>
 #include <machine/pcb.h>
 #include <machine/vmparam.h>
-
-
-#ifdef KDB
-#include <machine/db_machdep.h>
-#endif
 
 #ifdef DDB
 #include <ddb/db_output.h>
@@ -167,11 +158,14 @@ kdata_abort(struct trapframe *frame, uint64_t esr, uint64_t far, int exe)
 		 * Only allow user-space access using
 		 * unprivileged load/store instructions.
 		 */
-		if (!is_unpriv_ldst(frame->tf_elr)) {
+		if (is_unpriv_ldst(frame->tf_elr))
+			map = &p->p_vmspace->vm_map;
+		else if (pcb->pcb_onfault != NULL)
+			map = kernel_map;
+		else {
 			panic("attempt to access user address"
 			      " 0x%llx from EL1", far);
 		}
-		map = &p->p_vmspace->vm_map;
 	}
 
 	/* Handle referenced/modified emulation */
@@ -184,7 +178,7 @@ kdata_abort(struct trapframe *frame, uint64_t esr, uint64_t far, int exe)
 
 	if (error != 0) {
 		if (curcpu()->ci_idepth == 0 &&
-		    pcb->pcb_onfault != 0) {
+		    pcb->pcb_onfault != NULL) {
 			frame->tf_elr = (register_t)pcb->pcb_onfault;
 			return;
 		}
@@ -224,6 +218,9 @@ do_el1h_sync(struct trapframe *frame)
 	case EXCP_FP_SIMD:
 	case EXCP_TRAP_FP:
 		panic("FP exception in the kernel");
+	case EXCP_INSN_ABORT:
+		kdata_abort(frame, esr, far, 1);
+		break;
 	case EXCP_DATA_ABORT:
 		kdata_abort(frame, esr, far, 0);
 		break;
@@ -246,6 +243,7 @@ do_el1h_sync(struct trapframe *frame)
 		/* XXX */
 		int db_trapper (u_int, u_int, trapframe_t *, int);
 		db_trapper(frame->tf_elr, 0/*XXX*/, frame, exception);
+		break;
 		}
 #endif
 		panic("Unknown kernel exception %x esr_el1 %llx lr %lxpc %lx",

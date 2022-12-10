@@ -1,4 +1,4 @@
-/*	$OpenBSD: crl.c,v 1.15 2022/04/21 09:53:07 claudio Exp $ */
+/*	$OpenBSD: crl.c,v 1.21 2022/11/30 09:03:44 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -15,13 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/socket.h>
-
-#include <arpa/inet.h>
-#include <assert.h>
 #include <err.h>
-#include <inttypes.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -57,7 +51,7 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_CRL_get0_lastUpdate failed", fn);
 		goto out;
 	}
-	if (x509_get_time(at, &crl->issued) == -1) {
+	if (!x509_get_time(at, &crl->issued)) {
 		warnx("%s: ASN1_time_parse failed", fn);
 		goto out;
 	}
@@ -67,7 +61,7 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_CRL_get0_nextUpdate failed", fn);
 		goto out;
 	}
-	if (x509_get_time(at, &crl->expires) == -1) {
+	if (!x509_get_time(at, &crl->expires)) {
 		warnx("%s: ASN1_time_parse failed", fn);
 		goto out;
 	}
@@ -117,4 +111,15 @@ crl_free(struct crl *crl)
 	free(crl->aki);
 	X509_CRL_free(crl->x509_crl);
 	free(crl);
+}
+
+void
+crl_tree_free(struct crl_tree *crlt)
+{
+	struct crl	*crl, *tcrl;
+
+	RB_FOREACH_SAFE(crl, crl_tree, crlt, tcrl) {
+		RB_REMOVE(crl_tree, crlt, crl);
+		crl_free(crl);
+	}
 }

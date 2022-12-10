@@ -131,6 +131,7 @@ _thread_sys_lseek
 _thread_sys_lstat
 _thread_sys_madvise
 _thread_sys_minherit
+_thread_sys_mimmutable
 _thread_sys_mkdir
 _thread_sys_mkdirat
 _thread_sys_mkfifo
@@ -175,6 +176,7 @@ _thread_sys_readlinkat
 _thread_sys_readv
 _thread_sys_reboot
 _thread_sys_recvfrom
+_thread_sys_recvmmsg
 _thread_sys_recvmsg
 _thread_sys_rename
 _thread_sys_renameat
@@ -184,6 +186,7 @@ _thread_sys_sched_yield
 _thread_sys_select
 _thread_sys_semget
 _thread_sys_semop
+_thread_sys_sendmmsg
 _thread_sys_sendmsg
 _thread_sys_sendsyslog
 _thread_sys_sendto
@@ -237,6 +240,7 @@ _thread_sys_utimes
 _thread_sys_utrace
 _thread_sys_vfork
 _thread_sys_wait4
+_thread_sys_waitid
 _thread_sys_write
 _thread_sys_writev
 accept4
@@ -325,6 +329,7 @@ listen
 lseek
 lstat
 madvise
+mimmutable
 minherit
 mkdir
 mkdirat
@@ -372,6 +377,7 @@ readlinkat
 readv
 reboot
 recvfrom
+recvmmsg
 recvmsg
 rename
 renameat
@@ -383,6 +389,7 @@ select
 semctl
 semget
 semop
+sendmmsg
 sendmsg
 sendsyslog
 sendto
@@ -442,6 +449,7 @@ utimes
 utrace
 vfork
 wait4
+waitid
 write
 writev
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: loader.c,v 1.195 2022/01/08 06:49:41 guenther Exp $ */
+/*	$OpenBSD: loader.c,v 1.206 2022/12/04 15:55:26 visa Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -219,9 +219,13 @@ _dl_clean_boot(void)
 	extern char boot_data_start[], boot_data_end[];
 #endif
 
-	_dl_munmap(boot_text_start, boot_text_end - boot_text_start);
+	_dl_mmap(boot_text_start, boot_text_end - boot_text_start,
+	    PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	_dl_mimmutable(boot_text_start, boot_text_end - boot_text_start);
 #if 0	/* XXX breaks boehm-gc?!? */
-	_dl_munmap(boot_data_start, boot_data_end - boot_data_start);
+	_dl_mmap(boot_data_start, boot_data_end - boot_data_start,
+	    PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+	_dl_mimmutable(boot_data_start, boot_data_end - boot_data_start);
 #endif
 }
 #endif /* DO_CLEAN_BOOT */
@@ -247,7 +251,7 @@ _dl_dopreload(char *paths)
 	dp = paths;
 	while ((cp = _dl_strsep(&dp, ":")) != NULL) {
 		shlib = _dl_load_shlib(cp, _dl_objects, OBJTYPE_LIB,
-		    _dl_objects->obj_flags);
+		    _dl_objects->obj_flags, 1);
 		if (shlib == NULL)
 			_dl_die("can't preload library '%s'", cp);
 		_dl_add_object(shlib);
@@ -316,7 +320,7 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 	Elf_Dyn *dynp;
 	unsigned int loop;
 	int libcount;
-	int depflags;
+	int depflags, nodelete = 0;
 
 	dynobj = object;
 	while (dynobj) {
@@ -325,6 +329,8 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 
 		/* propagate DF_1_NOW to deplibs (can be set by dynamic tags) */
 		depflags = flags | (dynobj->obj_flags & DF_1_NOW);
+		if (booting || object->nodelete)
+			nodelete = 1;
 
 		for (dynp = dynobj->load_dyn; dynp->d_tag; dynp++) {
 			if (dynp->d_tag == DT_NEEDED) {
@@ -375,7 +381,7 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 				DL_DEB(("loading: %s required by %s\n", libname,
 				    dynobj->load_name));
 				depobj = _dl_load_shlib(libname, dynobj,
-				    OBJTYPE_LIB, depflags);
+				    OBJTYPE_LIB, depflags, nodelete);
 				if (depobj == 0) {
 					if (booting) {
 						_dl_die(
@@ -432,6 +438,8 @@ _dl_self_relro(long loff)
 		case PT_GNU_RELRO:
 			_dl_mprotect((void *)(phdp->p_vaddr + loff),
 			    phdp->p_memsz, PROT_READ);
+			_dl_mimmutable((void *)(phdp->p_vaddr + loff),
+			    phdp->p_memsz);
 			break;
 		}
 	}
@@ -561,6 +569,7 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	}
 	exe_obj->load_list = load_list;
 	exe_obj->obj_flags |= DF_1_GLOBAL;
+	exe_obj->nodelete = 1;
 	exe_obj->load_size = maxva - minva;
 	exe_obj->relro_addr = relro_addr;
 	exe_obj->relro_size = relro_size;
@@ -748,6 +757,18 @@ _dl_rtld(elf_object_t *object)
 		}
 	}
 
+	/* 
+	 * TEXTREL binaries are loaded without immutable on un-writeable sections.
+	 * After text relocations are finished, these regions can become
+	 * immutable.  OPENBSD_MUTABLE section always overlaps writeable LOADs,
+	 * so don't be afraid.
+	 */
+	if (object->dyn.textrel) {
+		for (llist = object->load_list; llist != NULL; llist = llist->next)
+			if ((llist->prot & PROT_WRITE) == 0)
+				_dl_mimmutable(llist->start, llist->size);
+	}
+
 	if (fails == 0)
 		object->status |= STAT_RELOC_DONE;
 
@@ -788,6 +809,10 @@ _dl_relro(elf_object_t *object)
 		DL_DEB(("protect RELRO [0x%lx,0x%lx) in %s\n",
 		    addr, addr + object->relro_size, object->load_name));
 		_dl_mprotect((void *)addr, object->relro_size, PROT_READ);
+
+		/* if library will never be unloaded, RELRO can be immutable */
+		if (object->nodelete)
+			_dl_mimmutable((void *)addr, object->relro_size);
 	}
 }
 
@@ -812,8 +837,10 @@ _dl_call_init_recurse(elf_object_t *object, int initfirst)
 	if (initfirst && (object->obj_flags & DF_1_INITFIRST) == 0)
 		return;
 
-	if (!initfirst)
+	if (!initfirst) {
 		_dl_relro(object);
+		_dl_apply_immutable(object);
+	}
 
 	if (object->dyn.init) {
 		DL_DEB(("doing ctors obj %p @%p: [%s]\n",
@@ -832,8 +859,10 @@ _dl_call_init_recurse(elf_object_t *object, int initfirst)
 			    environ, &_dl_cb_cb);
 	}
 
-	if (initfirst)
+	if (initfirst) {
 		_dl_relro(object);
+		_dl_apply_immutable(object);
+	}
 
 	object->status |= STAT_INIT_DONE;
 }
@@ -980,3 +1009,114 @@ _dl_rreloc(elf_object_t *object)
 	}
 }
 
+void
+_dl_defer_immut(struct mutate *m, vaddr_t start, vsize_t len)
+{
+	int i;
+
+	for (i = 0; i < MAXMUT; i++) {
+		if (m[i].valid == 0) {
+//			_dl_printf("%dimut\t%lx-%lx (len %x)\n",
+//			    i, start, start + len, len);
+			m[i].start = start;
+			m[i].end = start + len;
+			m[i].valid = 1;
+			return;
+		}
+	}
+	if (i == MAXMUT)
+		_dl_die("too many _dl_defer_immut");
+}
+
+void
+_dl_defer_mut(struct mutate *m, vaddr_t start, size_t len)
+{
+	int i;
+
+	for (i = 0; i < MAXMUT; i++) {
+		if (m[i].valid == 0) {
+//			_dl_printf("%dmut\t%lx-%lx (len %x)\n",
+//			    i, start, start + len, len);
+			m[i].start = start;
+			m[i].end = start + len;
+			m[i].valid = 1;
+			return;
+		}
+	}
+	if (i == MAXMUT)
+		_dl_die("too many _dl_defer_mut");
+}
+
+void
+_dl_apply_immutable(elf_object_t *object)
+{
+	struct mutate *m, *im, *imtail;
+	int mut, imut;
+	
+	if (object->obj_type != OBJTYPE_LIB)
+		return;
+
+	imtail = &object->imut[MAXMUT - 1];
+
+//	_dl_printf("library %s %lx:\n", object->load_name);
+	for (imut = 0; imut < MAXMUT; imut++) {
+		im = &object->imut[imut];
+		if (im->valid == 0)
+			continue;
+
+		for (mut = 0; mut < MAXMUT; mut++) {
+			m = &object->mut[mut];
+			if (m->valid == 0)
+				continue;
+//			_dl_printf("- mut%d %lx-%lx (%x) from imut%d %lx-%lx (%x): ",
+//			    mut, m->start, m->end, m->end - m->start,
+//			    imut, im->start, im->end, im->end - im->start);
+			if (m->start <= im->start) {
+				if (m->end < im->start) {
+//					_dl_printf("before ignored");
+					;
+				} else if (m->end >= im->end) {
+					im->start = im->end = im->valid = 0;
+//					_dl_printf("whole: %lx-%lx", im->start, im->end);
+				} else {
+					im->start = m->end;
+//					_dl_printf("early: %lx-%lx", im->start, im->end);
+				}
+			} else if (m->start > im->start) {
+				if (m->end > im->end) {
+//					_dl_printf("after ignored");
+					;
+				} else if (m->end == im->end) {
+					im->end = m->start;
+//					_dl_printf("end: %lx-%lx", im->start, im->end);
+				} else if (m->end < im->end) {
+					imtail->start = im->start;
+					imtail->end = m->start;
+					imtail->valid = 1;
+					imtail--;
+					imtail->start = m->end;
+					imtail->end = im->end;
+					imtail->valid = 1;
+					imtail--;
+					im->start = im->end = im->valid = 0;
+//					_dl_printf("split %lx-%lx %lx-%lx",
+//					    imtail[1].start, imtail[1].end,
+//					    imtail[2].start, imtail[2].end);
+				}
+			}
+//			_dl_printf("\n");
+		}
+	}
+
+	/* and now, install immutability for objects */
+	for (imut = 0; imut < MAXMUT; imut++) {
+		im = &object->imut[imut];
+		if (im->valid == 0)
+			continue;
+//		_dl_printf("IMUT %s %lx-%lx (len %x) (%lx,%lx) [%lx,%lx]\n",
+//		    object->load_name, im->start, im->end, im->end - im->start,
+//		    (void *)im->start, (void *)im->end,
+//		    (void *)im->start, im->end - im->start);
+		_dl_mimmutable((void *)im->start, im->end - im->start);
+	}
+}

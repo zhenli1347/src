@@ -2134,6 +2134,7 @@ inteldrm_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		case WSDISPLAYIO_PARAM_BRIGHTNESS:
 			bd->props.brightness = dp->curval;
 			backlight_update_status(bd);
+			KNOTE(&dev_priv->drm.note, NOTE_CHANGE);
 			return 0;
 		}
 		break;
@@ -2410,6 +2411,12 @@ inteldrm_attach(struct device *parent, struct device *self, void *aux)
 	dev_priv->id = id;
 	info = (struct intel_device_info *)id->driver_data;
 
+	/* Device parameters start as a copy of module parameters. */
+	i915_params_copy(&dev_priv->params, &i915_modparams);
+	dev_priv->params.enable_guc = 0;
+	dev_priv->params.request_timeout_ms = 0;
+	dev_priv->params.enable_psr = 0;
+
 	/* Setup the write-once "constant" device info */
 	device_info = mkwrite_device_info(dev_priv);
 	memcpy(device_info, info, sizeof(*device_info));
@@ -2599,7 +2606,7 @@ inteldrm_activate(struct device *self, int act)
 	struct drm_device *dev = &dev_priv->drm;
 	int rv = 0;
 
-	if (dev->dev == NULL)
+	if (dev->dev == NULL || inteldrm_fatal_error)
 		return (0);
 
 	/*

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_misc.h,v 1.24 2022/03/21 19:22:40 miod Exp $	*/
+/*	$OpenBSD: ofw_misc.h,v 1.26 2022/11/09 19:18:11 kettenis Exp $	*/
 /*
  * Copyright (c) 2017-2021 Mark Kettenis
  *
@@ -194,6 +194,7 @@ struct dai_device {
 	const void *dd_hw_if;
 	int	(*dd_set_format)(void *, uint32_t, uint32_t, uint32_t);
 	int	(*dd_set_sysclk)(void *, uint32_t);
+	int	(*dd_set_tdm_slot)(void *, int);
 
 	LIST_ENTRY(dai_device) dd_list;
 	uint32_t dd_phandle;
@@ -261,6 +262,8 @@ void	iommu_reserve_region_pci(int, uint32_t, bus_addr_t, bus_size_t);
 struct mbox_client {
 	void	(*mc_rx_callback)(void *);
 	void	*mc_rx_arg;
+	int	mc_flags;
+#define MC_WAKEUP		0x00000001
 };
 
 struct mbox_channel;

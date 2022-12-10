@@ -1,4 +1,4 @@
-/*	$OpenBSD: ufs_disksubr.c,v 1.4 2013/11/05 00:51:58 krw Exp $	*/
+/*	$OpenBSD: ufs_disksubr.c,v 1.6 2022/10/14 13:22:57 krw Exp $	*/
 /*	$NetBSD: ufs_disksubr.c,v 1.2 2013/01/14 01:37:57 tsutsui Exp $	*/
 
 /*
@@ -149,7 +149,6 @@ readdisklabel(struct scsi_softc *sc, uint tgt, struct disklabel *lp)
 
 	lp->d_magic = DISKMAGIC;
 	lp->d_magic2 = DISKMAGIC;
-	lp->d_flags = D_VENDOR;
 	memcpy(lp->d_packname, slp->sl_text, sizeof(lp->d_packname));
 	lp->d_nsectors = slp->sl_nsectors;
 	lp->d_ntracks = slp->sl_ntracks;
@@ -166,9 +165,6 @@ readdisklabel(struct scsi_softc *sc, uint tgt, struct disklabel *lp)
 	lp->d_acylinders = slp->sl_acylinders;
 
 	lp->d_npartitions = MAXPARTITIONS;
-	/* These are as defined in <ufs/ffs/fs.h> */
-	lp->d_bbsize = BBSIZE;    /* XXX */
-	lp->d_sbsize = BBSIZE;    /* XXX */
 
 	for (i = 0; i < 8; i++) {
 		spp = &slp->sl_part[i];

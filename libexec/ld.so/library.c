@@ -1,4 +1,4 @@
-/*	$OpenBSD: library.c,v 1.86 2022/01/08 06:49:41 guenther Exp $ */
+/*	$OpenBSD: library.c,v 1.89 2022/12/04 15:42:07 deraadt Exp $ */
 
 /*
  * Copyright (c) 2002 Dale Rahn
@@ -96,8 +96,9 @@ unload:
 }
 
 elf_object_t *
-_dl_tryload_shlib(const char *libname, int type, int flags)
+_dl_tryload_shlib(const char *libname, int type, int flags, int nodelete)
 {
+	struct mutate imut[MAXMUT], mut[MAXMUT];
 	int	libfile, i;
 	struct load_list *next_load, *load_list = NULL;
 	Elf_Addr maxva = 0, minva = ELF_NO_ADDR;
@@ -129,17 +130,15 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 	for (object = _dl_objects; object != NULL; object = object->next) {
 		if (object->dev == sb.st_dev &&
 		    object->inode == sb.st_ino) {
-			object->obj_flags |= flags & DF_1_GLOBAL;
 			_dl_close(libfile);
-			if (_dl_loading_object == NULL)
-				_dl_loading_object = object;
-			if (object->load_object != _dl_objects &&
-			    object->load_object != _dl_loading_object) {
-				_dl_link_grpref(object->load_object,
-				    _dl_loading_object);
-			}
+			_dl_handle_already_loaded(object, flags);
 			return(object);
 		}
+	}
+	if (flags & DF_1_NOOPEN) {
+		_dl_close(libfile);
+		return NULL;
+
 	}
 
 	_dl_read(libfile, hbuf, sizeof(hbuf));
@@ -151,6 +150,9 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 		_dl_errno = DL_NOT_ELF;
 		return(0);
 	}
+
+	_dl_memset(&mut, 0, sizeof mut);
+	_dl_memset(&imut, 0, sizeof imut);
 
 	/*
 	 *  Alright, we might have a winner!
@@ -212,6 +214,9 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 
 	loff = libaddr - minva;
 	phdp = (Elf_Phdr *)(hbuf + ehdr->e_phoff);
+
+	/* Entire mapping can become immutable, minus exceptions chosen later */
+	_dl_defer_immut(imut, loff, maxva - minva);
 
 	for (i = 0; i < ehdr->e_phnum; i++, phdp++) {
 		switch (phdp->p_type) {
@@ -295,6 +300,11 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 		case PT_GNU_RELRO:
 			relro_addr = phdp->p_vaddr + loff;
 			relro_size = phdp->p_memsz;
+			_dl_defer_mut(mut, phdp->p_vaddr + loff, phdp->p_memsz);
+			break;
+
+		case PT_OPENBSD_MUTABLE:
+			_dl_defer_mut(mut, phdp->p_vaddr + loff, phdp->p_memsz);
 			break;
 
 		default:
@@ -317,6 +327,7 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 		object->dev = sb.st_dev;
 		object->inode = sb.st_ino;
 		object->obj_flags |= flags;
+		object->nodelete = nodelete;
 		object->relro_addr = relro_addr;
 		object->relro_size = relro_size;
 		_dl_set_sod(object->load_name, &object->sod);
@@ -330,6 +341,8 @@ _dl_tryload_shlib(const char *libname, int type, int flags)
 				_dl_printf("msyscall %lx %lx error\n",
 				    exec_start, exec_size);
 		}
+		_dl_bcopy(mut, object->mut, sizeof mut);
+		_dl_bcopy(imut, object->imut, sizeof imut);
 	} else {
 		_dl_munmap((void *)libaddr, maxva - minva);
 		_dl_load_list_free(load_list);

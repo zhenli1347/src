@@ -1,4 +1,4 @@
-/* $OpenBSD: tls13_record_layer.c,v 1.70 2022/07/24 14:28:16 jsing Exp $ */
+/* $OpenBSD: tls13_record_layer.c,v 1.72 2022/11/11 17:15:27 jsing Exp $ */
 /*
  * Copyright (c) 2018, 2019 Joel Sing <jsing@openbsd.org>
  *
@@ -561,6 +561,7 @@ tls13_record_layer_open_record_protected(struct tls13_record_layer *rl)
 	if (!tls13_record_content(rl->rrec, &enc_record))
 		goto err;
 
+	/* XXX - minus tag len? */
 	if ((content = calloc(1, CBS_len(&enc_record))) == NULL)
 		goto err;
 	content_len = CBS_len(&enc_record);
@@ -850,6 +851,8 @@ tls13_record_layer_read_record(struct tls13_record_layer *rl)
 			return tls13_send_alert(rl, TLS13_ALERT_DECODE_ERROR);
 		if (ccs != 1)
 			return tls13_send_alert(rl, TLS13_ALERT_ILLEGAL_PARAMETER);
+		if (CBS_len(&cbs) != 0)
+			return tls13_send_alert(rl, TLS13_ALERT_DECODE_ERROR);
 		rl->ccs_seen++;
 		tls13_record_layer_rrec_free(rl);
 		return TLS13_IO_WANT_RETRY;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplsmc.c,v 1.12 2022/06/12 16:00:12 kettenis Exp $	*/
+/*	$OpenBSD: aplsmc.c,v 1.20 2022/11/26 17:23:15 tobhe Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -18,7 +18,9 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
+#include <sys/proc.h>
 #include <sys/sensors.h>
+#include <sys/signalvar.h>
 
 #include <machine/apmvar.h>
 #include <machine/bus.h>
@@ -35,6 +37,9 @@
 
 #include "apm.h"
 
+extern int lid_action;
+extern void (*simplefb_burn_hook)(u_int);
+
 extern void (*cpuresetfn)(void);
 extern void (*powerdownfn)(void);
 
@@ -42,12 +47,14 @@ extern void (*powerdownfn)(void);
 #define SMC_EP			32
 
 /* SMC commands */
+#define SMC_CMD(d)		((d) & 0xff)
 #define SMC_READ_KEY		0x10
 #define SMC_WRITE_KEY		0x11
 #define SMC_GET_KEY_BY_INDEX	0x12
 #define SMC_GET_KEY_INFO	0x13
 #define SMC_GET_SRAM_ADDR	0x17
 #define  SMC_SRAM_SIZE		0x4000
+#define SMC_NOTIFICATION	0x18
 
 /* SMC errors */
 #define SMC_ERROR(d)		((d) & 0xff)
@@ -78,6 +85,23 @@ struct aplsmc_sensor {
 	const char	*desc;
 	int		flags;
 };
+
+/* SMC events */
+#define SMC_EV_TYPE(d)		(((d) >> 48) & 0xffff)
+#define SMC_EV_TYPE_BTN		0x7201
+#define SMC_EV_TYPE_LID		0x7203
+#define SMC_EV_SUBTYPE(d)	(((d) >> 40) & 0xff)
+#define SMC_EV_DATA(d)		(((d) >> 32) & 0xff)
+
+/* Button events */
+#define SMC_PWRBTN_OFF		0x00
+#define SMC_PWRBTN_SHORT	0x01
+#define SMC_PWRBTN_TOUCHID	0x06
+#define SMC_PWRBTN_LONG		0xfe
+
+/* Lid events */
+#define SMC_LID_OPEN		0x00
+#define SMC_LID_CLOSE		0x01
 
 #define APLSMC_BE		(1 << 0)
 #define APLSMC_HIDDEN		(1 << 1)
@@ -154,6 +178,7 @@ void	aplsmc_callback(void *, uint64_t);
 int	aplsmc_send_cmd(struct aplsmc_softc *, uint16_t, uint32_t, uint16_t);
 int	aplsmc_wait_cmd(struct aplsmc_softc *sc);
 int	aplsmc_read_key(struct aplsmc_softc *, uint32_t, void *, size_t);
+int	aplsmc_write_key(struct aplsmc_softc *, uint32_t, void *, size_t);
 void	aplsmc_refresh_sensors(void *);
 int	aplsmc_apminfo(struct apm_power_info *);
 void	aplsmc_set_pin(void *, uint32_t *, int);
@@ -177,6 +202,7 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 	struct aplsmc_softc *sc = (struct aplsmc_softc *)self;
 	struct fdt_attach_args *faa = aux;
 	uint8_t data[SMC_CLKM_LEN];
+	uint8_t ntap;
 	int error, node;
 #ifndef SMALL_KERNEL
 	int i;
@@ -194,7 +220,7 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 		return;
 	}
 
-	sc->sc_rs = rtkit_init(faa->fa_node, NULL, NULL);
+	sc->sc_rs = rtkit_init(faa->fa_node, NULL, RK_WAKEUP, NULL);
 	if (sc->sc_rs == NULL) {
 		printf(": can't map mailbox channel\n");
 		return;
@@ -248,6 +274,7 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_todr.cookie = sc;
 		sc->sc_todr.todr_gettime = aplsmc_gettime;
 		sc->sc_todr.todr_settime = aplsmc_settime;
+		sc->sc_todr.todr_quality = 1000;
 		todr_attach(&sc->sc_todr);
 	}
 
@@ -258,6 +285,10 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 		powerdownfn = aplsmc_powerdown;
 		config_mountroot(self, aplsmc_reboot_attachhook);
 	}
+
+	/* Enable notifications. */
+	ntap = 1;
+	aplsmc_write_key(sc, SMC_KEY("NTAP"), &ntap, sizeof(ntap));
 
 #ifndef SMALL_KERNEL
 
@@ -307,12 +338,88 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 #endif
 
 #endif
+
+#ifdef SUSPEND
+	device_register_wakeup(&sc->sc_dev);
+#endif
+}
+
+void
+aplsmc_handle_notification(struct aplsmc_softc *sc, uint64_t data)
+{
+	extern int allowpowerdown;
+	extern int cpu_suspended;
+
+	switch (SMC_EV_TYPE(data)) {
+	case SMC_EV_TYPE_BTN:
+		switch (SMC_EV_SUBTYPE(data)) {
+		case SMC_PWRBTN_SHORT:
+		case SMC_PWRBTN_TOUCHID:
+			if (SMC_EV_DATA(data) == 1) {
+#ifdef SUSPEND
+				if (cpu_suspended) {
+					cpu_suspended = 0;
+				} else
+#endif
+				if (allowpowerdown) {
+					allowpowerdown = 0;
+					prsignal(initprocess, SIGUSR2);
+				}
+			}
+			break;
+		case SMC_PWRBTN_LONG:
+			break;
+		case SMC_PWRBTN_OFF:
+			/* XXX Do emergency shutdown? */
+			break;
+		default:
+			printf("%s: SMV_EV_TYPE_BTN 0x%016llx\n",
+			       sc->sc_dev.dv_xname, data);
+			break;
+		}
+		break;
+	case SMC_EV_TYPE_LID:
+		switch (SMC_EV_SUBTYPE(data)) {
+		case SMC_LID_OPEN:
+			if (simplefb_burn_hook)
+				simplefb_burn_hook(1);
+			break;
+		case SMC_LID_CLOSE:
+			if (simplefb_burn_hook)
+				simplefb_burn_hook(0);
+			break;
+		default:
+			printf("%s: SMV_EV_TYPE_LID 0x%016llx\n",
+			       sc->sc_dev.dv_xname, data);
+			break;
+		}
+		switch (lid_action) {
+		case 1: 
+			/* XXX: suspend */
+			break;
+		case 2:
+			/* XXX: hibernate */
+			break;
+		}
+		break;
+	default:
+#ifdef APLSMC_DEBUG
+		printf("%s: unhandled event 0x%016llx\n",
+		    sc->sc_dev.dv_xname, data);
+#endif
+		break;
+	}
 }
 
 void
 aplsmc_callback(void *arg, uint64_t data)
 {
 	struct aplsmc_softc *sc = arg;
+
+	if (SMC_CMD(data) == SMC_NOTIFICATION) {
+		aplsmc_handle_notification(sc, data);
+		return;
+	}
 
 	sc->sc_data = data;
 	wakeup(&sc->sc_data);

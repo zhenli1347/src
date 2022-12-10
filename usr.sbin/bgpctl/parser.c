@@ -1,4 +1,4 @@
-/*	$OpenBSD: parser.c,v 1.113 2022/06/22 12:27:46 claudio Exp $ */
+/*	$OpenBSD: parser.c,v 1.118 2022/11/10 10:47:30 mbuhl Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -141,6 +141,7 @@ static const struct token t_show[] = {
 	{ KEYWORD,	"sets",		SHOW_SET,	NULL},
 	{ KEYWORD,	"rtr",		SHOW_RTR,	NULL},
 	{ KEYWORD,	"mrt",		SHOW_MRT,	t_show_mrt},
+	{ KEYWORD,	"metrics",	SHOW_METRICS,	NULL},
 	{ ENDTOKEN,	"",		NONE,		NULL}
 };
 
@@ -506,7 +507,7 @@ parse(int argc, char *argv[])
 	const struct token	*table = t_main;
 	const struct token	*match;
 
-	bzero(&res, sizeof(res));
+	memset(&res, 0, sizeof(res));
 	res.rtableid = getrtable();
 	TAILQ_INIT(&res.set);
 
@@ -718,7 +719,7 @@ match_token(int *argc, char **argv[], const struct token table[])
 		case RD:
 			if (word != NULL && wordlen > 0) {
 				char *p = strdup(word);
-				struct community ext;
+				struct community ext = { 0 };
 				uint64_t rd;
 
 				if (p == NULL)
@@ -907,8 +908,8 @@ parse_addr(const char *word, struct bgpd_addr *addr)
 	if (word == NULL)
 		return (0);
 
-	bzero(addr, sizeof(struct bgpd_addr));
-	bzero(&ina, sizeof(ina));
+	memset(addr, 0, sizeof(struct bgpd_addr));
+	memset(&ina, 0, sizeof(ina));
 
 	if (inet_net_pton(AF_INET, word, &ina, sizeof(ina)) != -1) {
 		addr->aid = AID_INET;
@@ -916,7 +917,7 @@ parse_addr(const char *word, struct bgpd_addr *addr)
 		return (1);
 	}
 
-	bzero(&hints, sizeof(hints));
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET6;
 	hints.ai_socktype = SOCK_DGRAM; /*dummy*/
 	hints.ai_flags = AI_NUMERICHOST;
@@ -940,7 +941,7 @@ parse_prefix(const char *word, size_t wordlen, struct bgpd_addr *addr,
 	if (word == NULL)
 		return (0);
 
-	bzero(addr, sizeof(struct bgpd_addr));
+	memset(addr, 0, sizeof(struct bgpd_addr));
 
 	if ((p = strrchr(word, '/')) != NULL) {
 		size_t plen = strlen(p);

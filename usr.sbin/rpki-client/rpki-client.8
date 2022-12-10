@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rpki-client.8,v 1.68 2022/06/30 10:27:52 job Exp $
+.\"	$OpenBSD: rpki-client.8,v 1.81 2022/11/26 12:02:37 job Exp $
 .\"
 .\" Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,18 +14,19 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: June 30 2022 $
+.Dd $Mdocdate: November 26 2022 $
 .Dt RPKI-CLIENT 8
 .Os
 .Sh NAME
 .Nm rpki-client
-.Nd RPKI validator to support BGP Origin Validation
+.Nd RPKI validator to support BGP routing security
 .Sh SYNOPSIS
 .Nm
 .Op Fl BcjnoRrVv
 .Op Fl b Ar sourceaddr
 .Op Fl d Ar cachedir
 .Op Fl e Ar rsync_prog
+.Op Fl H Ar fqdn
 .Op Fl S Ar skiplist
 .Op Fl s Ar timeout
 .Op Fl T Ar table
@@ -34,6 +35,7 @@
 .Nm
 .Op Fl Vv
 .Op Fl d Ar cachedir
+.Op Fl j
 .Op Fl t Ar tal
 .Fl f
 .Ar
@@ -41,7 +43,7 @@
 The
 .Nm
 utility queries the RPKI repository system with
-a built-in HTTP client and
+a built-in HTTPS client and
 .Xr openrsync 1
 to fetch all X.509 certificates, manifests, and revocation lists under a given
 .Em Trust Anchor .
@@ -52,9 +54,10 @@ by constructing and verifying a certification path for the certificate
 associated with the Object (including checking relevant CRLs).
 .Nm
 produces lists of the
-.Em Validated ROA Payloads Pq VRPs
+.Em Validated ROA Payloads Pq VRPs ,
+.Em BGPsec Router Keys Pq BRKs ,
 and
-.Em BGPsec Router Keys Pq BRKs
+.Em Validated ASPA Payloads Pq VAPs
 in various formats.
 .Pp
 The options are as follows:
@@ -118,6 +121,16 @@ and can be combined with
 .Fl j
 to emit a stream of
 .Em Concatenated JSON .
+.It Fl H Ar fqdn
+Create a shortlist and add
+.Ar fqdn
+to the shortlist.
+.Nm
+only connects to shortlisted hosts.
+The shortlist filter is enforced during processing of the
+.Em Subject Information Access Pq SIA
+extension in CA certificates, thus applies to both RSYNC and RRDP connections.
+This option can be used multiple times.
 .It Fl j
 Create output in the file
 .Pa json
@@ -176,7 +189,9 @@ seconds of runtime, because normal practice will restart from
 .Xr cron 8 .
 Disable by specifying 0.
 Defaults to 1 hour.
-Individual Publication Points are timed out after one fourth of
+Individual RSYNC/RRDP repositories are timed out after one fourth of
+.Em timeout .
+All network synchronisation tasks are aborted after seven eights of
 .Em timeout .
 .It Fl T Ar table
 For BIRD output generated with the
@@ -196,8 +211,13 @@ will load all TAL files in
 .It Fl V
 Show the version and exit.
 .It Fl v
-Specified once, prints information about status.
-Twice, prints each filename as it's processed.
+Increase verbosity.
+Specify once for synchronisation status, twice to print the name of each file
+as it's processed.
+If
+.Fl f
+is given, specify once to print more information about the encapsulated X.509
+certificate, twice to print the certificate in PEM format.
 .It Ar outputdir
 The directory where
 .Nm
@@ -271,7 +291,7 @@ The rsync URI Scheme.
 A Recommendation for IPv6 Address Text Representation.
 .It RFC 6480
 An Infrastructure to Support Secure Internet Routing.
-.It RFC 6482
+.It RFC 6482 , draft-ietf-sidrops-rfc6482bis-01
 A Profile for Route Origin Authorizations (ROAs).
 .It RFC 6485
 The Profile for Algorithms and Key Sizes for Use in the Resource Public Key
@@ -293,8 +313,14 @@ A Profile for BGPsec Router Certificates, Certificate Revocation Lists, and
 Certification Requests.
 .It RFC 8630
 Resource Public Key Infrastructure (RPKI) Trust Anchor Locator.
-.It draft-ietf-sidrops-rpki-rsc-08
-A profile for Resource Public Key Infrastructure (RPKI) Signed Checklists (RSC).
+.It RFC 9092
+Finding and Using Geofeed Data.
+.It RFC 9323
+A Profile for RPKI Signed Checklists (RSCs).
+.It draft-ietf-sidrops-aspa-profile-10
+A Profile for Autonomous System Provider Authorization (ASPA).
+.It draft-ietf-sidrops-signed-tal-12
+RPKI Signed Object for Trust Anchor Key.
 .El
 .Sh HISTORY
 .Nm

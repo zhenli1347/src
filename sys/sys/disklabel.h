@@ -1,4 +1,4 @@
-/*	$OpenBSD: disklabel.h,v 1.78 2021/05/08 16:41:25 krw Exp $	*/
+/*	$OpenBSD: disklabel.h,v 1.86 2022/11/07 10:33:22 krw Exp $	*/
 /*	$NetBSD: disklabel.h,v 1.41 1996/05/10 23:07:37 mark Exp $	*/
 
 /*
@@ -107,7 +107,7 @@ struct disklabel {
 	u_int32_t d_bend;		/* end of useable region */
 	u_int32_t d_flags;		/* generic flags */
 #define NDDATA 5
-	u_int32_t d_drivedata[NDDATA];	/* drive-type specific information */
+	u_int32_t d_spare4[NDDATA];
 	u_int16_t d_secperunith;	/* # of data sectors (high part) */
 	u_int16_t d_version;		/* version # (1=48 bit addressing) */
 #define NSPARE 4
@@ -117,8 +117,8 @@ struct disklabel {
 
 			/* filesystem and partition information: */
 	u_int16_t d_npartitions;	/* number of partitions in following */
-	u_int32_t d_bbsize;		/* size of boot area at sn0, bytes */
-	u_int32_t d_sbsize;		/* max size of fs superblock, bytes */
+	u_int32_t d_spare2;
+	u_int32_t d_spare3;
 	struct	partition {		/* the partition table */
 		u_int32_t p_size;	/* number of sectors (low part) */
 		u_int32_t p_offset;	/* starting sector (low part) */
@@ -321,28 +321,7 @@ static char *fstypesnames[] = {
 /*
  * flags shared by various drives:
  */
-#define		D_BADSECT	0x04		/* supports bad sector forw. */
 #define		D_VENDOR	0x08		/* vendor disklabel */
-
-/*
- * Drive data for SMD.
- */
-#define	d_smdflags	d_drivedata[0]
-#define		D_SSE		0x1		/* supports skip sectoring */
-#define	d_mindist	d_drivedata[1]
-#define	d_maxdist	d_drivedata[2]
-#define	d_sdist		d_drivedata[3]
-
-/*
- * Drive data for ST506.
- */
-#define d_precompcyl	d_drivedata[0]
-#define d_gap3		d_drivedata[1]		/* used only when formatting */
-
-/*
- * Drive data for SCSI.
- */
-#define	d_blind		d_drivedata[0]
 
 #ifndef _LOCORE
 /*
@@ -360,7 +339,14 @@ struct partinfo {
 				/* ASCII string "EFI PART" encoded as 64-bit */
 #define	GPTREVISION		0x10000		/* GPT header version 1.0 */
 #define	NGPTPARTITIONS		128
-#define	GPTDOSACTIVE		0x2
+#define	GPTPARTATTR_REQUIRED		(1ULL << 0)
+#define	GPTPARTATTR_IGNORE		(1ULL << 1)
+#define	GPTPARTATTR_BOOTABLE		(1ULL << 2)
+#define	GPTPARTATTR_MS_READONLY		(1ULL << 60)
+#define	GPTPARTATTR_MS_SHADOW		(1ULL << 61)
+#define	GPTPARTATTR_MS_HIDDEN		(1ULL << 62)
+#define	GPTPARTATTR_MS_NOAUTOMOUNT	(1ULL << 63)
+
 #define	GPTMINHDRSIZE		92
 #define	GPTMINPARTSIZE		128
 #define	GPTPARTNAMESIZE		36
@@ -505,7 +491,7 @@ struct dos_mbr {
 void	 diskerr(struct buf *, char *, char *, int, int, struct disklabel *);
 u_int	 dkcksum(struct disklabel *);
 int	 initdisklabel(struct disklabel *);
-int	 checkdisklabel(void *, struct disklabel *, u_int64_t, u_int64_t);
+int	 checkdisklabel(dev_t, void *, struct disklabel *, u_int64_t, u_int64_t);
 int	 setdisklabel(struct disklabel *, struct disklabel *, u_int);
 int	 readdisklabel(dev_t, void (*)(struct buf *), struct disklabel *, int);
 int	 writedisklabel(dev_t, void (*)(struct buf *), struct disklabel *);

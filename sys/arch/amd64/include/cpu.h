@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.147 2022/08/12 02:20:36 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.154 2022/11/29 21:41:39 guenther Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 2003/04/26 18:39:39 fvdl Exp $	*/
 
 /*-
@@ -47,6 +47,7 @@
 #include <machine/intrdefs.h>
 #endif /* _KERNEL */
 
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/rwlock.h>
 #include <sys/sched.h>
@@ -82,6 +83,7 @@ struct svm {
 	uint32_t	svm_max_asid;
 	uint8_t		svm_flush_by_asid;
 	uint8_t		svm_vmcb_clean;
+	uint8_t		svm_decode_assist;
 };
 
 union vmm_cpu_cap {
@@ -220,6 +222,8 @@ struct cpu_info {
 
 	paddr_t		ci_vmcs_pa;
 	struct rwlock	ci_vmcs_lock;
+
+	struct clockintr_queue ci_queue;
 };
 
 #define CPUF_BSP	0x0001		/* CPU is the original BSP */
@@ -359,6 +363,8 @@ void signotify(struct proc *);
  * We need a machine-independent name for this.
  */
 extern void (*delay_func)(int);
+void delay_fini(void (*)(int));
+void delay_init(void (*)(int), int);
 struct timeval;
 
 #define DELAY(x)		(*delay_func)(x)
@@ -366,10 +372,7 @@ struct timeval;
 
 
 #ifdef _KERNEL
-/* locore.S */
-extern int biosbasemem;
-extern int biosextmem;
-extern int cpu;
+/* cpu.c */
 extern int cpu_feature;
 extern int cpu_ebxfeature;
 extern int cpu_ecxfeature;
@@ -381,10 +384,7 @@ extern int ecpu_ecxfeature;
 extern int cpu_id;
 extern char cpu_vendor[];
 extern int cpuid_level;
-extern int cpuspeed;
 extern int cpu_meltdown;
-
-/* cpu.c */
 extern u_int cpu_mwait_size;
 extern u_int cpu_mwait_states;
 
@@ -394,6 +394,7 @@ void	x86_print_cacheinfo(struct cpu_info *);
 /* identcpu.c */
 void	identifycpu(struct cpu_info *);
 int	cpu_amd64speed(int *);
+extern int cpuspeed;
 
 /* machdep.c */
 void	dumpconf(void);
@@ -427,6 +428,7 @@ void	i8254_inittimecounter_simple(void);
 void	i8259_default_setup(void);
 
 void cpu_init_msrs(struct cpu_info *);
+void cpu_fix_msrs(struct cpu_info *);
 void cpu_tsx_disable(struct cpu_info *);
 
 /* dkcsum.c */

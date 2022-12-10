@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.13 2022/08/09 04:49:08 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.15 2022/11/19 16:02:37 cheloha Exp $	*/
 
 /*
  * Copyright (c) 2019 Mike Larkin <mlarkin@openbsd.org>
@@ -68,6 +68,7 @@
 #define PROC_PC(p)	((p)->p_addr->u_pcb.pcb_tf->tf_sepc)
 #define PROC_STACK(p)	((p)->p_addr->u_pcb.pcb_tf->tf_sp)
 
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
@@ -89,9 +90,7 @@ struct cpu_info {
 	struct pcb		*ci_curpcb;
 	struct pcb		*ci_idle_pcb;
 
-	uint64_t		ci_lasttb;
-	uint64_t		ci_nexttimerevent;
-	uint64_t		ci_nextstatevent;
+	struct clockintr_queue	ci_queue;
 	volatile int		ci_timer_deferred;
 
 	uint32_t		ci_cpl;
@@ -137,7 +136,7 @@ static inline struct cpu_info *
 curcpu(void)
 {
 	struct cpu_info *__ci = NULL;
-	__asm __volatile("mv %0, tp" : "=&r"(__ci));
+	__asm volatile("mv %0, tp" : "=&r"(__ci));
 	return (__ci);
 }
 
@@ -238,7 +237,7 @@ void	savectx		(struct pcb *pcb);
 static inline void
 intr_enable(void)
 {
-	__asm __volatile("csrsi sstatus, %0" :: "i" (SSTATUS_SIE));
+	__asm volatile("csrsi sstatus, %0" :: "i" (SSTATUS_SIE));
 }
 
 static inline u_long
@@ -246,7 +245,7 @@ intr_disable(void)
 {
 	uint64_t ret;
 
-	__asm __volatile(
+	__asm volatile(
 	    "csrrci %0, sstatus, %1"
 	    : "=&r" (ret) : "i" (SSTATUS_SIE)
 	);
@@ -257,7 +256,7 @@ intr_disable(void)
 static inline void
 intr_restore(u_long s)
 {
-	__asm __volatile("csrs sstatus, %0" :: "r" (s));
+	__asm volatile("csrs sstatus, %0" :: "r" (s));
 }
 
 void	delay (unsigned);

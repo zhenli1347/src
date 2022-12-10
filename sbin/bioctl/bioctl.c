@@ -1,4 +1,4 @@
-/* $OpenBSD: bioctl.c,v 1.147 2021/02/08 19:05:05 stsp Exp $ */
+/* $OpenBSD: bioctl.c,v 1.151 2022/10/18 07:04:20 kn Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Marco Peereboom
@@ -133,14 +133,15 @@ main(int argc, char *argv[])
 			func |= BIOC_CREATERAID;
 			if (strcmp(optarg, "1C") == 0) {
 				cr_level = 0x1C;
-			} else if (strlen(optarg) != 1) {
-				errx(1, "Invalid RAID level");
 			} else if (isdigit((unsigned char)*optarg)) {
 				cr_level = strtonum(optarg, 0, 10, &errstr);
 				if (errstr != NULL)
 					errx(1, "Invalid RAID level");
-			} else
+			} else if (strlen(optarg) == 1) {
 				cr_level = *optarg;
+			} else {
+				errx(1, "Invalid RAID level");
+			}
 			break;
 		case 'd':
 			/* delete volume */
@@ -289,8 +290,8 @@ usage(void)
 		"[-u channel:target[.lun]] "
 		"device\n"
 		"       %s [-dhiPqsv] "
-		"[-C flag[,flag,...]] [-c raidlevel] [-k keydisk]\n"
-		"\t[-l special[,special,...]] "
+		"[-C flag[,...]] [-c raidlevel] [-k keydisk]\n"
+		"\t[-l chunk[,...]] "
 		"[-O device | channel:target[.lun]]\n"
 		"\t[-p passfile] [-R chunk | channel:target[.lun]]\n"
 		"\t[-r rounds] "
@@ -491,25 +492,24 @@ bio_inq(char *name)
 			else
 				snprintf(size, sizeof size, "%14llu",
 				    bv.bv_size);
+			printf("%11s %-10s %14s %-7s ",
+			    volname, status, size, bv.bv_dev);
 			switch (bv.bv_level) {
 			case 'C':
-				printf("%11s %-10s %14s %-7s CRYPTO%s%s\n",
-				    volname, status, size, bv.bv_dev,
+				printf("CRYPTO%s%s\n",
 				    percent, seconds);
 				break;
 			case 'c':
-				printf("%11s %-10s %14s %-7s CONCAT%s%s\n",
-				    volname, status, size, bv.bv_dev,
+				printf("CONCAT%s%s\n",
 				    percent, seconds);
 				break;
 			case 0x1C:
-				printf("%11s %-10s %14s %-7s RAID%X%s%s %s\n",
-				    volname, status, size, bv.bv_dev,
+			case 0x1E:
+				printf("RAID%X%s%s %s\n",
 				    bv.bv_level, percent, seconds, cache);
 				break;
 			default:
-				printf("%11s %-10s %14s %-7s RAID%u%s%s %s\n",
-				    volname, status, size, bv.bv_dev,
+				printf("RAID%u%s%s %s\n",
 				    bv.bv_level, percent, seconds, cache);
 				break;
 			}
@@ -863,7 +863,7 @@ bio_createraid(u_int16_t level, char *dev_list, char *key_disk)
 		min_disks = 1;
 		break;
 	default:
-		errx(1, "unsupported raid level");
+		errx(1, "unsupported RAID level");
 	}
 
 	if (no_dev < min_disks)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.138 2022/01/28 16:20:09 visa Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.140 2022/11/19 16:23:48 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993
@@ -106,6 +106,7 @@
 
 #if defined(_KERNEL) && !defined(_LOCORE)
 
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <machine/intr.h>
 #include <sys/sched.h>
@@ -178,10 +179,9 @@ struct cpu_info {
 	volatile int	ci_ipl;			/* software IPL */
 	uint32_t	ci_softpending;		/* pending soft interrupts */
 	int		ci_clock_started;
-	u_int32_t	ci_cpu_counter_last;	/* last compare value loaded */
-	u_int32_t	ci_cpu_counter_interval; /* # of counter ticks/tick */
-
-	u_int32_t	ci_pendingticks;
+	volatile int	ci_clock_deferred;	/* clock interrupt postponed */
+	struct clockintr_queue
+			ci_queue;
 
 	struct pmap	*ci_curpmap;
 	uint		ci_intrdepth;		/* interrupt depth */
@@ -258,6 +258,7 @@ void	smp_rendezvous_cpus(unsigned long, void (*)(void *), void *arg);
 #define CPU_BUSY_CYCLE()	do {} while (0)
 
 extern void (*md_startclock)(struct cpu_info *);
+extern void (*md_triggerclock)(void);
 void	cp0_calibrate(struct cpu_info *);
 
 unsigned int cpu_rnd_messybits(void);
@@ -447,6 +448,7 @@ register_t disableintr(void);
 register_t getsr(void);
 register_t setsr(register_t);
 
+uint32_t cp0_get_cause(void);
 u_int	cp0_get_count(void);
 register_t cp0_get_config(void);
 uint32_t cp0_get_config_1(void);

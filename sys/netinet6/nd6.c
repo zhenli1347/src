@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.246 2022/08/09 21:10:03 kn Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.259 2022/12/09 17:32:53 claudio Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -101,23 +101,16 @@ struct timeout nd6_slowtimo_ch;
 struct timeout nd6_expire_timeout;
 struct task nd6_expire_task;
 
+struct nd_opt_hdr *nd6_option(struct nd_opts *);
+
 void
 nd6_init(void)
 {
-	static int nd6_init_done = 0;
-
-	if (nd6_init_done) {
-		log(LOG_NOTICE, "%s called more than once\n", __func__);
-		return;
-	}
-
 	TAILQ_INIT(&nd6_list);
 	pool_init(&nd6_pool, sizeof(struct llinfo_nd6), 0,
 	    IPL_SOFTNET, 0, "nd6", NULL);
 
 	task_set(&nd6_expire_task, nd6_expire, NULL);
-
-	nd6_init_done = 1;
 
 	/* start timer */
 	timeout_set_proc(&nd6_timer_to, nd6_timer, NULL);
@@ -126,31 +119,28 @@ nd6_init(void)
 	timeout_set(&nd6_expire_timeout, nd6_expire_timer, NULL);
 }
 
-struct nd_ifinfo *
+void
 nd6_ifattach(struct ifnet *ifp)
 {
 	struct nd_ifinfo *nd;
 
 	nd = malloc(sizeof(*nd), M_IP6NDP, M_WAITOK | M_ZERO);
 
-	nd->initialized = 1;
+	nd->reachable = ND_COMPUTE_RTIME(REACHABLE_TIME);
 
-	nd->basereachable = REACHABLE_TIME;
-	nd->reachable = ND_COMPUTE_RTIME(nd->basereachable);
-	nd->retrans = RETRANS_TIMER;
-
-	return nd;
+	ifp->if_nd = nd;
 }
 
 void
-nd6_ifdetach(struct nd_ifinfo *nd)
+nd6_ifdetach(struct ifnet *ifp)
 {
+	struct nd_ifinfo *nd = ifp->if_nd;
 
 	free(nd, M_IP6NDP, sizeof(*nd));
 }
 
 void
-nd6_option_init(void *opt, int icmp6len, union nd_opts *ndopts)
+nd6_option_init(void *opt, int icmp6len, struct nd_opts *ndopts)
 {
 	bzero(ndopts, sizeof(*ndopts));
 	ndopts->nd_opts_search = (struct nd_opt_hdr *)opt;
@@ -167,15 +157,11 @@ nd6_option_init(void *opt, int icmp6len, union nd_opts *ndopts)
  * Take one ND option.
  */
 struct nd_opt_hdr *
-nd6_option(union nd_opts *ndopts)
+nd6_option(struct nd_opts *ndopts)
 {
 	struct nd_opt_hdr *nd_opt;
 	int olen;
 
-	if (!ndopts)
-		panic("%s: ndopts == NULL", __func__);
-	if (!ndopts->nd_opts_last)
-		panic("%s: uninitialized ndopts", __func__);
 	if (!ndopts->nd_opts_search)
 		return NULL;
 	if (ndopts->nd_opts_done)
@@ -218,21 +204,18 @@ nd6_option(union nd_opts *ndopts)
  * multiple options of the same type.
  */
 int
-nd6_options(union nd_opts *ndopts)
+nd6_options(struct nd_opts *ndopts)
 {
 	struct nd_opt_hdr *nd_opt;
 	int i = 0;
 
-	if (!ndopts)
-		panic("%s: ndopts == NULL", __func__);
-	if (!ndopts->nd_opts_last)
-		panic("%s: uninitialized ndopts", __func__);
-	if (!ndopts->nd_opts_search)
+	KASSERT(ndopts->nd_opts_last != NULL);
+	if (ndopts->nd_opts_search == NULL)
 		return 0;
 
 	while (1) {
 		nd_opt = nd6_option(ndopts);
-		if (!nd_opt && !ndopts->nd_opts_last) {
+		if (nd_opt == NULL && ndopts->nd_opts_last == NULL) {
 			/*
 			 * Message validation requires that all included
 			 * options have a length that is greater than zero.
@@ -242,35 +225,30 @@ nd6_options(union nd_opts *ndopts)
 			return -1;
 		}
 
-		if (!nd_opt)
+		if (nd_opt == NULL)
 			goto skip1;
 
 		switch (nd_opt->nd_opt_type) {
 		case ND_OPT_SOURCE_LINKADDR:
+			if (ndopts->nd_opts_src_lladdr != NULL)
+				nd6log((LOG_INFO, "duplicated ND6 option found "
+				    "(type=%d)\n", nd_opt->nd_opt_type));
+			else
+				ndopts->nd_opts_src_lladdr = nd_opt;
+			break;
 		case ND_OPT_TARGET_LINKADDR:
+			if (ndopts->nd_opts_tgt_lladdr != NULL)
+				nd6log((LOG_INFO, "duplicated ND6 option found "
+				    "(type=%d)\n", nd_opt->nd_opt_type));
+			else
+				ndopts->nd_opts_tgt_lladdr = nd_opt;
+			break;
 		case ND_OPT_MTU:
 		case ND_OPT_REDIRECTED_HEADER:
-			if (ndopts->nd_opt_array[nd_opt->nd_opt_type]) {
-				nd6log((LOG_INFO,
-				    "duplicated ND6 option found (type=%d)\n",
-				    nd_opt->nd_opt_type));
-				/* XXX bark? */
-			} else {
-				ndopts->nd_opt_array[nd_opt->nd_opt_type]
-					= nd_opt;
-			}
-			break;
 		case ND_OPT_PREFIX_INFORMATION:
-			if (ndopts->nd_opt_array[nd_opt->nd_opt_type] == 0) {
-				ndopts->nd_opt_array[nd_opt->nd_opt_type]
-					= nd_opt;
-			}
-			ndopts->nd_opts_pi_end =
-				(struct nd_opt_prefix_info *)nd_opt;
-			break;
 		case ND_OPT_DNSSL:
 		case ND_OPT_RDNSS:
-			/* Don't warn */
+			/* Don't warn, not used by kernel */
 			break;
 		default:
 			/*
@@ -280,6 +258,7 @@ nd6_options(union nd_opts *ndopts)
 			nd6log((LOG_DEBUG,
 			    "nd6_options: unsupported option %d - "
 			    "option ignored\n", nd_opt->nd_opt_type));
+			break;
 		}
 
 skip1:
@@ -356,20 +335,17 @@ nd6_llinfo_timer(struct rtentry *rt)
 	struct llinfo_nd6 *ln = (struct llinfo_nd6 *)rt->rt_llinfo;
 	struct sockaddr_in6 *dst = satosin6(rt_key(rt));
 	struct ifnet *ifp;
-	struct nd_ifinfo *ndi = NULL;
 
 	NET_ASSERT_LOCKED();
 
 	if ((ifp = if_get(rt->rt_ifidx)) == NULL)
 		return 1;
 
-	ndi = ND_IFINFO(ifp);
-
 	switch (ln->ln_state) {
 	case ND6_LLINFO_INCOMPLETE:
 		if (ln->ln_asked < nd6_mmaxtries) {
 			ln->ln_asked++;
-			nd6_llinfo_settimer(ln, ndi->retrans / 1000);
+			nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
 			nd6_ns_output(ifp, NULL, &dst->sin6_addr, ln, 0);
 		} else {
 			struct mbuf *m = ln->ln_hold;
@@ -413,19 +389,16 @@ nd6_llinfo_timer(struct rtentry *rt)
 		break;
 
 	case ND6_LLINFO_DELAY:
-		if (ndi) {
-			/* We need NUD */
-			ln->ln_asked = 1;
-			ln->ln_state = ND6_LLINFO_PROBE;
-			nd6_llinfo_settimer(ln, ndi->retrans / 1000);
-			nd6_ns_output(ifp, &dst->sin6_addr,
-			    &dst->sin6_addr, ln, 0);
-		}
+		/* We need NUD */
+		ln->ln_asked = 1;
+		ln->ln_state = ND6_LLINFO_PROBE;
+		nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
+		nd6_ns_output(ifp, &dst->sin6_addr, &dst->sin6_addr, ln, 0);
 		break;
 	case ND6_LLINFO_PROBE:
 		if (ln->ln_asked < nd6_umaxtries) {
 			ln->ln_asked++;
-			nd6_llinfo_settimer(ln, ndi->retrans / 1000);
+			nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
 			nd6_ns_output(ifp, &dst->sin6_addr,
 			    &dst->sin6_addr, ln, 0);
 		} else {
@@ -445,8 +418,6 @@ nd6_expire_timer_update(struct in6_ifaddr *ia6)
 {
 	time_t expire_time = INT64_MAX;
 	int secs;
-
-	KERNEL_ASSERT_LOCKED();
 
 	if (ia6->ia6_lifetime.ia6t_vltime != ND6_INFINITE_LIFETIME)
 		expire_time = ia6->ia6_lifetime.ia6t_expire;
@@ -486,10 +457,9 @@ nd6_expire(void *unused)
 {
 	struct ifnet *ifp;
 
-	KERNEL_LOCK();
 	NET_LOCK();
 
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		struct ifaddr *ifa, *nifa;
 		struct in6_ifaddr *ia6;
 
@@ -509,7 +479,6 @@ nd6_expire(void *unused)
 	}
 
 	NET_UNLOCK();
-	KERNEL_UNLOCK();
 }
 
 void
@@ -775,7 +744,7 @@ nd6_nud_hint(struct rtentry *rt)
 
 	ln->ln_state = ND6_LLINFO_REACHABLE;
 	if (!ND6_LLINFO_PERMANENT(ln))
-		nd6_llinfo_settimer(ln, ND_IFINFO(ifp)->reachable);
+		nd6_llinfo_settimer(ln, ifp->if_nd->reachable);
 out:
 	if_put(ifp);
 }
@@ -805,10 +774,10 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 	if (req == RTM_RESOLVE && nd6_need_cache(ifp) == 0) {
 		/*
 		 * For routing daemons like ospf6d we allow neighbor discovery
-		 * based on the cloning route only.  This allows us to sent
+		 * based on the cloning route only.  This allows us to send
 		 * packets directly into a network without having an address
 		 * with matching prefix on the interface.  If the cloning
-		 * route is used for an stf interface, we would mistakenly
+		 * route is used for an 6to4 interface, we would mistakenly
 		 * make a neighbor cache for the host route, and would see
 		 * strange neighbor solicitation for the corresponding
 		 * destination.  In order to avoid confusion, we check if the
@@ -905,8 +874,8 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		 * If we have too many cache entries, initiate immediate
 		 * purging for some "less recently used" entries.  Note that
 		 * we cannot directly call nd6_free() here because it would
-		 * cause re-entering rtable related routines triggering an LOR
-		 * problem for FreeBSD.
+		 * cause re-entering rtable related routines triggering
+		 * lock-order-reversal problems.
 		 */
 		if (ip6_neighborgcthresh >= 0 &&
 		    nd6_inuse >= ip6_neighborgcthresh) {
@@ -1023,7 +992,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 	switch (cmd) {
 	case SIOCGIFINFO_IN6:
 		NET_LOCK_SHARED();
-		ndi->ndi = *ND_IFINFO(ifp);
+		ndi->ndi = *ifp->if_nd;
 		NET_UNLOCK_SHARED();
 		return (0);
 	case SIOCGNBRINFO_IN6:
@@ -1037,8 +1006,8 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		 * XXX: KAME specific hack for scoped addresses
 		 *      XXXX: for other scopes than link-local?
 		 */
-		if (IN6_IS_ADDR_LINKLOCAL(&nbi->addr) ||
-		    IN6_IS_ADDR_MC_LINKLOCAL(&nbi->addr)) {
+		if (IN6_IS_ADDR_LINKLOCAL(&nb_addr) ||
+		    IN6_IS_ADDR_MC_LINKLOCAL(&nb_addr)) {
 			u_int16_t *idp = (u_int16_t *)&nb_addr.s6_addr[2];
 
 			if (*idp == 0)
@@ -1303,10 +1272,9 @@ nd6_slowtimo(void *ignored_arg)
 
 	timeout_add_sec(&nd6_slowtimo_ch, ND6_SLOWTIMER_INTERVAL);
 
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
-		nd6if = ND_IFINFO(ifp);
-		if (nd6if->basereachable && /* already initialized */
-		    (nd6if->recalctm -= ND6_SLOWTIMER_INTERVAL) <= 0) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
+		nd6if = ifp->if_nd;
+		if ((nd6if->recalctm -= ND6_SLOWTIMER_INTERVAL) <= 0) {
 			/*
 			 * Since reachable time rarely changes by router
 			 * advertisements, we SHOULD insure that a new random
@@ -1314,7 +1282,7 @@ nd6_slowtimo(void *ignored_arg)
 			 * (RFC 2461, 6.3.4)
 			 */
 			nd6if->recalctm = ND6_RECALC_REACHTM_INTERVAL;
-			nd6if->reachable = ND_COMPUTE_RTIME(nd6if->basereachable);
+			nd6if->reachable = ND_COMPUTE_RTIME(REACHABLE_TIME);
 		}
 	}
 	NET_UNLOCK();
@@ -1375,8 +1343,8 @@ nd6_resolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 
 	/*
 	 * The first time we send a packet to a neighbor whose entry is
-	 * STALE, we have to change the state to DELAY and a sets a timer to
-	 * expire in DELAY_FIRST_PROBE_TIME seconds to ensure do
+	 * STALE, we have to change the state to DELAY and set a timer to
+	 * expire in DELAY_FIRST_PROBE_TIME seconds to ensure we do
 	 * neighbor unreachability detection on expiration.
 	 * (RFC 2461 7.3.3)
 	 */
@@ -1423,7 +1391,7 @@ nd6_resolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	 */
 	if (!ND6_LLINFO_PERMANENT(ln) && ln->ln_asked == 0) {
 		ln->ln_asked++;
-		nd6_llinfo_settimer(ln, ND_IFINFO(ifp)->retrans / 1000);
+		nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
 		nd6_ns_output(ifp, NULL, &satosin6(dst)->sin6_addr, ln, 0);
 	}
 	return (EAGAIN);

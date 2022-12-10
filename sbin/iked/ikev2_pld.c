@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2_pld.c,v 1.124 2022/07/04 09:23:15 tobhe Exp $	*/
+/*	$OpenBSD: ikev2_pld.c,v 1.127 2022/12/06 09:07:33 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <endian.h>
 #include <errno.h>
 #include <err.h>
 #include <event.h>
@@ -319,7 +320,7 @@ ikev2_validate_sa(struct iked_message *msg, size_t offset, size_t left,
 	 */
 	if (!sap->sap_more && left != sap_length) {
 		log_debug("%s: malformed payload: SA payload length mismatches "
-		    "single proposal substructure length (%lu != %zu)",
+		    "single proposal substructure length (%zu != %zu)",
 		    __func__, left, sap_length);
 		return (-1);
 	}
@@ -1605,6 +1606,7 @@ ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
 	size_t				 frag_num, frag_total;
 	size_t				 len;
 	int				 ret = -1;
+	int				 processed = 0;
 	ssize_t				 elen;
 
 	buf = msgbuf + offset;
@@ -1615,6 +1617,8 @@ ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
 	offset += sizeof(frag);
 	buf = msgbuf + offset;
 	len = left - sizeof(frag);
+
+	ikestat_inc(env, ikes_frag_rcvd);
 
 	/* Limit number of total fragments to avoid DOS */
 	if (frag_total > IKED_FRAG_TOTAL_MAX ) {
@@ -1701,10 +1705,15 @@ ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
 	} else {
 		ret = 0;
 	}
+	processed = 1;
+
 done:
+	if (!processed)
+		ikestat_inc(env, ikes_frag_rcvd_drop);
 	ibuf_release(e);
 	return (ret);
 dropall:
+	ikestat_add(env, ikes_frag_rcvd_drop, sa_frag->frag_count + 1);
 	config_free_fragments(sa_frag);
 	ibuf_release(e);
 	return -1;
@@ -1722,6 +1731,7 @@ ikev2_frags_reassemble(struct iked *env, struct ikev2_payload *pld,
 	size_t				 i;
 	struct iked_message		 emsg;
 	int				 ret = -1;
+	int				 processed = 0;
 
 	/* Reassemble fragments to single buffer */
 	if ((e = ibuf_new(NULL, sa_frag->frag_total_size)) == NULL) {
@@ -1765,7 +1775,12 @@ ikev2_frags_reassemble(struct iked *env, struct ikev2_payload *pld,
 
 	ret = ikev2_pld_payloads(env, &emsg, 0, ibuf_size(e),
 	    sa_frag->frag_nextpayload);
+	processed = 1;
 done:
+	if (processed)
+		ikestat_add(env, ikes_frag_reass_ok, sa_frag->frag_total);
+	else
+		ikestat_add(env, ikes_frag_reass_drop, sa_frag->frag_total);
 	config_free_fragments(sa_frag);
 	ibuf_release(e);
 

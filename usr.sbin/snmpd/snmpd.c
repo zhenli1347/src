@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.c,v 1.46 2021/08/10 06:52:03 martijn Exp $	*/
+/*	$OpenBSD: snmpd.c,v 1.48 2022/10/06 14:41:08 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -24,6 +24,7 @@
 
 #include <net/if.h>
 
+#include <dirent.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ void	 snmpd_shutdown(struct snmpd *);
 void	 snmpd_sig_handler(int, short, void *);
 int	 snmpd_dispatch_snmpe(int, struct privsep_proc *, struct imsg *);
 int	 check_child(pid_t, const char *);
+void	 snmpd_backend(struct snmpd *);
 
 struct snmpd	*snmpd_env;
 
@@ -226,8 +228,6 @@ main(int argc, char *argv[])
 	gettimeofday(&env->sc_starttime, NULL);
 	env->sc_engine_boots = 0;
 
-	pf_init();
-
 	proc_init(ps, procs, nitems(procs), debug, argc0, argv0, proc_id);
 	if (!debug && daemon(0, 0) == -1)
 		err(1, "failed to daemonize");
@@ -252,6 +252,7 @@ main(int argc, char *argv[])
 	signal_add(&ps->ps_evsigusr1, NULL);
 
 	proc_connect(ps);
+	snmpd_backend(env);
 
 	if (pledge("stdio dns sendfd proc exec id", NULL) == -1)
 		fatal("pledge");
@@ -300,8 +301,6 @@ snmpd_dispatch_snmpe(int fd, struct privsep_proc *p, struct imsg *imsg)
 	switch (imsg->hdr.type) {
 	case IMSG_TRAP_EXEC:
 		return (traphandler_priv_recvmsg(p, imsg));
-	case IMSG_CTL_RELOAD:
-		/* XXX notyet */
 	default:
 		break;
 	}
@@ -346,4 +345,62 @@ snmpd_engine_time(void)
 	 */
 	gettimeofday(&now, NULL);
 	return now.tv_sec;
+}
+
+void
+snmpd_backend(struct snmpd *env)
+{
+	DIR *dir;
+	struct dirent *file;
+	int pair[2];
+	char *argv[8];
+	char execpath[PATH_MAX];
+	size_t i = 0;
+
+	if ((dir = opendir(SNMPD_BACKEND)) == NULL)
+		fatal("opendir \"%s\"", SNMPD_BACKEND);
+
+	argv[i++] = execpath;
+	if (env->sc_rtfilter) {
+		argv[i++] = "-C";
+		argv[i++] = "filter-routes";
+	}
+	if (env->sc_flags & SNMPD_F_VERBOSE)
+		argv[i++] = "-vv";
+	if (env->sc_flags & SNMPD_F_DEBUG) {
+		argv[i++] = "-d";
+		argv[i++] = "-x";
+		argv[i++] = "3";
+	} else {
+		argv[i++] = "-x";
+		argv[i++] = "0";
+	}
+	argv[i] = NULL;
+	while ((file = readdir(dir)) != NULL) {
+		if (file->d_name[0] == '.')
+			continue;
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1)
+			fatal("socketpair");
+		switch (fork()) {
+		case -1:
+			fatal("fork");
+		case 0:
+			close(pair[1]);
+			if (dup2(pair[0],
+			    env->sc_flags & SNMPD_F_DEBUG ? 3 : 0) == -1)
+				fatal("dup2");
+			if (closefrom(env->sc_flags & SNMPD_F_DEBUG ? 4 : 1) == -1)
+				fatal("closefrom");
+			(void)snprintf(execpath, sizeof(execpath), "%s/%s",
+			    SNMPD_BACKEND, file->d_name);
+			execv(argv[0], argv);
+			fatal("execv");
+		default:
+			close(pair[0]);
+			if (proc_compose_imsg(&env->sc_ps, PROC_SNMPE, -1,
+			    IMSG_AX_FD, -1, pair[1], NULL, 0) == -1)
+				fatal("proc_compose_imsg");
+			continue;
+		}
+	}
 }

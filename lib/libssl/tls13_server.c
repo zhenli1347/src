@@ -1,4 +1,4 @@
-/* $OpenBSD: tls13_server.c,v 1.100 2022/07/24 14:16:29 jsing Exp $ */
+/* $OpenBSD: tls13_server.c,v 1.105 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2019, 2020 Joel Sing <jsing@openbsd.org>
  * Copyright (c) 2020 Bob Beck <beck@openbsd.org>
@@ -18,7 +18,7 @@
 
 #include <openssl/x509v3.h>
 
-#include "ssl_locl.h"
+#include "ssl_local.h"
 #include "ssl_sigalgs.h"
 #include "ssl_tlsext.h"
 #include "tls13_handshake.h"
@@ -37,7 +37,7 @@ tls13_server_init(struct tls13_ctx *ctx)
 	s->version = ctx->hs->our_max_tls_version;
 
 	tls13_record_layer_set_retry_after_phh(ctx->rl,
-	    (s->internal->mode & SSL_MODE_AUTO_RETRY) != 0);
+	    (s->mode & SSL_MODE_AUTO_RETRY) != 0);
 
 	if (!ssl_get_new_session(s, 0)) /* XXX */
 		return 0;
@@ -174,6 +174,15 @@ tls13_client_hello_process(struct tls13_ctx *ctx, CBS *cbs)
 	/* Ensure we send subsequent alerts with the correct record version. */
 	tls13_record_layer_set_legacy_version(ctx->rl, TLS1_2_VERSION);
 
+	/*
+	 * Ensure that the client has not requested middlebox compatibility mode
+	 * if it is prohibited from doing so.
+	 */
+	if (!ctx->middlebox_compat && CBS_len(&session_id) != 0) {
+		ctx->alert = TLS13_ALERT_ILLEGAL_PARAMETER;
+		goto err;
+	}
+
 	/* Add decoded values to the current ClientHello hash */
 	if (!tls13_clienthello_hash_init(ctx)) {
 		ctx->alert = TLS13_ALERT_INTERNAL_ERROR;
@@ -234,8 +243,14 @@ tls13_client_hello_process(struct tls13_ctx *ctx, CBS *cbs)
 		goto err;
 	}
 
-	/* Store legacy session identifier so we can echo it. */
-	if (CBS_len(&session_id) > sizeof(ctx->hs->tls13.legacy_session_id)) {
+	/*
+	 * The legacy session identifier must either be zero length or a 32 byte
+	 * value (in which case the client is requesting middlebox compatibility
+	 * mode), as per RFC 8446 section 4.1.2. If it is valid, store the value
+	 * so that we can echo it back to the client.
+	 */
+	if (CBS_len(&session_id) != 0 &&
+	    CBS_len(&session_id) != sizeof(ctx->hs->tls13.legacy_session_id)) {
 		ctx->alert = TLS13_ALERT_ILLEGAL_PARAMETER;
 		goto err;
 	}
@@ -303,7 +318,6 @@ tls13_client_hello_recv(struct tls13_ctx *ctx, CBS *cbs)
 	if (ctx->hs->key_share != NULL)
 		ctx->handshake_stage.hs_type |= NEGOTIATED | WITHOUT_HRR;
 
-	/* XXX - check this is the correct point */
 	tls13_record_layer_allow_ccs(ctx->rl, 1);
 
 	return 1;
@@ -642,7 +656,7 @@ tls13_server_certificate_send(struct tls13_ctx *ctx, CBB *cbb)
 	if ((chain = cpk->chain) == NULL)
 		chain = s->ctx->extra_certs;
 
-	if (chain == NULL && !(s->internal->mode & SSL_MODE_NO_AUTO_CHAIN)) {
+	if (chain == NULL && !(s->mode & SSL_MODE_NO_AUTO_CHAIN)) {
 		if ((xsc = X509_STORE_CTX_new()) == NULL)
 			goto err;
 		if (!X509_STORE_CTX_init(xsc, s->ctx->cert_store, cpk->x509, NULL))
@@ -860,9 +874,7 @@ tls13_client_certificate_recv(struct tls13_ctx *ctx, CBS *cbs)
 	struct stack_st_X509 *certs = NULL;
 	SSL *s = ctx->ssl;
 	X509 *cert = NULL;
-	EVP_PKEY *pkey;
 	const uint8_t *p;
-	int cert_type;
 	int ret = 0;
 
 	if (!CBS_get_u8_length_prefixed(cbs, &cert_request_context))
@@ -911,31 +923,11 @@ tls13_client_certificate_recv(struct tls13_ctx *ctx, CBS *cbs)
 		    "failed to verify peer certificate", NULL);
 		goto err;
 	}
+	s->session->verify_result = s->verify_result;
 	ERR_clear_error();
 
-	/*
-	 * Achtung! Due to API inconsistency, a client includes the peer's leaf
-	 * certificate in the stored certificate chain, while a server does not.
-	 */
-	cert = sk_X509_shift(certs);
-
-	if ((pkey = X509_get0_pubkey(cert)) == NULL)
+	if (!tls_process_peer_certs(s, certs))
 		goto err;
-	if (EVP_PKEY_missing_parameters(pkey))
-		goto err;
-	if ((cert_type = ssl_cert_type(pkey)) < 0)
-		goto err;
-
-	X509_up_ref(cert);
-	X509_free(s->session->peer_cert);
-	s->session->peer_cert = cert;
-	s->session->peer_cert_type = cert_type;
-
-	s->session->verify_result = s->verify_result;
-
-	sk_X509_pop_free(s->session->cert_chain, X509_free);
-	s->session->cert_chain = certs;
-	certs = NULL;
 
 	ctx->handshake_stage.hs_type |= WITH_CCV;
 	ret = 1;

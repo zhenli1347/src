@@ -1,4 +1,4 @@
-/* $OpenBSD: tls13_client.c,v 1.97 2022/07/24 14:16:29 jsing Exp $ */
+/* $OpenBSD: tls13_client.c,v 1.101 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2018, 2019 Joel Sing <jsing@openbsd.org>
  *
@@ -18,7 +18,7 @@
 #include <openssl/ssl3.h>
 
 #include "bytestring.h"
-#include "ssl_locl.h"
+#include "ssl_local.h"
 #include "ssl_sigalgs.h"
 #include "ssl_tlsext.h"
 #include "tls13_handshake.h"
@@ -39,7 +39,7 @@ tls13_client_init(struct tls13_ctx *ctx)
 	s->version = ctx->hs->our_max_tls_version;
 
 	tls13_record_layer_set_retry_after_phh(ctx->rl,
-	    (s->internal->mode & SSL_MODE_AUTO_RETRY) != 0);
+	    (s->mode & SSL_MODE_AUTO_RETRY) != 0);
 
 	if (!ssl_get_new_session(s, 0)) /* XXX */
 		return 0;
@@ -148,12 +148,12 @@ tls13_client_hello_send(struct tls13_ctx *ctx, CBB *cbb)
 int
 tls13_client_hello_sent(struct tls13_ctx *ctx)
 {
-	tls13_record_layer_allow_ccs(ctx->rl, 1);
-
 	tls1_transcript_freeze(ctx->ssl);
 
-	if (ctx->middlebox_compat)
+	if (ctx->middlebox_compat) {
+		tls13_record_layer_allow_ccs(ctx->rl, 1);
 		ctx->send_dummy_ccs = 1;
+	}
 
 	return 1;
 }
@@ -553,9 +553,8 @@ tls13_server_certificate_recv(struct tls13_ctx *ctx, CBS *cbs)
 	struct stack_st_X509 *certs = NULL;
 	SSL *s = ctx->ssl;
 	X509 *cert = NULL;
-	EVP_PKEY *pkey;
 	const uint8_t *p;
-	int alert_desc, cert_type;
+	int alert_desc;
 	int ret = 0;
 
 	if ((certs = sk_X509_new_null()) == NULL)
@@ -610,28 +609,11 @@ tls13_server_certificate_recv(struct tls13_ctx *ctx, CBS *cbs)
 		    "failed to verify peer certificate", NULL);
 		goto err;
 	}
+	s->session->verify_result = s->verify_result;
 	ERR_clear_error();
 
-	cert = sk_X509_value(certs, 0);
-	X509_up_ref(cert);
-
-	if ((pkey = X509_get0_pubkey(cert)) == NULL)
+	if (!tls_process_peer_certs(s, certs))
 		goto err;
-	if (EVP_PKEY_missing_parameters(pkey))
-		goto err;
-	if ((cert_type = ssl_cert_type(pkey)) < 0)
-		goto err;
-
-	X509_up_ref(cert);
-	X509_free(s->session->peer_cert);
-	s->session->peer_cert = cert;
-	s->session->peer_cert_type = cert_type;
-
-	s->session->verify_result = s->verify_result;
-
-	sk_X509_pop_free(s->session->cert_chain, X509_free);
-	s->session->cert_chain = certs;
-	certs = NULL;
 
 	if (ctx->ocsp_status_recv_cb != NULL &&
 	    !ctx->ocsp_status_recv_cb(ctx))

@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_http.c,v 1.150 2022/03/02 11:10:43 florian Exp $	*/
+/*	$OpenBSD: server_http.c,v 1.153 2022/09/21 05:55:18 yasuoka Exp $	*/
 
 /*
  * Copyright (c) 2020 Matthias Pressfreund <mpfr@fn.de>
@@ -474,12 +474,9 @@ server_read_http(struct bufferevent *bev, void *arg)
 			/* HTTP request payload */
 			if (clt->clt_toread > 0)
 				bev->readcb = server_read_httpcontent;
-
-			/* Single-pass HTTP body */
-			if (clt->clt_toread < 0) {
-				clt->clt_toread = TOREAD_UNLIMITED;
-				bev->readcb = server_read;
-			}
+			if (clt->clt_toread < 0 && !desc->http_chunked)
+				/* 7. of RFC 9112 Section 6.3 */
+				clt->clt_toread = 0;
 			break;
 		default:
 			server_abort_http(clt, 405, "method not allowed");
@@ -1764,8 +1761,8 @@ read_errdoc(const char *root, const char *file)
 {
 	struct stat	 sb;
 	char		*path;
-	int	 	 fd;
-	char	 	*ret = NULL;
+	int		 fd;
+	char		*ret = NULL;
 
 	if (asprintf(&path, "%s/%s.html", root, file) == -1)
 		fatal("asprintf");
@@ -1777,13 +1774,16 @@ read_errdoc(const char *root, const char *file)
 	free(path);
 	if (fstat(fd, &sb) < 0) {
 		log_warn("%s: stat", __func__);
+		close(fd);
 		return (NULL);
 	}
 
 	if ((ret = calloc(1, sb.st_size + 1)) == NULL)
 		fatal("calloc");
-	if (sb.st_size == 0)
+	if (sb.st_size == 0) {
+		close(fd);
 		return (ret);
+	}
 	if (read(fd, ret, sb.st_size) != sb.st_size) {
 		log_warn("%s: read", __func__);
 		close(fd);

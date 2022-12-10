@@ -1,4 +1,4 @@
-.\" $OpenBSD: tmux.1,v 1.897 2022/08/02 11:09:26 nicm Exp $
+.\" $OpenBSD: tmux.1,v 1.908 2022/11/11 08:37:55 nicm Exp $
 .\"
 .\" Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 .\"
@@ -14,7 +14,7 @@
 .\" IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 .\" OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 2 2022 $
+.Dd $Mdocdate: November 11 2022 $
 .Dt TMUX 1
 .Os
 .Sh NAME
@@ -23,7 +23,7 @@
 .Sh SYNOPSIS
 .Nm tmux
 .Bk -words
-.Op Fl 2CDluvV
+.Op Fl 2CDlNuVv
 .Op Fl c Ar shell-command
 .Op Fl f Ar file
 .Op Fl L Ar socket-name
@@ -203,6 +203,12 @@ If
 is specified, the default socket directory is not used and any
 .Fl L
 flag is ignored.
+.It Fl T Ar features
+Set terminal features for the client.
+This is a comma-separated list of features.
+See the
+.Ic terminal-features
+option.
 .It Fl u
 Write UTF-8 output to the terminal even if the first environment
 variable of
@@ -214,12 +220,10 @@ that is set does not contain
 .Qq UTF-8
 or
 .Qq UTF8 .
-.It Fl T Ar features
-Set terminal features for the client.
-This is a comma-separated list of features.
-See the
-.Ic terminal-features
-option.
+.It Fl V
+Report the
+.Nm
+version.
 .It Fl v
 Request verbose logging.
 Log messages will be saved into
@@ -244,10 +248,6 @@ signal may be sent to the
 server process to toggle logging between on (as if
 .Fl v
 was given) and off.
-.It Fl V
-Report the
-.Nm
-version.
 .It Ar command Op Ar flags
 This specifies one of a set of commands used to control
 .Nm ,
@@ -1808,6 +1808,9 @@ The following commands are supported in copy mode:
 .It Li "search-forward <for>" Ta "/" Ta ""
 .It Li "search-forward-incremental <for>" Ta "" Ta "C-s"
 .It Li "search-forward-text <for>" Ta "" Ta ""
+.It Li "scroll-bottom" Ta "" Ta ""
+.It Li "scroll-middle" Ta "z" Ta ""
+.It Li "scroll-top" Ta "" Ta ""
 .It Li "search-reverse" Ta "N" Ta "N"
 .It Li "select-line" Ta "V" Ta ""
 .It Li "select-word" Ta "" Ta ""
@@ -2010,7 +2013,7 @@ but a different format may be specified with
 .Fl F .
 .Tg capturep
 .It Xo Ic capture-pane
-.Op Fl aepPqCJN
+.Op Fl aAepPqCJN
 .Op Fl b Ar buffer-name
 .Op Fl E Ar end-line
 .Op Fl S Ar start-line
@@ -2035,10 +2038,15 @@ is given, the output includes escape sequences for text and background
 attributes.
 .Fl C
 also escapes non-printable characters as octal \exxx.
+.Fl T
+ignores trailing positions that do not contain a character.
 .Fl N
 preserves trailing spaces at each line's end and
 .Fl J
-preserves trailing spaces and joins any wrapped lines.
+preserves trailing spaces and joins any wrapped lines;
+.Fl J
+implies
+.Fl T .
 .Fl P
 captures only any output that the pane has received that is the beginning of an
 as-yet incomplete escape sequence.
@@ -3679,6 +3687,8 @@ Supports the overline SGR attribute.
 Supports the DECFRA rectangle fill escape sequence.
 .It RGB
 Supports RGB colour with the SGR escape sequences.
+.It sixel
+Supports SIXEL graphics.
 .It strikethrough
 Supports the strikethrough SGR escape sequence.
 .It sync
@@ -3872,6 +3882,10 @@ For how to specify
 see the
 .Sx STYLES
 section.
+.It Xo Ic message-line
+.Op Ic 0 | 1 | 2 | 3 | 4
+.Xc
+Set line on which status line messages and the command prompt are shown.
 .It Ic message-style Ar style
 Set status line message style.
 This is used for messages and for the command prompt.
@@ -5068,6 +5082,15 @@ would change
 .Ql abABab
 into
 .Ql bxBxbx .
+A different delimiter character may also be used, to avoid collisions with
+literal slashes in the pattern.
+For example,
+.Ql s|foo/|bar/|:
+will substitute
+.Ql foo/
+with
+.Ql bar/
+throughout.
 .Pp
 In addition, the last line of a shell command's output may be inserted using
 .Ql #() .
@@ -5875,7 +5898,7 @@ The following keys are also available:
 .El
 .Tg display
 .It Xo Ic display-message
-.Op Fl aINpv
+.Op Fl aIlNpv
 .Op Fl c Ar target-client
 .Op Fl d Ar delay
 .Op Fl t Ar target-pane
@@ -5897,7 +5920,12 @@ is not given, the
 option is used; a delay of zero waits for a key press.
 .Ql N
 ignores key presses and closes only after the delay expires.
-The format of
+If
+.Fl l
+is given,
+.Ar message
+is printed unchanged.
+Otherwise, the format of
 .Ar message
 is described in the
 .Sx FORMATS
@@ -6430,6 +6458,10 @@ These are set automatically if the
 capability is present.
 .It Em \&Hls
 Set or clear a hyperlink annotation.
+.It Em \&Nobr
+Tell
+.Nm
+that the terminal does not use bright colors for bold display.
 .It Em \&Rect
 Tell
 .Nm
@@ -6461,6 +6493,8 @@ Set the opening sequence for the working directory notification.
 The sequence is terminated using the standard
 .Em fsl
 capability.
+.It Em \&Sxl
+Indicates that the terminal supports SIXEL.
 .It Em \&Sync
 Start (parameter is 1) or end (parameter is 2) a synchronized update.
 .It Em \&Tc
@@ -6592,6 +6626,14 @@ escapes non-printable characters and backslash as octal \\xxx.
 The pane with ID
 .Ar pane-id
 has changed mode.
+.It Ic %paste-buffer-changed Ar name
+Paste buffer
+.Ar name
+has been changed.
+.It Ic %paste-buffer-deleted Ar name
+Paste buffer
+.Ar name
+has been deleted.
 .It Ic %pause Ar pane-id
 The pane has been paused (if the
 .Ar pause-after

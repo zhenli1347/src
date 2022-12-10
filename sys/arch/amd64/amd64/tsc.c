@@ -1,4 +1,4 @@
-/*	$OpenBSD: tsc.c,v 1.25 2022/08/12 02:20:36 cheloha Exp $	*/
+/*	$OpenBSD: tsc.c,v 1.30 2022/10/24 00:56:33 cheloha Exp $	*/
 /*
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
  * Copyright (c) 2016,2017 Reyk Floeter <reyk@openbsd.org>
@@ -36,7 +36,8 @@ int		tsc_recalibrate;
 uint64_t	tsc_frequency;
 int		tsc_is_invariant;
 
-u_int		tsc_get_timecount(struct timecounter *tc);
+u_int		tsc_get_timecount_lfence(struct timecounter *tc);
+u_int		tsc_get_timecount_rdtscp(struct timecounter *tc);
 void		tsc_delay(int usecs);
 
 #include "lapic.h"
@@ -44,15 +45,17 @@ void		tsc_delay(int usecs);
 extern u_int32_t lapic_per_second;
 #endif
 
+u_int64_t (*tsc_rdtsc)(void) = rdtsc_lfence;
+
 struct timecounter tsc_timecounter = {
-	.tc_get_timecount = tsc_get_timecount,
+	.tc_get_timecount = tsc_get_timecount_lfence,
 	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 0,
 	.tc_name = "tsc",
 	.tc_quality = -1000,
 	.tc_priv = NULL,
-	.tc_user = TC_TSC,
+	.tc_user = TC_TSC_LFENCE,
 };
 
 uint64_t
@@ -97,6 +100,67 @@ tsc_freq_cpuid(struct cpu_info *ci)
 	return (0);
 }
 
+uint64_t
+tsc_freq_msr(struct cpu_info *ci)
+{
+	uint64_t base, def, divisor, multiplier;
+
+	if (strcmp(cpu_vendor, "AuthenticAMD") != 0)
+		return 0;
+
+	/*
+	 * All 10h+ CPUs have Core::X86::Msr:HWCR and the TscFreqSel
+	 * bit.  If TscFreqSel hasn't been set, the TSC isn't advancing
+	 * at the core P0 frequency and we need to calibrate by hand.
+	 */
+	if (ci->ci_family < 0x10)
+		return 0;
+	if (!ISSET(rdmsr(MSR_HWCR), HWCR_TSCFREQSEL))
+		return 0;
+
+	/*
+	 * In 10h+ CPUs, Core::X86::Msr::PStateDef defines the voltage
+	 * and frequency for each core P-state.  We want the P0 frequency.
+	 * If the En bit isn't set, the register doesn't define a valid
+	 * P-state.
+	 */
+	def = rdmsr(MSR_PSTATEDEF(0));
+	if (!ISSET(def, PSTATEDEF_EN))
+		return 0;
+
+	switch (ci->ci_family) {
+	case 0x17:
+	case 0x19:
+		/*
+		 * PPR for AMD Family 17h [...]:
+		 * Models 01h,08h B2, Rev 3.03, pp. 33, 139-140
+		 * Model 18h B1, Rev 3.16, pp. 36, 143-144
+		 * Model 60h A1, Rev 3.06, pp. 33, 155-157
+		 * Model 71h B0, Rev 3.06, pp. 28, 150-151
+		 *
+		 * PPR for AMD Family 19h [...]:
+		 * Model 21h B0, Rev 3.05, pp. 33, 166-167
+		 *
+		 * OSRR for AMD Family 17h processors,
+		 * Models 00h-2Fh, Rev 3.03, pp. 130-131
+		 */
+		base = 200000000;			/* 200.0 MHz */
+		divisor = (def >> 8) & 0x3f;
+		if (divisor <= 0x07 || divisor >= 0x2d)
+			return 0;			/* reserved */
+		if (divisor >= 0x1b && divisor % 2 == 1)
+			return 0;			/* reserved */
+		multiplier = def & 0xff;
+		if (multiplier <= 0x0f)
+			return 0;			/* reserved */
+		break;
+	default:
+		return 0;
+	}
+
+	return base * multiplier / divisor;
+}
+
 void
 tsc_identify(struct cpu_info *ci)
 {
@@ -105,11 +169,20 @@ tsc_identify(struct cpu_info *ci)
 	    !(ci->ci_flags & CPUF_INVAR_TSC))
 		return;
 
+	/* Prefer RDTSCP where supported. */
+	if (ISSET(ci->ci_feature_eflags, CPUID_RDTSCP)) {
+		tsc_rdtsc = rdtscp;
+		tsc_timecounter.tc_get_timecount = tsc_get_timecount_rdtscp;
+		tsc_timecounter.tc_user = TC_TSC_RDTSCP;
+	}
+
 	tsc_is_invariant = 1;
 
 	tsc_frequency = tsc_freq_cpuid(ci);
+	if (tsc_frequency == 0)
+		tsc_frequency = tsc_freq_msr(ci);
 	if (tsc_frequency > 0)
-		delay_func = tsc_delay;
+		delay_init(tsc_delay, 5000);
 }
 
 static inline int
@@ -119,9 +192,9 @@ get_tsc_and_timecount(struct timecounter *tc, uint64_t *tsc, uint64_t *count)
 	int i;
 
 	for (i = 0; i < RECALIBRATE_MAX_RETRIES; i++) {
-		tsc1 = rdtsc_lfence();
+		tsc1 = tsc_rdtsc();
 		n = (tc->tc_get_timecount(tc) & tc->tc_counter_mask);
-		tsc2 = rdtsc_lfence();
+		tsc2 = tsc_rdtsc();
 
 		if ((tsc2 - tsc1) < RECALIBRATE_SMI_THRESHOLD) {
 			*count = n;
@@ -227,9 +300,15 @@ cpu_recalibrate_tsc(struct timecounter *tc)
 }
 
 u_int
-tsc_get_timecount(struct timecounter *tc)
+tsc_get_timecount_lfence(struct timecounter *tc)
 {
 	return rdtsc_lfence();
+}
+
+u_int
+tsc_get_timecount_rdtscp(struct timecounter *tc)
+{
+	return rdtscp();
 }
 
 void
@@ -260,14 +339,12 @@ tsc_delay(int usecs)
 	uint64_t interval, start;
 
 	interval = (uint64_t)usecs * tsc_frequency / 1000000;
-	start = rdtsc_lfence();
-	while (rdtsc_lfence() - start < interval)
+	start = tsc_rdtsc();
+	while (tsc_rdtsc() - start < interval)
 		CPU_BUSY_CYCLE();
 }
 
 #ifdef MULTIPROCESSOR
-
-#define TSC_DEBUG 1
 
 /*
  * Protections for global variables in this code:
@@ -301,8 +378,8 @@ volatile u_int tsc_ingress_barrier;	/* [a] Test start barrier */
 volatile u_int tsc_test_rounds;		/* [p] Remaining test rounds */
 int tsc_is_synchronized = 1;		/* [p] Have we ever failed the test? */
 
+void tsc_adjust_reset(struct cpu_info *, struct tsc_test_status *);
 void tsc_report_test_results(void);
-void tsc_reset_adjust(struct tsc_test_status *);
 void tsc_test_ap(void);
 void tsc_test_bp(void);
 
@@ -317,7 +394,7 @@ tsc_test_sync_bp(struct cpu_info *ci)
 		return;
 #endif
 	/* Reset IA32_TSC_ADJUST if it exists. */
-	tsc_reset_adjust(&tsc_bp_status);
+	tsc_adjust_reset(ci, &tsc_bp_status);
 
 	/* Reset the test cycle limit and round count. */
 	tsc_test_cycles = TSC_TEST_MSECS * tsc_frequency / 1000;
@@ -384,7 +461,7 @@ tsc_test_sync_ap(struct cpu_info *ci)
 		    __func__, ci->ci_dev->dv_xname, tsc_ap_name);
 	}
 
-	tsc_reset_adjust(&tsc_ap_status);
+	tsc_adjust_reset(ci, &tsc_ap_status);
 
 	/*
 	 * The AP is only responsible for running the test and
@@ -405,6 +482,7 @@ tsc_test_sync_ap(struct cpu_info *ci)
 void
 tsc_report_test_results(void)
 {
+#ifdef TSC_DEBUG
 	u_int round = TSC_TEST_ROUNDS - tsc_test_rounds + 1;
 
 	if (tsc_bp_status.adj != 0) {
@@ -429,28 +507,22 @@ tsc_report_test_results(void)
 		    tsc_ap_name, tsc_ap_name, tsc_ap_status.lag_count,
 		    tsc_ap_status.lag_max);
 	}
+#else
+	if (tsc_ap_status.lag_count > 0 || tsc_bp_status.lag_count > 0)
+		printf("tsc: cpu0/%s: sync test failed\n", tsc_ap_name);
+#endif /* TSC_DEBUG */
 }
 
 /*
  * Reset IA32_TSC_ADJUST if we have it.
- *
- * XXX We should rearrange cpu_hatch() so that the feature
- * flags are already set before we get here.  Check CPUID
- * by hand until then.
  */
 void
-tsc_reset_adjust(struct tsc_test_status *tts)
+tsc_adjust_reset(struct cpu_info *ci, struct tsc_test_status *tts)
 {
-	uint32_t eax, ebx, ecx, edx;
-
-	CPUID(0, eax, ebx, ecx, edx);
-	if (eax >= 7) {
-		CPUID_LEAF(7, 0, eax, ebx, ecx, edx);
-		if (ISSET(ebx, SEFF0EBX_TSC_ADJUST)) {
-			tts->adj = rdmsr(MSR_TSC_ADJUST);
-			if (tts->adj != 0)
-				wrmsr(MSR_TSC_ADJUST, 0);
-		}
+	if (ISSET(ci->ci_feature_sefflags_ebx, SEFF0EBX_TSC_ADJUST)) {
+		tts->adj = rdmsr(MSR_TSC_ADJUST);
+		if (tts->adj != 0)
+			wrmsr(MSR_TSC_ADJUST, 0);
 	}
 }
 
@@ -459,7 +531,7 @@ tsc_test_ap(void)
 {
 	uint64_t ap_val, bp_val, end, lag;
 
-	ap_val = rdtsc_lfence();
+	ap_val = tsc_rdtsc();
 	end = ap_val + tsc_test_cycles;
 	while (__predict_true(ap_val < end)) {
 		/*
@@ -470,7 +542,7 @@ tsc_test_ap(void)
 		 * the BP and the counters cannot be synchronized.
 		 */
 		bp_val = tsc_bp_status.val;
-		ap_val = rdtsc_lfence();
+		ap_val = tsc_rdtsc();
 		tsc_ap_status.val = ap_val;
 
 		/*
@@ -495,11 +567,11 @@ tsc_test_bp(void)
 {
 	uint64_t ap_val, bp_val, end, lag;
 
-	bp_val = rdtsc_lfence();
+	bp_val = tsc_rdtsc();
 	end = bp_val + tsc_test_cycles;
 	while (__predict_true(bp_val < end)) {
 		ap_val = tsc_ap_status.val;
-		bp_val = rdtsc_lfence();
+		bp_val = tsc_rdtsc();
 		tsc_bp_status.val = bp_val;
 
 		if (__predict_false(bp_val < ap_val)) {

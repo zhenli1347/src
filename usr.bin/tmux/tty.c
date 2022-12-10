@@ -1,4 +1,4 @@
-/* $OpenBSD: tty.c,v 1.423 2022/08/02 11:09:26 nicm Exp $ */
+/* $OpenBSD: tty.c,v 1.425 2022/11/11 08:37:55 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -299,9 +299,9 @@ tty_start_timer_callback(__unused int fd, __unused short events, void *data)
 	struct client	*c = tty->client;
 
 	log_debug("%s: start timer fired", c->name);
-	if ((tty->flags & (TTY_HAVEDA|TTY_HAVEXDA)) == 0)
+	if ((tty->flags & (TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA)) == 0)
 		tty_update_features(tty);
-	tty->flags |= (TTY_HAVEDA|TTY_HAVEXDA);
+	tty->flags |= (TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA);
 }
 
 void
@@ -363,12 +363,14 @@ tty_send_requests(struct tty *tty)
 		return;
 
 	if (tty->term->flags & TERM_VT100LIKE) {
-		if (~tty->flags & TTY_HAVEDA)
+		if (~tty->term->flags & TTY_HAVEDA)
+			tty_puts(tty, "\033[c");
+		if (~tty->flags & TTY_HAVEDA2)
 			tty_puts(tty, "\033[>c");
 		if (~tty->flags & TTY_HAVEXDA)
 			tty_puts(tty, "\033[>q");
 	} else
-		tty->flags |= (TTY_HAVEDA|TTY_HAVEXDA);
+		tty->flags |= (TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA);
 }
 
 void
@@ -2690,12 +2692,14 @@ tty_check_fg(struct tty *tty, struct colour_palette *palette,
 
 	/*
 	 * Perform substitution if this pane has a palette. If the bright
-	 * attribute is set, use the bright entry in the palette by changing to
-	 * the aixterm colour.
+	 * attribute is set and Nobr is not present, use the bright entry in
+	 * the palette by changing to the aixterm colour
 	 */
 	if (~gc->flags & GRID_FLAG_NOPALETTE) {
 		c = gc->fg;
-		if (c < 8 && gc->attr & GRID_ATTR_BRIGHT)
+		if (c < 8 &&
+		    gc->attr & GRID_ATTR_BRIGHT &&
+		    !tty_term_has(tty->term, TTYC_NOBR))
 			c += 90;
 		if ((c = colour_palette_get(palette, c)) != -1)
 			gc->fg = c;

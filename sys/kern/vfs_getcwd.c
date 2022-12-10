@@ -1,4 +1,4 @@
-/* $OpenBSD: vfs_getcwd.c,v 1.36 2019/05/30 13:34:54 beck Exp $ */
+/* $OpenBSD: vfs_getcwd.c,v 1.38 2022/12/05 23:18:37 deraadt Exp $ */
 /* $NetBSD: vfs_getcwd.c,v 1.3.2.3 1999/07/11 10:24:09 sommerfeld Exp $ */
 
 /*
@@ -34,7 +34,6 @@
 #include <sys/systm.h>
 #include <sys/namei.h>
 #include <sys/filedesc.h>
-#include <sys/kernel.h>
 #include <sys/stat.h>
 #include <sys/lock.h>
 #include <sys/vnode.h>
@@ -62,7 +61,7 @@ vfs_getcwd_scandir(struct vnode **lvpp, struct vnode **uvpp, char **bpp,
 	ino_t fileno;
 	struct vattr va;
 	struct vnode *uvp = NULL;
-	struct vnode *lvp = *lvpp;	
+	struct vnode *lvp = *lvpp;
 	struct componentname cn;
 
 	tries = 0;
@@ -252,7 +251,7 @@ vfs_getcwd_getcache(struct vnode **lvpp, struct vnode **uvpp, char **bpp,
 			vput(uvp);
 
 		*uvpp = NULL;
-		
+
 		error = vn_lock(lvp, LK_EXCLUSIVE | LK_RETRY);
 		if (!error) {
 			*bpp = obp; /* restore the buffer */
@@ -325,7 +324,7 @@ vfs_getcwd_common(struct vnode *lvp, struct vnode *rvp, char **bpp, char *bufp,
 
 			if (lvp == rvp)
 				goto out;
-			
+
 			tvp = lvp;
 			lvp = lvp->v_mount->mnt_vnodecovered;
 

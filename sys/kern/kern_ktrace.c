@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_ktrace.c,v 1.107 2022/07/20 05:56:36 deraadt Exp $	*/
+/*	$OpenBSD: kern_ktrace.c,v 1.109 2022/12/05 23:18:37 deraadt Exp $	*/
 /*	$NetBSD: kern_ktrace.c,v 1.23 1996/02/09 18:59:36 christos Exp $	*/
 
 /*
@@ -49,8 +49,6 @@
 #include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/syscallargs.h>
-
-#include <uvm/uvm_extern.h>
 
 void	ktrinitheaderraw(struct ktr_header *, uint, pid_t, pid_t);
 void	ktrinitheader(struct ktr_header *, struct proc *, int);
@@ -106,7 +104,7 @@ ktrsettrace(struct process *pr, int facs, struct vnode *newvp,
 
 	/* nothing to change about where the trace goes? */
 	if (pr->ps_tracevp == newvp && pr->ps_tracecred == newcred)
-		return;	
+		return;
 
 	vref(newvp);
 	crhold(newcred);
@@ -353,7 +351,7 @@ ktrexec(struct proc *p, int type, const char *data, ssize_t len)
 	struct ktr_header kth;
 	int count;
 	int buflen;
-	
+
 	assert(type == KTR_EXECARGS || type == KTR_EXECENV);
 	atomic_setbits_int(&p->p_flag, P_INKTR);
 
@@ -544,7 +542,7 @@ ktrops(struct proc *curp, struct process *pr, int ops, int facs,
 		return (0);
 	if (ops == KTROP_SET)
 		ktrsettrace(pr, facs, vp, cred);
-	else {	
+	else {
 		/* KTROP_CLEAR */
 		pr->ps_traceflag &= ~facs;
 		if ((pr->ps_traceflag & KTRFAC_MASK) == 0) {

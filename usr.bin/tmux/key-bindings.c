@@ -1,4 +1,4 @@
-/* $OpenBSD: key-bindings.c,v 1.144 2022/08/11 09:11:26 nicm Exp $ */
+/* $OpenBSD: key-bindings.c,v 1.146 2022/08/23 08:14:19 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -344,7 +344,7 @@ key_bindings_init_done(__unused struct cmdq_item *item, __unused void *data)
 void
 key_bindings_init(void)
 {
-	static const char *defaults[] = {
+	static const char *const defaults[] = {
 		/* Prefix keys. */
 		"bind -N 'Send the prefix key' C-b { send-prefix }",
 		"bind -N 'Rotate through the panes' C-o { rotate-window }",
@@ -605,6 +605,7 @@ key_bindings_init(void)
 		"bind -Tcopy-mode-vi h { send -X cursor-left }",
 		"bind -Tcopy-mode-vi j { send -X cursor-down }",
 		"bind -Tcopy-mode-vi k { send -X cursor-up }",
+		"bind -Tcopy-mode-vi z { send -X scroll-middle }",
 		"bind -Tcopy-mode-vi l { send -X cursor-right }",
 		"bind -Tcopy-mode-vi n { send -X search-again }",
 		"bind -Tcopy-mode-vi o { send -X other-end }",

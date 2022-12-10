@@ -1,4 +1,4 @@
-/*	$OpenBSD: init_main.c,v 1.316 2022/07/23 22:10:58 cheloha Exp $	*/
+/*	$OpenBSD: init_main.c,v 1.319 2022/11/10 07:05:41 jmatthew Exp $	*/
 /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
 
 /*
@@ -40,10 +40,7 @@
 
 #include <sys/param.h>
 #include <sys/filedesc.h>
-#include <sys/file.h>
 #include <sys/errno.h>
-#include <sys/exec.h>
-#include <sys/kernel.h>
 #include <sys/kthread.h>
 #include <sys/mount.h>
 #include <sys/proc.h>
@@ -53,13 +50,11 @@
 #include <sys/namei.h>
 #include <sys/vnode.h>
 #include <sys/tty.h>
-#include <sys/conf.h>
 #include <sys/buf.h>
 #include <sys/device.h>
 #include <sys/socketvar.h>
 #include <sys/lockf.h>
 #include <sys/reboot.h>
-#include <sys/user.h>
 #ifdef SYSVSHM
 #include <sys/shm.h>
 #endif
@@ -74,20 +69,16 @@
 #include <sys/msgbuf.h>
 #include <sys/mbuf.h>
 #include <sys/pipe.h>
-#include <sys/task.h>
 #include <sys/witness.h>
 #include <sys/smr.h>
+#include <sys/evcount.h>
 
-#include <sys/syscall.h>
 #include <sys/syscallargs.h>
 
 #include <uvm/uvm_extern.h>
 
-#include <ufs/ufs/quota.h>
-
 #include <net/if.h>
 #include <net/rtable.h>
-#include <net/netisr.h>
 
 #if defined(CRYPTO)
 #include <crypto/cryptodev.h>
@@ -407,6 +398,7 @@ main(void *framep)
 	mbcpuinit();
 	kqueue_init_percpu();
 	uvm_init_percpu();
+	evcount_init_percpu();
 
 	/* init exec */
 	init_exec();
@@ -720,7 +712,7 @@ start_init(void *arg)
 		 * Now try to exec the program.  If can't for any reason
 		 * other than it doesn't exist, complain.
 		 */
-		if ((error = sys_execve(p, &args, retval)) == 0) {
+		if ((error = sys_execve(p, &args, retval)) == EJUSTRETURN) {
 			KERNEL_UNLOCK();
 			return;
 		}

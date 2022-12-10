@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.27 2022/07/13 09:28:19 kettenis Exp $ */
+/* $OpenBSD: cpu.h,v 1.33 2022/12/10 10:13:58 patrick Exp $ */
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -22,19 +22,36 @@
  * User-visible definitions
  */
 
-/* 
+/*
  * CTL_MACHDEP definitions.
  */
 #define	CPU_COMPATIBLE		1	/* compatible property */
 #define	CPU_ID_AA64ISAR0	2
 #define	CPU_ID_AA64ISAR1	3
-#define	CPU_MAXID		4	/* number of valid machdep ids */
+#define	CPU_ID_AA64ISAR2	4
+#define	CPU_ID_AA64MMFR0	5
+#define	CPU_ID_AA64MMFR1	6
+#define	CPU_ID_AA64MMFR2	7
+#define	CPU_ID_AA64PFR0		8
+#define	CPU_ID_AA64PFR1		9
+#define	CPU_ID_AA64SMFR0       10
+#define	CPU_ID_AA64ZFR0	       11
+#define	CPU_LIDACTION          12
+#define	CPU_MAXID	       13	/* number of valid machdep ids */
 
 #define	CTL_MACHDEP_NAMES { \
 	{ 0, 0 }, \
 	{ "compatible", CTLTYPE_STRING }, \
 	{ "id_aa64isar0", CTLTYPE_QUAD }, \
 	{ "id_aa64isar1", CTLTYPE_QUAD }, \
+	{ "id_aa64isar2", CTLTYPE_QUAD }, \
+	{ "id_aa64mmfr0", CTLTYPE_QUAD }, \
+	{ "id_aa64mmfr1", CTLTYPE_QUAD }, \
+	{ "id_aa64mmfr2", CTLTYPE_QUAD }, \
+	{ "id_aa64pfr0", CTLTYPE_QUAD }, \
+	{ "id_aa64pfr1", CTLTYPE_QUAD }, \
+	{ "id_aa64smfr0", CTLTYPE_QUAD }, \
+	{ "id_aa64zfr0", CTLTYPE_QUAD }, \
 }
 
 #ifdef _KERNEL
@@ -81,6 +98,7 @@ void	arm32_vector_init(vaddr_t, int);
  * Per-CPU information.  For now we assume one CPU.
  */
 
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
@@ -108,6 +126,8 @@ struct cpu_info {
 
 	u_int32_t		ci_ctrl; /* The CPU control register */
 
+	u_int64_t		ci_trampoline_vectors;
+
 	uint32_t		ci_cpl;
 	uint32_t		ci_ipending;
 	uint32_t		ci_idepth;
@@ -120,7 +140,7 @@ struct cpu_info {
 
 	uint64_t		ci_ttbr1;
 	vaddr_t			ci_el1_stkend;
-	
+
 	struct opp_table	*ci_opp_table;
 	volatile int		ci_opp_idx;
 	volatile int		ci_opp_max;
@@ -142,7 +162,7 @@ struct cpu_info {
 #ifdef GPROF
 	struct gmonparam	*ci_gmon;
 #endif
-
+	struct clockintr_queue	ci_queue;
 	char			ci_panicbuf[512];
 };
 
@@ -158,7 +178,7 @@ static inline struct cpu_info *
 curcpu(void)
 {
 	struct cpu_info *__ci = NULL;
-	__asm __volatile("mrs %0, tpidr_el1" : "=r" (__ci));
+	__asm volatile("mrs %0, tpidr_el1" : "=r" (__ci));
 	return (__ci);
 }
 

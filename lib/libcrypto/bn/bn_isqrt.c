@@ -1,4 +1,4 @@
-/*	$OpenBSD: bn_isqrt.c,v 1.2 2022/07/13 11:20:00 tb Exp $ */
+/*	$OpenBSD: bn_isqrt.c,v 1.5 2022/12/01 21:59:54 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  *
@@ -21,7 +21,7 @@
 #include <openssl/bn.h>
 #include <openssl/err.h>
 
-#include "bn_lcl.h"
+#include "bn_local.h"
 
 #define CTASSERT(x)	extern char  _ctassert[(x) ? 1 : -1 ]   \
 			    __attribute__((__unused__))

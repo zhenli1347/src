@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.512 2022/03/08 15:08:01 hastings Exp $
+#	$OpenBSD: GENERIC,v 1.514 2022/11/11 15:27:39 matthieu Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -86,6 +86,7 @@ ipmi0		at acpi? disable
 ccpmic*		at iic?
 tipmic*		at iic?
 
+efi0		at bios0
 mpbios0		at bios0
 
 ipmi0	at mainbus? disable	# IPMI
@@ -191,6 +192,8 @@ imt*	at ihidev?		# HID-over-i2c multitouch trackpad
 wsmouse* at imt? mux 0
 iatp* at iic?			# Atmel maXTouch i2c touchpad/touchscreen
 wsmouse* at iatp? mux 0
+icc*	at ihidev?		# Consumer Control keyboards
+wskbd*	at icc? mux 1
 
 skgpio0 at isa? port 0x680	# Soekris net6501 GPIO and LEDs
 gpio* at skgpio?

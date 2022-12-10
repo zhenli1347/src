@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.84 2022/01/10 09:20:27 kettenis Exp $ */
+/* $OpenBSD: pmap.c,v 1.91 2022/12/10 10:13:58 patrick Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -108,6 +108,7 @@ void	pmap_set_l3(struct pmap *, uint64_t, struct pmapvp2 *,
 
 void	pmap_fill_pte(pmap_t, vaddr_t, paddr_t, struct pte_desc *,
 	    vm_prot_t, int, int);
+void	pmap_icache_sync_page(struct pmap *, paddr_t);
 void	pmap_pte_insert(struct pte_desc *);
 void	pmap_pte_remove(struct pte_desc *, int);
 void	pmap_pte_update(struct pte_desc *, uint64_t *);
@@ -375,45 +376,6 @@ pmap_vp_lookup(pmap_t pm, vaddr_t va, uint64_t **pl3entry)
 }
 
 /*
- * Remove, and return, pted at specified address, NULL if not present
- */
-struct pte_desc *
-pmap_vp_remove(pmap_t pm, vaddr_t va)
-{
-	struct pmapvp1 *vp1;
-	struct pmapvp2 *vp2;
-	struct pmapvp3 *vp3;
-	struct pte_desc *pted;
-
-	PMAP_ASSERT_LOCKED(pm);
-	
-	if (pm->have_4_level_pt) {
-		vp1 = pm->pm_vp.l0->vp[VP_IDX0(va)];
-		if (vp1 == NULL) {
-			return NULL;
-		}
-	} else {
-		vp1 = pm->pm_vp.l1;
-	}
-
-	vp2 = vp1->vp[VP_IDX1(va)];
-	if (vp2 == NULL) {
-		return NULL;
-	}
-
-	vp3 = vp2->vp[VP_IDX2(va)];
-	if (vp3 == NULL) {
-		return NULL;
-	}
-
-	pted = vp3->vp[VP_IDX3(va)];
-	vp3->vp[VP_IDX3(va)] = NULL;
-
-	return pted;
-}
-
-
-/*
  * Create a V -> P mapping for the given pmap and virtual address
  * with reference to the pte descriptor that is used to map the page.
  * This code should track allocations of vp table allocations
@@ -494,23 +456,19 @@ pmap_vp_page_free(struct pool *pp, void *v)
 	km_free(v, pp->pr_pgsize, &kv_any, &kp_dirty);
 }
 
-u_int32_t PTED_MANAGED(struct pte_desc *pted);
-u_int32_t PTED_WIRED(struct pte_desc *pted);
-u_int32_t PTED_VALID(struct pte_desc *pted);
-
-u_int32_t
+static inline u_int32_t
 PTED_MANAGED(struct pte_desc *pted)
 {
 	return (pted->pted_va & PTED_VA_MANAGED_M);
 }
 
-u_int32_t
+static inline u_int32_t
 PTED_WIRED(struct pte_desc *pted)
 {
 	return (pted->pted_va & PTED_VA_WIRED_M);
 }
 
-u_int32_t
+static inline u_int32_t
 PTED_VALID(struct pte_desc *pted)
 {
 	return (pted->pted_pte != 0);
@@ -577,7 +535,6 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	struct vm_page *pg;
 	int error;
 	int cache = PMAP_CACHE_WB;
-	int need_sync = 0;
 
 	if (pa & PMAP_NOCACHE)
 		cache = PMAP_CACHE_CI;
@@ -633,6 +590,12 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 		pmap_enter_pv(pted, pg); /* only managed mem */
 	}
 
+	if (pg != NULL && (flags & PROT_EXEC)) {
+		if ((pg->pg_flags & PG_PMAP_EXE) == 0)
+			pmap_icache_sync_page(pm, pa);
+		atomic_setbits_int(&pg->pg_flags, PG_PMAP_EXE);
+	}
+
 	/*
 	 * Insert into table, if this mapping said it needed to be mapped
 	 * now.
@@ -641,15 +604,6 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 		pmap_pte_insert(pted);
 		ttlb_flush(pm, va & ~PAGE_MASK);
 	}
-
-	if (pg != NULL && (flags & PROT_EXEC)) {
-		need_sync = ((pg->pg_flags & PG_PMAP_EXE) == 0);
-		atomic_setbits_int(&pg->pg_flags, PG_PMAP_EXE);
-	}
-
-	if (need_sync && (pm == pmap_kernel() || (curproc &&
-	    curproc->p_vmspace->vm_map.pmap == pm)))
-		cpu_icache_sync_range(va & ~PAGE_MASK, PAGE_SIZE);
 
 	error = 0;
 out:
@@ -674,7 +628,7 @@ pmap_remove(pmap_t pm, vaddr_t sva, vaddr_t eva)
 		if (pted == NULL)
 			continue;
 
-		if (pted->pted_va & PTED_VA_WIRED_M) {
+		if (PTED_WIRED(pted)) {
 			pm->pm_stats.wired_count--;
 			pted->pted_va &= ~PTED_VA_WIRED_M;
 		}
@@ -693,7 +647,7 @@ pmap_remove_pted(pmap_t pm, struct pte_desc *pted)
 {
 	pm->pm_stats.resident_count--;
 
-	if (pted->pted_va & PTED_VA_WIRED_M) {
+	if (PTED_WIRED(pted)) {
 		pm->pm_stats.wired_count--;
 		pted->pted_va &= ~PTED_VA_WIRED_M;
 	}
@@ -733,8 +687,6 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 	struct vm_page *pg;
 
 	pted = pmap_vp_lookup(pm, va, NULL);
-
-	/* Do not have pted for this, get one and put it in VP */
 	if (pted == NULL) {
 		panic("pted not preallocated in pmap_kernel() va %lx pa %lx",
 		    va, pa);
@@ -801,7 +753,7 @@ pmap_kremove_pg(vaddr_t va)
 	if (PTED_MANAGED(pted))
 		pmap_remove_pv(pted);
 
-	if (pted->pted_va & PTED_VA_WIRED_M)
+	if (PTED_WIRED(pted))
 		pm->pm_stats.wired_count--;
 
 	/* invalidate pted; */
@@ -853,24 +805,6 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 
 	pted->pted_pte = pa & PTE_RPGN;
 	pted->pted_pte |= flags & (PROT_READ|PROT_WRITE|PROT_EXEC);
-}
-
-/*
- * Garbage collects the physical map system for pages which are
- * no longer used. Success need not be guaranteed -- that is, there
- * may well be pages which are not referenced, but others may be collected
- * Called by the pageout daemon when pages are scarce.
- */
-void
-pmap_collect(pmap_t pm)
-{
-	/* This could return unused v->p table layers which
-	 * are empty.
-	 * could malicious programs allocate memory and eat
-	 * these wired pages? These are allocated via pool.
-	 * Are there pool functions which could be called
-	 * to lower the pool usage here?
-	 */
 }
 
 /*
@@ -1361,44 +1295,6 @@ pmap_bootstrap(long kvo, paddr_t lpt1, long kernelstart, long kernelend,
 	memset((void *)pa, 0, Lx_TABLE_ALIGN);
 	pmap_kernel()->pm_pt0pa = pa;
 
-	/* now that we have mapping space for everything, lets map it */
-	/* all of these mappings are ram -> kernel va */
-
-	/*
-	 * enable mappings for existing 'allocated' mapping in the bootstrap
-	 * page tables
-	 */
-	extern uint64_t *pagetable;
-	extern char _end[];
-	vp2 = (void *)((long)&pagetable + kvo);
-	struct mem_region *mp;
-	ssize_t size;
-	for (mp = pmap_allocated; mp->size != 0; mp++) {
-		/* bounds may be kinda messed up */
-		for (pa = mp->start, size = mp->size & ~0xfff;
-		    size > 0;
-		    pa+= L2_SIZE, size -= L2_SIZE)
-		{
-			paddr_t mappa = pa & ~(L2_SIZE-1);
-			vaddr_t mapva = mappa - kvo;
-			int prot = PROT_READ | PROT_WRITE;
-
-			if (mapva < (vaddr_t)_end)
-				continue;
-
-			if (mapva >= (vaddr_t)__text_start &&
-			    mapva < (vaddr_t)_etext)
-				prot = PROT_READ | PROT_EXEC;
-			else if (mapva >= (vaddr_t)__rodata_start &&
-			    mapva < (vaddr_t)_erodata)
-				prot = PROT_READ;
-
-			vp2->l2[VP_IDX2(mapva)] = mappa | L2_BLOCK |
-			    ATTR_IDX(PTE_ATTR_WB) | ATTR_SH(SH_INNER) |
-			    ATTR_nG | ap_bits_kern[prot];
-		}
-	}
-
 	pmap_avail_fixup();
 
 	/*
@@ -1558,6 +1454,26 @@ pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
 }
 
+#ifdef DDB
+void
+pmap_page_rw(pmap_t pm, vaddr_t va)
+{
+	struct pte_desc *pted;
+	uint64_t *pl3;
+
+	/* Every VA needs a pted, even unmanaged ones. */
+	pted = pmap_vp_lookup(pm, va, &pl3);
+	if (!pted || !PTED_VALID(pted)) {
+		return;
+	}
+
+	pted->pted_va |= PROT_WRITE;
+	pted->pted_pte |= PROT_WRITE;
+	pmap_pte_update(pted, pl3);
+	ttlb_flush(pm, pted->pted_va & ~PAGE_MASK);
+}
+#endif /* DDB */
+
 /*
  * Lower the protection on the specified physical page.
  *
@@ -1708,6 +1624,16 @@ pmap_proc_iflush(struct process *pr, vaddr_t va, vsize_t len)
 }
 
 void
+pmap_icache_sync_page(struct pmap *pm, paddr_t pa)
+{
+	vaddr_t kva = zero_page + cpu_number() * PAGE_SIZE;
+
+	pmap_kenter_pa(kva, pa, PROT_READ|PROT_WRITE);
+	cpu_icache_sync_range(kva, PAGE_SIZE);
+	pmap_kremove_pg(kva);
+}
+
+void
 pmap_pte_insert(struct pte_desc *pted)
 {
 	pmap_t pm = pted->pted_pmap;
@@ -1808,7 +1734,6 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 	struct vm_page *pg;
 	paddr_t pa;
 	uint64_t *pl3 = NULL;
-	int need_sync = 0;
 	int retcode = 0;
 
 	pmap_lock(pm);
@@ -1876,21 +1801,20 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 		goto done;
 	}
 
-	/* We actually made a change, so flush it and sync. */
-	pmap_pte_update(pted, pl3);
-	ttlb_flush(pm, va & ~PAGE_MASK);
-
 	/*
 	 * If this is a page that can be executed, make sure to invalidate
 	 * the instruction cache if the page has been modified or not used
 	 * yet.
 	 */
 	if (pted->pted_va & PROT_EXEC) {
-		need_sync = ((pg->pg_flags & PG_PMAP_EXE) == 0);
+		if ((pg->pg_flags & PG_PMAP_EXE) == 0)
+			pmap_icache_sync_page(pm, pa);
 		atomic_setbits_int(&pg->pg_flags, PG_PMAP_EXE);
-		if (need_sync)
-			cpu_icache_sync_range(va & ~PAGE_MASK, PAGE_SIZE);
 	}
+
+	/* We actually made a change, so flush it and sync. */
+	pmap_pte_update(pted, pl3);
+	ttlb_flush(pm, va & ~PAGE_MASK);
 
 	retcode = 1;
 done:
@@ -1902,14 +1826,21 @@ void
 pmap_postinit(void)
 {
 	extern char trampoline_vectors[];
+	extern char trampoline_vectors_end[];
 	paddr_t pa;
 	vaddr_t minaddr, maxaddr;
 	u_long npteds, npages;
 
 	memset(pmap_tramp.pm_vp.l1, 0, sizeof(struct pmapvp1));
 	pmap_extract(pmap_kernel(), (vaddr_t)trampoline_vectors, &pa);
-	pmap_enter(&pmap_tramp, (vaddr_t)trampoline_vectors, pa,
-	    PROT_READ | PROT_EXEC, PROT_READ | PROT_EXEC | PMAP_WIRED);
+	minaddr = (vaddr_t)trampoline_vectors;
+	maxaddr = (vaddr_t)trampoline_vectors_end;
+	while (minaddr < maxaddr) {
+		pmap_enter(&pmap_tramp, minaddr, pa,
+		    PROT_READ | PROT_EXEC, PROT_READ | PROT_EXEC | PMAP_WIRED);
+		minaddr += PAGE_SIZE;
+		pa += PAGE_SIZE;
+	}
 
 	/*
 	 * Reserve enough virtual address space to grow the kernel
@@ -2005,7 +1936,7 @@ pmap_unwire(pmap_t pm, vaddr_t va)
 
 	pmap_lock(pm);
 	pted = pmap_vp_lookup(pm, va, NULL);
-	if ((pted != NULL) && (pted->pted_va & PTED_VA_WIRED_M)) {
+	if (pted != NULL && PTED_WIRED(pted)) {
 		pm->pm_stats.wired_count--;
 		pted->pted_va &= ~PTED_VA_WIRED_M;
 	}
@@ -2295,41 +2226,6 @@ pmap_show_mapping(uint64_t va)
 	pted = vp3->vp[VP_IDX3(va)];
 	printf("  pted = %p lp3 = %llx idx3 off  %x\n",
 		pted, vp3->l3[VP_IDX3(va)], VP_IDX3(va)*8);
-}
-
-void
-pmap_map_early(paddr_t spa, psize_t len)
-{
-	extern pd_entry_t pagetable_l0_ttbr0[];
-	extern pd_entry_t pagetable_l1_ttbr0[];
-	extern uint64_t pagetable_l1_ttbr0_idx[];
-	extern uint64_t pagetable_l1_ttbr0_num;
-	extern uint64_t pagetable_l1_ttbr0_pa;
-	paddr_t pa, epa = spa + len;
-	uint64_t i, idx = ~0;
-
-	for (pa = spa & ~(L1_SIZE - 1); pa < epa; pa += L1_SIZE) {
-		for (i = 0; i < pagetable_l1_ttbr0_num; i++) {
-			if (pagetable_l1_ttbr0_idx[i] == ~0)
-				break;
-			if (pagetable_l1_ttbr0_idx[i] == VP_IDX0(pa))
-				break;
-		}
-		if (i == pagetable_l1_ttbr0_num)
-			panic("%s: outside existing L0 entries", __func__);
-		if (pagetable_l1_ttbr0_idx[i] == ~0) {
-			pagetable_l0_ttbr0[VP_IDX0(pa)] =
-			    (pagetable_l1_ttbr0_pa + i * PAGE_SIZE) | L0_TABLE;
-			pagetable_l1_ttbr0_idx[i] = VP_IDX0(pa);
-		}
-
-		idx = i * (PAGE_SIZE / sizeof(uint64_t)) + VP_IDX1(pa);
-		pagetable_l1_ttbr0[idx] = pa | L1_BLOCK |
-		    ATTR_IDX(PTE_ATTR_WB) | ATTR_SH(SH_INNER) |
-		    ATTR_nG | ATTR_UXN | ATTR_AF | ATTR_AP(0);
-	}
-	__asm volatile("dsb sy" ::: "memory");
-	__asm volatile("isb");
 }
 
 void

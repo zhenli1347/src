@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.20 2021/06/16 16:55:02 dv Exp $	*/
+/*	$OpenBSD: proc.h,v 1.22 2022/10/31 14:02:11 dv Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -79,6 +79,7 @@ TAILQ_HEAD(ctl_connlist, ctl_conn);
 enum privsep_procid {
 	PROC_PARENT	= 0,
 	PROC_CONTROL,
+	PROC_AGENTX,
 	PROC_VMM,
 	PROC_PRIV,
 	PROC_MAX,
@@ -88,7 +89,6 @@ extern enum privsep_procid privsep_process;
 #define CONFIG_RELOAD		0x00
 #define CONFIG_VMS		0x01
 #define CONFIG_SWITCHES		0x02
-#define CONFIG_USERS		0x04
 #define CONFIG_ALL		0xff
 
 struct privsep_pipes {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.27 2022/03/22 06:48:36 miod Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.30 2022/12/06 00:11:23 jca Exp $	*/
 
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
@@ -49,7 +49,7 @@
 #include <machine/db_machdep.h>
 #include <ddb/db_extern.h>
 
-#include <dev/acpi/efi.h>
+#include <dev/efi/efi.h>
 
 #include "softraid.h"
 #if NSOFTRAID > 0
@@ -273,6 +273,8 @@ cpu_startup(void)
 	printf("avail mem = %lu (%luMB)\n", ptoa(uvmexp.free),
 	    ptoa(uvmexp.free) / 1024 / 1024);
 
+	sbi_print_version();
+
 	curpcb = &proc0.p_addr->u_pcb;
 	curpcb->pcb_flags = 0;
 	curpcb->pcb_tf = &proc0tf;
@@ -407,7 +409,7 @@ doreset:
 
 void
 setregs(struct proc *p, struct exec_package *pack, u_long stack,
-    register_t *retval)
+    struct ps_strings *arginfo)
 {
 	struct trapframe *tf = p->p_addr->u_pcb.pcb_tf;
 	struct pcb *pcb = &p->p_addr->u_pcb;
@@ -417,12 +419,10 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 	tf->tf_sstatus &= ~SSTATUS_FS_MASK;
 	tf->tf_sstatus |= SSTATUS_FS_OFF;
 
-	memset(tf, 0, sizeof(*tf));
+	memset(tf, 0, sizeof *tf);
 	tf->tf_sp = STACKALIGN(stack);
 	tf->tf_ra = pack->ep_entry;
 	tf->tf_sepc = pack->ep_entry;
-
-	retval[1] = 0;
 }
 
 void

@@ -1,4 +1,4 @@
-/* $OpenBSD: trap.c,v 1.102 2022/08/12 17:19:52 miod Exp $ */
+/* $OpenBSD: trap.c,v 1.104 2022/11/02 07:20:07 guenther Exp $ */
 /* $NetBSD: trap.c,v 1.52 2000/05/24 16:48:33 thorpej Exp $ */
 
 /*-
@@ -569,7 +569,6 @@ syscall(code, framep)
 	switch (error) {
 	case 0:
 		framep->tf_regs[FRAME_V0] = rval[0];
-		framep->tf_regs[FRAME_A4] = rval[1];
 		framep->tf_regs[FRAME_A3] = 0;
 		break;
 	case ERESTART:
@@ -604,7 +603,6 @@ child_return(arg)
 	 * Return values in the frame set by cpu_fork().
 	 */
 	framep->tf_regs[FRAME_V0] = 0;
-	framep->tf_regs[FRAME_A4] = 0;
 	framep->tf_regs[FRAME_A3] = 0;
 
 	KERNEL_UNLOCK();
@@ -693,7 +691,7 @@ ast(framep)
 	userret(p);
 }
 
-const static int reg_to_framereg[32] = {
+static const int reg_to_framereg[32] = {
 	FRAME_V0,	FRAME_T0,	FRAME_T1,	FRAME_T2,
 	FRAME_T3,	FRAME_T4,	FRAME_T5,	FRAME_T6,
 	FRAME_T7,	FRAME_S0,	FRAME_S1,	FRAME_S2,

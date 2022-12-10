@@ -1,13 +1,13 @@
 #!/bin/sh -
 #
-#	$OpenBSD: netstart,v 1.219 2022/07/03 12:14:36 kn Exp $
+#	$OpenBSD: netstart,v 1.230 2022/12/05 20:12:00 afresh1 Exp $
 
 # Turn off Strict Bourne shell mode.
 set +o sh
 
 # Show usage of the netstart script and exit.
 usage() {
-	print -u2 "usage: ${0##*/} [[-n] interface ...]"
+	print -u2 "usage: sh $0 [-n] [interface ...]"
 	exit 1
 }
 
@@ -135,6 +135,22 @@ ifstart() {
 	local _if=$1 _hn=/etc/hostname.$1 _cmds _i=0 _line _stat
 	set -A _cmds
 
+	if [[ $_if == ??:??:??:??:??:?? ]]; then
+		if ! _line=$( ifconfig -M $_if ); then
+			print -u2 "${0##*/}: $_if is not unique."
+			return
+		fi
+
+		[[ -z $_line ]] && return
+		_if=$_line
+		_line=
+
+		if [[ -e /etc/hostname.$_if ]]; then
+			print -u2 "${0##*/}: $_hn: /etc/hostname.$_if overrides"
+			return
+		fi
+	fi
+
 	# Interface names must be alphanumeric only.  We check to avoid
 	# configuring backup or temp files, and to catch the "*" case.
 	[[ $_if != +([[:alpha:]])+([[:digit:]]) ]] && return
@@ -183,14 +199,16 @@ ifmstart() {
 	local _sifs=$1 _xifs=$2 _hn _if _sif _xif
 
 	for _sif in ${_sifs:-ALL}; do
-		for _hn in /etc/hostname.+([[:alpha:]])+([[:digit:]]); do
+		for _hn in /etc/hostname.@(+([[:alpha:]])+([[:digit:]])|??:??:??:??:??:??); do
 			[[ -f $_hn ]] || continue
 			_if=${_hn#/etc/hostname.}
 
-			# Skip unwanted ifs.
-			for _xif in $_xifs; do
-				[[ $_xif == ${_if%%[0-9]*} ]] && continue 2
-			done
+			if [[ $_if == +([[:alpha:]])+([[:digit:]]) ]]; then
+				# Skip unwanted ifs.
+				for _xif in $_xifs; do
+					[[ $_xif == ${_if%%[0-9]*} ]] && continue 2
+				done
+			fi
 
 			# Start wanted ifs.
 			[[ $_sif == @(ALL|${_if%%[0-9]*}) ]] && ifstart $_if
@@ -290,19 +308,29 @@ ip6routes() {
 
 # wait for autoconf interfaces
 wait_autoconf_default() {
+	local _count=0
+
 	if ifconfig | grep -q ': flags=.*<.*AUTOCONF.*>'; then
-		count=0
-		while ((count++ < 20)); do
+		while ((_count++ < 20)); do
 			route -n show | grep -q ^default && break
 			sleep .5
 		done
 	fi
 }
 
+# Ensure IPv6 Duplicate Address Detection (DAD) is completed.
+wait_dad() {
+	local _count=0
+
+	while ((_count++ < 10 && $(sysctl -n net.inet6.ip6.dad_pending) != 0)); do
+		sleep 1
+	done
+}
+
 # Make sure the invoking user has the right privileges.  Check for presence of
 # id(1) to avoid problems with diskless setups.
 if [[ -x /usr/bin/id ]] && (($(id -u) != 0)); then
-	echo "${0##*/}: need root privileges"
+	print -u2 "${0##*/}: need root privileges"
 	exit 1
 fi
 
@@ -313,6 +341,7 @@ _rc_parse_conf
 PRINT_ONLY=false
 V4_AUTOCONF=false
 V6_AUTOCONF=false
+IP6KERNEL=false
 
 while getopts ":n" opt; do
 	case $opt in
@@ -322,10 +351,16 @@ while getopts ":n" opt; do
 done
 shift $((OPTIND-1))
 
+if ifconfig lo0 inet6 >/dev/null 2>&1; then
+	IP6KERNEL=true
+fi
+
 # Load key material for the generation of IPv6 Semantically Opaque Interface
-# Identifiers (SOII) used for link local and SLAAC addresses.
-$PRINT_ONLY || [[ ! -f /etc/soii.key ]] ||
-	sysctl -q "net.inet6.ip6.soiikey=$(</etc/soii.key)"
+# Identifiers (SOII) used for SLAAC addresses.
+if $IP6KERNEL && ! $PRINT_ONLY; then
+	[[ -f /etc/soii.key ]] &&
+		sysctl -q "net.inet6.ip6.soiikey=$(</etc/soii.key)"
+fi
 
 # If we were invoked with a list of interface names, just reconfigure these
 # interfaces (or bridges), add default routes and return.
@@ -349,12 +384,8 @@ else
 	ifconfig lo0 inet 127.0.0.1/8
 fi
 
-# IPv6 configuration.
-if ifconfig lo0 inet6 >/dev/null 2>&1; then
-	ip6kernel=YES
+if $IP6KERNEL && ! $PRINT_ONLY; then
 	ip6routes
-else
-	ip6kernel=NO
 fi
 
 # Create all the pseudo interfaces up front.
@@ -391,15 +422,11 @@ else
 fi
 
 # If interface autoconf exists, pause a little for at least one default route
-wait_autoconf_default
+$PRINT_ONLY || wait_autoconf_default
 
 # Configure interfaces that rely on routing
 ifmstart "tun tap gif etherip gre egre nvgre eoip vxlan pflow wg"
 
-if [[ $ip6kernel == YES ]]; then
-	# Ensure IPv6 Duplicate Address Detection (DAD) is completed.
-	count=0
-	while ((count++ < 10 && $(sysctl -n net.inet6.ip6.dad_pending) != 0)); do
-		sleep 1
-	done
+if $IP6KERNEL && ! $PRINT_ONLY; then
+	wait_dad
 fi

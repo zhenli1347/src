@@ -1,4 +1,4 @@
-#	$OpenBSD: files.acpi,v 1.64 2021/12/29 18:40:19 patrick Exp $
+#	$OpenBSD: files.acpi,v 1.67 2022/11/06 15:36:13 patrick Exp $
 #
 # Config file and device description for machine-independent ACPI code.
 # Included by ports that need it.
@@ -263,3 +263,11 @@ file	dev/acpi/acpihid.c		acpihid
 # Freescale i.MX I2C controller
 attach	imxiic at acpi with imxiic_acpi
 file	dev/acpi/imxiic_acpi.c		imxiic_acpi
+
+# Qualcomm GPIO controller
+attach	qcgpio at acpi with qcgpio_acpi
+file	dev/acpi/qcgpio.c		qcgpio
+
+# Qualcomm I2C controller
+attach	qciic at acpi with qciic_acpi
+file	dev/acpi/qciic.c		qciic

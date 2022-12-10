@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_socket.c,v 1.51 2022/06/20 01:39:44 visa Exp $	*/
+/*	$OpenBSD: sys_socket.c,v 1.56 2022/11/19 14:26:39 kn Exp $	*/
 /*	$NetBSD: sys_socket.c,v 1.13 1995/08/12 23:59:09 mycroft Exp $	*/
 
 /*
@@ -45,7 +45,6 @@
 #include <sys/fcntl.h>
 
 #include <net/if.h>
-#include <net/route.h>
 
 const struct fileops socketops = {
 	.fo_read	= soo_read,
@@ -130,17 +129,12 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 		 * different entry since a socket's unnecessary
 		 */
 		if (IOCGROUP(cmd) == 'i') {
-			KERNEL_LOCK();
 			error = ifioctl(so, cmd, data, p);
-			KERNEL_UNLOCK();
 			return (error);
 		}
 		if (IOCGROUP(cmd) == 'r')
 			return (EOPNOTSUPP);
-		KERNEL_LOCK();
-		error = ((*so->so_proto->pr_usrreq)(so, PRU_CONTROL,
-		    (struct mbuf *)cmd, (struct mbuf *)data, NULL, p));
-		KERNEL_UNLOCK();
+		error = pru_control(so, cmd, data, NULL);
 		break;
 	}
 
@@ -161,8 +155,7 @@ soo_stat(struct file *fp, struct stat *ub, struct proc *p)
 		ub->st_mode |= S_IWUSR | S_IWGRP | S_IWOTH;
 	ub->st_uid = so->so_euid;
 	ub->st_gid = so->so_egid;
-	(void) ((*so->so_proto->pr_usrreq)(so, PRU_SENSE,
-	    (struct mbuf *)ub, NULL, NULL, p));
+	(void)pru_sense(so, ub);
 	sounlock(so);
 	return (0);
 }

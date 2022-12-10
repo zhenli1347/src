@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_tc.c,v 1.77 2022/08/12 02:20:36 cheloha Exp $ */
+/*	$OpenBSD: kern_tc.c,v 1.80 2022/12/05 23:18:37 deraadt Exp $ */
 
 /*
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>
@@ -165,7 +165,7 @@ void
 microboottime(struct timeval *tvp)
 {
 	struct bintime bt;
-	
+
 	binboottime(&bt);
 	BINTIME_TO_TIMEVAL(&bt, tvp);
 }
@@ -174,7 +174,7 @@ void
 nanoboottime(struct timespec *tsp)
 {
 	struct bintime bt;
-	
+
 	binboottime(&bt);
 	BINTIME_TO_TIMESPEC(&bt, tsp);
 }
@@ -486,6 +486,8 @@ tc_reset_quality(struct timecounter *tc, int quality)
 		if (best != tc) {
 			enqueue_randomness(best->tc_get_timecount(best));
 			timecounter = best;
+			printf("timecounter: active counter changed: %s -> %s\n",
+			    tc->tc_name, best->tc_name);
 		}
 	}
 }
@@ -550,7 +552,6 @@ void
 tc_setclock(const struct timespec *ts)
 {
 	struct bintime new_naptime, old_naptime, uptime, utc;
-	struct timespec tmp;
 	static int first = 1;
 #ifndef SMALL_KERNEL
 	struct bintime elapsed;
@@ -580,12 +581,6 @@ tc_setclock(const struct timespec *ts)
 	new_naptime = timehands->th_naptime;
 
 	mtx_leave(&windup_mtx);
-
-	if (bintimecmp(&old_naptime, &new_naptime, ==)) {
-		BINTIME_TO_TIMESPEC(&uptime, &tmp);
-		printf("%s: cannot rewind uptime to %lld.%09ld\n",
-		    __func__, (long long)tmp.tv_sec, tmp.tv_nsec);
-	}
 
 #ifndef SMALL_KERNEL
 	/* convert the bintime to ticks */

@@ -1,4 +1,4 @@
-/* $OpenBSD: ts.c,v 1.23 2022/03/27 00:37:10 inoguchi Exp $ */
+/* $OpenBSD: ts.c,v 1.25 2022/11/11 17:07:39 joshua Exp $ */
 /* Written by Zoltan Glozik (zglozik@stones.com) for the OpenSSL
  * project 2002.
  */
@@ -377,11 +377,9 @@ ts_main(int argc, char **argv)
 	CONF *conf = NULL;
 	char *password = NULL;	/* Password itself. */
 
-	if (single_execution) {
-		if (pledge("stdio cpath wpath rpath tty", NULL) == -1) {
-			perror("pledge");
-			exit(1);
-		}
+	if (pledge("stdio cpath wpath rpath tty", NULL) == -1) {
+		perror("pledge");
+		exit(1);
 	}
 
 	memset(&ts_config, 0, sizeof(ts_config));
@@ -870,7 +868,7 @@ read_PKCS7(BIO *in_bio)
 	/* Create granted status info. */
 	if ((si = TS_STATUS_INFO_new()) == NULL)
 		goto end;
-	if (!(ASN1_INTEGER_set(si->status, TS_STATUS_GRANTED)))
+	if (!TS_STATUS_INFO_set_status(si, TS_STATUS_GRANTED))
 		goto end;
 	if (!TS_RESP_set_status_info(resp, si))
 		goto end;
@@ -1118,25 +1116,32 @@ create_verify_ctx(char *data, char *digest, char *queryfile, char *ca_path,
 	TS_VERIFY_CTX *ctx = NULL;
 	BIO *input = NULL;
 	TS_REQ *request = NULL;
+	X509_STORE *store;
+	STACK_OF(X509) *certs;
 	int ret = 0;
 
 	if (data != NULL || digest != NULL) {
 		if ((ctx = TS_VERIFY_CTX_new()) == NULL)
 			goto err;
-		ctx->flags = TS_VFY_VERSION | TS_VFY_SIGNER;
+		TS_VERIFY_CTX_set_flags(ctx, TS_VFY_VERSION | TS_VFY_SIGNER);
 		if (data != NULL) {
-			ctx->flags |= TS_VFY_DATA;
-			if ((ctx->data = BIO_new_file(data, "rb")) == NULL)
+			BIO *data_bio;
+
+			TS_VERIFY_CTX_add_flags(ctx, TS_VFY_DATA);
+			if ((data_bio = BIO_new_file(data, "rb")) == NULL)
 				goto err;
+			TS_VERIFY_CTX_set_data(ctx, data_bio);
 		} else if (digest != NULL) {
+			unsigned char *imprint;
 			long imprint_len;
-			ctx->flags |= TS_VFY_IMPRINT;
-			if ((ctx->imprint = string_to_hex(digest,
-				    &imprint_len)) == NULL) {
+
+			TS_VERIFY_CTX_add_flags(ctx, TS_VFY_IMPRINT);
+			if ((imprint = string_to_hex(digest,
+			    &imprint_len)) == NULL) {
 				BIO_printf(bio_err, "invalid digest string\n");
 				goto err;
 			}
-			ctx->imprint_len = imprint_len;
+			TS_VERIFY_CTX_set_imprint(ctx, imprint, imprint_len);
 		}
 	} else if (queryfile != NULL) {
 		/*
@@ -1153,16 +1158,19 @@ create_verify_ctx(char *data, char *digest, char *queryfile, char *ca_path,
 		return NULL;
 
 	/* Add the signature verification flag and arguments. */
-	ctx->flags |= TS_VFY_SIGNATURE;
+	TS_VERIFY_CTX_add_flags(ctx, TS_VFY_SIGNATURE);
 
 	/* Initialising the X509_STORE object. */
-	if ((ctx->store = create_cert_store(ca_path, ca_file)) == NULL)
+	if ((store = create_cert_store(ca_path, ca_file)) == NULL)
 		goto err;
+	TS_VERIFY_CTX_set_store(ctx, store);
 
 	/* Loading untrusted certificates. */
-	if (untrusted != NULL &&
-	    (ctx->certs = TS_CONF_load_certs(untrusted)) == NULL)
-		goto err;
+	if (untrusted != NULL) {
+		if ((certs = TS_CONF_load_certs(untrusted)) == NULL)
+			goto err;
+		TS_VERIFY_CTX_set_certs(ctx, certs);
+	}
 
 	ret = 1;
  err:

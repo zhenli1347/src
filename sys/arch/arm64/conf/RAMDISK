@@ -1,4 +1,4 @@
-# $OpenBSD: RAMDISK,v 1.174 2022/06/26 20:05:06 sthen Exp $
+# $OpenBSD: RAMDISK,v 1.184 2022/11/10 12:13:22 patrick Exp $
 
 machine		arm64
 maxusers	4
@@ -34,6 +34,7 @@ mainbus0	at root
 softraid0	at root
 cpu0		at mainbus?
 efi0		at mainbus?
+smbios0		at efi?
 acpi0		at mainbus?
 acpiec*		at acpi?
 acpimcfg*	at acpi?
@@ -105,6 +106,10 @@ wsdisplay*	at simplefb?
 
 # Apple
 apldart*	at fdt? early 1
+apldc*		at fdt?
+apldchidev*	at fdt?
+apldckbd*	at apldchidev?
+wskbd*		at apldckbd? mux 1
 apldog*		at fdt? early 1
 apliic*		at fdt?
 iic*		at apliic?
@@ -116,6 +121,7 @@ aplpcie*	at fdt?
 pci*		at aplpcie?
 aplpinctrl*	at fdt? early 1
 aplpmgr*	at fdt? early 1
+aplrtk*		at fdt?
 aplsart*	at fdt?
 aplsmc*		at fdt?
 aplspi*		at fdt?
@@ -225,6 +231,21 @@ rkrng*		at fdt?
 rkdwusb*	at fdt?
 dwmmc*		at fdt?
 sdmmc*		at dwmmc?
+
+# Qualcomm SoCs
+qcdwusb*	at fdt?
+qcgpio*		at acpi?
+qcgpio*		at fdt? early 1
+qciic*		at acpi?
+qciic*		at fdt?
+iic*		at qciic?
+qcpdc*		at fdt?
+qcspmi*		at fdt?
+qcpmic*		at qcspmi?
+qcpmicgpio*	at qcpmic?
+qcpon*		at qcpmic?
+qcpwm*		at qcpmic?
+qcrtc*		at qcpmic?
 
 # Sunxi SoCs
 sxipio*		at fdt? early 1	# GPIO pins for leds & PHYs
@@ -336,6 +357,9 @@ urlphy*		at mii?			# Realtek RTL8150L internal PHY
 abcrtc*		at iic?			# Abracon x80x RTC
 dsxrtc*		at iic?			# DS3231 RTC
 fusbtc*		at iic?			# USB Type-C controller
+ihidev*		at iic?			# HID-over-I2C
+ikbd*		at ihidev?		# HID-over-I2C keyboard
+wskbd*		at ikbd? mux 1
 islrtc*		at iic?			# ISL1208 RTC
 maxrtc*		at iic?			# DS1307 RTC
 mcprtc*		at iic?			# MCP794XX RTC
@@ -352,3 +376,6 @@ pseudo-device	trunk
 pseudo-device	bpfilter 1
 pseudo-device	rd 1
 pseudo-device	bio 1
+
+# mouse & keyboard multiplexor pseudo-devices
+pseudo-device	wsmux		2

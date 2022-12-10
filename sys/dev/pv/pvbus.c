@@ -1,4 +1,4 @@
-/*	$OpenBSD: pvbus.c,v 1.24 2021/11/05 11:38:29 mpi Exp $	*/
+/*	$OpenBSD: pvbus.c,v 1.26 2022/12/08 05:45:36 yasuoka Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -319,9 +319,8 @@ pvbus_hyperv(struct pvbus_hv *hv)
 	    HYPERV_VERSION_EBX_MINOR_S;
 
 #if NHYPERV > 0
-	if (hv->hv_features & CPUID_HV_MSR_TIME_REFCNT &&
-	    delay_func == i8254_delay)
-		delay_func = hv_delay;
+	if (hv->hv_features & CPUID_HV_MSR_TIME_REFCNT)
+		delay_init(hv_delay, 4000);
 #endif
 }
 
@@ -409,7 +408,7 @@ pvbusgetstr(size_t srclen, const char *src, char **dstp)
 	else if (srclen > PAGE_SIZE)
 		return (ENAMETOOLONG);
 
-	*dstp = dst = malloc(srclen + 1, M_TEMP|M_ZERO, M_WAITOK);
+	*dstp = dst = malloc(srclen + 1, M_TEMP, M_WAITOK | M_ZERO);
 	if (src != NULL) {
 		error = copyin(src, dst, srclen);
 		dst[srclen] = '\0';

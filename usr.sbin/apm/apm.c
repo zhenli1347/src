@@ -1,4 +1,4 @@
-/*	$OpenBSD: apm.c,v 1.41 2022/02/13 21:27:51 jmc Exp $	*/
+/*	$OpenBSD: apm.c,v 1.43 2022/11/09 18:48:11 mbuhl Exp $	*/
 
 /*
  *  Copyright (c) 1996 John T. Kohl
@@ -99,6 +99,8 @@ do_zzz(int fd, enum apm_action action)
 	char *msg;
 	int ret;
 
+	bzero(&reply, sizeof reply);
+
 	switch (action) {
 	case NONE:
 	case SUSPEND:
@@ -119,7 +121,7 @@ do_zzz(int fd, enum apm_action action)
 
 	printf("%s...\n", msg);
 	ret = send_command(fd, &command, &reply);
-	if (reply.error)
+	if (ret == 0 && reply.error)
 		errx(1, "%s: %s", apm_state(reply.newstate), strerror(reply.error));
 	exit(ret);
 }
@@ -376,8 +378,15 @@ balony:
 		} else if (domin) {
 			if (reply.batterystate.battery_state ==
 			    APM_BATT_CHARGING)
-				printf(", %d minutes recharge time estimate\n",
-				    reply.batterystate.minutes_left);
+			{
+				if (reply.batterystate.minutes_left ==
+				    (u_int)-1)
+					printf(", unknown");
+				else
+					printf(", %d minutes",
+					    reply.batterystate.minutes_left);
+				printf(" recharge time estimate\n");
+			}
 			else if (reply.batterystate.minutes_left == 0 &&
 			    reply.batterystate.battery_life > 10)
 				printf(", unknown life estimate\n");

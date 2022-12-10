@@ -1,4 +1,4 @@
-/* $OpenBSD: dtlstest.c,v 1.15 2022/01/07 09:07:00 tb Exp $ */
+/* $OpenBSD: dtlstest.c,v 1.18 2022/11/26 16:08:56 tb Exp $ */
 /*
  * Copyright (c) 2020, 2021 Joel Sing <jsing@openbsd.org>
  *
@@ -28,7 +28,7 @@
 #include <openssl/ssl.h>
 
 #include "bio_local.h"
-#include "ssl_locl.h"
+#include "ssl_local.h"
 
 const char *server_ca_file;
 const char *server_cert_file;
@@ -365,6 +365,12 @@ poll_timeout(SSL *client, SSL *server)
 	if (DTLSv1_get_timeout(server, &timeout))
 		server_timeout = timeout.tv_sec * 1000 + timeout.tv_usec / 1000;
 
+	if (client_timeout < 10)
+		client_timeout = 10;
+	if (server_timeout < 10)
+		server_timeout = 10;
+
+	/* XXX */
 	if (client_timeout <= 0)
 		return server_timeout;
 	if (client_timeout > 0 && server_timeout <= 0)
@@ -972,10 +978,8 @@ dtlstest(const struct dtls_test *dt)
 	if ((server = dtls_server(server_sock, dt->ssl_options, dt->mtu)) == NULL)
 		goto failure;
 
-	tls12_record_layer_set_initial_epoch(client->internal->rl,
-	    dt->initial_epoch);
-	tls12_record_layer_set_initial_epoch(server->internal->rl,
-	    dt->initial_epoch);
+	tls12_record_layer_set_initial_epoch(client->rl, dt->initial_epoch);
+	tls12_record_layer_set_initial_epoch(server->rl, dt->initial_epoch);
 
 	if (dt->client_bbio_off)
 		SSL_set_info_callback(client, dtls_info_callback);

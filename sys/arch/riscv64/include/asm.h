@@ -1,4 +1,4 @@
-/*	$OpenBSD: asm.h,v 1.4 2022/02/24 07:08:21 guenther Exp $	*/
+/*	$OpenBSD: asm.h,v 1.8 2022/12/06 00:08:38 jca Exp $	*/
 
 /*
  * Copyright (c) 2020 Brian Bamsch <bbamsch@google.com>
@@ -53,6 +53,11 @@
 # define _ALIGN_TEXT .align 0
 #endif
 
+/* NB == No Binding: use .globl or .weak as necessary */
+#define _ENTRY_NB(x) \
+	.text; .p2align 1; .type x,@function; x:
+#define _ENTRY(x)	.globl x; _ENTRY_NB(x)
+
 #if defined(PROF) || defined(GPROF)
 // XXX Profiler Support
 #define _PROF_PROLOGUE			\
@@ -81,12 +86,11 @@
 #define RETGUARD_SYMBOL(x)
 #endif
 
-#define	_ENTRY(x)							\
-	.text; .globl x; .type x,@function; .p2align 1; x:
-#define	ENTRY(y)	_ENTRY(_C_LABEL(y)); _PROF_PROLOGUE
-#define	ENTRY_NP(y)	_ENTRY(_C_LABEL(y))
-#define	ASENTRY(y)	_ENTRY(_ASM_LABEL(y)); _PROF_PROLOGUE
-#define	ASENTRY_NP(y)	_ENTRY(_ASM_LABEL(y))
+#define	ENTRY(y)	_ENTRY(y); _PROF_PROLOGUE
+#define	ENTRY_NP(y)	_ENTRY(y)
+#define	ENTRY_NB(y)	_ENTRY_NB(y); _PROF_PROLOGUE
+#define	ASENTRY(y)	_ENTRY(y); _PROF_PROLOGUE
+#define	ASENTRY_NP(y)	_ENTRY(y)
 #define	END(y)		.size y, . - y
 #define EENTRY(sym)	 .globl  sym; sym:
 #define EEND(sym)
@@ -103,20 +107,6 @@
 #define	WEAK_ALIAS(alias,sym)						\
 	.weak alias;							\
 	alias = sym
-
-#ifdef __STDC__
-#define	WARN_REFERENCES(sym,msg)					\
-	.stabs msg ## ,30,0,0,0 ;					\
-	.stabs __STRING(_C_LABEL(sym)) ## ,1,0,0,0
-#else
-#define	WARN_REFERENCES(sym,msg)					\
-	.stabs msg,30,0,0,0 ;						\
-	.stabs __STRING(sym),1,0,0,0
-#endif
-
-#define	WEAK_REFERENCE(sym, alias)				\
-	.weak alias;						\
-	.set alias,sym
 
 #define	SWAP_FAULT_HANDLER(handler, tmp0, tmp1)			\
 	ld	tmp0, CI_CURPCB(tp);		/* Load the pcb */	\

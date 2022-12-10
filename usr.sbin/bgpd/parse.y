@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.434 2022/07/28 13:11:49 deraadt Exp $ */
+/*	$OpenBSD: parse.y,v 1.437 2022/11/18 10:17:23 claudio Exp $ */
 
 /*
  * Copyright (c) 2002, 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -140,6 +140,13 @@ struct filter_match_l {
 	struct filter_prefixset	*prefixset;
 } fmopts;
 
+struct aspa_tas_l {
+	struct aspa_tas_l	*next;
+	uint32_t		 as;
+	uint32_t		 num;
+	uint8_t			 aid;
+};
+
 struct peer	*alloc_peer(void);
 struct peer	*new_peer(void);
 struct peer	*new_group(void);
@@ -171,6 +178,7 @@ static void	 add_roa_set(struct prefixset_item *, uint32_t, uint8_t,
 		    time_t);
 static struct rtr_config	*get_rtr(struct bgpd_addr *);
 static int	 insert_rtr(struct rtr_config *);
+static int	 merge_aspa_set(uint32_t, struct aspa_tas_l *, time_t);
 
 typedef struct {
 	union {
@@ -186,6 +194,7 @@ typedef struct {
 		struct filter_as_l	*filter_as;
 		struct filter_set	*filter_set;
 		struct filter_set_head	*filter_set_head;
+		struct aspa_tas_l	*aspa_elm;
 		struct {
 			struct bgpd_addr	prefix;
 			uint8_t			len;
@@ -222,8 +231,8 @@ typedef struct {
 %token	COMMUNITY EXTCOMMUNITY LARGECOMMUNITY DELETE
 %token	MAXCOMMUNITIES MAXEXTCOMMUNITIES MAXLARGECOMMUNITIES
 %token	PREFIX PREFIXLEN PREFIXSET
-%token	ROASET ORIGINSET OVS EXPIRES
-%token	ASSET SOURCEAS TRANSITAS PEERAS MAXASLEN MAXASSEQ
+%token	ASPASET ROASET ORIGINSET OVS EXPIRES
+%token	ASSET SOURCEAS TRANSITAS PEERAS PROVIDERAS CUSTOMERAS MAXASLEN MAXASSEQ
 %token	SET LOCALPREF MED METRIC NEXTHOP REJECT BLACKHOLE NOMODIFY SELF
 %token	PREPEND_SELF PREPEND_PEER PFTABLE WEIGHT RTLABEL ORIGIN PRIORITY
 %token	ERROR INCLUDE
@@ -254,6 +263,7 @@ typedef struct {
 %type	<v.filter_prefix>	filter_prefix_m
 %type	<v.u8>			unaryop equalityop binaryop filter_as_type
 %type	<v.encspec>		encspec
+%type	<v.aspa_elm>		aspa_tas aspa_tas_l
 %%
 
 grammar		: /* empty */
@@ -263,6 +273,7 @@ grammar		: /* empty */
 		| grammar as_set '\n'
 		| grammar prefixset '\n'
 		| grammar roa_set '\n'
+		| grammar aspa_set '\n'
 		| grammar origin_set '\n'
 		| grammar rtr '\n'
 		| grammar rib '\n'
@@ -520,10 +531,8 @@ prefixset_item	: prefix prefixlenop			{
 
 roa_set		: ROASET '{' optnl		{
 			curroatree = &conf->roa;
-			noexpires = 0;
 		} roa_set_l optnl '}'			{
 			curroatree = NULL;
-			noexpires = 1;
 		}
 		| ROASET '{' optnl '}'		/* nothing */
 		;
@@ -540,6 +549,7 @@ origin_set	: ORIGINSET STRING '{' optnl		{
 			SIMPLEQ_INSERT_TAIL(&conf->originsets, curoset, entry);
 			curoset = NULL;
 			curroatree = NULL;
+			noexpires = 0;
 		}
 		| ORIGINSET STRING '{' optnl '}'		{
 			if ((curoset = new_prefix_set($2, 1)) == NULL) {
@@ -586,6 +596,55 @@ roa_set_l	: prefixset_item SOURCEAS as4number_any	expires		{
 		}
 		;
 
+aspa_set	: ASPASET '{' optnl aspa_set_l optnl '}'
+		| ASPASET '{' optnl '}'
+		;
+
+aspa_set_l	: aspa_elm
+		| aspa_set_l comma aspa_elm
+		;
+
+aspa_elm	: CUSTOMERAS as4number expires PROVIDERAS '{' optnl
+		    aspa_tas_l optnl '}' {
+			int rv;
+			struct aspa_tas_l *a, *n;
+
+			rv = merge_aspa_set($2, $7, $3);
+
+			for (a = $7; a != NULL; a = n) {
+				n = a->next;
+				free(a);
+			}
+
+			if (rv == -1)
+				YYERROR;
+		}
+		;
+
+aspa_tas_l	: aspa_tas			{ $$ = $1; }
+		| aspa_tas_l comma aspa_tas	{
+			$3->next = $1;
+			$3->num = $1->num + 1;
+			$$ = $3;
+		}
+		;
+
+aspa_tas	: as4number_any {
+			if (($$ = calloc(1, sizeof(*$$))) == NULL)
+				fatal(NULL);
+			$$->as = $1;
+			$$->aid = AID_UNSPEC;
+			$$->num = 1;
+		}
+		| as4number_any ALLOW family {
+			if (($$ = calloc(1, sizeof(*$$))) == NULL)
+				fatal(NULL);
+			$$->as = $1;
+			$$->aid = $3;
+			$$->num = 1;
+		}
+		;
+
 rtr		: RTR address	{
 			currtr = get_rtr(&$2);
 			currtr->remote_port = RTR_PORT;
@@ -609,6 +668,7 @@ rtr		: RTR address	{
 
 rtropt_l	: rtropt
 		| rtropt_l optnl rtropt
+		;
 
 rtropt		: DESCR STRING		{
 			if (strlcpy(currtr->descr, $2,
@@ -708,9 +768,8 @@ conf_main	: AS as4number		{
 			TAILQ_INSERT_TAIL(conf->listen_addrs, la, entry);
 		}
 		| FIBPRIORITY NUMBER		{
-			if ($2 <= RTP_LOCAL || $2 > RTP_MAX) {
-				yyerror("fib-priority %lld must be between "
-				    "%u and %u", $2, RTP_LOCAL + 1, RTP_MAX);
+			if (!kr_check_prio($2)) {
+				yyerror("fib-priority %lld out of range", $2);
 				YYERROR;
 			}
 			conf->fib_priority = $2;
@@ -1046,9 +1105,8 @@ network		: NETWORK prefix filter_set	{
 		}
 		| NETWORK family PRIORITY NUMBER filter_set	{
 			struct network	*n;
-			if ($4 <= RTP_LOCAL && $4 > RTP_MAX) {
-				yyerror("priority %lld must be between "
-				    "%u and %u", $4, RTP_LOCAL + 1, RTP_MAX);
+			if (!kr_check_prio($4)) {
+				yyerror("priority %lld out of range", $4);
 				YYERROR;
 			}
 
@@ -1949,10 +2007,10 @@ espah		: ESP		{ $$ = 1; }
 		;
 
 encspec		: /* nada */	{
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 		}
 		| STRING STRING {
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 			if (!strcmp($1, "3des") || !strcmp($1, "3des-cbc")) {
 				$$.enc_alg = AUTH_EALG_3DESCBC;
 				$$.enc_key_len = 21; /* XXX verify */
@@ -1990,7 +2048,7 @@ filterrule	: action quick filter_rib_h direction filter_peer_h
 			struct filter_rule	 r;
 			struct filter_rib_l	 *rb, *rbnext;
 
-			bzero(&r, sizeof(r));
+			memset(&r, 0, sizeof(r));
 			r.action = $1;
 			r.quick = $2;
 			r.dir = $4;
@@ -2317,10 +2375,10 @@ filter_as	: as4number_any		{
 		;
 
 filter_match_h	: /* empty */			{
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 		}
 		| {
-			bzero(&fmopts, sizeof(fmopts));
+			memset(&fmopts, 0, sizeof(fmopts));
 		}
 		    filter_match		{
 			memcpy(&$$, &fmopts, sizeof($$));
@@ -2568,15 +2626,15 @@ filter_elm	: filter_prefix_h	{
 		}
 		;
 
-prefixlenop	: /* empty */			{ bzero(&$$, sizeof($$)); }
+prefixlenop	: /* empty */			{ memset(&$$, 0, sizeof($$)); }
 		| LONGER				{
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 			$$.op = OP_RANGE;
 			$$.len_min = -1;
 			$$.len_max = -1;
 		}
 		| MAXLEN NUMBER				{
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 			if ($2 < 0 || $2 > 128) {
 				yyerror("prefixlen must be >= 0 and <= 128");
 				YYERROR;
@@ -2589,7 +2647,7 @@ prefixlenop	: /* empty */			{ bzero(&$$, sizeof($$)); }
 		| PREFIXLEN unaryop NUMBER		{
 			int min, max;
 
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 			if ($3 < 0 || $3 > 128) {
 				yyerror("prefixlen must be >= 0 and <= 128");
 				YYERROR;
@@ -2630,7 +2688,7 @@ prefixlenop	: /* empty */			{ bzero(&$$, sizeof($$)); }
 			$$.len_max = max;
 		}
 		| PREFIXLEN NUMBER binaryop NUMBER	{
-			bzero(&$$, sizeof($$));
+			memset(&$$, 0, sizeof($$));
 			if ($2 < 0 || $2 > 128 || $4 < 0 || $4 > 128) {
 				yyerror("prefixlen must be < 128");
 				YYERROR;
@@ -3092,12 +3150,14 @@ lookup(char *s)
 		{ "as-4byte",		AS4BYTE },
 		{ "as-override",	ASOVERRIDE},
 		{ "as-set",		ASSET },
+		{ "aspa-set",		ASPASET},
 		{ "blackhole",		BLACKHOLE},
 		{ "capabilities",	CAPABILITIES},
 		{ "community",		COMMUNITY},
 		{ "compare",		COMPARE},
 		{ "connect-retry",	CONNECTRETRY},
 		{ "connected",		CONNECTED},
+		{ "customer-as",	CUSTOMERAS},
 		{ "default-route",	DEFAULTROUTE},
 		{ "delete",		DELETE},
 		{ "demote",		DEMOTE},
@@ -3175,6 +3235,7 @@ lookup(char *s)
 		{ "prepend-neighbor",	PREPEND_PEER},
 		{ "prepend-self",	PREPEND_SELF},
 		{ "priority",		PRIORITY},
+		{ "provider-as",	PROVIDERAS},
 		{ "qualify",		QUALIFY},
 		{ "quick",		QUICK},
 		{ "rd",			RD},
@@ -3598,7 +3659,7 @@ init_config(struct bgpd_config *c)
 	c->holdtime = INTERVAL_HOLD;
 	c->connectretry = INTERVAL_CONNECTRETRY;
 	c->bgpid = get_bgpid();
-	c->fib_priority = RTP_BGP;
+	c->fib_priority = kr_default_prio();
 	c->default_tableid = getrtable();
 	if (!ktable_exists(c->default_tableid, &rdomid))
 		fatalx("current routing table %u does not exist",
@@ -4998,6 +5059,60 @@ insert_rtr(struct rtr_config *new)
 		new->id = ++id;
 
 	SIMPLEQ_INSERT_TAIL(&conf->rtrs, currtr, entry);
+
+	return 0;
+}
+
+static int
+merge_aspa_set(uint32_t as, struct aspa_tas_l *tas, time_t expires)
+{
+	struct aspa_set	*aspa, needle = { .as = as };
+	uint32_t i, num, *newtas;
+	uint8_t *newtasaid = NULL;
+
+	aspa = RB_FIND(aspa_tree, &conf->aspa, &needle);
+	if (aspa == NULL) {
+		if ((aspa = calloc(1, sizeof(*aspa))) == NULL) {
+			yyerror("out of memory");
+			return -1;
+		}
+		aspa->as = as;
+		aspa->expires = expires;
+		RB_INSERT(aspa_tree, &conf->aspa, aspa);
+	}
+
+	if (UINT32_MAX - aspa->num <= tas->num) {
+		yyerror("aspa_set overflow");
+		return -1;
+	}
+	num = aspa->num + tas->num;
+	newtas = recallocarray(aspa->tas, aspa->num, num, sizeof(uint32_t));
+	if (newtas == NULL) {
+		yyerror("out of memory");
+		return -1;
+	}
+	newtasaid = recallocarray(aspa->tas_aid, aspa->num, num, 1);
+	if (newtasaid == NULL) {
+		free(newtas);
+		yyerror("out of memory");
+		return -1;
+	}
+
+	/* fill starting at the end since the tas list is reversed */
+	if (num > 0) {
+		for (i = num - 1; tas; tas = tas->next, i--) {
+			newtas[i] = tas->as;
+			if (tas->aid != AID_UNSPEC)
+				newtasaid[i] = tas->aid;
+		}
+	}
+
+	aspa->num = num;
+	aspa->tas = newtas;
+	aspa->tas_aid = newtasaid;
+	/* take the longest expiry time, same logic as for ROA entries */
+	if (aspa->expires != 0 && expires != 0 && expires > aspa->expires)
+		aspa->expires = expires;
 
 	return 0;
 }

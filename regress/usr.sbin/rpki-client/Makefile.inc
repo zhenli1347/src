@@ -1,15 +1,18 @@
-# $OpenBSD: Makefile.inc,v 1.24 2022/05/09 17:20:25 job Exp $
+# $OpenBSD: Makefile.inc,v 1.27 2022/11/26 12:09:34 job Exp $
 
 .PATH:		${.CURDIR}/../../../../usr.sbin/rpki-client
 
 PROGS += test-ip
 PROGS += test-cert
 PROGS += test-gbr
+PROGS += test-geofeed
 PROGS += test-mft
 PROGS += test-roa
 PROGS += test-rsc
 PROGS += test-tal
 PROGS += test-rrdp
+PROGS += test-aspa
+PROGS += test-tak
 
 .for p in ${PROGS}
 REGRESS_TARGETS += run-regress-$p
@@ -54,10 +57,25 @@ SRCS_test-gbr+=	test-gbr.c gbr.c cms.c x509.c ip.c io.c log.c \
 run-regress-test-gbr: test-gbr
 	./test-gbr -v ${.CURDIR}/../gbr/*.gbr
 
+SRCS_test-geofeed+=	test-geofeed.c geofeed.c cms.c x509.c ip.c io.c log.c \
+		encoding.c print.c validate.c as.c cert.c mft.c
+run-regress-test-geofeed: test-geofeed
+	./test-geofeed -v ${.CURDIR}/../geofeed/*.csv
+
 SRCS_test-tal+=	test-tal.c tal.c ip.c io.c log.c validate.c \
 		encoding.c print.c dummy.c x509.c
 run-regress-test-tal: test-tal
 	./test-tal -v ${.CURDIR}/../tal/*.tal
+
+SRCS_test-aspa+=	test-aspa.c aspa.c cms.c x509.c ip.c as.c io.c log.c \
+		encoding.c print.c validate.c cert.c mft.c
+run-regress-test-aspa: test-aspa
+	./test-aspa -v ${.CURDIR}/../aspa/*.asa
+
+SRCS_test-tak+=	test-tak.c tak.c cms.c x509.c ip.c as.c io.c log.c \
+		encoding.c print.c validate.c cert.c mft.c
+run-regress-test-tak: test-tak
+	./test-tak -v ${.CURDIR}/../tak/*.tak
 
 SRCS_test-rrdp+=	test-rrdp.c rrdp_delta.c rrdp_notification.c \
 			rrdp_snapshot.c rrdp_util.c \

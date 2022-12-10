@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6_ifattach.c,v 1.118 2021/03/15 17:28:45 florian Exp $	*/
+/*	$OpenBSD: in6_ifattach.c,v 1.121 2022/11/15 18:42:46 claudio Exp $	*/
 /*	$KAME: in6_ifattach.c,v 1.124 2001/07/18 08:32:51 jinmei Exp $	*/
 
 /*
@@ -209,7 +209,7 @@ in6_get_ifid(struct ifnet *ifp0, struct in6_addr *in6)
 	}
 
 	/* next, try to get it from some other hardware interface */
-	TAILQ_FOREACH(ifp, &ifnet, if_list) {
+	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp == ifp0)
 			continue;
 		if (in6_get_hw_ifid(ifp, in6) == 0)
@@ -373,7 +373,7 @@ in6_ifattach(struct ifnet *ifp)
 	if (ifp->if_mtu < IPV6_MMTU)
 		return (EINVAL);
 
-	if ((ifp->if_flags & IFF_MULTICAST) == 0)
+	if (nd6_need_cache(ifp) && (ifp->if_flags & IFF_MULTICAST) == 0)
 		return (EINVAL);
 
 	/*
@@ -389,8 +389,6 @@ in6_ifattach(struct ifnet *ifp)
 			return (error);
 	}
 
-	/* Interfaces that rely on strong a priori cryptographic binding of
-	 * IP addresses are incompatible with automatically assigned llv6. */
 	switch (ifp->if_type) {
 	case IFT_WIREGUARD:
 		return (0);

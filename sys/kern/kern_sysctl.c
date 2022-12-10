@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.404 2022/07/26 14:53:45 deraadt Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.408 2022/11/07 14:25:44 robert Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -53,7 +53,7 @@
 #include <sys/vnode.h>
 #include <sys/unistd.h>
 #include <sys/buf.h>
-#include <sys/ioctl.h>
+#include <sys/clockintr.h>
 #include <sys/tty.h>
 #include <sys/disklabel.h>
 #include <sys/disk.h>
@@ -126,6 +126,7 @@ extern long numvnodes;
 extern int allowdt;
 extern int audio_record_enable;
 extern int video_record_enable;
+extern int autoconf_serial;
 
 int allowkmem;
 
@@ -298,7 +299,6 @@ const struct sysctl_bounded_args kern_vars[] = {
 	{KERN_NFILES, &numfiles, SYSCTL_INT_READONLY},
 	{KERN_TTYCOUNT, &tty_count, SYSCTL_INT_READONLY},
 	{KERN_ARGMAX, &arg_max, SYSCTL_INT_READONLY},
-	{KERN_NSELCOLL, &int_zero, SYSCTL_INT_READONLY},
 	{KERN_POSIX1, &posix_version, SYSCTL_INT_READONLY},
 	{KERN_NGROUPS, &ngroups_max, SYSCTL_INT_READONLY},
 	{KERN_JOB_CONTROL, &int_one, SYSCTL_INT_READONLY},
@@ -342,6 +342,7 @@ const struct sysctl_bounded_args kern_vars[] = {
 #ifdef PTRACE
 	{KERN_GLOBAL_PTRACE, &global_ptrace, 0, 1},
 #endif
+	{KERN_AUTOCONF_SERIAL, &autoconf_serial, SYSCTL_INT_READONLY},
 };
 
 int
@@ -428,6 +429,11 @@ kern_sysctl_dirs(int top_name, int *name, u_int namelen,
 	case KERN_CPUSTATS:
 		return (sysctl_cpustats(name, namelen, oldp, oldlenp,
 		    newp, newlen));
+#ifdef __HAVE_CLOCKINTR
+	case KERN_CLOCKINTR:
+		return sysctl_clockintr(name, namelen, oldp, oldlenp, newp,
+		    newlen);
+#endif
 	default:
 		return (ENOTDIR);	/* overloaded */
 	}

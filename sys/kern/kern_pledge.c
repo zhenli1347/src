@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_pledge.c,v 1.293 2022/08/11 09:13:21 claudio Exp $	*/
+/*	$OpenBSD: kern_pledge.c,v 1.300 2022/12/05 23:18:37 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
@@ -23,12 +23,9 @@
 #include <sys/mutex.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
-#include <sys/filedesc.h>
 #include <sys/namei.h>
-#include <sys/pool.h>
 #include <sys/socketvar.h>
 #include <sys/vnode.h>
-#include <sys/mbuf.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
@@ -153,6 +150,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_minherit] = PLEDGE_STDIO,
 	[SYS_mmap] = PLEDGE_STDIO,
 	[SYS_mprotect] = PLEDGE_STDIO,
+	[SYS_mimmutable] = PLEDGE_STDIO,
 	[SYS_mquery] = PLEDGE_STDIO,
 	[SYS_munmap] = PLEDGE_STDIO,
 	[SYS_msync] = PLEDGE_STDIO,
@@ -170,6 +168,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_pwrite] = PLEDGE_STDIO,
 	[SYS_pwritev] = PLEDGE_STDIO,
 	[SYS_recvmsg] = PLEDGE_STDIO,
+	[SYS_recvmmsg] = PLEDGE_STDIO,
 	[SYS_recvfrom] = PLEDGE_STDIO,
 	[SYS_ftruncate] = PLEDGE_STDIO,
 	[SYS_lseek] = PLEDGE_STDIO,
@@ -198,6 +197,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	 * "unix", "dns".  SCM_RIGHTS requires "sendfd" or "recvfd".
 	 */
 	[SYS_sendmsg] = PLEDGE_STDIO,
+	[SYS_sendmmsg] = PLEDGE_STDIO,
 
 	/* Common signal operations */
 	[SYS_nanosleep] = PLEDGE_STDIO,
@@ -943,7 +943,7 @@ pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 	if (miblen >= 3 &&			/* ntpd(8) to read sensors */
 	    mib[0] == CTL_HW && mib[1] == HW_SENSORS)
 		return (0);
-	
+
 	if (miblen == 6 &&		/* if_nameindex() */
 	    mib[0] == CTL_NET && mib[1] == PF_ROUTE &&
 	    mib[2] == 0 && mib[3] == 0 && mib[4] == NET_RT_IFNAMES)
@@ -964,6 +964,7 @@ pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 			case KERN_NGROUPS:	/* kern.ngroups */
 			case KERN_SYSVSHM:	/* kern.sysvshm */
 			case KERN_POSIX1:	/* kern.posix1version */
+			case KERN_AUTOCONF_SERIAL:	/* kern.autoconf_serial */
 				return (0);
 			}
 			break;
@@ -1373,6 +1374,12 @@ pledge_sockopt(struct proc *p, int set, int level, int optname)
 			return (0);
 		}
 		break;
+	case IPPROTO_TCP:
+		switch (optname) {
+		case TCP_NODELAY:
+			return (0);
+		}
+		break;
 	}
 
 	if ((pledge & PLEDGE_WROUTE)) {
@@ -1425,7 +1432,6 @@ pledge_sockopt(struct proc *p, int set, int level, int optname)
 	switch (level) {
 	case IPPROTO_TCP:
 		switch (optname) {
-		case TCP_NODELAY:
 		case TCP_MD5SIG:
 		case TCP_SACK_ENABLE:
 		case TCP_MAXSEG:

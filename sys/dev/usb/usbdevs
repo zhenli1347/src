@@ -1,4 +1,4 @@
-$OpenBSD: usbdevs,v 1.747 2022/06/23 00:31:37 jsg Exp $
+$OpenBSD: usbdevs,v 1.752 2022/11/09 10:03:04 robert Exp $
 /* $NetBSD: usbdevs,v 1.322 2003/05/10 17:47:14 hamajima Exp $ */
 
 /*
@@ -1002,6 +1002,7 @@ product APPLE WELLSPRING9_JIS	0x0274	Keyboard/Trackpad
 product APPLE WELLSPRING8_ANSI	0x0290	Keyboard/Trackpad
 product APPLE WELLSPRING8_ISO	0x0291	Keyboard/Trackpad
 product APPLE WELLSPRING8_JIS	0x0292	Keyboard/Trackpad
+product APPLE WELLSPRINGM1_J293	0x0341	Keyboard/Trackpad	
 product APPLE OPTMOUSE		0x0302	Optical mouse
 product APPLE BLUETOOTH_HCI	0x1000	HID-proxy
 product APPLE SPEAKERS		0x1101	Speakers
@@ -3148,6 +3149,7 @@ product MICROSOFT SURFETH	0x0927	Surface Ethernet
 product MICROSOFT TYPECOVER	0x096f	Surface Go Type Cover
 product MICROSOFT TYPECOVER2	0x09b5	Surface Go Type Cover
 product MICROSOFT TYPECOVER3	0x09c0	Surface Pro Type Cover
+product MICROSOFT WINDEVETH	0x0c5e
 
 /* Microtech products */
 product MICROTECH SCSIDB25	0x0004	SCSI-DB25
@@ -4147,6 +4149,7 @@ product SILICONPORTALS YAPPH_NF	0x0200	YAP Phone (no firmware)
 product SILICONPORTALS YAPPHONE	0x0201	YAP Phone
 
 /* Simcom products */
+product SIMCOM SIM5320		0x9000	SIM5320 modem
 product SIMCOM SIM7600E		0x9001	SIM7600E modem
 product SIMCOM SIM7600		0x9003	SIM7600 LTE
 
@@ -4612,6 +4615,8 @@ product WACOM GRAPHIRE3_4X5	0x0013	Graphire3 4x5
 product WACOM GRAPHIRE4_4X5	0x0015	Graphire4 Classic A6
 product WACOM INTUOSA5		0x0021	Intuos A5
 product WACOM INTUOS_DRAW	0x033b	Intuos Draw (CTL-490)
+product WACOM ONE_S		0x037a	One S (CTL-472)
+product WACOM ONE_M		0x037b	One M (CTL-672)
 product WACOM INTUOS_PRO_S	0x0392	Intuos Pro S
 
 /* WAGO Kontakttechnik products */

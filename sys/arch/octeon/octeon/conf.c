@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.27 2021/11/11 10:03:09 claudio Exp $ */
+/*	$OpenBSD: conf.c,v 1.29 2022/10/15 10:12:13 jsg Exp $ */
 
 /*
  * Copyright (c) 1992, 1993
@@ -257,8 +257,7 @@ dev_t	swapdev = makedev(1, 0);
  * A minimal stub routine can always return 0.
  */
 int
-iskmemdev(dev)
-	dev_t dev;
+iskmemdev(dev_t dev)
 {
 
 	if (major(dev) == 3 && (minor(dev) == 0 || minor(dev) == 1))
@@ -270,20 +269,19 @@ iskmemdev(dev)
  * Returns true if def is /dev/zero
  */
 int
-iszerodev(dev)
-	dev_t dev;
+iszerodev(dev_t dev)
 {
 	return (major(dev) == 3 && minor(dev) == 12);
 }
 
 dev_t
-getnulldev()
+getnulldev(void)
 {
 	return(makedev(3, 2));
 }
 
 
-int chrtoblktbl[] =  {
+const int chrtoblktbl[] =  {
 	/* VCHR         VBLK */
 	/* 0 */		NODEV,
 	/* 1 */		NODEV,
@@ -310,7 +308,7 @@ int chrtoblktbl[] =  {
 	/* 22 */	8		/* rd */
 };
 
-int nchrtoblktbl = nitems(chrtoblktbl);
+const int nchrtoblktbl = nitems(chrtoblktbl);
 
 #include <dev/cons.h>
 
