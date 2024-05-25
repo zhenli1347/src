@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.89 2022/11/26 11:18:49 tb Exp $
+# $OpenBSD: Makefile,v 1.195 2024/05/24 19:16:53 tb Exp $
 
 LIB=	crypto
 LIBREBUILD=y
@@ -16,47 +16,47 @@ LCRYPTO_SRC=	${.CURDIR}
 
 CFLAGS+= -Wall -Wundef
 .if ${COMPILER_VERSION:L} == "clang"
-CFLAGS+= -Werror
+CFLAGS+= -Werror -Wshadow
 .endif
-CFLAGS+= -DLIBRESSL_INTERNAL -DLIBRESSL_CRYPTO_INTERNAL
+CFLAGS+= -DLIBRESSL_INTERNAL
 .ifdef NAMESPACE
 CFLAGS+= -DLIBRESSL_NAMESPACE -DLIBRESSL_CRYPTO_NAMESPACE
 .endif
-
-
-.if !defined(NOPIC)
-CFLAGS+= -DDSO_DLFCN -DHAVE_DLFCN_H -DHAVE_FUNOPEN
-.endif
-
-# Hardware engines
-CFLAGS+= -DOPENSSL_NO_HW_PADLOCK # XXX enable this?
+CFLAGS+= -DHAVE_FUNOPEN
 
 CFLAGS+= -I${LCRYPTO_SRC}
 CFLAGS+= -I${LCRYPTO_SRC}/arch/${MACHINE_CPU}
 CFLAGS+= -I${LCRYPTO_SRC}/asn1
 CFLAGS+= -I${LCRYPTO_SRC}/bio
 CFLAGS+= -I${LCRYPTO_SRC}/bn
+CFLAGS+= -I${LCRYPTO_SRC}/bn/arch/${MACHINE_CPU}
 CFLAGS+= -I${LCRYPTO_SRC}/bytestring
 CFLAGS+= -I${LCRYPTO_SRC}/curve25519
 CFLAGS+= -I${LCRYPTO_SRC}/dh
 CFLAGS+= -I${LCRYPTO_SRC}/dsa
 CFLAGS+= -I${LCRYPTO_SRC}/ec
-CFLAGS+= -I${LCRYPTO_SRC}/ecdh
 CFLAGS+= -I${LCRYPTO_SRC}/ecdsa
 CFLAGS+= -I${LCRYPTO_SRC}/evp
 CFLAGS+= -I${LCRYPTO_SRC}/hidden
 CFLAGS+= -I${LCRYPTO_SRC}/hmac
 CFLAGS+= -I${LCRYPTO_SRC}/kdf
+CFLAGS+= -I${LCRYPTO_SRC}/lhash
 CFLAGS+= -I${LCRYPTO_SRC}/modes
 CFLAGS+= -I${LCRYPTO_SRC}/ocsp
 CFLAGS+= -I${LCRYPTO_SRC}/pkcs12
 CFLAGS+= -I${LCRYPTO_SRC}/rsa
+CFLAGS+= -I${LCRYPTO_SRC}/sha
+CFLAGS+= -I${LCRYPTO_SRC}/stack
 CFLAGS+= -I${LCRYPTO_SRC}/ts
 CFLAGS+= -I${LCRYPTO_SRC}/x509
 
 VERSION_SCRIPT=	Symbols.map
 SYMBOL_LIST=	${.CURDIR}/Symbols.list
 SYMBOL_NAMESPACE=	${.CURDIR}/Symbols.namespace
+
+.if (${MACHINE_CPU} == "amd64") || (${MACHINE_CPU} == "i386")
+SYMBOL_LIST+=	${.CURDIR}/arch/${MACHINE_CPU}/Symbols.list
+.endif
 
 # crypto/
 SRCS+= cpt_err.c
@@ -69,17 +69,11 @@ SRCS+= malloc-wrapper.c
 SRCS+= mem_clr.c
 SRCS+= mem_dbg.c
 SRCS+= o_fips.c
-SRCS+= o_init.c
-SRCS+= o_str.c
 
 # aes/
-SRCS+= aes_cfb.c
-SRCS+= aes_ctr.c
-SRCS+= aes_ecb.c
+SRCS+= aes.c
+SRCS+= aes_core.c
 SRCS+= aes_ige.c
-SRCS+= aes_misc.c
-SRCS+= aes_ofb.c
-SRCS+= aes_wrap.c
 
 # asn1/
 SRCS+= a_bitstr.c
@@ -99,7 +93,6 @@ SRCS+= a_time_posix.c
 SRCS+= a_time_tm.c
 SRCS+= a_type.c
 SRCS+= a_utf8.c
-SRCS+= ameth_lib.c
 SRCS+= asn1_err.c
 SRCS+= asn1_gen.c
 SRCS+= asn1_item.c
@@ -112,12 +105,10 @@ SRCS+= asn_mime.c
 SRCS+= asn_moid.c
 SRCS+= bio_asn1.c
 SRCS+= bio_ndef.c
-SRCS+= nsseq.c
 SRCS+= p5_pbe.c
 SRCS+= p5_pbev2.c
 SRCS+= p8_pkey.c
 SRCS+= t_crl.c
-SRCS+= t_pkey.c
 SRCS+= t_req.c
 SRCS+= t_spki.c
 SRCS+= t_x509.c
@@ -147,10 +138,7 @@ SRCS+= x_x509.c
 SRCS+= x_x509a.c
 
 # bf/
-SRCS+= bf_cfb64.c
-SRCS+= bf_ecb.c
-SRCS+= bf_ofb64.c
-SRCS+= bf_skey.c
+SRCS+= blowfish.c
 
 # bio/
 SRCS+= b_dump.c
@@ -177,39 +165,33 @@ SRCS+= bss_sock.c
 
 # bn/
 SRCS+= bn_add.c
-SRCS+= bn_blind.c
 SRCS+= bn_bpsw.c
 SRCS+= bn_const.c
+SRCS+= bn_convert.c
 SRCS+= bn_ctx.c
-SRCS+= bn_depr.c
 SRCS+= bn_div.c
 SRCS+= bn_err.c
 SRCS+= bn_exp.c
-SRCS+= bn_exp2.c
 SRCS+= bn_gcd.c
-SRCS+= bn_gf2m.c
 SRCS+= bn_isqrt.c
 SRCS+= bn_kron.c
 SRCS+= bn_lib.c
 SRCS+= bn_mod.c
+SRCS+= bn_mod_sqrt.c
 SRCS+= bn_mont.c
-SRCS+= bn_mpi.c
 SRCS+= bn_mul.c
-SRCS+= bn_nist.c
 SRCS+= bn_prime.c
+SRCS+= bn_primitives.c
 SRCS+= bn_print.c
 SRCS+= bn_rand.c
 SRCS+= bn_recp.c
 SRCS+= bn_shift.c
 SRCS+= bn_small_primes.c
 SRCS+= bn_sqr.c
-SRCS+= bn_sqrt.c
 SRCS+= bn_word.c
-SRCS+= bn_x931p.c
 
 # buffer/
 SRCS+= buf_err.c
-SRCS+= buf_str.c
 SRCS+= buffer.c
 
 # bytestring/
@@ -218,17 +200,10 @@ SRCS+= bs_cbb.c
 SRCS+= bs_cbs.c
 
 # camellia/
-SRCS+= cmll_cfb.c
-SRCS+= cmll_ctr.c
-SRCS+= cmll_ecb.c
-SRCS+= cmll_ofb.c
+SRCS+= camellia.c
 
 # cast/
-SRCS+= c_cfb64.c
-SRCS+= c_ecb.c
-SRCS+= c_enc.c
-SRCS+= c_ofb64.c
-SRCS+= c_skey.c
+SRCS+= cast.c
 
 # chacha/
 SRCS+= chacha.c
@@ -241,7 +216,6 @@ SRCS+= cmac.c
 # cms/
 SRCS+= cms_asn1.c
 SRCS+= cms_att.c
-SRCS+= cms_cd.c
 SRCS+= cms_dd.c
 SRCS+= cms_enc.c
 SRCS+= cms_env.c
@@ -253,12 +227,6 @@ SRCS+= cms_lib.c
 SRCS+= cms_pwri.c
 SRCS+= cms_sd.c
 SRCS+= cms_smime.c
-
-# comp/
-SRCS+= c_rle.c
-SRCS+= c_zlib.c
-SRCS+= comp_err.c
-SRCS+= comp_lib.c
 
 # conf/
 SRCS+= conf_api.c
@@ -291,18 +259,18 @@ SRCS+= cbc_enc.c
 SRCS+= cfb64ede.c
 SRCS+= cfb64enc.c
 SRCS+= cfb_enc.c
+SRCS+= des_enc.c
 SRCS+= ecb3_enc.c
 SRCS+= ecb_enc.c
 SRCS+= ede_cbcm_enc.c
 SRCS+= enc_read.c
-SRCS+= enc_writ.c
 SRCS+= fcrypt.c
+SRCS+= fcrypt_b.c
 SRCS+= ofb64ede.c
 SRCS+= ofb64enc.c
 SRCS+= ofb_enc.c
 SRCS+= pcbc_enc.c
 SRCS+= qud_cksm.c
-SRCS+= rand_key.c
 SRCS+= set_key.c
 SRCS+= str2key.c
 SRCS+= xcbc_enc.c
@@ -311,18 +279,15 @@ SRCS+= xcbc_enc.c
 SRCS+= dh_ameth.c
 SRCS+= dh_asn1.c
 SRCS+= dh_check.c
-SRCS+= dh_depr.c
 SRCS+= dh_err.c
 SRCS+= dh_gen.c
 SRCS+= dh_key.c
 SRCS+= dh_lib.c
 SRCS+= dh_pmeth.c
-SRCS+= dh_prn.c
 
 # dsa/
 SRCS+= dsa_ameth.c
 SRCS+= dsa_asn1.c
-SRCS+= dsa_depr.c
 SRCS+= dsa_err.c
 SRCS+= dsa_gen.c
 SRCS+= dsa_key.c
@@ -331,20 +296,8 @@ SRCS+= dsa_meth.c
 SRCS+= dsa_ossl.c
 SRCS+= dsa_pmeth.c
 SRCS+= dsa_prn.c
-SRCS+= dsa_sign.c
-SRCS+= dsa_vrf.c
-
-# dso/
-SRCS+= dso_dlfcn.c
-SRCS+= dso_err.c
-SRCS+= dso_lib.c
-SRCS+= dso_null.c
-SRCS+= dso_openssl.c
 
 # ec/
-SRCS+= ec2_mult.c
-SRCS+= ec2_oct.c
-SRCS+= ec2_smpl.c
 SRCS+= ec_ameth.c
 SRCS+= ec_asn1.c
 SRCS+= ec_check.c
@@ -360,56 +313,18 @@ SRCS+= ec_pmeth.c
 SRCS+= ec_print.c
 SRCS+= eck_prn.c
 SRCS+= ecp_mont.c
-SRCS+= ecp_nist.c
-SRCS+= ecp_nistp224.c
-SRCS+= ecp_nistp256.c
-SRCS+= ecp_nistp521.c
-SRCS+= ecp_nistputil.c
 SRCS+= ecp_oct.c
 SRCS+= ecp_smpl.c
 SRCS+= ecx_methods.c
 
 # ecdh/
-SRCS+= ecdh_kdf.c
-SRCS+= ech_err.c
-SRCS+= ech_key.c
-SRCS+= ech_lib.c
+SRCS+= ecdh.c
 
 # ecdsa/
-SRCS+= ecs_asn1.c
-SRCS+= ecs_err.c
-SRCS+= ecs_lib.c
-SRCS+= ecs_ossl.c
-SRCS+= ecs_sign.c
-SRCS+= ecs_vrf.c
+SRCS+= ecdsa.c
 
 # engine/
-SRCS+= eng_all.c
-SRCS+= eng_cnf.c
-SRCS+= eng_ctrl.c
-SRCS+= eng_dyn.c
-SRCS+= eng_err.c
-SRCS+= eng_fat.c
-SRCS+= eng_init.c
-SRCS+= eng_lib.c
-SRCS+= eng_list.c
-SRCS+= eng_openssl.c
-SRCS+= eng_pkey.c
-SRCS+= eng_table.c
-SRCS+= tb_asnmth.c
-SRCS+= tb_cipher.c
-SRCS+= tb_dh.c
-SRCS+= tb_digest.c
-SRCS+= tb_dsa.c
-SRCS+= tb_ecdh.c
-SRCS+= tb_ecdsa.c
-SRCS+= tb_eckey.c
-SRCS+= tb_pkmeth.c
-SRCS+= tb_rand.c
-SRCS+= tb_rsa.c
-SRCS+= tb_store.c
-# XXX unnecessary? handled in EVP now...
-# SRCS+= eng_aesni.c # local addition
+SRCS+= engine_stubs.c
 
 # err/
 SRCS+= err.c
@@ -420,10 +335,7 @@ SRCS+= err_prn.c
 SRCS+= bio_b64.c
 SRCS+= bio_enc.c
 SRCS+= bio_md.c
-SRCS+= c_all.c
-SRCS+= digest.c
 SRCS+= e_aes.c
-SRCS+= e_aes_cbc_hmac_sha1.c
 SRCS+= e_bf.c
 SRCS+= e_camellia.c
 SRCS+= e_cast.c
@@ -431,64 +343,38 @@ SRCS+= e_chacha.c
 SRCS+= e_chacha20poly1305.c
 SRCS+= e_des.c
 SRCS+= e_des3.c
-SRCS+= e_gost2814789.c
 SRCS+= e_idea.c
 SRCS+= e_null.c
-SRCS+= e_old.c
 SRCS+= e_rc2.c
 SRCS+= e_rc4.c
-SRCS+= e_rc4_hmac_md5.c
 SRCS+= e_sm4.c
 SRCS+= e_xcbc_d.c
-SRCS+= encode.c
 SRCS+= evp_aead.c
-SRCS+= evp_enc.c
+SRCS+= evp_cipher.c
+SRCS+= evp_digest.c
+SRCS+= evp_encode.c
 SRCS+= evp_err.c
 SRCS+= evp_key.c
-SRCS+= evp_lib.c
+SRCS+= evp_names.c
 SRCS+= evp_pbe.c
 SRCS+= evp_pkey.c
-SRCS+= m_gost2814789.c
-SRCS+= m_gostr341194.c
 SRCS+= m_md4.c
 SRCS+= m_md5.c
 SRCS+= m_md5_sha1.c
 SRCS+= m_null.c
 SRCS+= m_ripemd.c
 SRCS+= m_sha1.c
+SRCS+= m_sha3.c
 SRCS+= m_sigver.c
 SRCS+= m_sm3.c
-SRCS+= m_streebog.c
 SRCS+= m_wp.c
-SRCS+= names.c
-SRCS+= p5_crpt.c
-SRCS+= p5_crpt2.c
-SRCS+= p_dec.c
-SRCS+= p_enc.c
+SRCS+= p_legacy.c
 SRCS+= p_lib.c
-SRCS+= p_open.c
-SRCS+= p_seal.c
 SRCS+= p_sign.c
 SRCS+= p_verify.c
 SRCS+= pmeth_fn.c
 SRCS+= pmeth_gn.c
 SRCS+= pmeth_lib.c
-
-# gost/
-SRCS+= gost2814789.c
-SRCS+= gost89_keywrap.c
-SRCS+= gost89_params.c
-SRCS+= gost89imit_ameth.c
-SRCS+= gost89imit_pmeth.c
-SRCS+= gost_asn1.c
-SRCS+= gost_err.c
-SRCS+= gostr341001.c
-SRCS+= gostr341001_ameth.c
-SRCS+= gostr341001_key.c
-SRCS+= gostr341001_params.c
-SRCS+= gostr341001_pmeth.c
-SRCS+= gostr341194.c
-SRCS+= streebog.c
 
 # hkdf/
 SRCS+= hkdf.c
@@ -499,40 +385,31 @@ SRCS+= hm_pmeth.c
 SRCS+= hmac.c
 
 # idea/
-SRCS+= i_cbc.c
-SRCS+= i_cfb64.c
-SRCS+= i_ecb.c
-SRCS+= i_ofb64.c
-SRCS+= i_skey.c
+SRCS+= idea.c
 
 # kdf/
 SRCS+= hkdf_evp.c
 SRCS+= kdf_err.c
 
 # lhash/
-SRCS+= lh_stats.c
 SRCS+= lhash.c
 
 # md4/
-SRCS+= md4_dgst.c
-SRCS+= md4_one.c
+SRCS+= md4.c
 
 # md5/
-SRCS+= md5_dgst.c
-SRCS+= md5_one.c
+SRCS+= md5.c
 
 # modes/
 SRCS+= cbc128.c
 SRCS+= ccm128.c
 SRCS+= cfb128.c
 SRCS+= ctr128.c
-SRCS+= cts128.c
 SRCS+= gcm128.c
 SRCS+= ofb128.c
 SRCS+= xts128.c
 
 # objects/
-SRCS+= o_names.c
 SRCS+= obj_dat.c
 SRCS+= obj_err.c
 SRCS+= obj_lib.c
@@ -566,7 +443,6 @@ SRCS+= pvkfmt.c
 SRCS+= p12_add.c
 SRCS+= p12_asn.c
 SRCS+= p12_attr.c
-SRCS+= p12_crpt.c
 SRCS+= p12_crt.c
 SRCS+= p12_decr.c
 SRCS+= p12_init.c
@@ -581,7 +457,6 @@ SRCS+= p12_utl.c
 SRCS+= pk12err.c
 
 # pkcs7/
-SRCS+= bio_pk7.c
 SRCS+= pk7_asn1.c
 SRCS+= pk7_attr.c
 SRCS+= pk7_doit.c
@@ -605,16 +480,17 @@ SRCS+= rc2_skey.c
 SRCS+= rc2cfb64.c
 SRCS+= rc2ofb64.c
 
+# rc4/
+SRCS+= rc4.c
+
 # ripemd/
-SRCS+= rmd_dgst.c
-SRCS+= rmd_one.c
+SRCS+= ripemd.c
 
 # rsa/
 SRCS+= rsa_ameth.c
 SRCS+= rsa_asn1.c
+SRCS+= rsa_blinding.c
 SRCS+= rsa_chk.c
-SRCS+= rsa_crpt.c
-SRCS+= rsa_depr.c
 SRCS+= rsa_eay.c
 SRCS+= rsa_err.c
 SRCS+= rsa_gen.c
@@ -631,9 +507,9 @@ SRCS+= rsa_sign.c
 SRCS+= rsa_x931.c
 
 # sha/
-SRCS+= sha1dgst.c
-SRCS+= sha1_one.c
+SRCS+= sha1.c
 SRCS+= sha256.c
+SRCS+= sha3.c
 SRCS+= sha512.c
 
 # sm3/
@@ -664,22 +540,17 @@ SRCS+=txt_db.c
 # ui/
 SRCS+= ui_err.c
 SRCS+= ui_lib.c
+SRCS+= ui_null.c
 SRCS+= ui_openssl.c
 SRCS+= ui_util.c
 
 # whrlpool/
-SRCS+= wp_dgst.c
+SRCS+= whirlpool.c
 
 # x509/
 SRCS+= by_dir.c
 SRCS+= by_file.c
 SRCS+= by_mem.c
-SRCS+= pcy_cache.c
-SRCS+= pcy_data.c
-SRCS+= pcy_lib.c
-SRCS+= pcy_map.c
-SRCS+= pcy_node.c
-SRCS+= pcy_tree.c
 SRCS+= x509_addr.c
 SRCS+= x509_akey.c
 SRCS+= x509_akeya.c
@@ -695,7 +566,6 @@ SRCS+= x509_cpols.c
 SRCS+= x509_crld.c
 SRCS+= x509_d2.c
 SRCS+= x509_def.c
-SRCS+= x509_enum.c
 SRCS+= x509_err.c
 SRCS+= x509_ext.c
 SRCS+= x509_extku.c
@@ -709,18 +579,16 @@ SRCS+= x509_lu.c
 SRCS+= x509_ncons.c
 SRCS+= x509_obj.c
 SRCS+= x509_ocsp.c
-SRCS+= x509_pci.c
-SRCS+= x509_pcia.c
 SRCS+= x509_pcons.c
 SRCS+= x509_pku.c
 SRCS+= x509_pmaps.c
+SRCS+= x509_policy.c
 SRCS+= x509_prn.c
 SRCS+= x509_purp.c
 SRCS+= x509_r2x.c
 SRCS+= x509_req.c
 SRCS+= x509_set.c
 SRCS+= x509_skey.c
-SRCS+= x509_sxnet.c
 SRCS+= x509_trs.c
 SRCS+= x509_txt.c
 SRCS+= x509_utl.c
@@ -735,13 +603,14 @@ SRCS+= x509spki.c
 SRCS+= x509type.c
 SRCS+= x_all.c
 
-.PATH:	${.CURDIR}/arch/${MACHINE_CPU} \
+.PATH:	${LCRYPTO_SRC}/arch/${MACHINE_CPU} \
 	${LCRYPTO_SRC} \
 	${LCRYPTO_SRC}/aes \
 	${LCRYPTO_SRC}/asn1 \
 	${LCRYPTO_SRC}/bf \
 	${LCRYPTO_SRC}/bio \
 	${LCRYPTO_SRC}/bn \
+	${LCRYPTO_SRC}/bn/arch/${MACHINE_CPU} \
 	${LCRYPTO_SRC}/bn/asm \
 	${LCRYPTO_SRC}/buffer \
 	${LCRYPTO_SRC}/bytestring \
@@ -757,14 +626,12 @@ SRCS+= x_all.c
 	${LCRYPTO_SRC}/des \
 	${LCRYPTO_SRC}/dh \
 	${LCRYPTO_SRC}/dsa \
-	${LCRYPTO_SRC}/dso \
 	${LCRYPTO_SRC}/ec \
 	${LCRYPTO_SRC}/ecdh \
 	${LCRYPTO_SRC}/ecdsa \
 	${LCRYPTO_SRC}/engine \
 	${LCRYPTO_SRC}/err \
 	${LCRYPTO_SRC}/evp \
-	${LCRYPTO_SRC}/gost \
 	${LCRYPTO_SRC}/hkdf \
 	${LCRYPTO_SRC}/hmac \
 	${LCRYPTO_SRC}/idea \
@@ -800,6 +667,7 @@ HDRS=\
 	${LCRYPTO_SRC}/aes/aes.h \
 	${LCRYPTO_SRC}/asn1/asn1.h \
 	${LCRYPTO_SRC}/asn1/asn1t.h \
+	${LCRYPTO_SRC}/asn1/posix_time.h \
 	${LCRYPTO_SRC}/bf/blowfish.h \
 	${LCRYPTO_SRC}/bio/bio.h \
 	${LCRYPTO_SRC}/bn/bn.h \
@@ -818,14 +686,12 @@ HDRS=\
 	${LCRYPTO_SRC}/des/des.h \
 	${LCRYPTO_SRC}/dh/dh.h \
 	${LCRYPTO_SRC}/dsa/dsa.h \
-	${LCRYPTO_SRC}/dso/dso.h \
 	${LCRYPTO_SRC}/ec/ec.h \
 	${LCRYPTO_SRC}/ecdh/ecdh.h \
 	${LCRYPTO_SRC}/ecdsa/ecdsa.h \
 	${LCRYPTO_SRC}/engine/engine.h \
 	${LCRYPTO_SRC}/err/err.h \
 	${LCRYPTO_SRC}/evp/evp.h \
-	${LCRYPTO_SRC}/gost/gost.h \
 	${LCRYPTO_SRC}/hkdf/hkdf.h \
 	${LCRYPTO_SRC}/hmac/hmac.h \
 	${LCRYPTO_SRC}/idea/idea.h \
@@ -840,7 +706,6 @@ HDRS=\
 	${LCRYPTO_SRC}/opensslv.h \
 	${LCRYPTO_SRC}/ossl_typ.h \
 	${LCRYPTO_SRC}/pem/pem.h \
-	${LCRYPTO_SRC}/pem/pem2.h \
 	${LCRYPTO_SRC}/pkcs12/pkcs12.h \
 	${LCRYPTO_SRC}/pkcs7/pkcs7.h \
 	${LCRYPTO_SRC}/poly1305/poly1305.h \
@@ -861,7 +726,6 @@ HDRS=\
 	${LCRYPTO_SRC}/whrlpool/whrlpool.h \
 	${LCRYPTO_SRC}/x509/x509.h \
 	${LCRYPTO_SRC}/x509/x509_vfy.h \
-	${LCRYPTO_SRC}/x509/x509_verify.h \
 	${LCRYPTO_SRC}/x509/x509v3.h
 
 HDRS_GEN=\
@@ -911,13 +775,6 @@ obj_dat.h: obj_mac.h ${SSL_OBJECTS}/obj_dat.pl
 .include "${.CURDIR}/arch/${MACHINE_CPU}/Makefile.inc"
 .else
 CFLAGS+=-DOPENSSL_NO_ASM
-SRCS+= aes_core.c aes_cbc.c
-SRCS+= bf_enc.c
-SRCS+= bn_asm.c
-SRCS+= camellia.c cmll_cbc.c cmll_misc.c
-SRCS+= des_enc.c fcrypt_b.c
-SRCS+= rc4_enc.c rc4_skey.c
-SRCS+= wp_block.c
 .endif
 
 BUILDFIRST = ${GENERATED}

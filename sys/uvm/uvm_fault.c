@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_fault.c,v 1.133 2022/11/04 09:36:44 mpi Exp $	*/
+/*	$OpenBSD: uvm_fault.c,v 1.135 2023/09/05 05:08:26 guenther Exp $	*/
 /*	$NetBSD: uvm_fault.c,v 1.51 2000/08/06 00:22:53 thorpej Exp $	*/
 
 /*
@@ -396,7 +396,6 @@ uvmfault_anonget(struct uvm_faultinfo *ufi, struct vm_amap *amap,
 			 * anon and try again.
 			 */
 			if (pg->pg_flags & PG_RELEASED) {
-				pmap_page_protect(pg, PROT_NONE);
 				KASSERT(anon->an_ref == 0);
 				/*
 				 * Released while we had unlocked amap.
@@ -1456,7 +1455,20 @@ uvm_fault_lower(struct uvm_faultinfo *ufi, struct uvm_faultctx *flt,
 			 */
 			if ((amap_flags(amap) & AMAP_SHARED) != 0) {
 				pmap_page_protect(uobjpage, PROT_NONE);
-				}
+			}
+#if defined(MULTIPROCESSOR) && !defined(__HAVE_PMAP_MPSAFE_ENTER_COW)
+			/*
+			 * Otherwise:
+			 * If there are multiple threads, either uvm or the
+			 * pmap has to make sure no threads see the old RO
+			 * mapping once any have seen the new RW mapping.
+			 * uvm does it here by forcing it to PROT_NONE before
+			 * inserting the new mapping.
+			 */
+			else if (P_HASSIBLING(curproc)) {
+				pmap_page_protect(uobjpage, PROT_NONE);
+			}
+#endif
 
 			/* dispose of uobjpage. drop handle to uobj as well. */
 			if (uobjpage->pg_flags & PG_WANTED)

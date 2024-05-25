@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tpmr.c,v 1.31 2021/07/07 20:19:01 sashan Exp $ */
+/*	$OpenBSD: if_tpmr.c,v 1.35 2023/12/23 10:52:54 bluhm Exp $ */
 
 /*
  * Copyright (c) 2019 The University of Queensland
@@ -520,6 +520,8 @@ tpmr_add_port(struct tpmr_softc *sc, const struct ifbreq *req)
 		error = ENOMEM;
 		goto put;
 	}
+
+	ifsetlro(ifp0, 0);
 
 	p->p_ifp0 = ifp0;
 	p->p_tpmr = sc;

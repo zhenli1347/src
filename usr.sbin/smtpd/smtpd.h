@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpd.h,v 1.674 2022/02/18 16:57:36 millert Exp $	*/
+/*	$OpenBSD: smtpd.h,v 1.684 2024/05/07 12:10:06 op Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -25,6 +25,7 @@
 #include <sys/queue.h>
 #include <sys/tree.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include <event.h>
 #include <imsg.h>
@@ -45,9 +46,6 @@
 
 #define CONF_FILE		 "/etc/mail/smtpd.conf"
 #define MAILNAME_FILE		 "/etc/mail/mailname"
-#define CA_FILE			 "/etc/ssl/cert.pem"
-
-#define PROC_COUNT		 7
 
 #define MAX_HOPS_COUNT		 100
 #define	DEFAULT_MAX_BODY_SIZE	(35*1024*1024)
@@ -57,7 +55,7 @@
 #define SMTPD_QUEUE_EXPIRY	 (4 * 24 * 60 * 60)
 #define SMTPD_SOCKET		 "/var/run/smtpd.sock"
 #define	SMTPD_NAME		 "OpenSMTPD"
-#define	SMTPD_VERSION		 "7.0.0"
+#define	SMTPD_VERSION		 "7.5.0"
 #define SMTPD_SESSION_TIMEOUT	 300
 #define SMTPD_BACKLOG		 5
 
@@ -430,6 +428,7 @@ struct expandnode {
 	enum expand_type	type;
 	int			sameuser;
 	int			realuser;
+	uid_t			realuser_uid;
 	int			forwarded;
 	struct rule	       *rule;
 	struct expandnode      *parent;
@@ -469,6 +468,7 @@ struct maddrmap {
 #define DSN_NEVER   0x08
 
 #define	DSN_ENVID_LEN	100
+#define	DSN_ORCPT_LEN	500
 
 #define	SMTPD_ENVELOPE_VERSION		3
 struct envelope {
@@ -509,7 +509,7 @@ struct envelope {
 	time_t				nexttry;
 	time_t				lastbounce;
 
-	struct mailaddr			dsn_orcpt;
+	char				dsn_orcpt[DSN_ORCPT_LEN+1];
 	char				dsn_envid[DSN_ENVID_LEN+1];
 	uint8_t				dsn_notify;
 	enum dsn_ret			dsn_ret;
@@ -1028,6 +1028,8 @@ enum dns_error {
 	DNS_EINVAL,
 	DNS_ENONAME,
 	DNS_ENOTFOUND,
+	/* RFC 7505 */
+	DNS_NULLMX,
 };
 
 enum lka_resp_status {
@@ -1618,7 +1620,7 @@ const char *proc_name(enum smtp_proc_type);
 const char *proc_title(enum smtp_proc_type);
 const char *imsg_to_str(int);
 void log_imsg(int, int, struct imsg *);
-int fork_proc_backend(const char *, const char *, const char *);
+int fork_proc_backend(const char *, const char *, const char *, int);
 
 
 /* srs.c */
@@ -1638,6 +1640,8 @@ struct stat_value *stat_timespec(struct timespec *);
 
 
 /* table.c */
+const char *table_service_name(enum table_service);
+int table_service_from_name(const char *);
 struct table *table_find(struct smtpd *, const char *);
 struct table *table_create(struct smtpd *, const char *, const char *,
     const char *);
@@ -1703,6 +1707,7 @@ int valid_localpart(const char *);
 int valid_domainpart(const char *);
 int valid_domainname(const char *);
 int valid_smtp_response(const char *);
+int valid_xtext(const char *);
 int secure_file(int, char *, char *, uid_t, int);
 int  lowercase(char *, const char *, size_t);
 void xlowercase(char *, const char *, size_t);
@@ -1737,6 +1742,9 @@ void log_trace_verbose(int);
 void log_trace0(const char *, ...)
     __attribute__((format (printf, 1, 2)));
 #define log_trace(m, ...)  do { if (tracing & (m)) log_trace0(__VA_ARGS__); } while (0)
+
+int parse_table_line(FILE *, char **, size_t *, int *,
+    char **, char **, int *);
 
 /* waitq.c */
 int  waitq_wait(void *, void (*)(void *, void *, void *), void *);

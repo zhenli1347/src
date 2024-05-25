@@ -7,8 +7,8 @@
  *
  */
 
-#ifndef _UTIL_H_
-#define _UTIL_H_
+#ifndef UTIL_H
+#define UTIL_H
 
 #include <sys/time.h>
 #include <stdarg.h>
@@ -42,6 +42,15 @@ struct nsd;
  * until log_open and log_set_log_function are called.
  */
 void log_init(const char *ident);
+
+#ifdef USE_LOG_PROCESS_ROLE
+/*
+ * Set the name of the role for the process (for debugging purposes)
+ */
+void log_set_process_role(const char* role);
+#else
+#define log_set_process_role(role) /* empty */
+#endif
 
 /*
  * Open the system log.  If FILENAME is not NULL, a log file is opened
@@ -451,4 +460,4 @@ void activate_cookie_secret(struct nsd* nsd);
 /* Drop a cookie secret. Drops the staging secret. An active secret will not
  * be dropped. */
 void drop_cookie_secret(struct nsd* nsd);
-#endif /* _UTIL_H_ */
+#endif /* UTIL_H */

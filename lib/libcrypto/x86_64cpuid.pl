@@ -15,34 +15,12 @@ open OUT,"| \"$^X\" $xlate $flavour $output";
 ($arg1,$arg2,$arg3,$arg4)=("%rdi","%rsi","%rdx","%rcx");	# Unix order
 
 print<<___;
-.extern		OPENSSL_cpuid_setup
-.hidden		OPENSSL_cpuid_setup
-.section	.init
-	call	OPENSSL_cpuid_setup
-
-.extern	OPENSSL_ia32cap_P
-.hidden	OPENSSL_ia32cap_P
-
 .text
-
-.globl	OPENSSL_atomic_add
-.type	OPENSSL_atomic_add,\@abi-omnipotent
-.align	16
-OPENSSL_atomic_add:
-	movl	($arg1),%eax
-.Lspin:	leaq	($arg2,%rax),%r8
-	.byte	0xf0		# lock
-	cmpxchgl	%r8d,($arg1)
-	jne	.Lspin
-	movl	%r8d,%eax
-	.byte	0x48,0x98	# cltq/cdqe
-	ret
-.size	OPENSSL_atomic_add,.-OPENSSL_atomic_add
-
 .globl	OPENSSL_ia32_cpuid
 .type	OPENSSL_ia32_cpuid,\@abi-omnipotent
 .align	16
 OPENSSL_ia32_cpuid:
+	_CET_ENDBR
 	mov	%rbx,%r8		# save %rbx
 
 	xor	%eax,%eax
@@ -80,6 +58,7 @@ OPENSSL_ia32_cpuid:
 	mov	%eax,%r10d
 	mov	\$0x80000001,%eax
 	cpuid
+	or	%ecx,%r9d
 	and	\$IA32CAP_MASK1_AMD_XOP,%r9d	# isolate AMD XOP bit
 	or	\$1,%r9d			# make sure %r9d is not zero
 
@@ -163,40 +142,6 @@ OPENSSL_ia32_cpuid:
 	or	%r9,%rax
 	ret
 .size	OPENSSL_ia32_cpuid,.-OPENSSL_ia32_cpuid
-___
-
-print<<___;
-.globl	OPENSSL_wipe_cpu
-.type	OPENSSL_wipe_cpu,\@abi-omnipotent
-.align	16
-OPENSSL_wipe_cpu:
-	pxor	%xmm0,%xmm0
-	pxor	%xmm1,%xmm1
-	pxor	%xmm2,%xmm2
-	pxor	%xmm3,%xmm3
-	pxor	%xmm4,%xmm4
-	pxor	%xmm5,%xmm5
-	pxor	%xmm6,%xmm6
-	pxor	%xmm7,%xmm7
-	pxor	%xmm8,%xmm8
-	pxor	%xmm9,%xmm9
-	pxor	%xmm10,%xmm10
-	pxor	%xmm11,%xmm11
-	pxor	%xmm12,%xmm12
-	pxor	%xmm13,%xmm13
-	pxor	%xmm14,%xmm14
-	pxor	%xmm15,%xmm15
-	xorq	%rcx,%rcx
-	xorq	%rdx,%rdx
-	xorq	%rsi,%rsi
-	xorq	%rdi,%rdi
-	xorq	%r8,%r8
-	xorq	%r9,%r9
-	xorq	%r10,%r10
-	xorq	%r11,%r11
-	leaq	8(%rsp),%rax
-	ret
-.size	OPENSSL_wipe_cpu,.-OPENSSL_wipe_cpu
 ___
 
 close STDOUT;	# flush

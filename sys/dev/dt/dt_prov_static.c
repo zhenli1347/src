@@ -1,4 +1,4 @@
-/*	$OpenBSD: dt_prov_static.c,v 1.17 2022/09/11 19:05:44 dv Exp $ */
+/*	$OpenBSD: dt_prov_static.c,v 1.23 2024/04/06 11:18:02 mpi Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -39,11 +39,14 @@ struct dt_provider dt_prov_static = {
  */
 DT_STATIC_PROBE2(sched, dequeue, "pid_t", "pid_t");
 DT_STATIC_PROBE2(sched, enqueue, "pid_t", "pid_t");
+DT_STATIC_PROBE3(sched, fork, "pid_t", "pid_t", "int");
 DT_STATIC_PROBE2(sched, off__cpu, "pid_t", "pid_t");
 DT_STATIC_PROBE0(sched, on__cpu);
 DT_STATIC_PROBE0(sched, remain__cpu);
 DT_STATIC_PROBE0(sched, sleep);
-DT_STATIC_PROBE0(sched, wakeup);
+DT_STATIC_PROBE3(sched, steal, "pid_t", "pid_t", "int");
+DT_STATIC_PROBE2(sched, unsleep, "pid_t", "pid_t");
+DT_STATIC_PROBE3(sched, wakeup, "pid_t", "pid_t", "int");
 
 /*
  * Raw syscalls
@@ -92,8 +95,12 @@ DT_STATIC_PROBE2(smr, thread, "uint64_t", "uint64_t");
  * reference counting, keep in sync with sys/refcnt.h
  */
 DT_STATIC_PROBE0(refcnt, none);
+DT_STATIC_PROBE3(refcnt, ethmulti, "void *", "int", "int");
 DT_STATIC_PROBE3(refcnt, ifaddr, "void *", "int", "int");
+DT_STATIC_PROBE3(refcnt, ifmaddr, "void *", "int", "int");
 DT_STATIC_PROBE3(refcnt, inpcb, "void *", "int", "int");
+DT_STATIC_PROBE3(refcnt, rtentry, "void *", "int", "int");
+DT_STATIC_PROBE3(refcnt, syncache, "void *", "int", "int");
 DT_STATIC_PROBE3(refcnt, tdb, "void *", "int", "int");
 
 /*
@@ -103,10 +110,13 @@ struct dt_probe *const dtps_static[] = {
 	/* Scheduler */
 	&_DT_STATIC_P(sched, dequeue),
 	&_DT_STATIC_P(sched, enqueue),
+	&_DT_STATIC_P(sched, fork),
 	&_DT_STATIC_P(sched, off__cpu),
 	&_DT_STATIC_P(sched, on__cpu),
 	&_DT_STATIC_P(sched, remain__cpu),
 	&_DT_STATIC_P(sched, sleep),
+	&_DT_STATIC_P(sched, steal),
+	&_DT_STATIC_P(sched, unsleep),
 	&_DT_STATIC_P(sched, wakeup),
 	/* Raw syscalls */
 	&_DT_STATIC_P(raw_syscalls, sys_enter),
@@ -138,8 +148,12 @@ struct dt_probe *const dtps_static[] = {
 	&_DT_STATIC_P(smr, thread),
 	/* refcnt */
 	&_DT_STATIC_P(refcnt, none),
+	&_DT_STATIC_P(refcnt, ethmulti),
 	&_DT_STATIC_P(refcnt, ifaddr),
+	&_DT_STATIC_P(refcnt, ifmaddr),
 	&_DT_STATIC_P(refcnt, inpcb),
+	&_DT_STATIC_P(refcnt, rtentry),
+	&_DT_STATIC_P(refcnt, syncache),
 	&_DT_STATIC_P(refcnt, tdb),
 };
 
@@ -165,14 +179,12 @@ dt_prov_static_alloc(struct dt_probe *dtp, struct dt_softc *sc,
 {
 	struct dt_pcb *dp;
 
-	KASSERT(dtioc_req_isvalid(dtrq));
 	KASSERT(TAILQ_EMPTY(plist));
 
 	dp = dt_pcb_alloc(dtp, sc);
 	if (dp == NULL)
 		return ENOMEM;
 
-	dp->dp_filter = dtrq->dtrq_filter;
 	dp->dp_evtflags = dtrq->dtrq_evtflags;
 	TAILQ_INSERT_HEAD(plist, dp, dp_snext);
 

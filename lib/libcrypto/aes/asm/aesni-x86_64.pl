@@ -52,7 +52,7 @@
 # nothing one can do and the result appears optimal. CCM result is
 # identical to CBC, because CBC-MAC is essentially CBC encrypt without
 # saving output. CCM CTR "stays invisible," because it's neatly
-# interleaved wih CBC-MAC. This provides ~30% improvement over
+# interleaved with CBC-MAC. This provides ~30% improvement over
 # "straghtforward" CCM implementation with CTR and CBC-MAC performed
 # disjointly. Parallelizable modes practically achieve the theoretical
 # limit.
@@ -136,7 +136,7 @@
 # asymptotic, if it can be surpassed, isn't it? What happens there?
 # Rewind to CBC paragraph for the answer. Yes, out-of-order execution
 # magic is responsible for this. Processor overlaps not only the
-# additional instructions with AES ones, but even AES instuctions
+# additional instructions with AES ones, but even AES instructions
 # processing adjacent triplets of independent blocks. In the 6x case
 # additional instructions  still claim disproportionally small amount
 # of additional cycles, but in 8x case number of instructions must be
@@ -242,6 +242,7 @@ $code.=<<___;
 .type	${PREFIX}_encrypt,\@abi-omnipotent
 .align	16
 ${PREFIX}_encrypt:
+	_CET_ENDBR
 	movups	($inp),$inout0		# load input
 	mov	240($key),$rounds	# key->rounds
 ___
@@ -255,6 +256,7 @@ $code.=<<___;
 .type	${PREFIX}_decrypt,\@abi-omnipotent
 .align	16
 ${PREFIX}_decrypt:
+	_CET_ENDBR
 	movups	($inp),$inout0		# load input
 	mov	240($key),$rounds	# key->rounds
 ___
@@ -284,6 +286,7 @@ $code.=<<___;
 .type	_aesni_${dir}rypt3,\@abi-omnipotent
 .align	16
 _aesni_${dir}rypt3:
+	_CET_ENDBR
 	$movkey	($key),$rndkey0
 	shr	\$1,$rounds
 	$movkey	16($key),$rndkey1
@@ -328,6 +331,7 @@ $code.=<<___;
 .type	_aesni_${dir}rypt4,\@abi-omnipotent
 .align	16
 _aesni_${dir}rypt4:
+	_CET_ENDBR
 	$movkey	($key),$rndkey0
 	shr	\$1,$rounds
 	$movkey	16($key),$rndkey1
@@ -373,6 +377,7 @@ $code.=<<___;
 .type	_aesni_${dir}rypt6,\@abi-omnipotent
 .align	16
 _aesni_${dir}rypt6:
+	_CET_ENDBR
 	$movkey		($key),$rndkey0
 	shr		\$1,$rounds
 	$movkey		16($key),$rndkey1
@@ -437,6 +442,7 @@ $code.=<<___;
 .type	_aesni_${dir}rypt8,\@abi-omnipotent
 .align	16
 _aesni_${dir}rypt8:
+	_CET_ENDBR
 	$movkey		($key),$rndkey0
 	shr		\$1,$rounds
 	$movkey		16($key),$rndkey1
@@ -525,6 +531,7 @@ $code.=<<___;
 .type	aesni_ecb_encrypt,\@function,5
 .align	16
 aesni_ecb_encrypt:
+	_CET_ENDBR
 	and	\$-16,$len
 	jz	.Lecb_ret
 
@@ -830,6 +837,7 @@ $code.=<<___;
 .type	aesni_ccm64_encrypt_blocks,\@function,6
 .align	16
 aesni_ccm64_encrypt_blocks:
+	_CET_ENDBR
 ___
 $code.=<<___ if ($win64);
 	lea	-0x58(%rsp),%rsp
@@ -910,6 +918,7 @@ $code.=<<___;
 .type	aesni_ccm64_decrypt_blocks,\@function,6
 .align	16
 aesni_ccm64_decrypt_blocks:
+	_CET_ENDBR
 ___
 $code.=<<___ if ($win64);
 	lea	-0x58(%rsp),%rsp
@@ -1017,6 +1026,7 @@ $code.=<<___;
 .type	aesni_ctr32_encrypt_blocks,\@function,5
 .align	16
 aesni_ctr32_encrypt_blocks:
+	_CET_ENDBR
 	lea	(%rsp),%rax
 	push	%rbp
 	sub	\$$frame_size,%rsp
@@ -1308,6 +1318,7 @@ $code.=<<___;
 .type	aesni_xts_encrypt,\@function,6
 .align	16
 aesni_xts_encrypt:
+	_CET_ENDBR
 	lea	(%rsp),%rax
 	push	%rbp
 	sub	\$$frame_size,%rsp
@@ -1350,7 +1361,7 @@ ___
 	movdqa	@tweak[5],@tweak[$i]
 	paddq	@tweak[5],@tweak[5]		# psllq	1,$tweak
 	pand	$twmask,$twres			# isolate carry and residue
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	pxor	$twres,@tweak[5]
 ___
     }
@@ -1456,7 +1467,7 @@ $code.=<<___;
 	 aesenc		$rndkey0,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesenc		$rndkey0,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesenc		$rndkey0,$inout2
 	pxor	$twres,@tweak[5]
 	 aesenc		$rndkey0,$inout3
@@ -1471,7 +1482,7 @@ $code.=<<___;
 	 aesenc		$rndkey1,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesenc		$rndkey1,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesenc		$rndkey1,$inout2
 	pxor	$twres,@tweak[5]
 	 aesenc		$rndkey1,$inout3
@@ -1485,7 +1496,7 @@ $code.=<<___;
 	 aesenclast	$rndkey0,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesenclast	$rndkey0,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesenclast	$rndkey0,$inout2
 	pxor	$twres,@tweak[5]
 	 aesenclast	$rndkey0,$inout3
@@ -1499,7 +1510,7 @@ $code.=<<___;
 	 xorps	`16*0`(%rsp),$inout0		# output^=tweak
 	pand	$twmask,$twres			# isolate carry and residue
 	 xorps	`16*1`(%rsp),$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	pxor	$twres,@tweak[5]
 
 	xorps	`16*2`(%rsp),$inout2
@@ -1702,6 +1713,7 @@ $code.=<<___;
 .type	aesni_xts_decrypt,\@function,6
 .align	16
 aesni_xts_decrypt:
+	_CET_ENDBR
 	lea	(%rsp),%rax
 	push	%rbp
 	sub	\$$frame_size,%rsp
@@ -1750,7 +1762,7 @@ ___
 	movdqa	@tweak[5],@tweak[$i]
 	paddq	@tweak[5],@tweak[5]		# psllq	1,$tweak
 	pand	$twmask,$twres			# isolate carry and residue
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	pxor	$twres,@tweak[5]
 ___
     }
@@ -1856,7 +1868,7 @@ $code.=<<___;
 	 aesdec		$rndkey0,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesdec		$rndkey0,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesdec		$rndkey0,$inout2
 	pxor	$twres,@tweak[5]
 	 aesdec		$rndkey0,$inout3
@@ -1871,7 +1883,7 @@ $code.=<<___;
 	 aesdec		$rndkey1,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesdec		$rndkey1,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesdec		$rndkey1,$inout2
 	pxor	$twres,@tweak[5]
 	 aesdec		$rndkey1,$inout3
@@ -1885,7 +1897,7 @@ $code.=<<___;
 	 aesdeclast	$rndkey0,$inout0
 	pand	$twmask,$twres			# isolate carry and residue
 	 aesdeclast	$rndkey0,$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	 aesdeclast	$rndkey0,$inout2
 	pxor	$twres,@tweak[5]
 	 aesdeclast	$rndkey0,$inout3
@@ -1899,7 +1911,7 @@ $code.=<<___;
 	 xorps	`16*0`(%rsp),$inout0		# output^=tweak
 	pand	$twmask,$twres			# isolate carry and residue
 	 xorps	`16*1`(%rsp),$inout1
-	pcmpgtd	@tweak[5],$twtmp		# broadcat upper bits
+	pcmpgtd	@tweak[5],$twtmp		# broadcast upper bits
 	pxor	$twres,@tweak[5]
 
 	xorps	`16*2`(%rsp),$inout2
@@ -2139,6 +2151,7 @@ $code.=<<___;
 .type	${PREFIX}_cbc_encrypt,\@function,6
 .align	16
 ${PREFIX}_cbc_encrypt:
+	_CET_ENDBR
 	test	$len,$len		# check length
 	jz	.Lcbc_ret
 
@@ -2478,6 +2491,7 @@ $code.=<<___;
 .type	${PREFIX}_set_decrypt_key,\@abi-omnipotent
 .align	16
 ${PREFIX}_set_decrypt_key:
+	_CET_ENDBR
 	sub	\$8,%rsp
 	call	__aesni_set_encrypt_key
 	shl	\$4,$bits		# rounds-1 after _aesni_set_encrypt_key
@@ -2520,7 +2534,7 @@ ___
 #	Vinodh Gopal <vinodh.gopal@intel.com>
 #	Kahraman Akdemir
 #
-# Agressively optimized in respect to aeskeygenassist's critical path
+# Aggressively optimized in respect to aeskeygenassist's critical path
 # and is contained in %xmm0-5 to meet Win64 ABI requirement.
 #
 $code.=<<___;
@@ -2528,6 +2542,7 @@ $code.=<<___;
 .type	${PREFIX}_set_encrypt_key,\@abi-omnipotent
 .align	16
 ${PREFIX}_set_encrypt_key:
+	_CET_ENDBR
 __aesni_set_encrypt_key:
 	sub	\$8,%rsp
 	mov	\$-1,%rax
@@ -2602,7 +2617,7 @@ __aesni_set_encrypt_key:
 
 .align	16
 .L14rounds:
-	movups	16($inp),%xmm2			# remaning half of *userKey
+	movups	16($inp),%xmm2			# remaining half of *userKey
 	mov	\$13,$bits			# 14 rounds for 256
 	lea	16(%rax),%rax
 	$movkey	%xmm0,($key)			# round 0
@@ -2720,6 +2735,7 @@ ___
 }
 
 $code.=<<___;
+.section .rodata
 .align	64
 .Lbswap_mask:
 	.byte	15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0
@@ -2729,9 +2745,8 @@ $code.=<<___;
 	.long	1,0,0,0
 .Lxts_magic:
 	.long	0x87,0,1,0
-
-.asciz  "AES for Intel AES-NI, CRYPTOGAMS by <appro\@openssl.org>"
 .align	64
+.text
 ___
 
 # EXCEPTION_DISPOSITION handler (EXCEPTION_RECORD *rec,ULONG64 frame,
@@ -2749,6 +2764,7 @@ $code.=<<___ if ($PREFIX eq "aesni");
 .type	ecb_se_handler,\@abi-omnipotent
 .align	16
 ecb_se_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx
@@ -2768,6 +2784,7 @@ ecb_se_handler:
 .type	ccm64_se_handler,\@abi-omnipotent
 .align	16
 ccm64_se_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx
@@ -2809,6 +2826,7 @@ ccm64_se_handler:
 .type	ctr32_se_handler,\@abi-omnipotent
 .align	16
 ctr32_se_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx
@@ -2844,6 +2862,7 @@ ctr32_se_handler:
 .type	xts_se_handler,\@abi-omnipotent
 .align	16
 xts_se_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx
@@ -2862,7 +2881,7 @@ xts_se_handler:
 	mov	56($disp),%r11		# disp->HandlerData
 
 	mov	0(%r11),%r10d		# HandlerData[0]
-	lea	(%rsi,%r10),%r10	# prologue lable
+	lea	(%rsi,%r10),%r10	# prologue label
 	cmp	%r10,%rbx		# context->Rip<prologue label
 	jb	.Lcommon_seh_tail
 
@@ -2885,6 +2904,7 @@ $code.=<<___;
 .type	cbc_se_handler,\@abi-omnipotent
 .align	16
 cbc_se_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx

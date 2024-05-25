@@ -1,4 +1,4 @@
-/*	$OpenBSD: bios.c,v 1.127 2022/02/21 10:24:28 mpi Exp $	*/
+/*	$OpenBSD: bios.c,v 1.129 2023/03/15 08:20:52 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997-2001 Michael Shalayeff
@@ -30,7 +30,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/errno.h>
 #include <sys/malloc.h>
@@ -43,14 +42,9 @@
 #include <dev/cons.h>
 #include <stand/boot/bootarg.h>
 
-#include <machine/cpu.h>
-#include <machine/pio.h>
-#include <machine/cpufunc.h>
 #include <machine/conf.h>
 #include <machine/gdt.h>
-#include <machine/pcb.h>
 #include <machine/biosvar.h>
-#include <machine/apmvar.h>
 #include <machine/mpbiosvar.h>
 #include <machine/smbiosvar.h>
 
@@ -58,9 +52,6 @@
 #include <i386/isa/isa_machdep.h>
 
 #include <dev/pci/pcivar.h>
-
-#include <dev/acpi/acpireg.h>
-#include <dev/acpi/acpivar.h>
 
 #include "apm.h"
 #include "acpi.h"
@@ -70,9 +61,8 @@
 
 #include "com.h"
 #if NCOM > 0
-#include <sys/tty.h>
+#include <sys/termios.h>
 #include <dev/ic/comvar.h>
-#include <dev/ic/comreg.h>
 #endif
 
 #include "softraid.h"
@@ -135,6 +125,7 @@ const char *smbios_uninfo[] = {
 
 
 char smbios_bios_date[64];
+char smbios_bios_version[64];
 char smbios_board_vendor[64];
 char smbios_board_prod[64];
 char smbios_board_serial[64];
@@ -301,9 +292,16 @@ biosattach(struct device *parent, struct device *self, void *aux)
 					printf(" vendor %s",
 					    fixstring(scratch));
 				if ((smbios_get_string(&bios, sb->version,
-				    scratch, sizeof(scratch))) != NULL)
-					printf(" version \"%s\"",
-					    fixstring(scratch));
+				    scratch, sizeof(scratch))) != NULL) {
+					sminfop = fixstring(scratch);
+					if (sminfop != NULL) {
+						strlcpy(smbios_bios_version,
+						    sminfop,
+						    sizeof(smbios_bios_version));
+						printf(" version \"%s\"",
+						    sminfop);
+					}
+				}
 				if ((smbios_get_string(&bios, sb->release,
 				    scratch, sizeof(scratch))) != NULL) {
 					sminfop = fixstring(scratch);

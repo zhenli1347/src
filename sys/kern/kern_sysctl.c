@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sysctl.c,v 1.408 2022/11/07 14:25:44 robert Exp $	*/
+/*	$OpenBSD: kern_sysctl.c,v 1.427 2024/04/12 16:07:09 bluhm Exp $	*/
 /*	$NetBSD: kern_sysctl.c,v 1.17 1996/05/20 17:49:05 mrg Exp $	*/
 
 /*-
@@ -86,6 +86,8 @@
 
 #include <dev/cons.h>
 
+#include <dev/usb/ucomvar.h>
+
 #include <net/route.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -116,6 +118,7 @@
 #include "audio.h"
 #include "dt.h"
 #include "pf.h"
+#include "ucom.h"
 #include "video.h"
 
 extern struct forkstat forkstat;
@@ -143,6 +146,7 @@ int sysctl_audio(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_video(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_cpustats(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_utc_offset(void *, size_t *, void *, size_t);
+int sysctl_hwbattery(int *, u_int, void *, size_t *, void *, size_t);
 
 void fill_file(struct kinfo_file *, struct file *, struct filedesc *, int,
     struct vnode *, struct process *, struct proc *, struct socket *, int);
@@ -429,11 +433,9 @@ kern_sysctl_dirs(int top_name, int *name, u_int namelen,
 	case KERN_CPUSTATS:
 		return (sysctl_cpustats(name, namelen, oldp, oldlenp,
 		    newp, newlen));
-#ifdef __HAVE_CLOCKINTR
 	case KERN_CLOCKINTR:
 		return sysctl_clockintr(name, namelen, oldp, oldlenp, newp,
 		    newlen);
-#endif
 	default:
 		return (ENOTDIR);	/* overloaded */
 	}
@@ -520,7 +522,7 @@ kern_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		unsigned int i;
 
 		memset(&mbs, 0, sizeof(mbs));
-		counters_read(mbstat, counters, MBSTAT_COUNT);
+		counters_read(mbstat, counters, MBSTAT_COUNT, NULL);
 		for (i = 0; i < MBSTAT_TYPES; i++)
 			mbs.m_mtypes[i] = counters[i];
 
@@ -664,13 +666,12 @@ int hw_power = 1;
 
 /* morally const values reported by sysctl_bounded_arr */
 static int byte_order = BYTE_ORDER;
-static int page_size = PAGE_SIZE;
 
 const struct sysctl_bounded_args hw_vars[] = {
 	{HW_NCPU, &ncpus, SYSCTL_INT_READONLY},
 	{HW_NCPUFOUND, &ncpusfound, SYSCTL_INT_READONLY},
 	{HW_BYTEORDER, &byte_order, SYSCTL_INT_READONLY},
-	{HW_PAGESIZE, &page_size, SYSCTL_INT_READONLY},
+	{HW_PAGESIZE, &uvmexp.pagesize, SYSCTL_INT_READONLY},
 	{HW_DISKCOUNT, &disk_count, SYSCTL_INT_READONLY},
 	{HW_POWER, &hw_power, SYSCTL_INT_READONLY},
 };
@@ -682,8 +683,11 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	extern char machine[], cpu_model[];
 	int err, cpuspeed;
 
-	/* all sysctl names at this level except sensors are terminal */
-	if (name[0] != HW_SENSORS && namelen != 1)
+	/*
+	 * all sysctl names at this level except sensors and battery
+	 * are terminal
+	 */
+	if (name[0] != HW_SENSORS && name[0] != HW_BATTERY && namelen != 1)
 		return (ENOTDIR);		/* overloaded */
 
 	switch (name[0]) {
@@ -766,9 +770,21 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	case HW_ALLOWPOWERDOWN:
 		return (sysctl_securelevel_int(oldp, oldlenp, newp, newlen,
 		    &allowpowerdown));
+	case HW_UCOMNAMES: {
+		const char *str = "";
+#if NUCOM > 0
+		str = sysctl_ucominit();
+#endif	/* NUCOM > 0 */
+		return (sysctl_rdstring(oldp, oldlenp, newp, str));
+	}
 #ifdef __HAVE_CPU_TOPOLOGY
 	case HW_SMT:
 		return (sysctl_hwsmt(oldp, oldlenp, newp, newlen));
+#endif
+#ifndef SMALL_KERNEL
+	case HW_BATTERY:
+		return (sysctl_hwbattery(name + 1, namelen - 1, oldp, oldlenp,
+		    newp, newlen));
 #endif
 	default:
 		return sysctl_bounded_arr(hw_vars, nitems(hw_vars), name,
@@ -776,6 +792,97 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	}
 	/* NOTREACHED */
 }
+
+#ifndef SMALL_KERNEL
+
+int hw_battery_chargemode;
+int hw_battery_chargestart;
+int hw_battery_chargestop;
+int (*hw_battery_setchargemode)(int);
+int (*hw_battery_setchargestart)(int);
+int (*hw_battery_setchargestop)(int);
+
+int
+sysctl_hwchargemode(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	int mode = hw_battery_chargemode;
+	int error;
+
+	if (!hw_battery_setchargemode)
+		return EOPNOTSUPP;
+
+	error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+	    &mode, -1, 1);
+	if (error)
+		return error;
+
+	if (newp != NULL)
+		error = hw_battery_setchargemode(mode);
+
+	return error;
+}
+
+int
+sysctl_hwchargestart(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	int start = hw_battery_chargestart;
+	int error;
+
+	if (!hw_battery_setchargestart)
+		return EOPNOTSUPP;
+
+	error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+	    &start, 0, 100);
+	if (error)
+		return error;
+
+	if (newp != NULL)
+		error = hw_battery_setchargestart(start);
+
+	return error;
+}
+
+int
+sysctl_hwchargestop(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	int stop = hw_battery_chargestop;
+	int error;
+
+	if (!hw_battery_setchargestop)
+		return EOPNOTSUPP;
+
+	error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+	    &stop, 0, 100);
+	if (error)
+		return error;
+
+	if (newp != NULL)
+		error = hw_battery_setchargestop(stop);
+
+	return error;
+}
+
+int
+sysctl_hwbattery(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+    void *newp, size_t newlen)
+{
+	if (namelen != 1)
+		return (ENOTDIR);
+
+	switch (name[0]) {
+	case HW_BATTERY_CHARGEMODE:
+		return (sysctl_hwchargemode(oldp, oldlenp, newp, newlen));
+	case HW_BATTERY_CHARGESTART:
+		return (sysctl_hwchargestart(oldp, oldlenp, newp, newlen));
+	case HW_BATTERY_CHARGESTOP:
+		return (sysctl_hwchargestop(oldp, oldlenp, newp, newlen));
+	default:
+		return (EOPNOTSUPP);
+	}
+	/* NOTREACHED */
+}
+
+#endif
 
 #ifdef DEBUG_SYSCTL
 /*
@@ -1174,17 +1281,13 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		if (so == NULL) {
 			so = (struct socket *)fp->f_data;
 			/* if so is passed as parameter it is already locked */
-			switch (so->so_proto->pr_domain->dom_family) {
-			case AF_INET:
-			case AF_INET6:
-				NET_LOCK();
-				locked = 1;
-				break;
-			}
+			solock(so);
+			locked = 1;
 		}
 
 		kf->so_type = so->so_type;
-		kf->so_state = so->so_state;
+		kf->so_state = so->so_state | so->so_snd.sb_state |
+		    so->so_rcv.sb_state;
 		if (show_pointers)
 			kf->so_pcb = PTRTOINT64(so->so_pcb);
 		else
@@ -1202,14 +1305,14 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 			kf->so_splicelen = -1;
 		if (so->so_pcb == NULL) {
 			if (locked)
-				NET_UNLOCK();
+				sounlock(so);
 			break;
 		}
 		switch (kf->so_family) {
 		case AF_INET: {
 			struct inpcb *inpcb = so->so_pcb;
 
-			NET_ASSERT_LOCKED();
+			soassertlocked(so);
 			if (show_pointers)
 				kf->inp_ppcb = PTRTOINT64(inpcb->inp_ppcb);
 			kf->inp_lport = inpcb->inp_lport;
@@ -1231,7 +1334,7 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		case AF_INET6: {
 			struct inpcb *inpcb = so->so_pcb;
 
-			NET_ASSERT_LOCKED();
+			soassertlocked(so);
 			if (show_pointers)
 				kf->inp_ppcb = PTRTOINT64(inpcb->inp_ppcb);
 			kf->inp_lport = inpcb->inp_lport;
@@ -1278,7 +1381,7 @@ fill_file(struct kinfo_file *kf, struct file *fp, struct filedesc *fdp,
 		    }
 		}
 		if (locked)
-			NET_UNLOCK();
+			sounlock(so);
 		break;
 	    }
 
@@ -1379,10 +1482,22 @@ sysctl_file(int *name, u_int namelen, char *where, size_t *sizep,
 			TAILQ_FOREACH(inp, &tcbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
 			mtx_leave(&tcbtable.inpt_mtx);
+#ifdef INET6
+			mtx_enter(&tcb6table.inpt_mtx);
+			TAILQ_FOREACH(inp, &tcb6table.inpt_queue, inp_queue)
+				FILLSO(inp->inp_socket);
+			mtx_leave(&tcb6table.inpt_mtx);
+#endif
 			mtx_enter(&udbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &udbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
 			mtx_leave(&udbtable.inpt_mtx);
+#ifdef INET6
+			mtx_enter(&udb6table.inpt_mtx);
+			TAILQ_FOREACH(inp, &udb6table.inpt_queue, inp_queue)
+				FILLSO(inp->inp_socket);
+			mtx_leave(&udb6table.inpt_mtx);
+#endif
 			mtx_enter(&rawcbtable.inpt_mtx);
 			TAILQ_FOREACH(inp, &rawcbtable.inpt_queue, inp_queue)
 				FILLSO(inp->inp_socket);
@@ -2510,6 +2625,7 @@ sysctl_cpustats(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	if (!found)
 		return (ENOENT);
 
+	memset(&cs, 0, sizeof cs);
 	memcpy(&cs.cs_time, &ci->ci_schedstate.spc_cp_time, sizeof(cs.cs_time));
 	cs.cs_flags = 0;
 	if (cpu_is_online(ci))

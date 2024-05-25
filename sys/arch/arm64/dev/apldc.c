@@ -1,4 +1,4 @@
-/*	$OpenBSD: apldc.c,v 1.4 2022/09/16 16:30:10 robert Exp $	*/
+/*	$OpenBSD: apldc.c,v 1.12 2024/01/20 08:00:59 kettenis Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -40,7 +40,7 @@
 #include <dev/hid/hidmsvar.h>
 
 #include <arm64/dev/rtkit.h>
-#include <arm64/dev/simplebusvar.h>
+#include <machine/simplebusvar.h>
 
 #include "apldc.h"
 
@@ -212,7 +212,7 @@ apldc_intr_establish(void *cookie, int *cells, int ipl,
 	ih = malloc(sizeof(*ih), M_DEVBUF, M_WAITOK);
 	ih->ih_func = func;
 	ih->ih_arg = arg;
-	ih->ih_ipl = ipl;
+	ih->ih_ipl = ipl & IPL_IRQMASK;
 	ih->ih_irq = irq;
 	ih->ih_name = name;
 	ih->ih_level = level;
@@ -299,6 +299,12 @@ struct apldchidev_softc {
 	uint8_t			sc_mtdesc[APLDCHIDEV_DESC_MAX];
 	size_t			sc_mtdesclen;
 	int			sc_mt_ready;
+	int			sc_x_min;
+	int			sc_x_max;
+	int			sc_y_min;
+	int			sc_y_max;
+	int			sc_h_res;
+	int			sc_v_res;
 
 	struct apldchidev_gpio	sc_gpio[APLDCHIDEV_NUM_GPIOS];
 	u_int			sc_ngpios;
@@ -307,6 +313,8 @@ struct apldchidev_softc {
 
 	uint8_t			sc_cmd_iface;
 	uint8_t			sc_cmd_seq;
+	uint8_t			sc_data[APLDCHIDEV_DESC_MAX];
+	size_t			sc_data_len;
 	uint32_t		sc_retcode;
 	int			sc_busy;
 };
@@ -555,10 +563,20 @@ struct mtp_gpio_ack {
 	uint8_t cmd[512];
 } __packed;
 
+struct mtp_dim {
+	uint32_t width;
+	uint32_t height;
+	int16_t x_min;
+	int16_t y_min;
+	int16_t x_max;
+	int16_t y_max;
+};
+
 #define MTP_CMD_RESET_INTERFACE	0x40
 #define MTP_CMD_SEND_FIRMWARE		0x95
 #define MTP_CMD_ENABLE_INTERFACE	0xb4
 #define MTP_CMD_ACK_GPIO_CMD		0xa1
+#define MTP_CMD_GET_DIMENSIONS		0xd9
 
 void
 apldchidev_handle_gpio_req(struct apldchidev_softc *sc, uint8_t iface,
@@ -575,17 +593,22 @@ apldchidev_handle_gpio_req(struct apldchidev_softc *sc, uint8_t iface,
 	if (sc->sc_ngpios >= APLDCHIDEV_NUM_GPIOS)
 		return;
 
-	if (iface == sc->sc_iface_mt)
-		node = OF_getnodebyname(sc->sc_node, "multi-touch");
-	else if (iface == sc->sc_iface_stm)
-		node = OF_getnodebyname(sc->sc_node, "stm");
-	if (node == -1)
-		return;
-
+	node = sc->sc_node;
 	snprintf(name, sizeof(name), "apple,%s-gpios", req->name);
 	len = OF_getproplen(node, name);
-	if (len <= 0 || len > sizeof(gpio))
-		return;
+	if (len <= 0 || len > sizeof(gpio)) {
+		/* XXX: older device trees store gpios in sub-nodes */
+		if (iface == sc->sc_iface_mt)
+			node = OF_getnodebyname(sc->sc_node, "multi-touch");
+		else if (iface == sc->sc_iface_stm)
+			node = OF_getnodebyname(sc->sc_node, "stm");
+		if (node == -1)
+			return;
+		len = OF_getproplen(node, name);
+		if (len <= 0 || len > sizeof(gpio))
+			return;
+	}
+
 	OF_getpropintarray(node, name, gpio, len);
 	gpio_controller_config_pin(gpio, GPIO_CONFIG_OUTPUT);
 	gpio_controller_set_pin(gpio, 0);
@@ -764,6 +787,13 @@ apldchidev_rx_intr(void *arg)
 		if (hdr.seq != sc->sc_cmd_seq) {
 			printf("%s: got ack with unexpected seq\n",
 			    sc->sc_dev.dv_xname);
+		}
+		if (MTP_REQ(shdr->flags) == MTP_REQ_GET_REPORT &&
+		    shdr->len <= sizeof(sc->sc_data)) {
+			memcpy(sc->sc_data, (shdr + 1), shdr->len);
+			sc->sc_data_len = shdr->len;
+		} else {
+			sc->sc_data_len = 0;
 		}
 		sc->sc_retcode = shdr->retcode;
 		sc->sc_busy = 0;
@@ -963,16 +993,102 @@ struct mtp_fwhdr {
 	uint32_t iface_off;
 };
 
-void
-apldchidev_attachhook(struct device *self)
+int
+apldchidev_load_firmware(struct apldchidev_softc *sc, const char *name)
 {
-	struct apldchidev_softc *sc = (struct apldchidev_softc *)self;
-	struct apldchidev_attach_args aa;
+	struct mtp_fwhdr *hdr;
 	uint8_t *ucode;
 	size_t ucode_size;
 	uint8_t *data;
 	size_t size;
 	int error;
+
+	error = loadfirmware(name, &ucode, &ucode_size);
+	if (error) {
+		printf("%s: error %d, could not read firmware %s\n",
+		    sc->sc_dev.dv_xname, error, name);
+		return error;
+	}
+
+	hdr = (struct mtp_fwhdr *)ucode;
+	if (sizeof(hdr) > ucode_size ||
+	    hdr->hdr_len + hdr->data_len > ucode_size) {
+		printf("%s: loaded firmware is too small\n",
+		    sc->sc_dev.dv_xname);
+		return EINVAL;
+	}
+	if (hdr->magic != MTP_FW_MAGIC) {
+		printf("%s: wrong firmware magic number 0x%08x\n",
+		    sc->sc_dev.dv_xname, hdr->magic);
+		return EINVAL;
+	}
+	if (hdr->version != MTP_FW_VERSION) {
+		printf("%s: wrong firmware version %d\n",
+		    sc->sc_dev.dv_xname, hdr->version);
+		return EINVAL;
+	}
+	data = ucode + hdr->hdr_len;
+	if (hdr->iface_off)
+		data[hdr->iface_off] = sc->sc_iface_mt;
+	size = hdr->data_len;
+
+	apldchidev_send_firmware(sc, sc->sc_iface_mt, data, size);
+	apldchidev_reset(sc, sc->sc_iface_mt, 0);
+	apldchidev_reset(sc, sc->sc_iface_mt, 2);
+
+	/* Wait until ready. */
+	while (sc->sc_mt_ready == 0) {
+		error = tsleep_nsec(sc, PZERO, "apldcmt", SEC_TO_NSEC(2));
+		if (error == EWOULDBLOCK)
+			return error;
+	}
+
+	return 0;
+}
+
+void
+apldchidev_get_dimensions(struct apldchidev_softc *sc)
+{
+	uint8_t cmd[1] = { MTP_CMD_GET_DIMENSIONS };
+	struct mtp_dim dim;
+	uint8_t flags;
+
+	flags = MTP_GROUP_CMD << MTP_GROUP_SHIFT;
+	flags |= MTP_REQ_GET_REPORT << MTP_REQ_SHIFT;
+	apldchidev_cmd(sc, sc->sc_iface_mt, flags, cmd, sizeof(cmd));
+	apldchidev_wait(sc);
+
+	if (sc->sc_retcode == 0 && sc->sc_data_len == sizeof(dim) + 1 &&
+	    sc->sc_data[0] == MTP_CMD_GET_DIMENSIONS) {
+		memcpy(&dim, &sc->sc_data[1], sizeof(dim));
+		sc->sc_x_min = dim.x_min;
+		sc->sc_x_max = dim.x_max;
+		sc->sc_y_min = dim.y_min;
+		sc->sc_y_max = dim.y_max;
+		sc->sc_h_res = (100 * (dim.x_max - dim.x_min)) / dim.width;
+		sc->sc_v_res = (100 * (dim.y_max - dim.y_min)) / dim.height;
+	}		
+}
+
+void
+apldchidev_attachhook(struct device *self)
+{
+	struct apldchidev_softc *sc = (struct apldchidev_softc *)self;
+	struct apldchidev_attach_args aa;
+	char *firmware_name;
+	int node, len;
+	int retry;
+	int error;
+
+	/* Enable interface. */
+	apldchidev_enable(sc, sc->sc_iface_mt);
+
+	node = OF_getnodebyname(sc->sc_node, "multi-touch");
+	if (node == -1)
+		return;
+	len = OF_getproplen(node, "firmware-name");
+	if (len <= 0)
+		return;
 
 	/* Wait until we have received the multi-touch HID descriptor. */
 	while (sc->sc_mtdesclen == 0) {
@@ -981,69 +1097,26 @@ apldchidev_attachhook(struct device *self)
 			return;
 	}
 
-	if (sc->sc_mtdesclen > 0) {
-		struct mtp_fwhdr *hdr;
-		char *firmware_name;
-		int node, len;
+	firmware_name = malloc(len, M_TEMP, M_WAITOK);
+	OF_getprop(node, "firmware-name", firmware_name, len);
 
-		/* Enable interface. */
-		apldchidev_enable(sc, sc->sc_iface_mt);
-
-		node = OF_getnodebyname(sc->sc_node, "multi-touch");
-		if (node == -1)
-			return;
-		len = OF_getproplen(node, "firmware-name");
-		if (len <= 0)
-			return;
-		firmware_name = malloc(len, M_DEVBUF, M_WAITOK);
-		OF_getprop(node, "firmware-name", firmware_name, len);
-
-		error = loadfirmware(firmware_name, &ucode, &ucode_size);
-		if (error) {
-			printf("%s: error %d, could not read firmware %s\n",
-			    sc->sc_dev.dv_xname, error, firmware_name);
-			return;
-		}
-
-		hdr = (struct mtp_fwhdr *)ucode;
-		if (sizeof(hdr) > ucode_size ||
-		    hdr->hdr_len + hdr->data_len > ucode_size) {
-			printf("%s: loaded firmware is too small\n",
-			    sc->sc_dev.dv_xname);
-			return;
-		}
-		if (hdr->magic != MTP_FW_MAGIC) {
-			printf("%s: wrong firmware magic number 0x%08x\n",
-			    sc->sc_dev.dv_xname, hdr->magic);
-			return;
-		}
-		if (hdr->version != MTP_FW_VERSION) {
-			printf("%s: wrong firmware version %d\n",
-			    sc->sc_dev.dv_xname, hdr->version);
-			return;
-		}
-		data = ucode + hdr->hdr_len;
-		if (hdr->iface_off)
-			data[hdr->iface_off] = sc->sc_iface_mt;
-		size = hdr->data_len;
-
-		apldchidev_send_firmware(sc, sc->sc_iface_mt, data, size);
-		apldchidev_reset(sc, sc->sc_iface_mt, 0);
-		apldchidev_reset(sc, sc->sc_iface_mt, 2);
-
-		/* Wait until ready. */
-		while (sc->sc_mt_ready == 0) {
-			error = tsleep_nsec(sc, PZERO, "apldcmt",
-			    SEC_TO_NSEC(10));
-			if (error == EWOULDBLOCK)
-				return;
-		}
-
-		aa.aa_name = "multi-touch";
-		aa.aa_desc = sc->sc_mtdesc;
-		aa.aa_desclen = sc->sc_mtdesclen;
-		sc->sc_mt = config_found(self, &aa, NULL);
+	for (retry = 5; retry > 0; retry--) {
+		error = apldchidev_load_firmware(sc, firmware_name);
+		if (error != EWOULDBLOCK)
+			break;
 	}
+	if (error)
+		goto out;
+
+	apldchidev_get_dimensions(sc);
+
+	aa.aa_name = "multi-touch";
+	aa.aa_desc = sc->sc_mtdesc;
+	aa.aa_desclen = sc->sc_mtdesclen;
+	sc->sc_mt = config_found(self, &aa, NULL);
+
+out:
+	free(firmware_name, M_TEMP, len);
 }
 
 #endif
@@ -1167,6 +1240,9 @@ apldckbd_ioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		/* XXX: should we set something else? */
 		*(u_int *)data = WSKBD_TYPE_USB;
 		return 0;
+	case WSKBDIO_SETLEDS:
+		apldckbd_set_leds(v, *(int *)data);
+		return 0;
 	default:
 		return hidkbd_ioctl(kbd, cmd, data, flag, p);
 	}
@@ -1252,22 +1328,27 @@ struct ubcmtp_finger {
 #define DEFAULT_PRESSURE	40
 
 struct apldcms_softc {
-	struct device	sc_dev;
-	struct device	*sc_wsmousedev;
+	struct device		sc_dev;
+	struct apldchidev_softc	*sc_hidev;
+	struct device		*sc_wsmousedev;
 
-	int		sc_enabled;
+	int			sc_enabled;
 
-	int		tp_offset;
-	int		tp_fingerpad;
+	int			tp_offset;
+	int			tp_fingerpad;
 
-	struct mtpoint	frame[UBCMTP_MAX_FINGERS];
-	int		contacts;
-	int		btn;
+	struct mtpoint		frame[UBCMTP_MAX_FINGERS];
+	int			contacts;
+	int			btn;
 };
 
 int	apldcms_enable(void *);
 void	apldcms_disable(void *);
 int	apldcms_ioctl(void *, u_long, caddr_t, int, struct proc *);
+
+static struct wsmouse_param apldcms_wsmousecfg[] = {
+	{ WSMOUSECFG_MTBTN_MAXDIST, 0 }, /* 0: Compute a default value. */
+};
 
 const struct wsmouse_accessops apldcms_accessops = {
 	.enable = apldcms_enable,
@@ -1302,6 +1383,8 @@ apldcms_attach(struct device *parent, struct device *self, void *aux)
 	struct apldcms_softc *sc = (struct apldcms_softc *)self;
 	struct wsmousedev_attach_args aa;
 
+	sc->sc_hidev = (struct apldchidev_softc *)parent;
+
 	printf("\n");
 
 	sc->tp_offset = UBCMTP_TYPE4_TPOFF;
@@ -1320,17 +1403,19 @@ apldcms_configure(struct apldcms_softc *sc)
 {
 	struct wsmousehw *hw = wsmouse_get_hw(sc->sc_wsmousedev);
 
-	/* The values below are for the MacBookPro17,1 */
 	hw->type = WSMOUSE_TYPE_TOUCHPAD;
 	hw->hw_type = WSMOUSEHW_CLICKPAD;
-	hw->x_min = -6046;
-	hw->x_max = 6536;
-	hw->y_min = -164;
-	hw->y_max = 7439;
+	hw->x_min = sc->sc_hidev->sc_x_min;
+	hw->x_max = sc->sc_hidev->sc_x_max;
+	hw->y_min = sc->sc_hidev->sc_y_min;
+	hw->y_max = sc->sc_hidev->sc_y_max;
+	hw->h_res = sc->sc_hidev->sc_h_res;
+	hw->v_res = sc->sc_hidev->sc_v_res;
 	hw->mt_slots = UBCMTP_MAX_FINGERS;
 	hw->flags = WSMOUSEHW_MT_TRACKING;
 
-	return wsmouse_configure(sc->sc_wsmousedev, NULL, 0);
+	return wsmouse_configure(sc->sc_wsmousedev, apldcms_wsmousecfg,
+	    nitems(apldcms_wsmousecfg));
 }
 
 void

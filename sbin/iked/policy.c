@@ -1,4 +1,4 @@
-/*	$OpenBSD: policy.c,v 1.92 2022/10/10 11:33:55 tobhe Exp $	*/
+/*	$OpenBSD: policy.c,v 1.98 2024/02/03 00:54:14 jsg Exp $	*/
 
 /*
  * Copyright (c) 2020-2021 Tobias Heider <tobhe@openbsd.org>
@@ -222,11 +222,9 @@ struct iked_policy *
 policy_test(struct iked *env, struct iked_policy *key)
 {
 	struct iked_policy	*p = NULL, *pol = NULL;
-	unsigned int		 cnt = 0;
 
 	p = TAILQ_FIRST(&env->sc_policies);
 	while (p != NULL) {
-		cnt++;
 		if (p->pol_flags & IKED_POLICY_SKIP)
 			p = p->pol_skip[IKED_SKIP_FLAGS];
 		else if (key->pol_af && p->pol_af &&
@@ -400,10 +398,8 @@ sa_state(struct iked *env, struct iked_sa *sa, int state)
 		case IKEV2_STATE_CLOSED:
 			log_debug("%s: %s -> %s from %s to %s policy '%s'",
 			    SPI_SA(sa, __func__), a, b,
-			    print_host((struct sockaddr *)&sa->sa_peer.addr,
-			    NULL, 0),
-			    print_host((struct sockaddr *)&sa->sa_local.addr,
-			    NULL, 0),
+			    print_addr(&sa->sa_peer.addr),
+			    print_addr(&sa->sa_local.addr),
 			    sa->sa_policy ? sa->sa_policy->pol_name :
 			    "<unknown>");
 			break;
@@ -741,9 +737,13 @@ sa_configure_iface(struct iked *env, struct iked_sa *sa, int add)
 
 		switch(saflow->flow_src.addr_af) {
 		case AF_INET:
+			if (sa->sa_cp_addr == NULL)
+				continue;
 			caddr = (struct sockaddr *)&sa->sa_cp_addr->addr;
 			break;
 		case AF_INET6:
+			if (sa->sa_cp_addr6 == NULL)
+				continue;
 			caddr = (struct sockaddr *)&sa->sa_cp_addr6->addr;
 			break;
 		default:
@@ -786,8 +786,8 @@ childsa_free(struct iked_childsa *csa)
 		csb->csa_bundled = NULL;
 	if ((csb = csa->csa_peersa) != NULL)
 		csb->csa_peersa = NULL;
-	ibuf_release(csa->csa_encrkey);
-	ibuf_release(csa->csa_integrkey);
+	ibuf_free(csa->csa_encrkey);
+	ibuf_free(csa->csa_integrkey);
 	free(csa);
 }
 
@@ -1091,7 +1091,7 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
 
 	for (i = 0; i < peer->prop_nxforms; i++) {
 		tpeer = peer->prop_xforms + i;
-		if (tpeer->xform_type > IKEV2_XFORMTYPE_MAX)
+		if (tpeer->xform_type >= IKEV2_XFORMTYPE_MAX)
 			continue;
 		if (noauth && tpeer->xform_type == IKEV2_XFORMTYPE_INTEGR)
 			return (0);
@@ -1133,8 +1133,7 @@ proposals_match(struct iked_proposal *local, struct iked_proposal *peer,
 				continue;
 			type = tpeer->xform_type;
 
-			if (rekey && nodh == 0 && dhgroup >= 0 &&
-			    protoid == IKEV2_SAPROTO_ESP &&
+			if (nodh == 0 && dhgroup >= 0 &&
 			    type == IKEV2_XFORMTYPE_DH) {
 				if (dhforced)
 					continue;

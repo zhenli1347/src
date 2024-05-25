@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_spppsubr.c,v 1.191 2022/01/02 22:36:03 jsg Exp $	*/
+/*	$OpenBSD: if_spppsubr.c,v 1.193 2024/05/13 01:15:53 jsg Exp $	*/
 /*
  * Synchronous PPP link level subroutines.
  *
@@ -234,9 +234,6 @@ void sppp_cp_input(const struct cp *cp, struct sppp *sp,
 			  struct mbuf *m);
 void sppp_cp_send(struct sppp *sp, u_short proto, u_char type,
 			 u_char ident, u_short len, void *data);
-#ifdef notyet
-void sppp_cp_timeout(void *arg);
-#endif
 void sppp_cp_change_state(const struct cp *cp, struct sppp *sp,
 				 int newstate);
 void sppp_auth_send(const struct cp *cp,
@@ -713,7 +710,7 @@ sppp_attach(struct ifnet *ifp)
 	sp->pp_if.if_type = IFT_PPP;
 	sp->pp_if.if_output = sppp_output;
 	sp->pp_if.if_rtrequest = sppp_rtrequest;
-	ifq_set_maxlen(&sp->pp_if.if_snd, 50);
+	ifq_init_maxlen(&sp->pp_if.if_snd, 50);
 	mq_init(&sp->pp_cpq, 50, IPL_NET);
 	sp->pp_loopcnt = 0;
 	sp->pp_alivecnt = 0;

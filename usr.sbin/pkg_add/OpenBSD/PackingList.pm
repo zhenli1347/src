@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: PackingList.pm,v 1.149 2022/06/06 07:21:17 espie Exp $
+# $OpenBSD: PackingList.pm,v 1.153 2023/11/23 09:44:08 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -15,15 +15,13 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-use strict;
-use warnings;
+use v5.36;
 
 package OpenBSD::PackingList::State;
 my $dot = '.';
 
-sub new
+sub new($class)
 {
-	my $class = shift;
 	bless { default_owner=>'root',
 	     default_group=>'bin',
 	     default_mode=> 0444,
@@ -32,15 +30,13 @@ sub new
 	     cwd=>\$dot}, $class;
 }
 
-sub cwd
+sub cwd($self)
 {
-	return ${$_[0]->{cwd}};
+	return ${$self->{cwd}};
 }
 
-sub set_cwd
+sub set_cwd($self, $p)
 {
-	my ($self, $p) = @_;
-
 	require File::Spec;
 
 	$p = File::Spec->canonpath($p);
@@ -48,9 +44,8 @@ sub set_cwd
 }
 
 package OpenBSD::PackingList::hashpath;
-sub match
+sub match($h, $plist)
 {
-	my ($h, $plist) = @_;
 	my $f = $plist->fullpkgpath2;
 	if (!defined $f) {
 		return 0;
@@ -63,9 +58,8 @@ sub match
 	return 0;
 }
 
-sub partial_match
+sub partial_match($h, $subdir)
 {
-	my ($h, $subdir) = @_;
 	for my $dir (keys %$h) {
 		return 1 if $dir =~ m/\b\Q$subdir\E\b/;
 	}
@@ -103,53 +97,45 @@ our @ISA = qw(OpenBSD::Composite);
 use OpenBSD::PackingElement;
 use OpenBSD::PackageInfo;
 
-sub element_class { "OpenBSD::PackingElement" }
+sub element_class($) { "OpenBSD::PackingElement" }
 
-sub new
+sub new($class)
 {
-	my $class = shift;
 	my $plist = bless {state => OpenBSD::PackingList::State->new,
 		infodir => \(my $d)}, $class;
 	OpenBSD::PackingElement::File->add($plist, CONTENTS);
 	return $plist;
 }
 
-sub set_infodir
+sub set_infodir($self, $dir)
 {
-	my ($self, $dir) = @_;
 	$dir .= '/' unless $dir =~ m/\/$/o;
 	${$self->{infodir}} = $dir;
 }
 
-sub make_shallow_copy
+sub make_shallow_copy($plist, $h)
 {
-	my ($plist, $h) = @_;
-
 	my $copy = ref($plist)->new;
 	$copy->set_infodir($plist->infodir);
 	$plist->copy_shallow_if($copy, $h);
 	return $copy;
 }
 
-sub make_deep_copy
+sub make_deep_copy($plist, $h)
 {
-	my ($plist, $h) = @_;
-
 	my $copy = ref($plist)->new;
 	$copy->set_infodir($plist->infodir);
 	$plist->copy_deep_if($copy, $h);
 	return $copy;
 }
 
-sub infodir
+sub infodir($self)
 {
-	my $self = shift;
 	return ${$self->{infodir}};
 }
 
-sub zap_wrong_annotations
+sub zap_wrong_annotations($self)
 {
-	my $self = shift;
 	my $pkgname = $self->pkgname;
 	if (defined $pkgname && $pkgname =~ m/^(?:\.libs\d*|partial)\-/) {
 		delete $self->{'manual-installation'};
@@ -159,32 +145,24 @@ sub zap_wrong_annotations
 	}
 }
 
-sub conflict_list
+sub conflict_list($self)
 {
 	require OpenBSD::PkgCfl;
 
-	my $self = shift;
 	return OpenBSD::PkgCfl->make_conflict_list($self);
 }
 
-my $subclass;
-
-sub read
+sub read($a, $u, $code = \&defaultCode)
 {
-	my ($a, $u, $code) = @_;
+	$code //= \&defaultCode; # XXX callers may pass undef for now
 	my $plist;
-	$code = \&defaultCode if !defined $code;
 	if (ref $a) {
 		$plist = $a;
 	} else {
-		$plist = new $a;
-	}
-	if (defined $subclass->{$code}) {
-		bless $plist, "OpenBSD::PackingList::".$subclass->{$code};
+		$plist = $a->new;
 	}
 	&$code($u,
-		sub {
-			my $line = shift;
+		sub($line) {
 			return if $line =~ m/^\s*$/o;
 			OpenBSD::PackingElement->create($line, $plist);
 		});
@@ -192,67 +170,60 @@ sub read
 	return $plist;
 }
 
-sub defaultCode
+sub defaultCode($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		&$cont($_);
 	}
 }
 
-sub SharedItemsOnly
+sub SharedItemsOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		next unless m/^\@(?:cwd|dir|fontdir|ghost|mandir|newuser|newgroup|name)\b/o || m/^\@(?:sample|extra)\b.*\/$/o || m/^[^\@].*\/$/o;
 		&$cont($_);
 	}
 }
 
-sub UpdatePlistOnly
+sub UpdatePlistOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		next unless m/^\@(?:cwd|dir|fontdir|ghost|mandir|depend)\b/o || m/^\@(?:sample|extra)\b.*\/$/o || m/^[^\@].*\/$/o;
 		&$cont($_);
 	}
 }
 
-sub DirrmOnly
+sub DirrmOnly	# forwarder
 {
 	&OpenBSD::PackingList::SharedItemsOnly;
 }
 
-sub LibraryOnly
+sub LibraryOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		next unless m/^\@(?:cwd|lib|name|comment\s+subdir\=)\b/o;
 		&$cont($_);
 	}
 }
 
-sub FilesOnly
+sub FilesOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 	    	next unless m/^\@(?:cwd|name|info|man|file|lib|shell|sample|bin|rcscript|so|static-lib)\b/o || !m/^\@/o;
 		&$cont($_);
 	}
 }
 
-sub PrelinkStuffOnly
+sub PrelinkStuffOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		next unless m/^\@(?:cwd|bin|lib|name|define-tag|libset|depend|wantlib|comment\s+ubdir\=)\b/o;
 		&$cont($_);
 	}
 }
 
-sub DependOnly
+sub DependOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		if (m/^\@(?:libset|depend|wantlib|define-tag)\b/o) {
 			&$cont($_);
@@ -263,9 +234,8 @@ sub DependOnly
 	}
 }
 
-sub ExtraInfoOnly
+sub ExtraInfoOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		if (m/^\@(?:name|pkgpath|comment\s+(?:subdir|pkgpath)\=|option)\b/o) {
 			&$cont($_);
@@ -276,9 +246,8 @@ sub ExtraInfoOnly
 	}
 }
 
-sub UpdateInfoOnly
+sub UpdateInfoOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		# if old alwaysupdate, all info is sig
 		# if new, we don't need the rest
@@ -298,9 +267,8 @@ sub UpdateInfoOnly
 	}
 }
 
-sub ConflictOnly
+sub ConflictOnly($fh, $cont)
 {
-	my ($fh, $cont) = @_;
 	while (<$fh>) {
 		if (m/^\@(?:name|conflict|option)\b/o) {
 			&$cont($_);
@@ -311,9 +279,8 @@ sub ConflictOnly
 	}
 }
 
-sub fromfile
+sub fromfile($a, $fname, $code = \&defaultCode)
 {
-	my ($a, $fname, $code) = @_;
 	open(my $fh, '<', $fname) or return;
 	my $plist;
 	eval {
@@ -328,9 +295,8 @@ sub fromfile
 	return $plist;
 }
 
-sub tofile
+sub tofile($self, $fname)
 {
-	my ($self, $fname) = @_;
 	open(my $fh, '>', $fname) or return;
 	$self->zap_wrong_annotations;
 	$self->write($fh);
@@ -338,22 +304,19 @@ sub tofile
 	return 1;
 }
 
-sub save
+sub save($self)
 {
-	my $self = shift;
 	$self->tofile($self->infodir.CONTENTS);
 }
 
-sub add2list
+sub add2list($plist, $object)
 {
-	my ($plist, $object) = @_;
 	my $category = $object->category;
 	push @{$plist->{$category}}, $object;
 }
 
-sub addunique
+sub addunique($plist, $object)
 {
-	my ($plist, $object) = @_;
 	my $category = $object->category;
 	if (defined $plist->{$category}) {
 		die "Duplicate $category in plist ".($plist->pkgname // "?");
@@ -361,21 +324,18 @@ sub addunique
 	$plist->{$category} = $object;
 }
 
-sub has
+sub has($plist, $name)
 {
-	my ($plist, $name) = @_;
 	return defined $plist->{$name};
 }
 
-sub get
+sub get($plist, $name)
 {
-	my ($plist, $name) = @_;
 	return $plist->{$name};
 }
 
-sub set_pkgname
+sub set_pkgname($self, $name)
 {
-	my ($self, $name) = @_;
 	if (defined $self->{name}) {
 		$self->{name}->set_name($name);
 	} else {
@@ -383,9 +343,8 @@ sub set_pkgname
 	}
 }
 
-sub pkgname
+sub pkgname($self)
 {
-	my $self = shift;
 	if (defined $self->{name}) {
 		return $self->{name}->name;
 	} else {
@@ -393,10 +352,8 @@ sub pkgname
 	}
 }
 
-sub localbase
+sub localbase($self)
 {
-	my $self = shift;
-
 	if (defined $self->{localbase}) {
 		return $self->{localbase}->name;
 	} else {
@@ -404,15 +361,13 @@ sub localbase
 	}
 }
 
-sub is_signed
+sub is_signed($self)
 {
-	my $self = shift;
 	return defined $self->{'digital-signature'};
 }
 
-sub fullpkgpath
+sub fullpkgpath($self)
 {
-	my $self = shift;
 	if (defined $self->{extrainfo} && $self->{extrainfo}{subdir} ne '') {
 		return $self->{extrainfo}{subdir};
 	} else {
@@ -420,9 +375,8 @@ sub fullpkgpath
 	}
 }
 
-sub fullpkgpath2
+sub fullpkgpath2($self)
 {
-	my $self = shift;
 	if (defined $self->{extrainfo} && $self->{extrainfo}{subdir} ne '') {
 		return $self->{extrainfo}{path};
 	} else {
@@ -430,9 +384,8 @@ sub fullpkgpath2
 	}
 }
 
-sub pkgpath
+sub pkgpath($self)
 {
-	my $self = shift;
 	if (!defined $self->{_hashpath}) {
 		my $h = $self->{_hashpath} =
 		    bless {}, "OpenBSD::PackingList::hashpath";
@@ -449,15 +402,14 @@ sub pkgpath
 	return $self->{_hashpath};
 }
 
-sub match_pkgpath
+sub match_pkgpath($self, $plist2)
 {
-	my ($self, $plist2) = @_;
 	return $self->pkgpath->match($plist2) ||
 	    $plist2->pkgpath->match($self);
 }
 
 our @unique_categories =
-    (qw(name url version signer digital-signature no-default-conflict manual-installation firmware always-update is-branch extrainfo localbase arch));
+    (qw(name url version signer digital-signature no-default-conflict manual-installation firmware always-update updatedb is-branch extrainfo localbase arch));
 
 our @list_categories =
     (qw(conflict pkgpath ask-update libset depend
@@ -466,10 +418,8 @@ our @list_categories =
 our @cache_categories =
     (qw(libset depend wantlib));
 
-sub visit
+sub visit($self, $method, @l)
 {
-	my ($self, $method, @l) = @_;
-
 	if (defined $self->{cvstags}) {
 		for my $item (@{$self->{cvstags}}) {
 			$item->$method(@l) unless $item->{deleted};
@@ -498,14 +448,11 @@ sub visit
 
 my $plist_cache = {};
 
-sub from_installation
+sub from_installation($o, $pkgname, $code = \&defaultCode)
 {
-	my ($o, $pkgname, $code) = @_;
-
 	require OpenBSD::PackageInfo;
 
 	$code //= \&defaultCode;
-
 	if ($code == \&DependOnly && defined $plist_cache->{$pkgname}) {
 	    return $plist_cache->{$pkgname};
 	}
@@ -526,11 +473,10 @@ sub from_installation
 	return $plist;
 }
 
-sub to_cache
+sub to_cache($self)
 {
-	my ($self) = @_;
 	return if defined $plist_cache->{$self->pkgname};
-	my $plist = OpenBSD::PackingList::Depend->new;
+	my $plist = OpenBSD::PackingList->new;
 	for my $c (@cache_categories) {
 		if (defined $self->{$c}) {
 			$plist->{$c} = $self->{$c};
@@ -539,10 +485,8 @@ sub to_cache
 	$plist_cache->{$self->pkgname} = $plist;
 }
 
-sub to_installation
+sub to_installation($self)
 {
-	my ($self) = @_;
-
 	require OpenBSD::PackageInfo;
 
 	return if $main::not;
@@ -550,49 +494,10 @@ sub to_installation
 	$self->tofile(OpenBSD::PackageInfo::installed_contents($self->pkgname));
 }
 
-sub forget
+sub signature($self)
 {
-}
-
-sub signature
-{
-	my $self = shift;
-
 	require OpenBSD::Signature;
 	return OpenBSD::Signature->from_plist($self);
 }
-
-$subclass =  {
-	\&defaultCode => 'Full',
-	\&SharedItemsOnly => 'SharedItems',
-	\&DirrmOnly => 'SharedItems',
-	\&LibraryOnly => 'Libraries',
-	\&FilesOnly => 'Files',
-	\&PrelinkStuffOnly => 'Prelink',
-	\&DependOnly => 'Depend',
-	\&ExtraInfoOnly => 'ExtraInfo',
-	\&UpdateInfoOnly => 'UpdateInfo',
-	\&ConflictOnly => 'Conflict' };
-
-package OpenBSD::PackingList::OldLibs;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Full;
-our @ISA = qw(OpenBSD::PackingList::OldLibs);
-package OpenBSD::PackingList::SharedItems;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Libraries;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Files;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Prelink;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Depend;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::ExtraInfo;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::UpdateInfo;
-our @ISA = qw(OpenBSD::PackingList);
-package OpenBSD::PackingList::Conflict;
-our @ISA = qw(OpenBSD::PackingList);
 
 1;

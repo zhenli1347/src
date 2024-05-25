@@ -1,4 +1,4 @@
-/*	$OpenBSD: eigrpe.c,v 1.39 2021/01/19 10:53:25 claudio Exp $ */
+/*	$OpenBSD: eigrpe.c,v 1.41 2023/12/14 11:09:56 claudio Exp $ */
 
 /*
  * Copyright (c) 2015 Renato Westphal <renato@openbsd.org>
@@ -49,7 +49,6 @@ static struct event	 ev6;
 static struct imsgev	*iev_main;
 static struct imsgev	*iev_rde;
 
-/* ARGSUSED */
 static void
 eigrpe_sig_handler(int sig, short event, void *bula)
 {
@@ -211,7 +210,6 @@ eigrpe_imsg_compose_rde(int type, uint32_t peerid, pid_t pid,
 	    data, datalen));
 }
 
-/* ARGSUSED */
 static void
 eigrpe_dispatch_main(int fd, short event, void *bula)
 {
@@ -291,7 +289,7 @@ eigrpe_dispatch_main(int fd, short event, void *bula)
 				    "to rde", __func__);
 				break;
 			}
-			if ((fd = imsg.fd) == -1) {
+			if ((fd = imsg_get_fd(&imsg)) == -1) {
 				log_warnx("%s: expected to receive imsg fd to "
 				    "rde but didn't receive any", __func__);
 				break;
@@ -386,7 +384,6 @@ eigrpe_dispatch_main(int fd, short event, void *bula)
 	}
 }
 
-/* ARGSUSED */
 static void
 eigrpe_dispatch_rde(int fd, short event, void *bula)
 {

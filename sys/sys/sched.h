@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched.h,v 1.57 2020/12/25 12:49:31 visa Exp $	*/
+/*	$OpenBSD: sched.h,v 1.70 2024/01/24 19:23:38 cheloha Exp $	*/
 /* $NetBSD: sched.h,v 1.2 1999/02/28 18:14:58 ross Exp $ */
 
 /*-
@@ -69,8 +69,6 @@
 #ifndef	_SYS_SCHED_H_
 #define	_SYS_SCHED_H_
 
-#include <sys/queue.h>
-
 /*
  * Posix defines a <sched.h> which may want to include <sys/sched.h>
  */
@@ -88,6 +86,18 @@
 #define CP_IDLE		5
 #define CPUSTATES	6
 
+struct cpustats {
+	uint64_t	cs_time[CPUSTATES];	/* CPU state statistics */
+	uint64_t	cs_flags;		/* see below */
+};
+
+#define CPUSTATS_ONLINE		0x0001	/* CPU is schedulable */
+
+#ifdef	_KERNEL
+
+#include <sys/clockintr.h>
+#include <sys/queue.h>
+
 #define	SCHED_NQS	32			/* 32 run queues. */
 
 struct smr_entry;
@@ -104,12 +114,13 @@ struct schedstate_percpu {
 	u_int spc_schedticks;		/* ticks for schedclock() */
 	u_int64_t spc_cp_time[CPUSTATES]; /* CPU state statistics */
 	u_char spc_curpriority;		/* usrpri of curproc */
-	int spc_rrticks;		/* ticks until roundrobin() */
-	int spc_pscnt;			/* prof/stat counter */
-	int spc_psdiv;			/* prof/stat divisor */	
+
+	struct clockintr spc_itimer;	/* [o] itimer_update handle */
+	struct clockintr spc_profclock;	/* [o] profclock handle */
+	struct clockintr spc_roundrobin;/* [o] roundrobin handle */
+	struct clockintr spc_statclock;	/* [o] statclock handle */
 
 	u_int spc_nrun;			/* procs on the run queues */
-	fixpt_t spc_ldavg;		/* shortest load avg. for this cpu */
 
 	volatile uint32_t spc_whichqs;
 	volatile u_int spc_spinning;	/* this cpu is currently spinning */
@@ -122,39 +133,33 @@ struct schedstate_percpu {
 	u_char spc_smrgp;		/* this CPU's view of grace period */
 };
 
-struct cpustats {
-	uint64_t	cs_time[CPUSTATES];	/* CPU state statistics */
-	uint64_t	cs_flags;		/* see below */
-};
-
-#define CPUSTATS_ONLINE		0x0001	/* CPU is schedulable */
-
-#ifdef	_KERNEL
-
 /* spc_flags */
 #define SPCF_SEENRR             0x0001  /* process has seen roundrobin() */
 #define SPCF_SHOULDYIELD        0x0002  /* process should yield the CPU */
 #define SPCF_SWITCHCLEAR        (SPCF_SEENRR|SPCF_SHOULDYIELD)
 #define SPCF_SHOULDHALT		0x0004	/* CPU should be vacated */
 #define SPCF_HALTED		0x0008	/* CPU has been halted */
+#define SPCF_PROFCLOCK		0x0010	/* profclock() was started */
+#define SPCF_ITIMER		0x0020	/* itimer_update() was started */
 
 #define	SCHED_PPQ	(128 / SCHED_NQS)	/* priorities per queue */
 #define NICE_WEIGHT 2			/* priorities per nice level */
 #define	ESTCPULIM(e) min((e), NICE_WEIGHT * PRIO_MAX - SCHED_PPQ)
 
-extern int schedhz;			/* ideally: 16 */
-extern int rrticks_init;		/* ticks per roundrobin() */
+extern uint64_t roundrobin_period;
 
 struct proc;
 void schedclock(struct proc *);
-struct cpu_info;
-void roundrobin(struct cpu_info *);
+struct clockrequest;
+void roundrobin(struct clockrequest *, void *, void *);
 void scheduler_start(void);
 void userret(struct proc *p);
 
+struct cpu_info;
 void sched_init_cpu(struct cpu_info *);
 void sched_idle(void *);
 void sched_exit(struct proc *);
+void sched_toidle(void);
 void mi_switch(void);
 void cpu_switchto(struct proc *, struct proc *);
 struct proc *sched_chooseproc(void);

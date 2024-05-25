@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_timer.h,v 1.19 2022/11/07 11:22:55 yasuoka Exp $	*/
+/*	$OpenBSD: tcp_timer.h,v 1.21 2024/01/29 22:47:13 bluhm Exp $	*/
 /*	$NetBSD: tcp_timer.h,v 1.6 1995/03/26 20:32:37 jtc Exp $	*/
 
 /*
@@ -86,17 +86,17 @@
 /*
  * Time constants.
  */
-#define	TCPTV_MSL	30		/* max seg lifetime (hah!) */
+#define	TCPTV_MSL	TCP_TIME(30)	/* max seg lifetime (hah!) */
 #define	TCPTV_SRTTBASE	0		/* base roundtrip time;
 					   if 0, no idea yet */
-#define	TCPTV_SRTTDFLT	TCP_TIME_MSEC(1500) /* assumed RTT if no info */
+#define	TCPTV_SRTTDFLT	TCP_TIME(3)	/* assumed RTT if no info */
 
-#define	TCPTV_PERSMIN	5		/* retransmit persistence */
-#define	TCPTV_PERSMAX	60		/* maximum persist interval */
+#define	TCPTV_PERSMIN	TCP_TIME(5)	/* retransmit persistence */
+#define	TCPTV_PERSMAX	TCP_TIME(60)	/* maximum persist interval */
 
-#define	TCPTV_KEEP_INIT	75		/* initial connect keep alive */
-#define	TCPTV_KEEP_IDLE	120*60		/* dflt time before probing */
-#define	TCPTV_KEEPINTVL	75		/* default probe interval */
+#define	TCPTV_KEEP_INIT	TCP_TIME(75)	/* initial connect keep alive */
+#define	TCPTV_KEEP_IDLE	TCP_TIME(120*60) /* dflt time before probing */
+#define	TCPTV_KEEPINTVL	TCP_TIME(75)	/* default probe interval */
 #define	TCPTV_KEEPCNT	8		/* max probes before drop */
 
 #define	TCPTV_MIN	TCP_TIME(1)	/* minimum allowable value */
@@ -117,7 +117,9 @@ const char *tcptimers[TCPT_NTIMERS] =
  * Init, arm, disarm, and test TCP timers.
  */
 #define	TCP_TIMER_INIT(tp, timer)					\
-	timeout_set_proc(&(tp)->t_timer[(timer)], tcp_timer_funcs[(timer)], tp)
+	timeout_set_flags(&(tp)->t_timer[(timer)],			\
+	    tcp_timer_funcs[(timer)], tp, KCLOCK_NONE, 			\
+	    TIMEOUT_PROC | TIMEOUT_MPSAFE)
 
 #define	TCP_TIMER_ARM(tp, timer, msecs)					\
 do {									\

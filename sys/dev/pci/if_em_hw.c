@@ -31,31 +31,20 @@
 
 *******************************************************************************/
 
-/* $OpenBSD: if_em_hw.c,v 1.116 2022/06/23 09:47:04 jsg Exp $ */
+/* $OpenBSD: if_em_hw.c,v 1.121 2024/05/24 06:02:53 jsg Exp $ */
 /*
  * if_em_hw.c Shared functions for accessing and configuring the MAC
  */
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/sockio.h>
-#include <sys/mbuf.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
-#include <sys/socket.h>
-#include <sys/kstat.h>
 
 #include <net/if.h>
 #include <net/if_media.h>
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
-
-#include <uvm/uvm_extern.h>
-
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
 
 #include <dev/pci/if_em.h>
 #include <dev/pci/if_em_hw.h>
@@ -660,11 +649,23 @@ em_set_mac_type(struct em_hw *hw)
 	case E1000_DEV_ID_PCH_ADP_I219_V16:
 	case E1000_DEV_ID_PCH_ADP_I219_LM17:
 	case E1000_DEV_ID_PCH_ADP_I219_V17:
+	case E1000_DEV_ID_PCH_RPL_I219_LM22:
+	case E1000_DEV_ID_PCH_RPL_I219_V22:
+	case E1000_DEV_ID_PCH_RPL_I219_LM23:
+	case E1000_DEV_ID_PCH_RPL_I219_V23:
+		hw->mac_type = em_pch_adp;
+		break;
 	case E1000_DEV_ID_PCH_MTP_I219_LM18:
 	case E1000_DEV_ID_PCH_MTP_I219_V18:
 	case E1000_DEV_ID_PCH_MTP_I219_LM19:
 	case E1000_DEV_ID_PCH_MTP_I219_V19:
-		hw->mac_type = em_pch_adp;
+	case E1000_DEV_ID_PCH_LNP_I219_LM20:
+	case E1000_DEV_ID_PCH_LNP_I219_V20:
+	case E1000_DEV_ID_PCH_LNP_I219_LM21:
+	case E1000_DEV_ID_PCH_LNP_I219_V21:
+	case E1000_DEV_ID_PCH_ARL_I219_LM24:
+	case E1000_DEV_ID_PCH_ARL_I219_V24:
+		hw->mac_type = em_pch_adp;	/* pch_mtp */
 		break;
 	case E1000_DEV_ID_EP80579_LAN_1:
 		hw->mac_type = em_icp_xxxx;
@@ -3975,7 +3976,7 @@ em_force_mac_fc(struct em_hw *hw)
 	 * The possible values of the "fc" parameter are: 0:  Flow control is
 	 * completely disabled 1:  Rx flow control is enabled (we can receive
 	 * pause frames but not send pause frames). 2:  Tx flow control is
-	 * enabled (we can send pause frames frames but we do not receive
+	 * enabled (we can send pause frames but we do not receive
 	 * pause frames). 3:  Both Rx and TX flow control (symmetric) is
 	 * enabled. other:  No other values should be possible at this point.
 	 */
@@ -4466,7 +4467,7 @@ em_check_for_link(struct em_hw *hw)
 				 * TBI link partner, we will store bad
 				 * packets. Some frames have an additional
 				 * byte on the end and will look like CRC
-				 * errors to to the hardware.
+				 * errors to the hardware.
 				 */
 				if (!hw->tbi_compatibility_on) {
 					hw->tbi_compatibility_on = TRUE;
@@ -6420,9 +6421,9 @@ em_init_eeprom_params(struct em_hw *hw)
 	case em_pch2lan:
 	case em_pch_lpt:
 		{
-		int32_t         i = 0;
-		uint32_t        flash_size = 
-		    E1000_READ_ICH_FLASH_REG(hw, ICH_FLASH_GFPREG);
+			int32_t		i = 0;
+			uint32_t	flash_size = 
+			    E1000_READ_ICH_FLASH_REG(hw, ICH_FLASH_GFPREG);
 			eeprom->type = em_eeprom_ich8;
 			eeprom->use_eerd = FALSE;
 			eeprom->use_eewr = FALSE;
@@ -7884,20 +7885,16 @@ em_init_rx_addrs(struct em_hw *hw)
  * mc_addr_list - the list of new multicast addresses
  * mc_addr_count - number of addresses
  * pad - number of bytes between addresses in the list
- * rar_used_count - offset where to start adding mc addresses into the RAR's
  *
- * The given list replaces any existing list. Clears the last 15 receive
- * address registers and the multicast table. Uses receive address registers
- * for the first 15 multicast addresses, and hashes the rest into the
+ * The given list replaces any existing list and hashes the addresses into the
  * multicast table.
  *****************************************************************************/
 void
 em_mc_addr_list_update(struct em_hw *hw, uint8_t *mc_addr_list,
-    uint32_t mc_addr_count, uint32_t pad, uint32_t rar_used_count)
+    uint32_t mc_addr_count, uint32_t pad)
 {
 	uint32_t hash_value;
 	uint32_t i;
-	uint32_t num_rar_entry;
 	uint32_t num_mta_entry;
 	DEBUGFUNC("em_mc_addr_list_update");
 	/*
@@ -7905,28 +7902,6 @@ em_mc_addr_list_update(struct em_hw *hw, uint8_t *mc_addr_list,
 	 * use.
 	 */
 	hw->num_mc_addrs = mc_addr_count;
-
-	/* Clear RAR[1-15] */
-	DEBUGOUT(" Clearing RAR[1-15]\n");
-	num_rar_entry = E1000_RAR_ENTRIES;
-	if (IS_ICH8(hw->mac_type))
-		num_rar_entry = E1000_RAR_ENTRIES_ICH8LAN;
-	if (hw->mac_type == em_ich8lan)
-		num_rar_entry -= 1;
-	/*
-	 * Reserve a spot for the Locally Administered Address to work around
-	 * an 82571 issue in which a reset on one port will reload the MAC on
-	 * the other port.
-	 */
-	if ((hw->mac_type == em_82571) && (hw->laa_is_present == TRUE))
-		num_rar_entry -= 1;
-
-	for (i = rar_used_count; i < num_rar_entry; i++) {
-		E1000_WRITE_REG_ARRAY(hw, RA, (i << 1), 0);
-		E1000_WRITE_FLUSH(hw);
-		E1000_WRITE_REG_ARRAY(hw, RA, ((i << 1) + 1), 0);
-		E1000_WRITE_FLUSH(hw);
-	}
 
 	/* Clear the MTA */
 	DEBUGOUT(" Clearing MTA\n");
@@ -7954,18 +7929,7 @@ em_mc_addr_list_update(struct em_hw *hw, uint8_t *mc_addr_list,
 		    (i * (ETH_LENGTH_OF_ADDRESS + pad)));
 
 		DEBUGOUT1(" Hash value = 0x%03X\n", hash_value);
-		/*
-		 * Place this multicast address in the RAR if there is room, *
-		 * else put it in the MTA
-		 */
-		if (rar_used_count < num_rar_entry) {
-			em_rar_set(hw, mc_addr_list + 
-			    (i * (ETH_LENGTH_OF_ADDRESS + pad)),
-			    rar_used_count);
-			rar_used_count++;
-		} else {
-			em_mta_set(hw, hash_value);
-		}
+		em_mta_set(hw, hash_value);
 	}
 	DEBUGOUT("MC Update Complete\n");
 }

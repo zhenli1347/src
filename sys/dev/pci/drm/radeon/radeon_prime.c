@@ -29,9 +29,10 @@
 #include <drm/drm_prime.h>
 #include <drm/radeon_drm.h>
 
+#include <drm/ttm/ttm_tt.h>
+
 #include "radeon.h"
 #include "radeon_prime.h"
-
 
 struct sg_table *radeon_gem_prime_get_sg_table(struct drm_gem_object *obj)
 {
@@ -80,19 +81,9 @@ int radeon_gem_prime_pin(struct drm_gem_object *obj)
 
 	/* pin buffer into GTT */
 	ret = radeon_bo_pin(bo, RADEON_GEM_DOMAIN_GTT, NULL);
-	if (unlikely(ret))
-		goto error;
+	if (likely(ret == 0))
+		bo->prime_shared_count++;
 
-	if (bo->tbo.moving) {
-		ret = dma_fence_wait(bo->tbo.moving, false);
-		if (unlikely(ret)) {
-			radeon_bo_unpin(bo);
-			goto error;
-		}
-	}
-
-	bo->prime_shared_count++;
-error:
 	radeon_bo_unreserve(bo);
 	return ret;
 }
@@ -111,6 +102,7 @@ void radeon_gem_prime_unpin(struct drm_gem_object *obj)
 		bo->prime_shared_count--;
 	radeon_bo_unreserve(bo);
 }
+
 
 struct dma_buf *radeon_gem_prime_export(struct drm_gem_object *gobj,
 					int flags)

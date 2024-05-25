@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpleased.c,v 1.27 2022/11/27 15:19:38 kn Exp $	*/
+/*	$OpenBSD: dhcpleased.c,v 1.30 2023/10/10 16:09:53 florian Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -255,7 +255,7 @@ main(int argc, char *argv[])
 	if ((routesock = socket(AF_ROUTE, SOCK_RAW | SOCK_CLOEXEC |
 	    SOCK_NONBLOCK, AF_INET)) == -1)
 		fatal("route socket");
-	shutdown(SHUT_RD, routesock);
+	shutdown(routesock, SHUT_RD);
 
 	event_init();
 
@@ -601,7 +601,7 @@ main_dispatch_engine(int fd, short event, void *bula)
 		case IMSG_WITHDRAW_RDNS: {
 			struct imsg_propose_rdns	 rdns;
 			if (IMSG_DATA_SIZE(imsg) != sizeof(rdns))
-				fatalx("%s: IMSG_PROPOSE_RDNS wrong "
+				fatalx("%s: IMSG_WITHDRAW_RDNS wrong "
 				    "length: %lu", __func__,
 				    IMSG_DATA_SIZE(imsg));
 			memcpy(&rdns, imsg.data, sizeof(rdns));
@@ -805,6 +805,7 @@ configure_interface(struct imsg_configure_interface *imsg)
 			break;
 		}
 	}
+	freeifaddrs(ifap);
 
 	req_sin_addr->sin_addr = imsg->addr;
 	if (!found) {
@@ -1196,7 +1197,7 @@ propose_rdns(struct imsg_propose_rdns *rdns)
 	memset(&rtdns, 0, sizeof(rtdns));
 	rtdns.sr_family = AF_INET;
 	rtdns.sr_len = 2 + rdns->rdns_count * sizeof(struct in_addr);
-	memcpy(rtdns.sr_dns, rdns->rdns, sizeof(rtdns.sr_dns));
+	memcpy(rtdns.sr_dns, rdns->rdns, rtdns.sr_len - 2);
 
 	iov[iovcnt].iov_base = &rtdns;
 	iov[iovcnt++].iov_len = sizeof(rtdns);

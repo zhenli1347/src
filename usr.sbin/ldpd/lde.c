@@ -1,4 +1,4 @@
-/*	$OpenBSD: lde.c,v 1.75 2021/01/19 15:23:25 claudio Exp $ */
+/*	$OpenBSD: lde.c,v 1.78 2024/04/23 13:34:51 jsg Exp $ */
 
 /*
  * Copyright (c) 2013, 2016 Renato Westphal <renato@openbsd.org>
@@ -65,7 +65,6 @@ struct nbr_tree		 lde_nbrs = RB_INITIALIZER(&lde_nbrs);
 static struct imsgev	*iev_ldpe;
 static struct imsgev	*iev_main;
 
-/* ARGSUSED */
 static void
 lde_sig_handler(int sig, short event, void *arg)
 {
@@ -185,7 +184,6 @@ lde_imsg_compose_ldpe(int type, uint32_t peerid, pid_t pid, void *data,
 	     -1, data, datalen));
 }
 
-/* ARGSUSED */
 static void
 lde_dispatch_imsg(int fd, short event, void *bula)
 {
@@ -376,7 +374,6 @@ lde_dispatch_imsg(int fd, short event, void *bula)
 	}
 }
 
-/* ARGSUSED */
 static void
 lde_dispatch_parent(int fd, short event, void *bula)
 {
@@ -455,7 +452,7 @@ lde_dispatch_parent(int fd, short event, void *bula)
 				    "to ldpe", __func__);
 				break;
 			}
-			if ((fd = imsg.fd) == -1) {
+			if ((fd = imsg_get_fd(&imsg)) == -1) {
 				log_warnx("%s: expected to receive imsg fd to "
 				    "ldpe but didn't receive any", __func__);
 				break;
@@ -1166,7 +1163,7 @@ lde_nbr_clear(void)
 {
 	struct lde_nbr	*ln;
 
-	 while ((ln = RB_ROOT(&lde_nbrs)) != NULL)
+	while ((ln = RB_ROOT(&lde_nbrs)) != NULL)
 		lde_nbr_del(ln);
 }
 

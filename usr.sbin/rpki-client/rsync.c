@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsync.c,v 1.45 2022/11/29 20:26:22 job Exp $ */
+/*	$OpenBSD: rsync.c,v 1.50 2024/03/22 03:38:12 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -55,7 +55,7 @@ static TAILQ_HEAD(, rsync)	states = TAILQ_HEAD_INITIALIZER(states);
  * Return the base of a rsync URI (rsync://hostname/module). The
  * caRepository provided by the RIR CAs point deeper than they should
  * which would result in many rsync calls for almost every subdirectory.
- * This is inefficent so instead crop the URI to a common base.
+ * This is inefficient so instead crop the URI to a common base.
  * The returned string needs to be freed by the caller.
  */
 char *
@@ -65,7 +65,7 @@ rsync_base_uri(const char *uri)
 	char *base_uri;
 
 	/* Case-insensitive rsync URI. */
-	if (strncasecmp(uri, "rsync://", 8) != 0) {
+	if (strncasecmp(uri, RSYNC_PROTO, RSYNC_PROTO_LEN) != 0) {
 		warnx("%s: not using rsync schema", uri);
 		return NULL;
 	}
@@ -145,8 +145,9 @@ exec_rsync(const char *prog, const char *bind_addr, char *uri, char *dst,
 			err(1, "pledge");
 		i = 0;
 		args[i++] = (char *)prog;
-		args[i++] = "-rt";
+		args[i++] = "-rtO";
 		args[i++] = "--no-motd";
+		args[i++] = "--min-size=" STRINGIFY(MIN_FILE_SIZE);
 		args[i++] = "--max-size=" STRINGIFY(MAX_FILE_SIZE);
 		args[i++] = "--contimeout=" STRINGIFY(MAX_CONN_TIMEOUT);
 		args[i++] = "--timeout=" STRINGIFY(MAX_IO_TIMEOUT);
@@ -158,6 +159,7 @@ exec_rsync(const char *prog, const char *bind_addr, char *uri, char *dst,
 		args[i++] = "--include=*.roa";
 		args[i++] = "--include=*.asa";
 		args[i++] = "--include=*.tak";
+		args[i++] = "--include=*.spl";
 		args[i++] = "--exclude=*";
 		if (bind_addr != NULL) {
 			args[i++] = "--address";

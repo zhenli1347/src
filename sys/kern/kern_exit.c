@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exit.c,v 1.208 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: kern_exit.c,v 1.221 2024/05/20 10:32:20 claudio Exp $	*/
 /*	$NetBSD: kern_exit.c,v 1.39 1996/04/22 01:38:25 christos Exp $	*/
 
 /*
@@ -118,6 +118,7 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 {
 	struct process *pr, *qr, *nqr;
 	struct rusage *rup;
+	struct timespec ts;
 	int s;
 
 	atomic_setbits_int(&p->p_flag, P_WEXIT);
@@ -130,9 +131,7 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	} else {
 		/* nope, multi-threaded */
 		if (flags == EXIT_NORMAL)
-			single_thread_set(p, SINGLE_EXIT, 1);
-		else if (flags == EXIT_THREAD)
-			single_thread_check(p, 0);
+			single_thread_set(p, SINGLE_EXIT);
 	}
 
 	if (flags == EXIT_NORMAL && !(pr->ps_flags & PS_EXITING)) {
@@ -156,16 +155,27 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	}
 
 	/* unlink ourselves from the active threads */
-	SCHED_LOCK(s);
+	mtx_enter(&pr->ps_mtx);
 	TAILQ_REMOVE(&pr->ps_threads, p, p_thr_link);
-	SCHED_UNLOCK(s);
+	pr->ps_threadcnt--;
+	pr->ps_exitcnt++;
+
+	/*
+	 * if somebody else wants to take us to single threaded mode,
+	 * count ourselves out.
+	 */
+	if (pr->ps_single) {
+		if (--pr->ps_singlecnt == 0)
+			wakeup(&pr->ps_singlecnt);
+	}
+
 	if ((p->p_flag & P_THREAD) == 0) {
 		/* main thread gotta wait because it has the pid, et al */
-		while (pr->ps_refcnt > 1)
-			tsleep_nsec(&pr->ps_threads, PWAIT, "thrdeath", INFSLP);
-		if (pr->ps_flags & PS_PROFIL)
-			stopprofclock(pr);
+		while (pr->ps_threadcnt + pr->ps_exitcnt > 1)
+			msleep_nsec(&pr->ps_threads, &pr->ps_mtx, PWAIT,
+			    "thrdeath", INFSLP);
 	}
+	mtx_leave(&pr->ps_mtx);
 
 	rup = pr->ps_ru;
 	if (rup == NULL) {
@@ -188,6 +198,9 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 #endif
 
 	if ((p->p_flag & P_THREAD) == 0) {
+		if (pr->ps_flags & PS_PROFIL)
+			stopprofclock(pr);
+
 		sigio_freelist(&pr->ps_sigiolst);
 
 		/* close open files and release open-file table */
@@ -212,6 +225,11 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 
 		unveil_destroy(pr);
 
+		free(pr->ps_pin.pn_pins, M_PINSYSCALL,
+		    pr->ps_pin.pn_npins * sizeof(u_int));
+		free(pr->ps_libcpin.pn_pins, M_PINSYSCALL,
+		    pr->ps_libcpin.pn_npins * sizeof(u_int));
+
 		/*
 		 * If parent has the SAS_NOCLDWAIT flag set, we're not
 		 * going to become a zombie.
@@ -221,6 +239,15 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	}
 
 	p->p_fd = NULL;		/* zap the thread's copy */
+
+	/* Release the thread's read reference of resource limit structure. */
+	if (p->p_limit != NULL) {
+		struct plimit *limit;
+
+		limit = p->p_limit;
+		p->p_limit = NULL;
+		lim_free(limit);
+	}
 
         /*
 	 * Remove proc from pidhash chain and allproc so looking
@@ -297,7 +324,14 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 
 	/* add thread's accumulated rusage into the process's total */
 	ruadd(rup, &p->p_ru);
-	tuagg(pr, p);
+	nanouptime(&ts);
+	if (timespeccmp(&ts, &curcpu()->ci_schedstate.spc_runtime, <))
+		timespecclear(&ts);
+	else
+		timespecsub(&ts, &curcpu()->ci_schedstate.spc_runtime, &ts);
+	SCHED_LOCK(s);
+	tuagg_locked(pr, p, &ts);
+	SCHED_UNLOCK(s);
 
 	/*
 	 * clear %cpu usage during swap
@@ -328,18 +362,11 @@ exit1(struct proc *p, int xexit, int xsig, int flags)
 	/* just a thread? detach it from its process */
 	if (p->p_flag & P_THREAD) {
 		/* scheduler_wait_hook(pr->ps_mainproc, p); XXX */
-		if (--pr->ps_refcnt == 1)
+		mtx_enter(&pr->ps_mtx);
+		pr->ps_exitcnt--;
+		if (pr->ps_threadcnt + pr->ps_exitcnt == 1)
 			wakeup(&pr->ps_threads);
-		KASSERT(pr->ps_refcnt > 0);
-	}
-
-	/* Release the thread's read reference of resource limit structure. */
-	if (p->p_limit != NULL) {
-		struct plimit *limit;
-
-		limit = p->p_limit;
-		p->p_limit = NULL;
-		lim_free(limit);
+		mtx_leave(&pr->ps_mtx);
 	}
 
 	/*
@@ -517,7 +544,8 @@ loop:
 				proc_finish_wait(q, p);
 			return (0);
 		}
-		if (pr->ps_flags & PS_TRACED &&
+		if ((options & WTRAPPED) &&
+		    pr->ps_flags & PS_TRACED &&
 		    (pr->ps_flags & PS_WAITED) == 0 && pr->ps_single &&
 		    pr->ps_single->p_stat == SSTOP &&
 		    (pr->ps_single->p_flag & P_SUSPSINGLE) == 0) {
@@ -636,6 +664,7 @@ sys_wait4(struct proc *q, void *v, register_t *retval)
 
 	if (SCARG(uap, options) &~ (WUNTRACED|WNOHANG|WCONTINUED))
 		return (EINVAL);
+	options |= WEXITED | WTRAPPED;
 
 	if (SCARG(uap, pid) == WAIT_MYPGRP) {
 		idtype = P_PGID;
@@ -652,7 +681,7 @@ sys_wait4(struct proc *q, void *v, register_t *retval)
 	}
 
 	error = dowait6(q, idtype, id,
-	    SCARG(uap, status) ? &status : NULL, options | WEXITED,
+	    SCARG(uap, status) ? &status : NULL, options,
 	    SCARG(uap, rusage) ? &ru : NULL, NULL, retval);
 	if (error == 0 && *retval > 0 && SCARG(uap, status)) {
 		error = copyout(&status, SCARG(uap, status), sizeof(status));
@@ -681,17 +710,22 @@ sys_waitid(struct proc *q, void *v, register_t *retval)
 	int options = SCARG(uap, options);
 	int error;
 
-	if (options &~ (WSTOPPED|WCONTINUED|WEXITED|WNOHANG|WNOWAIT))
+	if (options &~ (WSTOPPED|WCONTINUED|WEXITED|WTRAPPED|WNOHANG|WNOWAIT))
 		return (EINVAL);
-	if ((options & (WSTOPPED|WCONTINUED|WEXITED)) == 0)
+	if ((options & (WSTOPPED|WCONTINUED|WEXITED|WTRAPPED)) == 0)
 		return (EINVAL);
 	if (idtype != P_ALL && idtype != P_PID && idtype != P_PGID)
 		return (EINVAL);
 
 	error = dowait6(q, idtype, SCARG(uap, id), NULL,
 	    options, NULL, &info, retval);
-	if (error == 0)
+	if (error == 0) {
 		error = copyout(&info, SCARG(uap, info), sizeof(info));
+#ifdef KTRACE
+		if (error == 0 && KTRPOINT(q, KTR_STRUCT))
+			ktrsiginfo(q, &info);
+#endif
+	}
 	if (error == 0)
 		*retval = 0;
 	return (error);
@@ -807,7 +841,8 @@ process_zap(struct process *pr)
 	if (otvp)
 		vrele(otvp);
 
-	KASSERT(pr->ps_refcnt == 1);
+	KASSERT(pr->ps_threadcnt == 0);
+	KASSERT(pr->ps_exitcnt == 1);
 	if (pr->ps_ptstat != NULL)
 		free(pr->ps_ptstat, M_SUBPROC, sizeof(*pr->ps_ptstat));
 	pool_put(&rusage_pool, pr->ps_ru);

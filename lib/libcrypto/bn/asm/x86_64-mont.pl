@@ -63,6 +63,7 @@ $code=<<___;
 .type	bn_mul_mont,\@function,6
 .align	16
 bn_mul_mont:
+	_CET_ENDBR
 	test	\$3,${num}d
 	jnz	.Lmul_enter
 	cmp	\$8,${num}d
@@ -278,6 +279,7 @@ $code.=<<___;
 .align	16
 bn_mul4x_mont:
 .Lmul4x_enter:
+	_CET_ENDBR
 	push	%rbx
 	push	%rbp
 	push	%r12
@@ -705,6 +707,7 @@ $code.=<<___;
 .align	16
 bn_sqr4x_mont:
 .Lsqr4x_enter:
+	_CET_ENDBR
 	push	%rbx
 	push	%rbp
 	push	%r12
@@ -1495,10 +1498,6 @@ $code.=<<___;
 .size	bn_sqr4x_mont,.-bn_sqr4x_mont
 ___
 }}}
-$code.=<<___;
-.asciz	"Montgomery Multiplication for x86_64, CRYPTOGAMS by <appro\@openssl.org>"
-.align	16
-___
 
 print $code;
 close STDOUT;

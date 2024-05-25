@@ -30,9 +30,9 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.\"	$OpenBSD: malloc.3,v 1.129 2022/03/31 17:27:16 naddy Exp $
+.\"	$OpenBSD: malloc.3,v 1.141 2023/12/04 22:52:41 tb Exp $
 .\"
-.Dd $Mdocdate: March 31 2022 $
+.Dd $Mdocdate: December 4 2023 $
 .Dt MALLOC 3
 .Os
 .Sh NAME
@@ -284,16 +284,33 @@ If it has been corrupted, the process is aborted.
 .It Cm D
 .Dq Dump .
 .Fn malloc
-will dump statistics to the file
-.Pa ./malloc.out ,
-if it already exists,
+will dump a leak report using
+.Xr utrace 2
 at exit.
-This option requires the library to have been compiled with -DMALLOC_STATS in
-order to have any effect.
+To record the dump:
+.Pp
+.Dl $ MALLOC_OPTIONS=D ktrace -tu program ...
+.Pp
+To view the leak report:
+.Pp
+.Dl $ kdump -u malloc ...
+.Pp
+By default, the immediate caller of a
+.Nm
+function will be recorded.
+Use malloc option
+.Cm 2 ,
+.Cm 3
+or
+.Cm 4
+to record deeper call stacks.
+These malloc options imply
+.Cm D .
 .It Cm F
 .Dq Freecheck .
-Enable more extensive double free and use after free detection.
-All chunks in the delayed free list will be checked for double frees.
+Enable more extensive double free and write after free detection.
+All chunks in the delayed free list will be checked for double frees and
+write after frees.
 Unused pages on the freelist are read and write protected to
 cause a segmentation fault upon access.
 .It Cm G
@@ -309,7 +326,7 @@ Increase the junk level by one if it is smaller than 2.
 Decrease the junk level by one if it is larger than 0.
 Junking writes some junk bytes into the area allocated.
 Junk is bytes of 0xdb when allocating;
-freed chunks are filled with 0xdf.
+small allocations are initially junked with 0xdf as are freed allocations.
 By default the junk level is 1: after free,
 small chunks are completely junked;
 for pages the first part is junked.
@@ -339,6 +356,11 @@ Enable all options suitable for security auditing.
 Enable use after free protection for larger allocations.
 Unused pages on the freelist are read and write protected to
 cause a segmentation fault upon access.
+.It Cm V
+.Dq Verbose .
+Use with
+.Cm D
+to get a verbose dump of malloc's internal state.
 .It Cm X
 .Dq xmalloc .
 Rather than return failure,
@@ -618,22 +640,41 @@ An attempt to
 .Fn free
 or
 reallocate an unallocated pointer was made.
-.It Dq chunk is already free
-There was an attempt to free a chunk that had already been freed.
-.It Dq write after free
-A chunk has been modified after it was freed.
+.It Dq double free
+There was an attempt to free an allocation that had already been freed.
+.It Dq write to free mem Va address Ns [ Va start Ns .. Ns Va end Ns ]@ Ns Va size
+An allocation has been modified after it was freed,
+or a chunk that was never allocated was written to.
+The
+.Va range
+at which corruption was detected is printed between [ and ].
+.Pp
+Enabling option
+.Cm D
+allows malloc to print information about where the allocation
+was done.
 .It Dq modified chunk-pointer
 The pointer passed to
 .Fn free
 or a reallocation function has been modified.
-.It Dq chunk canary corrupted address offset@length
-A byte after the requested size has been overwritten,
+.It Dq canary corrupted Va address Ns [ Va offset Ns ]@ Ns Va length Ns / Ns Va size
+A byte after the requested
+.Va length
+has been overwritten,
 indicating a heap overflow.
-The offset at which corruption was detected is printed before the @,
-and the requested length of the allocation after the @.
-.It Dq recorded old size oldsize != size
+The
+.Va offset
+at which corruption was detected is printed between [ and ],
+the requested
+.Va length
+of the allocation is printed before the / and the
+.Va size
+of the allocation after the /.
+.It Dq recorded size Va oldsize No inconsistent with Va size
 .Fn recallocarray
-has detected that the given old size does not equal the recorded size in its
+or
+.Fn freezero
+has detected that the given old size does not match the recorded size in its
 meta data.
 Enabling option
 .Cm C
@@ -653,7 +694,7 @@ functions nor utilize any other functions which may call
 (e.g.,
 .Xr stdio 3
 routines).
-.It Dq unknown char in MALLOC_OPTIONS
+.It Dq unknown char in Ev MALLOC_OPTIONS
 We found something we didn't understand.
 .It any other error
 .Fn malloc
@@ -801,3 +842,15 @@ and
 .Fn realloc
 to avoid these problems on
 .Ox .
+.Pp
+The mechanism to record caller functions when using malloc options
+.Cm 2 ,
+.Cm 3 ,
+or
+.Cm 4
+is not guaranteed to work for all platforms, compilers or compilation
+options,
+and might even crash your program.
+Use
+.Em only
+for debugging purposes.

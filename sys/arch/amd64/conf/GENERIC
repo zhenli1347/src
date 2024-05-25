@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.514 2022/11/11 15:27:39 matthieu Exp $
+#	$OpenBSD: GENERIC,v 1.523 2024/05/09 17:05:22 mglocker Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -159,6 +159,8 @@ iic*	at amdpm?
 dwiic*	at acpi?		# DesignWare Synopsys i2c controller
 dwiic*	at pci?
 iic*	at dwiic?
+iosf*	at acpi?		# Intel OnChip System Fabric
+iosf*	at pci?
 
 itherm*	at pci?			# Intel 3400 Thermal Sensor
 adc*	at iic?			# Analog Devices AD7416/AD7417/7418
@@ -192,6 +194,8 @@ imt*	at ihidev?		# HID-over-i2c multitouch trackpad
 wsmouse* at imt? mux 0
 iatp* at iic?			# Atmel maXTouch i2c touchpad/touchscreen
 wsmouse* at iatp? mux 0
+ietp* at iic?			# Elantech touchpad
+wsmouse* at ietp? mux 0
 icc*	at ihidev?		# Consumer Control keyboards
 wskbd*	at icc? mux 1
 
@@ -456,6 +460,7 @@ pcscp*	at pci?				# AMD 53c974 PCscsi-PCI SCSI
 #trm*	at pci?				# Tekram DC-3x5U SCSI Controllers
 vmwpvs*	at pci?				# VMware ParaVirtual SCSI
 nvme*	at pci?				# NVMe controllers
+ufshci*	at pci?				# UFSHCI controllers
 
 scsibus* at scsi?
 sd*	at scsibus?			# SCSI disk drives
@@ -552,10 +557,12 @@ lii*	at pci?				# Attansic L2 Ethernet
 jme*	at pci?				# JMicron JMC250/JMC260 Ethernet
 bnxt*	at pci?				# Broadcom BCM573xx, BCM574xx
 ixl*	at pci?				# Intel Ethernet 700 Series
+dwqe*	at pci?				# Intel Elkhart Lake Ethernet
 mcx*	at pci?				# Mellanox ConnectX-4
 iavf*	at pci?				# Intel Ethernet Adaptive VF
 aq*	at pci?				# Aquantia aQtion Ethernet
 igc*	at pci?				# Intel I225 Ethernet
+ngbe*	at pci?				# WangXun WX1860 Ethernet
 
 # Wireless network cards
 acx*	at pci?				# TI ACX100/ACX111 (802.11b/g)
@@ -577,6 +584,7 @@ wpi*	at pci?				# Intel PRO/Wireless 3945ABG
 iwn*	at pci?				# Intel WiFi Link 4965/5000/1000/6000
 iwm*	at pci?				# Intel WiFi Link 7xxx
 iwx*	at pci?				# Intel WiFi Link 22xxx
+qwx*	at pci?				# Qualcomm 802.11ax
 ral*	at pci?				# Ralink RT2500/RT2501/RT2600
 ral*	at cardbus?			# Ralink RT2500/RT2501/RT2600
 rtw*	at pci?				# Realtek 8180
@@ -587,6 +595,7 @@ pgt*	at cardbus?			# Prism54 Full-MAC
 malo*	at pci?				# Marvell Libertas
 malo*	at cardbus?			# Marvell Libertas
 malo*	at pcmcia?			# Marvell 88W8385
+mbg*	at pci?				# Meinberg Funkuhren radio clocks
 bwfm*	at pci?				# Broadcom FullMAC
 
 # Media Independent Interface (mii) drivers
@@ -705,3 +714,6 @@ viornd*		at virtio?	# Virtio entropy device
 vioscsi*	at virtio?	# Virtio SCSI device
 #viocon*	at virtio?	# Virtio console device
 vmmci*		at virtio?	# VMM control interface
+#viogpu*	at virtio?	# VirtIO GPU device
+#wsdisplay0	at viogpu? console 1
+#wsdisplay*	at viogpu? mux -1

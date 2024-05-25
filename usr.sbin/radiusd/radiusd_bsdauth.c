@@ -1,4 +1,4 @@
-/*	$OpenBSD: radiusd_bsdauth.c,v 1.14 2019/12/14 15:56:20 millert Exp $	*/
+/*	$OpenBSD: radiusd_bsdauth.c,v 1.16 2024/02/09 07:41:32 yasuoka Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -247,7 +247,7 @@ module_bsdauth_main(void)
 	    &module_bsdauth_handlers)) == NULL)
 		err(1, "Could not create a module instance");
 
-	module_drop_privilege(module_bsdauth.base);
+	module_drop_privilege(module_bsdauth.base, 0);
 
 	module_load(module_bsdauth.base);
 	imsg_init(&module_bsdauth.ibuf, 3);
@@ -418,6 +418,7 @@ start_child(char *argv0, int fd)
 
 	argv[argc++] = argv0;
 	argv[argc++] = "-M";	/* main proc */
+	argv[argc++] = NULL;
 	execvp(argv0, argv);
 	fatal("execvp");
 }

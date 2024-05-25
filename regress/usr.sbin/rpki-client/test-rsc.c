@@ -1,4 +1,4 @@
-/*	$Id: test-rsc.c,v 1.5 2022/11/05 10:32:51 job Exp $ */
+/*	$Id: test-rsc.c,v 1.10 2024/04/22 05:54:01 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -36,6 +36,7 @@
 int outformats;
 int verbose;
 int filemode;
+int experimental;
 
 int
 main(int argc, char *argv[])
@@ -73,7 +74,7 @@ main(int argc, char *argv[])
 
 	for (i = 0; i < argc; i++) {
 		buf = load_file(argv[i], &len);
-		if ((p = rsc_parse(&xp, argv[i], buf, len)) == NULL) {
+		if ((p = rsc_parse(&xp, argv[i], -1, buf, len)) == NULL) {
 			free(buf);
 			break;
 		}
@@ -97,4 +98,10 @@ main(int argc, char *argv[])
 
 	printf("OK\n");
 	return 0;
+}
+
+time_t
+get_current_time(void)
+{
+	return time(NULL);
 }

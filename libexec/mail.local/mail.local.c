@@ -1,4 +1,4 @@
-/*	$OpenBSD: mail.local.c,v 1.39 2020/02/09 14:59:20 millert Exp $	*/
+/*	$OpenBSD: mail.local.c,v 1.43 2024/05/09 08:35:03 florian Exp $	*/
 
 /*-
  * Copyright (c) 1996-1998 Theo de Raadt <deraadt@theos.com>
@@ -111,9 +111,10 @@ storemail(char *from)
 {
 	FILE *fp = NULL;
 	time_t tval;
-	int fd, eline;
-	size_t len;
-	char *line, *tbuf;
+	int fd, eline = 1;
+	char *tbuf, *line = NULL, *cnow;
+	size_t linesize = 0;
+	ssize_t linelen;
 
 	if ((tbuf = strdup(_PATH_LOCTMP)) == NULL)
 		merr(EX_OSERR, "unable to allocate memory");
@@ -123,25 +124,16 @@ storemail(char *from)
 	free(tbuf);
 
 	(void)time(&tval);
-	(void)fprintf(fp, "From %s %s", from, ctime(&tval));
+	cnow = ctime(&tval);
+	(void)fprintf(fp, "From %s %s", from, cnow ? cnow : "?\n");
 
-	for (eline = 1, tbuf = NULL; (line = fgetln(stdin, &len));) {
-		/* We have to NUL-terminate the line since fgetln does not */
-		if (line[len - 1] == '\n')
-			line[len - 1] = '\0';
-		else {
-			/* No trailing newline, so alloc space and copy */
-			if ((tbuf = malloc(len + 1)) == NULL)
-				merr(EX_OSERR, "unable to allocate memory");
-			memcpy(tbuf, line, len);
-			tbuf[len] = '\0';
-			line = tbuf;
-		}
+	while ((linelen = getline(&line, &linesize, stdin)) != -1) {
+		if (line[linelen - 1] == '\n')
+			line[linelen - 1] = '\0';
 		if (line[0] == '\0')
 			eline = 1;
 		else {
-			if (eline && line[0] == 'F' && len > 5 &&
-			    !memcmp(line, "From ", 5))
+			if (eline && !strncmp(line, "From ", 5))
 				(void)putc('>', fp);
 			eline = 0;
 		}
@@ -149,7 +141,7 @@ storemail(char *from)
 		if (ferror(fp))
 			break;
 	}
-	free(tbuf);
+	free(line);
 
 	/* Output a newline; note, empty messages are allowed. */
 	(void)putc('\n', fp);
@@ -243,7 +235,8 @@ retry:
 	}
 
 	curoff = lseek(mbfd, 0, SEEK_END);
-	(void)snprintf(biffmsg, sizeof biffmsg, "%s@%lld\n", name, curoff);
+	(void)snprintf(biffmsg, sizeof biffmsg, "%s@%lld\n", name,
+	    (long long)curoff);
 	if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
 		mwarn("temporary file: %s", strerror(errno));
 		goto bad;

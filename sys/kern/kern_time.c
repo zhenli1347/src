@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_time.c,v 1.159 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: kern_time.c,v 1.167 2023/10/17 00:04:02 cheloha Exp $	*/
 /*	$NetBSD: kern_time.c,v 1.20 1996/02/18 11:57:06 fvdl Exp $	*/
 
 /*
@@ -35,6 +35,7 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
+#include <sys/clockintr.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
 #include <sys/proc.h>
@@ -43,6 +44,7 @@
 #include <sys/stdint.h>
 #include <sys/pledge.h>
 #include <sys/task.h>
+#include <sys/time.h>
 #include <sys/timeout.h>
 #include <sys/timetc.h>
 
@@ -52,6 +54,7 @@
 #include <dev/clock_subr.h>
 
 int itimerfix(struct itimerval *);
+void process_reset_itimer_flag(struct process *);
 
 /* 
  * Time of day and interval timer support.
@@ -127,20 +130,18 @@ clock_gettime(struct proc *p, clockid_t clock_id, struct timespec *tp)
 		nanouptime(tp);
 		timespecsub(tp, &curcpu()->ci_schedstate.spc_runtime, tp);
 		timespecadd(tp, &p->p_p->ps_tu.tu_runtime, tp);
-		timespecadd(tp, &p->p_rtime, tp);
 		break;
 	case CLOCK_THREAD_CPUTIME_ID:
 		nanouptime(tp);
 		timespecsub(tp, &curcpu()->ci_schedstate.spc_runtime, tp);
 		timespecadd(tp, &p->p_tu.tu_runtime, tp);
-		timespecadd(tp, &p->p_rtime, tp);
 		break;
 	default:
 		/* check for clock from pthread_getcpuclockid() */
 		if (__CLOCK_TYPE(clock_id) == CLOCK_THREAD_CPUTIME_ID) {
 			KERNEL_LOCK();
-			q = tfind(__CLOCK_PTID(clock_id) - THREAD_PID_OFFSET);
-			if (q == NULL || q->p_p != p->p_p)
+			q = tfind_user(__CLOCK_PTID(clock_id), p->p_p);
+			if (q == NULL)
 				error = ESRCH;
 			else
 				*tp = q->p_tu.tu_runtime;
@@ -218,10 +219,9 @@ sys_clock_getres(struct proc *p, void *v, register_t *retval)
 	struct timespec ts;
 	struct proc *q;
 	u_int64_t scale;
-	int error = 0, realstathz;
+	int error = 0;
 
 	memset(&ts, 0, sizeof(ts));
-	realstathz = (stathz == 0) ? hz : stathz;
 	clock_id = SCARG(uap, clock_id);
 
 	switch (clock_id) {
@@ -238,17 +238,17 @@ sys_clock_getres(struct proc *p, void *v, register_t *retval)
 		break;
 	case CLOCK_PROCESS_CPUTIME_ID:
 	case CLOCK_THREAD_CPUTIME_ID:
-		ts.tv_nsec = 1000000000 / realstathz;
+		ts.tv_nsec = 1000000000 / stathz;
 		break;
 	default:
 		/* check for clock from pthread_getcpuclockid() */
 		if (__CLOCK_TYPE(clock_id) == CLOCK_THREAD_CPUTIME_ID) {
 			KERNEL_LOCK();
-			q = tfind(__CLOCK_PTID(clock_id) - THREAD_PID_OFFSET);
-			if (q == NULL || q->p_p != p->p_p)
+			q = tfind_user(__CLOCK_PTID(clock_id), p->p_p);
+			if (q == NULL)
 				error = ESRCH;
 			else
-				ts.tv_nsec = 1000000000 / realstathz;
+				ts.tv_nsec = 1000000000 / stathz;
 			KERNEL_UNLOCK();
 		} else
 			error = EINVAL;
@@ -270,7 +270,6 @@ sys_clock_getres(struct proc *p, void *v, register_t *retval)
 int
 sys_nanosleep(struct proc *p, void *v, register_t *retval)
 {
-	static int chan;
 	struct sys_nanosleep_args/* {
 		syscallarg(const struct timespec *) rqtp;
 		syscallarg(struct timespec *) rmtp;
@@ -295,7 +294,7 @@ sys_nanosleep(struct proc *p, void *v, register_t *retval)
 	do {
 		getnanouptime(&start);
 		nsecs = MAX(1, MIN(TIMESPEC_TO_NSEC(&request), MAXTSLP));
-		error = tsleep_nsec(&chan, PWAIT | PCATCH, "nanoslp", nsecs);
+		error = tsleep_nsec(&nowake, PWAIT | PCATCH, "nanoslp", nsecs);
 		getnanouptime(&stop);
 		timespecsub(&stop, &start, &elapsed);
 		timespecsub(&request, &elapsed, &request);
@@ -548,11 +547,15 @@ setitimer(int which, const struct itimerval *itv, struct itimerval *olditv)
 		if (which == ITIMER_REAL) {
 			if (timespecisset(&its.it_value)) {
 				timespecadd(&its.it_value, &now, &its.it_value);
-				timeout_at_ts(&pr->ps_realit_to, &its.it_value);
+				timeout_abs_ts(&pr->ps_realit_to,&its.it_value);
 			} else
 				timeout_del(&pr->ps_realit_to);
 		}
 		*itimer = its;
+		if (which == ITIMER_VIRTUAL || which == ITIMER_PROF) {
+			process_reset_itimer_flag(pr);
+			need_resched(curcpu());
+		}
 	}
 
 	if (which == ITIMER_REAL)
@@ -691,7 +694,7 @@ realitexpire(void *arg)
 	while (timespeccmp(&tp->it_value, &cts, <=))
 		timespecadd(&tp->it_value, &tp->it_interval, &tp->it_value);
 	if ((pr->ps_flags & PS_EXITING) == 0)
-		timeout_at_ts(&pr->ps_realit_to, &tp->it_value);
+		timeout_abs_ts(&pr->ps_realit_to, &tp->it_value);
 
 out:
 	mtx_leave(&pr->ps_mtx);
@@ -731,47 +734,70 @@ itimerfix(struct itimerval *itv)
 }
 
 /*
- * Decrement an interval timer by the given number of nanoseconds.
+ * Decrement an interval timer by the given duration.
  * If the timer expires and it is periodic then reload it.  When reloading
  * the timer we subtract any overrun from the next period so that the timer
  * does not drift.
  */
 int
-itimerdecr(struct itimerspec *itp, long nsec)
+itimerdecr(struct itimerspec *itp, const struct timespec *decrement)
 {
-	struct timespec decrement;
-
-	NSEC_TO_TIMESPEC(nsec, &decrement);
-
-	mtx_enter(&itimer_mtx);
-
-	/*
-	 * Double-check that the timer is enabled.  A different thread
-	 * in setitimer(2) may have disabled it while we were entering
-	 * the mutex.
-	 */
-	if (!timespecisset(&itp->it_value)) {
-		mtx_leave(&itimer_mtx);
+	timespecsub(&itp->it_value, decrement, &itp->it_value);
+	if (itp->it_value.tv_sec >= 0 && timespecisset(&itp->it_value))
 		return (1);
-	}
-
-	/*
-	 * The timer is enabled.  Update and reload it as needed.
-	 */
-	timespecsub(&itp->it_value, &decrement, &itp->it_value);
-	if (itp->it_value.tv_sec >= 0 && timespecisset(&itp->it_value)) {
-		mtx_leave(&itimer_mtx);
-		return (1);
-	}
 	if (!timespecisset(&itp->it_interval)) {
 		timespecclear(&itp->it_value);
-		mtx_leave(&itimer_mtx);
 		return (0);
 	}
 	while (itp->it_value.tv_sec < 0 || !timespecisset(&itp->it_value))
 		timespecadd(&itp->it_value, &itp->it_interval, &itp->it_value);
-	mtx_leave(&itimer_mtx);
 	return (0);
+}
+
+void
+itimer_update(struct clockrequest *cr, void *cf, void *arg)
+{
+	struct timespec elapsed;
+	uint64_t nsecs;
+	struct clockframe *frame = cf;
+	struct proc *p = curproc;
+	struct process *pr;
+
+	if (p == NULL || ISSET(p->p_flag, P_SYSTEM | P_WEXIT))
+		return;
+
+	pr = p->p_p;
+	if (!ISSET(pr->ps_flags, PS_ITIMER))
+		return;
+
+	nsecs = clockrequest_advance(cr, hardclock_period) * hardclock_period;
+	NSEC_TO_TIMESPEC(nsecs, &elapsed);
+
+	mtx_enter(&itimer_mtx);
+	if (CLKF_USERMODE(frame) &&
+	    timespecisset(&pr->ps_timer[ITIMER_VIRTUAL].it_value) &&
+	    itimerdecr(&pr->ps_timer[ITIMER_VIRTUAL], &elapsed) == 0) {
+		process_reset_itimer_flag(pr);
+		atomic_setbits_int(&p->p_flag, P_ALRMPEND);
+		need_proftick(p);
+	}
+	if (timespecisset(&pr->ps_timer[ITIMER_PROF].it_value) &&
+	    itimerdecr(&pr->ps_timer[ITIMER_PROF], &elapsed) == 0) {
+		process_reset_itimer_flag(pr);
+		atomic_setbits_int(&p->p_flag, P_PROFPEND);
+		need_proftick(p);
+	}
+	mtx_leave(&itimer_mtx);
+}
+
+void
+process_reset_itimer_flag(struct process *ps)
+{
+	if (timespecisset(&ps->ps_timer[ITIMER_VIRTUAL].it_value) ||
+	    timespecisset(&ps->ps_timer[ITIMER_PROF].it_value))
+		atomic_setbits_int(&ps->ps_flags, PS_ITIMER);
+	else
+		atomic_clearbits_int(&ps->ps_flags, PS_ITIMER);
 }
 
 struct mutex ratecheck_mtx = MUTEX_INITIALIZER(IPL_HIGH);

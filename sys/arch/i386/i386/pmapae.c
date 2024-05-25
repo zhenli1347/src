@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmapae.c,v 1.67 2022/06/29 14:24:29 dv Exp $	*/
+/*	$OpenBSD: pmapae.c,v 1.71 2023/05/30 08:30:01 jsg Exp $	*/
 
 /*
  * Copyright (c) 2006-2008 Michael Shalayeff
@@ -80,23 +80,16 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/atomic.h>
-#include <sys/proc.h>
-#include <sys/malloc.h>
 #include <sys/pool.h>
 #include <sys/user.h>
-#include <sys/kernel.h>
 #include <sys/mutex.h>
 
 #include <uvm/uvm.h>
 
-#include <machine/cpu.h>
 #include <machine/specialreg.h>
-#include <machine/gdt.h>
 
 #include <dev/isa/isareg.h>
 #include <i386/isa/isa_machdep.h>
-#include <sys/msgbuf.h>
-#include <stand/boot/bootarg.h>
 
 #include "ksyms.h"
 
@@ -827,8 +820,6 @@ pmap_bootstrap_pae(void)
  * => we should not be holding any pv_head locks (in case we are forced
  *	to call pmap_steal_ptp())
  * => we may need to lock pv_head's if we have to steal a PTP
- * => just_try: true if we want a PTP, but not enough to steal one
- * 	from another pmap (e.g. during optional functions like pmap_copy)
  */
 
 struct vm_page *
@@ -1274,7 +1265,7 @@ pmap_do_remove_pae(struct pmap *pmap, vaddr_t sva, vaddr_t eva, int flags)
 		 * with pmap_remove!  if we allow this (and why would
 		 * we?) then we end up freeing the pmap's page
 		 * directory page (PDP) before we are finished using
-		 * it when we hit in in the recursive mapping.  this
+		 * it when we hit it in the recursive mapping.  this
 		 * is BAD.
 		 *
 		 * long term solution is to move the PTEs out of user
@@ -1679,17 +1670,6 @@ pmap_unwire_pae(struct pmap *pmap, vaddr_t va)
 }
 
 /*
- * pmap_copy: copy mappings from one pmap to another
- *
- * => optional function
- * void pmap_copy(dst_pmap, src_pmap, dst_addr, len, src_addr)
- */
-
-/*
- * defined as macro in pmap.h
- */
-
-/*
  * pmap_enter: enter a mapping into a pmap
  *
  * => must be done "now" ... no lazy-evaluation
@@ -1985,7 +1965,7 @@ pmap_enter_special_pae(vaddr_t va, paddr_t pa, vm_prot_t prot, u_int32_t flags)
 	/* npa = physaddr of PT page */
 	npa = pd[l2idx] & PMAP_PA_MASK;
 
-	/* Valide PDE for the 2MB region containing va? */
+	/* Valid PDE for the 2MB region containing va? */
 	if (!npa) {
 		/*
 		 * No valid PDE - allocate PT page and set PDE.  We

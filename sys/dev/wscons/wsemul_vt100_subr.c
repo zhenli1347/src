@@ -1,4 +1,4 @@
-/* $OpenBSD: wsemul_vt100_subr.c,v 1.24 2020/05/25 09:55:49 jsg Exp $ */
+/* $OpenBSD: wsemul_vt100_subr.c,v 1.30 2023/02/26 15:09:53 miod Exp $ */
 /* $NetBSD: wsemul_vt100_subr.c,v 1.7 2000/04/28 21:56:16 mycroft Exp $ */
 
 /*
@@ -68,6 +68,7 @@ wsemul_vt100_scrollup(struct wsemul_vt100_emuldata *edp, int n)
 	    (edp->emulcookie, edp->scrreg_startrow + help, n, edp->bkgdattr));
 	if (rc != 0)
 		return rc;
+#ifdef HAVE_DOUBLE_WIDTH_HEIGHT
 	if (edp->dblwid) {
 		if (help > 0)
 			memmove(&edp->dblwid[edp->scrreg_startrow],
@@ -75,6 +76,7 @@ wsemul_vt100_scrollup(struct wsemul_vt100_emuldata *edp, int n)
 		memset(&edp->dblwid[edp->scrreg_startrow + help], 0, n);
 	}
 	CHECK_DW;
+#endif
 
 	return 0;
 }
@@ -103,6 +105,7 @@ wsemul_vt100_scrolldown(struct wsemul_vt100_emuldata *edp, int n)
 	    (edp->emulcookie, edp->scrreg_startrow, n, edp->bkgdattr));
 	if (rc != 0)
 		return rc;
+#ifdef HAVE_DOUBLE_WIDTH_HEIGHT
 	if (edp->dblwid) {
 		if (help > 0)
 			memmove(&edp->dblwid[edp->scrreg_startrow + n],
@@ -110,6 +113,7 @@ wsemul_vt100_scrolldown(struct wsemul_vt100_emuldata *edp, int n)
 		memset(&edp->dblwid[edp->scrreg_startrow], 0, n);
 	}
 	CHECK_DW;
+#endif
 
 	return 0;
 }
@@ -135,8 +139,10 @@ wsemul_vt100_ed(struct wsemul_vt100_emuldata *edp, int arg)
 			    (edp->emulcookie, edp->crow + 1, n, edp->bkgdattr));
 			if (rc != 0)
 				break;
+#ifdef HAVE_DOUBLE_WIDTH_HEIGHT
 			if (edp->dblwid)
 				memset(&edp->dblwid[edp->crow + 1], 0, n);
+#endif
 		}
 		break;
 	case 1: /* beginning to cursor */
@@ -150,18 +156,22 @@ wsemul_vt100_ed(struct wsemul_vt100_emuldata *edp, int arg)
 		    ERASECOLS(0, edp->ccol + 1, edp->bkgdattr));
 		if (rc != 0)
 			break;
+#ifdef HAVE_DOUBLE_WIDTH_HEIGHT
 		if (edp->dblwid) {
 			if (edp->crow > 0)
 				memset(&edp->dblwid[0], 0, edp->crow);
 		}
+#endif
 		break;
 	case 2: /* complete display */
 		WSEMULOP(rc, edp, &edp->abortstate, eraserows,
 		    (edp->emulcookie, 0, edp->nrows, edp->bkgdattr));
 		if (rc != 0)
 			break;
+#ifdef HAVE_DOUBLE_WIDTH_HEIGHT
 		if (edp->dblwid)
 			memset(&edp->dblwid[0], 0, edp->nrows);
+#endif
 		break;
 	default:
 #ifdef VT100_PRINTUNKNOWN
@@ -217,7 +227,7 @@ int
 wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
     struct wsemul_inputstate *instate)
 {
-	int n, help, flags, fgcol, bgcol;
+	int n, m, help, flags, fgcol, bgcol;
 	uint32_t attr, bkgdattr;
 	u_char c;
 	int rc = 0;
@@ -231,7 +241,7 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 	switch (A3(edp->modif1, edp->modif2, c)) {
 	case A3('>', '\0', 'c'): /* DA secondary */
 		wsdisplay_emulinput(edp->cbcookie, WSEMUL_VT_ID2,
-		    sizeof(WSEMUL_VT_ID2));
+		    sizeof(WSEMUL_VT_ID2) - 1);
 		break;
 
 	case A3('\0', '\0', 'J'): /* ED selective erase in display */
@@ -447,11 +457,15 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 		    ERASECOLS(edp->ccol, n, edp->bkgdattr));
 		break;
 	case 'A': /* CUU */
-		edp->crow -= min(DEF1_ARG(0), ROWS_ABOVE);
+		n = ROWS_ABOVE;
+		if (n > 0)
+			edp->crow -= min(DEF1_ARG(0), n);
 		CHECK_DW;
 		break;
 	case 'B': /* CUD */
-		edp->crow += min(DEF1_ARG(0), ROWS_BELOW);
+		n = ROWS_BELOW;
+		if (n > 0)
+			edp->crow += min(DEF1_ARG(0), n);
 		CHECK_DW;
 		break;
 	case 'C': /* CUF */
@@ -460,6 +474,10 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 	case 'D': /* CUB */
 		edp->ccol -= min(DEF1_ARG(0), edp->ccol);
 		edp->flags &= ~VTFL_LASTCHAR;
+		break;
+	case 'G': /* CHA */
+	case '`': /* HPA */
+		edp->ccol = min(DEF1_ARG(0), edp->ncols) - 1;
 		break;
 	case 'H': /* CUP */
 	case 'f': /* HVP */
@@ -474,21 +492,22 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 		break;
 	case 'L': /* IL insert line */
 	case 'M': /* DL delete line */
-	    {
-		int savscrstartrow, savscrnrows;
+		if (edp->crow >= edp->scrreg_startrow &&
+		    edp->crow < edp->scrreg_startrow + edp->scrreg_nrows) {
+			int savscrstartrow, savscrnrows;
 
-		n = min(DEF1_ARG(0), ROWS_BELOW + 1);
-		savscrstartrow = edp->scrreg_startrow;
-		savscrnrows = edp->scrreg_nrows;
-		edp->scrreg_nrows -= ROWS_ABOVE;
-		edp->scrreg_startrow = edp->crow;
-		if (c == 'L')
-			rc = wsemul_vt100_scrolldown(edp, n);
-		else
-			rc = wsemul_vt100_scrollup(edp, n);
-		edp->scrreg_startrow = savscrstartrow;
-		edp->scrreg_nrows = savscrnrows;
-	    }
+			n = min(DEF1_ARG(0), ROWS_BELOW + 1);
+			savscrstartrow = edp->scrreg_startrow;
+			savscrnrows = edp->scrreg_nrows;
+			edp->scrreg_nrows -= ROWS_ABOVE;
+			edp->scrreg_startrow = edp->crow;
+			if (c == 'L')
+				rc = wsemul_vt100_scrolldown(edp, n);
+			else
+				rc = wsemul_vt100_scrollup(edp, n);
+			edp->scrreg_startrow = savscrstartrow;
+			edp->scrreg_nrows = savscrnrows;
+		} /* else not within scrolling region, ignore the sequence */
 		break;
 	case 'P': /* DCH delete character */
 		n = min(DEF1_ARG(0), COLS_LEFT + 1);
@@ -502,15 +521,40 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 		WSEMULOP(rc, edp, &edp->abortstate, erasecols,
 		    ERASECOLS(NCOLS - n, n, edp->bkgdattr));
 		break;
+	case 'S': /* SU scroll up */
+		wsemul_vt100_scrollup(edp, DEF1_ARG(0));
+		break;
+	case 'T': /* SD scroll down */
+		wsemul_vt100_scrolldown(edp, DEF1_ARG(0));
+		break;
 	case 'X': /* ECH erase character */
 		n = min(DEF1_ARG(0), COLS_LEFT + 1);
 		WSEMULOP(rc, edp, &edp->abortstate, erasecols,
 		    ERASECOLS(edp->ccol, n, edp->bkgdattr));
 		break;
+	case 'Z': /* CBT */
+		if (edp->ccol == 0)
+			break;
+		for (m = 0; m < DEF1_ARG(0); m++) {
+			if (edp->tabs) {
+				for (n = edp->ccol - 1; n > 0; n--) {
+					if (edp->tabs[n])
+						break;
+				}
+			} else
+				n = (edp->ccol - 1) & ~7;
+			edp->ccol = n;
+			if (n == 0)
+				break;
+		}
+		break;
 	case 'c': /* DA primary */
 		if (ARG(0) == 0)
 			wsdisplay_emulinput(edp->cbcookie, WSEMUL_VT_ID1,
-			    sizeof(WSEMUL_VT_ID1));
+			    sizeof(WSEMUL_VT_ID1) - 1);
+		break;
+	case 'd': /* VPA */
+		edp->crow = min(DEF1_ARG(0), edp->nrows) - 1;
 		break;
 	case 'g': /* TBC */
 		if (edp->tabs != NULL)
@@ -594,6 +638,18 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 				if (fgcol == WSCOL_WHITE)
 					flags &= ~WSATTR_WSCOLORS;
 				break;
+			case 90: case 91: case 92: case 93:
+			case 94: case 95: case 96: case 97:
+				/* bright foreground color */
+				flags |= WSATTR_WSCOLORS;
+				fgcol = ARG(n) - 82;
+				break;
+			case 100: case 101: case 102: case 103:
+			case 104: case 105: case 106: case 107:
+				/* bright background color */
+				flags |= WSATTR_WSCOLORS;
+				bgcol = ARG(n) - 92;
+				break;
 			default:
 #ifdef VT100_PRINTUNKNOWN
 				printf("CSI%dm unknown\n", ARG(n));
@@ -625,9 +681,11 @@ wsemul_vt100_handle_csi(struct wsemul_vt100_emuldata *edp,
 		    {
 			char buf[20];
 			int row;
-			if (edp->flags & VTFL_DECOM)
+			if (edp->flags & VTFL_DECOM) {
 				row = ROWS_ABOVE;
-			else
+				if (row < 0)
+					row = 0;
+			} else
 				row = edp->crow;
 			n = snprintf(buf, sizeof buf, "\033[%d;%dR",
 				    row + 1, edp->ccol + 1);
@@ -788,13 +846,17 @@ wsemul_vt100_handle_dcs(struct wsemul_vt100_emuldata *edp)
 		if (edp->tabs != NULL) {
 			memset(edp->tabs, 0, edp->ncols);
 			pos = 0;
+			if (edp->dcsarg == NULL)
+				goto out;
 			for (i = 0; i < edp->dcspos; i++) {
 				char c = edp->dcsarg[i];
 				switch (c) {
 				case '0': case '1': case '2': case '3':
 				case '4': case '5': case '6': case '7':
 				case '8': case '9':
-					pos = pos * 10 + (edp->dcsarg[i] - '0');
+					pos = pos * 10 + (c - '0');
+					if (pos > edp->ncols)
+						goto out;
 					break;
 				case '/':
 					if (pos > 0)
@@ -818,6 +880,7 @@ wsemul_vt100_handle_dcs(struct wsemul_vt100_emuldata *edp)
 #endif
 		break;
 	}
+out:
 	edp->dcstype = 0;
 }
 

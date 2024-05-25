@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.2 2021/11/14 21:51:48 guenther Exp $
+#	$OpenBSD: Makefile,v 1.7 2024/03/26 22:26:04 kettenis Exp $
 
 NOMAN=		#
 
@@ -10,7 +10,7 @@ INSTALL_STRIP=
 BINDIR=		/usr/mdec
 SRCS=		start.S self_reloc.c efiboot.c conf.c exec.c
 SRCS+=		efidev.c efipxe.c efirng.c fdt.c
-SRCS+=		softraid_riscv64.c
+SRCS+=		softraid_riscv64.c efiriscv.c
 
 S=		${.CURDIR}/../../../..
 EFIDIR=		${S}/stand/efi
@@ -19,7 +19,7 @@ OBJCOPY?=	objcopy
 OBJDUMP?=	objdump
 
 LDFLAGS+=-nostdlib -T ${.CURDIR}/ldscript.riscv64 -Bsymbolic -shared
-LDFLAGS+=--pack-dyn-relocs=none
+LDFLAGS+=--pack-dyn-relocs=none --no-execute-only
 
 .PATH:	${S}/stand/boot
 SRCS+=	boot.c cmd.c vars.c
@@ -46,7 +46,7 @@ SRCS+=	adler32.c crc32.c inflate.c inftrees.c
 CPPFLAGS+=	-nostdinc
 CPPFLAGS+=	-I${S} -I. -I${.CURDIR}
 CPPFLAGS+=	-I${EFIDIR}/include -I${EFIDIR}/include/riscv64
-CPPFLAGS+=	-D_STANDALONE
+CPPFLAGS+=	-D_STANDALONE -DBOOT_STTY
 CPPFLAGS+=	-DSMALL -DSLOW -DNOBYFOUR -D__INTERNAL_LIBSA_CREAD
 CPPFLAGS+=	-DNEEDS_HEAP_H -DFWRANDOM
 CPPFLAGS+=	-march=rv64gc --target=riscv64 -mno-relax

@@ -1,4 +1,4 @@
-/*	$OpenBSD: socketvar.h,v 1.112 2022/11/26 17:52:35 mvs Exp $	*/
+/*	$OpenBSD: socketvar.h,v 1.131 2024/05/17 19:11:14 mvs Exp $	*/
 /*	$NetBSD: socketvar.h,v 1.18 1996/02/09 18:25:38 christos Exp $	*/
 
 /*-
@@ -35,11 +35,12 @@
 #ifndef _SYS_SOCKETVAR_H_
 #define _SYS_SOCKETVAR_H_
 
-#include <sys/selinfo.h>			/* for struct selinfo */
+#include <sys/event.h>
 #include <sys/queue.h>
 #include <sys/sigio.h>				/* for struct sigio_ref */
 #include <sys/task.h>
 #include <sys/timeout.h>
+#include <sys/mutex.h>
 #include <sys/rwlock.h>
 #include <sys/refcnt.h>
 
@@ -85,7 +86,6 @@ struct socket {
 	short	so_q0len;		/* partials on so_q0 */
 	short	so_qlen;		/* number of connections on so_q */
 	short	so_qlimit;		/* max number queued connections */
-	u_long	so_newconn;		/* # of pending sonewconn() threads */
 	short	so_timeo;		/* connection timeout */
 	u_long	so_oobmark;		/* chars to oob mark */
 	u_int	so_error;		/* error affecting connection */
@@ -105,6 +105,8 @@ struct socket {
  * Variables for socket buffering.
  */
 	struct	sockbuf {
+		struct rwlock sb_lock; 
+		struct mutex  sb_mtx;
 /* The following fields are all zeroed on flush. */
 #define	sb_startzero	sb_cc
 		u_long	sb_cc;		/* actual chars in buffer */
@@ -121,16 +123,16 @@ struct socket {
 		short	sb_flags;	/* flags, see below */
 /* End area that is zeroed on flush. */
 #define	sb_endzero	sb_flags
+		short	sb_state;	/* socket state on sockbuf */
 		uint64_t sb_timeo_nsecs;/* timeout for read/write */
-		struct	selinfo sb_sel;	/* process selecting read/write */
+		struct klist sb_klist;	/* process selecting read/write */
 	} so_rcv, so_snd;
-#define	SB_MAX		(2*1024*1024)	/* default for max chars in sockbuf */
-#define	SB_LOCK		0x01		/* lock on data queue */
-#define	SB_WANT		0x02		/* someone is waiting to lock */
-#define	SB_WAIT		0x04		/* someone is waiting for data/space */
-#define	SB_ASYNC	0x10		/* ASYNC I/O, need signals */
-#define	SB_SPLICE	0x20		/* buffer is splice source or drain */
-#define	SB_NOINTR	0x40		/* operations not interruptible */
+#define SB_MAX		(2*1024*1024)	/* default for max chars in sockbuf */
+#define SB_WAIT		0x0001		/* someone is waiting for data/space */
+#define SB_ASYNC	0x0002		/* ASYNC I/O, need signals */
+#define SB_SPLICE	0x0004		/* buffer is splice source or drain */
+#define SB_NOINTR	0x0008		/* operations not interruptible */
+#define SB_MTXLOCK	0x0010		/* sblock() doesn't need solock() */
 
 	void	(*so_upcall)(struct socket *so, caddr_t arg, int waitf);
 	caddr_t	so_upcallarg;		/* Arg for above */
@@ -141,7 +143,16 @@ struct socket {
 
 /*
  * Socket state bits.
+ *
+ * NOTE: The following states should be used with corresponding socket's
+ * buffer `sb_state' only:
+ *
+ *	SS_CANTSENDMORE		with `so_snd'
+ *	SS_ISSENDING		with `so_snd'
+ *	SS_CANTRCVMORE		with `so_rcv'
+ *	SS_RCVATMARK		with `so_rcv'
  */
+
 #define	SS_NOFDREF		0x001	/* no file table ref any more */
 #define	SS_ISCONNECTED		0x002	/* socket connected to a peer */
 #define	SS_ISCONNECTING		0x004	/* in process of connecting to peer */
@@ -155,8 +166,7 @@ struct socket {
 #define	SS_CONNECTOUT		0x1000	/* connect, not accept, at this end */
 #define	SS_ISSENDING		0x2000	/* hint for lower layer */
 #define	SS_DNS			0x4000	/* created using SOCK_DNS socket(2) */
-#define	SS_NEWCONN_WAIT		0x8000	/* waiting sonewconn() relock */
-#define	SS_YP			0x10000	/* created using ypconnect(2) */
+#define	SS_YP			0x8000	/* created using ypconnect(2) */
 
 #ifdef _KERNEL
 
@@ -164,6 +174,7 @@ struct socket {
 #include <lib/libkern/libkern.h>
 
 void	soassertlocked(struct socket *);
+void	soassertlocked_readonly(struct socket *);
 
 static inline void
 soref(struct socket *so)
@@ -184,16 +195,38 @@ sorele(struct socket *so)
 #define isspliced(so)		((so)->so_sp && (so)->so_sp->ssp_socket)
 #define issplicedback(so)	((so)->so_sp && (so)->so_sp->ssp_soback)
 
+static inline void
+sb_mtx_lock(struct sockbuf *sb)
+{
+	if (sb->sb_flags & SB_MTXLOCK)
+		mtx_enter(&sb->sb_mtx);
+}
+
+static inline void
+sb_mtx_unlock(struct sockbuf *sb)
+{
+	if (sb->sb_flags & SB_MTXLOCK)
+		mtx_leave(&sb->sb_mtx);
+}
+
+void	sbmtxassertlocked(struct socket *so, struct sockbuf *);
+
 /*
  * Do we need to notify the other side when I/O is possible?
  */
 static inline int
 sb_notify(struct socket *so, struct sockbuf *sb)
 {
-	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
+	int rv;
+
 	soassertlocked(so);
-	return ((sb->sb_flags & (SB_WAIT|SB_ASYNC|SB_SPLICE)) != 0 ||
-	    !klist_empty(&sb->sb_sel.si_note));
+
+	mtx_enter(&sb->sb_mtx);
+	rv = ((sb->sb_flags & (SB_WAIT|SB_ASYNC|SB_SPLICE)) != 0 ||
+	    !klist_empty(&sb->sb_klist));
+	mtx_leave(&sb->sb_mtx);
+
+	return rv;
 }
 
 /*
@@ -202,11 +235,15 @@ sb_notify(struct socket *so, struct sockbuf *sb)
  * still be negative (cc > hiwat or mbcnt > mbmax).  Should detect
  * overflow and return 0.
  */
+
 static inline long
 sbspace(struct socket *so, struct sockbuf *sb)
 {
-	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
-	soassertlocked(so);
+	if (sb->sb_flags & SB_MTXLOCK)
+		sbmtxassertlocked(so, sb);
+	else
+		soassertlocked_readonly(so);
+
 	return lmin(sb->sb_hiwat - sb->sb_cc, sb->sb_mbmax - sb->sb_mbcnt);
 }
 
@@ -216,28 +253,28 @@ sbspace(struct socket *so, struct sockbuf *sb)
 
 /* are we sending on this socket? */
 #define	soissending(so) \
-    ((so)->so_state & SS_ISSENDING)
+    ((so)->so_snd.sb_state & SS_ISSENDING)
 
 /* can we read something from so? */
 static inline int
 soreadable(struct socket *so)
 {
-	soassertlocked(so);
+	soassertlocked_readonly(so);
 	if (isspliced(so))
 		return 0;
-	return (so->so_state & SS_CANTRCVMORE) || so->so_qlen || so->so_error ||
-	    so->so_rcv.sb_cc >= so->so_rcv.sb_lowat;
+	return (so->so_rcv.sb_state & SS_CANTRCVMORE) || so->so_qlen ||
+	    so->so_error || so->so_rcv.sb_cc >= so->so_rcv.sb_lowat;
 }
 
 /* can we write something to so? */
 static inline int
 sowriteable(struct socket *so)
 {
-	soassertlocked(so);
+	soassertlocked_readonly(so);
 	return ((sbspace(so, &so->so_snd) >= so->so_snd.sb_lowat &&
 	    ((so->so_state & SS_ISCONNECTED) ||
 	    (so->so_proto->pr_flags & PR_CONNREQUIRED)==0)) ||
-	    (so->so_state & SS_CANTSENDMORE) || so->so_error);
+	    (so->so_snd.sb_state & SS_CANTSENDMORE) || so->so_error);
 }
 
 /* adjust counters in sb reflecting allocation of m */
@@ -265,14 +302,21 @@ sbfree(struct socket *so, struct sockbuf *sb, struct mbuf *m)
 }
 
 /*
- * Set lock on sockbuf sb; sleep if lock is already held.
- * Unless SB_NOINTR is set on sockbuf, sleep is interruptible.
- * Returns error without lock if sleep is interrupted.
+ * Flags to sblock()
  */
-int sblock(struct socket *, struct sockbuf *, int);
+#define SBL_WAIT	0x01	/* Wait if lock not immediately available. */
+#define SBL_NOINTR	0x02	/* Enforce non-interruptible sleep. */
+
+/*
+ * Set lock on sockbuf sb; sleep if lock is already held.
+ * Unless SB_NOINTR is set on sockbuf or SBL_NOINTR passed,
+ * sleep is interruptible. Returns error without lock if
+ * sleep is interrupted.
+ */
+int sblock(struct sockbuf *, int);
 
 /* release lock on sockbuf sb */
-void sbunlock(struct socket *, struct sockbuf *);
+void sbunlock(struct sockbuf *);
 
 #define	SB_EMPTY_FIXUP(sb) do {						\
 	if ((sb)->sb_mb == NULL) {					\
@@ -331,7 +375,7 @@ int	soconnect(struct socket *, struct mbuf *);
 int	soconnect2(struct socket *, struct socket *);
 int	socreate(int, struct socket **, int, int);
 int	sodisconnect(struct socket *);
-struct socket *soalloc(int);
+struct socket *soalloc(const struct protosw *, int);
 void	sofree(struct socket *, int);
 int	sogetopt(struct socket *, int, int, struct mbuf *);
 void	sohasoutofband(struct socket *);

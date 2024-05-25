@@ -1,4 +1,4 @@
-.\" $OpenBSD: pledge.2,v 1.64 2022/07/17 03:12:55 deraadt Exp $
+.\" $OpenBSD: pledge.2,v 1.69 2023/10/30 06:11:04 jmc Exp $
 .\"
 .\" Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 17 2022 $
+.Dd $Mdocdate: October 30 2023 $
 .Dt PLEDGE 2
 .Os
 .Sh NAME
@@ -30,7 +30,7 @@ The
 system call forces the current process into a restricted-service operating mode.
 A few subsets are available, roughly described as computation, memory
 management, read-write operations on file descriptors, opening of files,
-and networking.
+networking (and notably separate, DNS resolution).
 In general, these modes were selected by studying the operation
 of many programs using libc and other such interfaces, and setting
 .Fa promises
@@ -134,6 +134,8 @@ May open
 .Pa /etc/localtime
 and any files below
 .Pa /usr/share/zoneinfo .
+.It Xr profil 2 :
+Can only disable profiling.
 .It Fn pledge :
 Can only reduce permissions for
 .Fa promises
@@ -196,6 +198,7 @@ As a result, all the expected functionalities of libc stdio work.
 .Xr issetugid 2 ,
 .Xr kevent 2 ,
 .Xr kqueue 2 ,
+.Xr kqueue1 2 ,
 .Xr lseek 2 ,
 .Xr madvise 2 ,
 .Xr minherit 2 ,
@@ -209,6 +212,7 @@ As a result, all the expected functionalities of libc stdio work.
 .Xr poll 2 ,
 .Xr pread 2 ,
 .Xr preadv 2 ,
+.Xr profil 2 ,
 .Xr pwrite 2 ,
 .Xr pwritev 2 ,
 .Xr read 2 ,
@@ -227,6 +231,7 @@ As a result, all the expected functionalities of libc stdio work.
 .Xr socketpair 2 ,
 .Xr umask 2 ,
 .Xr wait4 2 ,
+.Xr waitid 2 ,
 .Xr write 2 ,
 .Xr writev 2
 .It Cm rpath

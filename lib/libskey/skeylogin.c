@@ -10,7 +10,7 @@
  *
  * S/Key verification check, lookups, and authentication.
  *
- * $OpenBSD: skeylogin.c,v 1.62 2019/01/25 00:19:26 millert Exp $
+ * $OpenBSD: skeylogin.c,v 1.65 2024/03/23 16:30:01 guenther Exp $
  */
 
 #ifdef	QUOTA
@@ -108,7 +108,7 @@ skeygetent(int fd, struct skey *mp, const char *name)
 	}
 
 	if (fd == -1) {
-		/* Open the user's databse entry, creating it as needed. */
+		/* Open the user's database entry, creating it as needed. */
 		if (snprintf(filename, sizeof(filename), "%s/%s", _PATH_SKEYDIR,
 		    name) >= sizeof(filename)) {
 			errno = ENAMETOOLONG;
@@ -207,7 +207,7 @@ skeylookup(struct skey *mp, char *name)
 int
 skeygetnext(struct skey *mp)
 {
-	struct dirent entry, *dp;
+	struct dirent *dp;
 	int rval;
 
 	if (mp->keyfile != NULL) {
@@ -220,10 +220,10 @@ skeygetnext(struct skey *mp)
 		return (-1);
 
 	rval = 1;
-	while ((readdir_r(mp->keydir, &entry, &dp)) == 0 && dp == &entry) {
+	while ((dp = readdir(mp->keydir)) != NULL) {
 		/* Skip dot files and zero-length files. */
-		if (entry.d_name[0] != '.' &&
-		    (rval = skeygetent(-1, mp, entry.d_name)) != 1)
+		if (dp->d_name[0] != '.' &&
+		    (rval = skeygetent(-1, mp, dp->d_name)) != 1)
 			break;
 	}
 
@@ -436,8 +436,8 @@ skey_fakeprompt(char *username, char *skeyprompt)
 			if (isalpha((unsigned char)*p) &&
 			    isupper((unsigned char)*p))
 				*p = (char)tolower((unsigned char)*p);
-	if (*p && pbuf - p < 4)
-		(void)strncpy(p, "asjd", 4 - (pbuf - p));
+	if (*p && p - pbuf < 4)
+		(void)strncpy(p, "asjd", 4 - (p - pbuf));
 	pbuf[4] = '\0';
 
 	/* Hash the username if possible */

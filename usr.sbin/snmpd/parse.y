@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.78 2022/10/06 14:41:08 martijn Exp $	*/
+/*	$OpenBSD: parse.y,v 1.90 2024/02/20 12:32:48 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -23,38 +23,41 @@
  */
 
 %{
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/queue.h>
-#include <sys/tree.h>
-
-#include <netinet/in.h>
-#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <sys/utsname.h>
 
 #include <arpa/inet.h>
 
+#include <netinet/in.h>
+
 #include <openssl/sha.h>
 
+#include <ber.h>
 #include <ctype.h>
-#include <unistd.h>
 #include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <grp.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <stdint.h>
-#include <stdarg.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <netdb.h>
 #include <pwd.h>
-#include <string.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <strings.h>
 #include <syslog.h>
+#include <unistd.h>
 
-#include "snmpd.h"
+#include "application.h"
+#include "log.h"
 #include "mib.h"
+#include "snmpd.h"
+#include "snmp.h"
 
 TAILQ_HEAD(files, file)		 files = TAILQ_HEAD_INITIALIZER(files);
 static struct file {
@@ -94,15 +97,54 @@ struct sym {
 int		 symset(const char *, const char *, int);
 char		*symget(const char *);
 
+struct oid_sym {
+	char			*descriptor;
+	char			 file[PATH_MAX];
+	int			 lineno;
+};
+
+struct object_sym {
+	struct oid_sym		 oid;
+	char			*name;
+	int			 isint;
+	union {
+		int32_t		 intval;
+		char		*sval;
+	};
+};
+
+struct trapcmd_sym {
+	struct oid_sym	 oid;
+	struct trapcmd	*cmd;
+};
+
+struct trapaddress_sym {
+	struct oid_sym	 oid;
+	struct trap_address *tr;
+};
+
 struct snmpd			*conf = NULL;
 static int			 errors = 0;
 static struct usmuser		*user = NULL;
+static int			 mibparsed = 0;
+
+static struct oid_sym		*blocklist = NULL;
+static size_t			 nblocklist = 0;
+static struct oid_sym		 sysoid = {};
+static struct object_sym	*objects = NULL;
+static size_t			 nobjects = 0;
+static struct trapcmd_sym	*trapcmds = NULL;
+static size_t			 ntrapcmds = 0;
+static struct trapaddress_sym	*trapaddresses = NULL;
+static size_t			 ntrapaddresses = 0;
 
 static uint8_t			 engineid[SNMPD_MAXENGINEIDLEN];
 static int32_t			 enginepen;
 static size_t			 engineidlen;
 
-int		 host(const char *, const char *, int,
+int		 resolve_oid(struct ber_oid *, struct oid_sym *);
+int		 resolve_oids(void);
+int		 host(const char *, const char *, int, int,
 		    struct sockaddr_storage *, int);
 int		 listen_add(struct sockaddr_storage *, int, int);
 
@@ -112,7 +154,7 @@ typedef struct {
 		char		*string;
 		struct host	*host;
 		struct timeval	 tv;
-		struct ber_oid	*oid;
+		struct oid_sym	 oid;
 		struct agentx_master ax;
 		struct {
 			int		 type;
@@ -140,14 +182,15 @@ typedef struct {
 %token	SYSTEM CONTACT DESCR LOCATION NAME OBJECTID SERVICES RTFILTER
 %token	READONLY READWRITE OCTETSTRING INTEGER COMMUNITY TRAP RECEIVER
 %token	SECLEVEL NONE AUTH ENC USER AUTHKEY ENCKEY ERROR
-%token	HANDLE DEFAULT SRCADDR TCP UDP PFADDRFILTER BLOCKLIST PORT
+%token	HANDLE DEFAULT SRCADDR TCP UDP BLOCKLIST PORT
+%token	MIB DIRECTORY
 %token	<v.string>	STRING
 %token	<v.number>	NUMBER
 %type	<v.string>	usmuser community optcommunity
 %type	<v.number>	listenproto listenflag listenflags
 %type	<v.string>	srcaddr port
 %type	<v.number>	optwrite yesno seclevel
-%type	<v.data>	objtype cmd hostauth hostauthv3 usmauthopts usmauthopt
+%type	<v.data>	cmd hostauth hostauthv3 usmauthopts usmauthopt
 %type	<v.oid>		oid hostoid trapoid
 %type	<v.auth>	auth
 %type	<v.enc>		enc
@@ -161,6 +204,7 @@ grammar		: /* empty */
 		| grammar varset '\n'
 		| grammar main '\n'
 		| grammar system '\n'
+		| grammar object '\n'
 		| grammar mib '\n'
 		| grammar error '\n'		{ file->errors++; }
 		;
@@ -301,60 +345,34 @@ main		: LISTEN ON listen_udptcp
 		}
 		| TRAP RECEIVER	host
 		| TRAP HANDLE trapoid cmd {
-			struct trapcmd *cmd = $4.data;
+			struct trapcmd_sym *ttrapcmds;
 
-			cmd->cmd_oid = $3;
-
-			if (trapcmd_add(cmd) != 0) {
-				free($3);
-				free(cmd);
-				yyerror("duplicate oid");
+			if ((ttrapcmds = recallocarray(trapcmds, ntrapcmds,
+			    ntrapcmds + 1, sizeof(*trapcmds))) == NULL) {
+				yyerror("malloc");
+				free($3.descriptor);
+				free($4.data);
 				YYERROR;
 			}
-			conf->sc_traphandler = 1;
+
+			trapcmds = ttrapcmds;
+			trapcmds[ntrapcmds].oid = $3;
+			trapcmds[ntrapcmds++].cmd = $4.data;
 		}
 		| BLOCKLIST oid {
-			struct ber_oid *blocklist;
+			struct oid_sym *tblocklist;
 
-			blocklist = recallocarray(conf->sc_blocklist,
-			    conf->sc_nblocklist, conf->sc_nblocklist + 1,
-			    sizeof(*blocklist));
-			if (blocklist == NULL) {
+			if ((tblocklist = recallocarray(blocklist, nblocklist,
+			    nblocklist + 1, sizeof(*blocklist))) == NULL) {
 				yyerror("malloc");
+				free($2.descriptor);
 				YYERROR;
 			}
-			conf->sc_blocklist = blocklist;
-			blocklist[conf->sc_nblocklist++] = *$2;
-			free($2);
+			blocklist = tblocklist;
+			blocklist[nblocklist++] = $2;
 		}
 		| RTFILTER yesno		{
-			if ($2 == 1)
-				conf->sc_rtfilter = ROUTE_FILTER(RTM_NEWADDR) |
-				    ROUTE_FILTER(RTM_DELADDR) |
-				    ROUTE_FILTER(RTM_IFINFO) |
-				    ROUTE_FILTER(RTM_IFANNOUNCE);
-			else
-				conf->sc_rtfilter = 0;
-		}
-		/* XXX Remove after 7.4 */
-		| PFADDRFILTER yesno		{
-			struct ber_oid *blocklist;
-
-			log_warnx("filter-pf-addresses is deprecated. "
-			    "Please use blocklist pfTblAddrTable instead.");
-			if ($2) {
-				blocklist = recallocarray(conf->sc_blocklist,
-				    conf->sc_nblocklist,
-				    conf->sc_nblocklist + 1,
-				    sizeof(*blocklist));
-				if (blocklist == NULL) {
-					yyerror("malloc");
-					YYERROR;
-				}
-				conf->sc_blocklist = blocklist;
-				smi_string2oid("pfTblAddrTable",
-				    &(blocklist[conf->sc_nblocklist++]));
-			}
+			conf->sc_rtfilter = $2;
 		}
 		| seclevel {
 			conf->sc_min_seclevel = $1;
@@ -418,8 +436,8 @@ listen_udptcp	: listenproto STRING port listenflags	{
 			}
 
 			for (i = 0; i < addresslen; i++) {
-				nhosts = host(address[i], port, $1, ss, nitems(ss));
-				if (nhosts < 1) {
+				if ((nhosts = host(address[i], port, AF_UNSPEC,
+				    $1, ss, nitems(ss))) < 1) {
 					yyerror("invalid address: %s", $2);
 					free($2);
 					free($3);
@@ -780,75 +798,120 @@ system		: SYSTEM sysmib
 		;
 
 sysmib		: CONTACT STRING		{
-			struct ber_oid	 o = OID(MIB_sysContact);
-			mps_set(&o, $2, strlen($2));
+			if (conf->sc_system.sys_contact[0] != '\0') {
+				yyerror("system contact already defined");
+				free($2);
+				YYERROR;
+			}
+			if (strlcpy(conf->sc_system.sys_contact, $2,
+			    sizeof(conf->sc_system.sys_contact)) >=
+			    sizeof(conf->sc_system.sys_contact)) {
+				yyerror("system contact too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
 		}
 		| DESCR STRING			{
-			struct ber_oid	 o = OID(MIB_sysDescr);
-			mps_set(&o, $2, strlen($2));
+			if (conf->sc_system.sys_descr[0] != '\0') {
+				yyerror("system description already defined");
+				free($2);
+				YYERROR;
+			}
+			if (strlcpy(conf->sc_system.sys_descr, $2,
+			    sizeof(conf->sc_system.sys_descr)) >=
+			    sizeof(conf->sc_system.sys_descr)) {
+				yyerror("system description too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
 		}
 		| LOCATION STRING		{
-			struct ber_oid	 o = OID(MIB_sysLocation);
-			mps_set(&o, $2, strlen($2));
+			if (conf->sc_system.sys_location[0] != '\0') {
+				yyerror("system location already defined");
+				free($2);
+				YYERROR;
+			}
+			if (strlcpy(conf->sc_system.sys_location, $2,
+			    sizeof(conf->sc_system.sys_location)) >=
+			    sizeof(conf->sc_system.sys_location)) {
+				yyerror("system location too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
 		}
 		| NAME STRING			{
-			struct ber_oid	 o = OID(MIB_sysName);
-			mps_set(&o, $2, strlen($2));
+			if (conf->sc_system.sys_name[0] != '\0') {
+				yyerror("system name already defined");
+				free($2);
+				YYERROR;
+			}
+			if (strlcpy(conf->sc_system.sys_name, $2,
+			    sizeof(conf->sc_system.sys_name)) >=
+			    sizeof(conf->sc_system.sys_name)) {
+				yyerror("system name too long");
+				free($2);
+				YYERROR;
+			}
+			free($2);
 		}
 		| OBJECTID oid			{
-			struct ber_oid	 o = OID(MIB_sysOID);
-			mps_set(&o, $2, sizeof(struct ber_oid));
+			if (sysoid.descriptor != NULL) {
+				yyerror("system oid already defined");
+				free($2.descriptor);
+				YYERROR;
+			}
+			sysoid = $2;
 		}
 		| SERVICES NUMBER		{
-			struct ber_oid	 o = OID(MIB_sysServices);
-			mps_set(&o, NULL, $2);
+			if (conf->sc_system.sys_services != -1) {
+				yyerror("system services already defined");
+				YYERROR;
+			}
+			if ($2 < 0) {
+				yyerror("system services too small");
+				YYERROR;
+			} else if ($2 > 127) {
+				yyerror("system services too large");
+				YYERROR;
+			}
+			conf->sc_system.sys_services = $2;
 		}
 		;
 
-mib		: OBJECTID oid NAME STRING optwrite objtype	{
-			struct oid	*oid;
-			if ((oid = (struct oid *)
-			    calloc(1, sizeof(*oid))) == NULL) {
-				yyerror("calloc");
-				free($2);
-				free($6.data);
-				YYERROR;
-			}
+object		: OBJECTID oid NAME STRING optwrite 	{
+			struct object_sym *tobjects;
 
-			smi_oidlen($2);
-			bcopy($2, &oid->o_id, sizeof(struct ber_oid));
-			free($2);
-			oid->o_name = $4;
-			oid->o_data = $6.data;
-			oid->o_val = $6.value;
-			switch ($6.type) {
-			case 1:
-				oid->o_get = mps_getint;
-				break;
-			case 2:
-				oid->o_get = mps_getstr;
-				break;
+			if ((tobjects = recallocarray(objects, nobjects,
+			    nobjects + 1, sizeof(*objects))) == NULL) {
+				yyerror("malloc");
+				free($2.descriptor);
+				free($4);
 			}
-			oid->o_flags = OID_RD|OID_DYNAMIC;
-
-			if (smi_insert(oid) == -1) {
-				yyerror("duplicate oid");
-				free(oid->o_name);
-				free(oid->o_data);
-				YYERROR;
-			}
-		}
+			objects = tobjects;
+			nobjects++;
+			objects[nobjects - 1].oid = $2;
+			objects[nobjects - 1].name = $4;
+		} objectvalue
 		;
 
-objtype		: INTEGER NUMBER			{
-			$$.type = 1;
-			$$.data = NULL;
-			$$.value = $2;
+objectvalue	: INTEGER NUMBER			{
+			if ($2 < INT32_MIN) {
+				yyerror("number too small");
+				YYERROR;
+			}
+			if ($2 > INT32_MAX) {
+				yyerror("number too large");
+				YYERROR;
+			}
+			objects[nobjects - 1].isint = 1;
+			objects[nobjects - 1].intval = $2;
 		}
 		| OCTETSTRING STRING			{
-			$$.type = 2;
-			$$.data = $2;
-			$$.value = strlen($2);
+			objects[nobjects - 1].isint = 0;
+			objects[nobjects - 1].sval = $2;
 		}
 		;
 
@@ -857,37 +920,28 @@ optwrite	: READONLY				{ $$ = 0; }
 		;
 
 oid		: STRING				{
-			struct ber_oid	*oid;
-			if ((oid = calloc(1, sizeof(*oid))) == NULL) {
-				yyerror("calloc");
-				free($1);
-				YYERROR;
-			}
-			if (smi_string2oid($1, oid) == -1) {
-				yyerror("invalid OID: %s", $1);
-				free(oid);
-				free($1);
-				YYERROR;
-			}
-			free($1);
-			$$ = oid;
+			$$.descriptor = $1;
+			strlcpy($$.file, file->name, sizeof($$.file));
+			$$.lineno = file->lineno;
 		}
 		;
 
 trapoid		: oid					{ $$ = $1; }
 		| DEFAULT				{
-			struct ber_oid	*sysoid;
-			if ((sysoid =
-			    calloc(1, sizeof(*sysoid))) == NULL) {
-				yyerror("calloc");
+			if (($$.descriptor = strdup("1.3")) == NULL) {
+				yyerror("malloc");
 				YYERROR;
 			}
-			ober_string2oid("1.3", sysoid);
-			$$ = sysoid;
+			strlcpy($$.file, file->name, sizeof($$.file));
+			$$.lineno = file->lineno;
 		}
 		;
 
-hostoid		: /* empty */				{ $$ = NULL; }
+hostoid		: /* empty */				{
+			$$.descriptor = NULL;
+			strlcpy($$.file, file->name, sizeof($$.file));
+			$$.lineno = file->lineno;
+		}
 		| OBJECTID oid				{ $$ = $2; }
 		;
 
@@ -978,38 +1032,54 @@ srcaddr		: /* empty */				{ $$ = NULL; }
 		;
 
 hostdef		: STRING hostoid hostauth srcaddr	{
-			struct sockaddr_storage ss;
+			struct sockaddr_storage ss, ssl = {};
 			struct trap_address *tr;
+			struct trapaddress_sym *ttrapaddresses;
 
-			if ((tr = calloc(1, sizeof(*tr))) == NULL) {
-				yyerror("calloc");
-				YYERROR;
-			}
-
-			if (host($1, SNMPTRAP_PORT, SOCK_DGRAM, &ss, 1) <= 0) {
+			if (host($1, SNMPTRAP_PORT, AF_UNSPEC, SOCK_DGRAM,
+			    &ss, 1) <= 0) {
 				yyerror("invalid host: %s", $1);
 				free($1);
-				free($2);
+				free($2.descriptor);
 				free($3.data);
 				free($4);
-				free(tr);
 				YYERROR;
 			}
 			free($1);
-			memcpy(&(tr->ta_ss), &ss, sizeof(ss));
 			if ($4 != NULL) {
-				if (host($1, "0", SOCK_DGRAM, &ss, 1) <= 0) {
-					yyerror("invalid host: %s", $1);
-					free($2);
+				if (host($4, "0", ss.ss_family, SOCK_DGRAM,
+				    &ss, 1) <= 0) {
+					yyerror("invalid source-address: %s",
+					    $4);
+					free($2.descriptor);
 					free($3.data);
 					free($4);
-					free(tr);
 					YYERROR;
 				}
 				free($4);
-				memcpy(&(tr->ta_sslocal), &ss, sizeof(ss));
 			}
-			tr->ta_oid = $2;
+
+			ttrapaddresses = reallocarray(trapaddresses,
+			    ntrapaddresses + 1, sizeof(*trapaddresses));
+			if (ttrapaddresses == NULL) {
+				yyerror("malloc");
+				free($2.descriptor);
+				free($3.data);
+				YYERROR;
+			}
+			trapaddresses = ttrapaddresses;
+			ntrapaddresses++;
+
+			if ((tr = calloc(1, sizeof(*tr))) == NULL) {
+				yyerror("calloc");
+				free($2.descriptor);
+				free($3.data);
+				ntrapaddresses--;
+				YYERROR;
+			}
+
+			tr->ta_ss = ss;
+			tr->ta_sslocal = ssl;
 			tr->ta_version = $3.type;
 			if ($3.type == SNMP_V2) {
 				(void)strlcpy(tr->ta_community, $3.data,
@@ -1019,7 +1089,9 @@ hostdef		: STRING hostoid hostauth srcaddr	{
 				tr->ta_usmusername = $3.data;
 				tr->ta_seclevel = $3.value;
 			}
-			TAILQ_INSERT_TAIL(&(conf->sc_trapreceivers), tr, entry);
+
+			trapaddresses[ntrapaddresses - 1].oid = $2;
+			trapaddresses[ntrapaddresses - 1].tr = tr;
 		}
 		;
 
@@ -1149,6 +1221,12 @@ cmd		: STRING		{
 		}
 		;
 
+mib		: MIB DIRECTORY STRING		{
+			mib_parsedir($3);
+			mibparsed = 1;
+		}
+		;
+
 %%
 
 struct keywords {
@@ -1192,10 +1270,10 @@ lookup(char *s)
 		{ "contact",			CONTACT },
 		{ "default",			DEFAULT },
 		{ "description",		DESCR },
+		{ "directory",			DIRECTORY },
 		{ "enc",			ENC },
 		{ "enckey",			ENCKEY },
 		{ "engineid",			ENGINEID },
-		{ "filter-pf-addresses",	PFADDRFILTER },
 		{ "filter-routes",		RTFILTER },
 		{ "group",			GROUP },
 		{ "handle",			HANDLE },
@@ -1207,6 +1285,7 @@ lookup(char *s)
 		{ "listen",			LISTEN },
 		{ "location",			LOCATION },
 		{ "mac",			MAC },
+		{ "mib",			MIB },
 		{ "mode",			MODE },
 		{ "name",			NAME },
 		{ "none",			NONE },
@@ -1592,10 +1671,114 @@ popfile(void)
 	return (file ? 0 : EOF);
 }
 
+int
+resolve_oid(struct ber_oid *dst, struct oid_sym *src)
+{
+	struct file f = { .name = src->file, };
+	const char *error;
+
+	file = &f;
+	yylval.lineno = src->lineno;
+
+	if ((error = mib_string2oid(src->descriptor, dst)) != NULL) {
+		if (smi_string2oid(src->descriptor, dst) == -1) {
+			yyerror("%s", error);
+			free(src->descriptor);
+			return -1;
+		}
+		yyerror("deprecated oid format");
+	}
+	free(src->descriptor);
+
+	return 0;
+}
+
+int
+resolve_oids(void)
+{
+	struct file f;
+	struct ber_oid oid;
+	const char *error;
+	size_t i;
+
+	conf->sc_blocklist = calloc(nblocklist, sizeof(*conf->sc_blocklist));
+	if (conf->sc_blocklist == NULL)
+		fatal("malloc");
+
+	conf->sc_nblocklist = nblocklist;
+	for (i = 0; i < nblocklist; i++) {
+		if (resolve_oid(&conf->sc_blocklist[i], &blocklist[i]) == -1)
+			return -1;
+	}
+	free(blocklist);
+
+	if (sysoid.descriptor != NULL) {
+		if (resolve_oid(&conf->sc_system.sys_oid, &sysoid) == -1)
+			return -1;
+	}
+
+	for (i = 0; i < nobjects; i++) {
+		if (resolve_oid(&oid, &objects[i].oid) == -1)
+			return -1;
+		file = &f;
+		f.name = objects[i].oid.file;
+		yylval.lineno = objects[i].oid.lineno;
+		if ((error = smi_insert(&oid, objects[i].name)) != NULL) {
+			yyerror("%s", error);
+			return -1;
+		}
+		if (objects[i].isint) {
+			if ((error = appl_internal_object_int(
+			    &oid, objects[i].intval)) != NULL) {
+				yyerror("%s", error);
+				return -1;
+			}
+		} else {
+			if ((error = appl_internal_object_string(
+			    &oid, objects[i].sval)) != NULL) {
+				yyerror("%s", error);
+				return -1;
+			}
+		}
+		free(objects[i].name);
+	}
+	free(objects);
+
+	for (i = 0; i < ntrapcmds; i++) {
+		if (resolve_oid(
+		    &trapcmds[i].cmd->cmd_oid, &trapcmds[i].oid) == -1)
+			return -1;
+		f.name = trapcmds[i].oid.file;
+		yylval.lineno = trapcmds[i].oid.lineno;
+		file = &f;
+		if (trapcmd_add(trapcmds[i].cmd) != 0) {
+			yyerror("duplicate oid");
+			return -1;
+		}
+	}
+	free(trapcmds);
+
+	for (i = 0; i < ntrapaddresses; i++) {
+		if (trapaddresses[i].oid.descriptor == NULL)
+			trapaddresses[i].tr->ta_oid.bo_n = 0;
+		else {
+			if (resolve_oid(&trapaddresses[i].tr->ta_oid,
+			    &trapaddresses[i].oid) == -1)
+				return -1;
+		}
+		TAILQ_INSERT_TAIL(&conf->sc_trapreceivers,
+		    trapaddresses[i].tr, entry);
+	}
+	free(trapaddresses);
+
+	return 0;
+}
+
 struct snmpd *
 parse_config(const char *filename, u_int flags)
 {
 	struct sockaddr_storage ss;
+	struct utsname u;
 	struct sym	*sym, *next;
 	struct address	*h;
 	struct trap_address	*tr;
@@ -1610,7 +1793,12 @@ parse_config(const char *filename, u_int flags)
 		return (NULL);
 	}
 
+	conf->sc_system.sys_services = -1;
 	conf->sc_flags = flags;
+
+	conf->sc_oidfmt =
+	    flags & SNMPD_F_NONAMES ?  MIB_OIDNUMERIC : MIB_OIDSYMBOLIC;
+
 	conf->sc_confpath = filename;
 	TAILQ_INIT(&conf->sc_addresses);
 	TAILQ_INIT(&conf->sc_agentx_masters);
@@ -1630,6 +1818,39 @@ parse_config(const char *filename, u_int flags)
 
 	endservent();
 
+	if (errors) {
+		free(conf);
+		return (NULL);
+	}
+
+	if (!mibparsed)
+		mib_parsedir("/usr/share/snmp/mibs");
+	mib_resolve();
+
+	if (resolve_oids() == -1) {
+		free(conf);
+		return NULL;
+	}
+
+	if (uname(&u) == -1)
+		fatal("uname");
+
+	if (conf->sc_system.sys_descr[0] == '\0')
+		snprintf(conf->sc_system.sys_descr,
+		    sizeof(conf->sc_system.sys_descr), "%s %s %s %s %s",
+		    u.sysname, u.nodename, u.release, u.version, u.machine);
+	if (conf->sc_system.sys_oid.bo_n == 0)
+		conf->sc_system.sys_oid = OID(MIB_SYSOID_DEFAULT);
+	if (conf->sc_system.sys_contact[0] == '\0')
+		snprintf(conf->sc_system.sys_contact,
+		    sizeof(conf->sc_system.sys_contact), "root@%s", u.nodename);
+	if (conf->sc_system.sys_name[0] == '\0')
+		snprintf(conf->sc_system.sys_name,
+		    sizeof(conf->sc_system.sys_name), "%s", u.nodename);
+	if (conf->sc_system.sys_services == -1)
+		conf->sc_system.sys_services = 0;
+
+
 	/* Must be identical to enginefmt_local:HOSTHASH */
 	if (conf->sc_engineid_len == 0) {
 		if (gethostname(hostname, sizeof(hostname)) == -1)
@@ -1647,11 +1868,12 @@ parse_config(const char *filename, u_int flags)
 
 	/* Setup default listen addresses */
 	if (TAILQ_EMPTY(&conf->sc_addresses)) {
-		if (host("0.0.0.0", SNMP_PORT, SOCK_DGRAM, &ss, 1) != 1)
+		if (host("0.0.0.0", SNMP_PORT, AF_INET, SOCK_DGRAM,
+		    &ss, 1) != 1)
 			fatal("Unexpected resolving of 0.0.0.0");
 		if (listen_add(&ss, SOCK_DGRAM, 0) == -1)
 			fatal("calloc");
-		if (host("::", SNMP_PORT, SOCK_DGRAM, &ss, 1) != 1)
+		if (host("::", SNMP_PORT, AF_INET6, SOCK_DGRAM, &ss, 1) != 1)
 			fatal("Unexpected resolving of ::");
 		if (listen_add(&ss, SOCK_DGRAM, 0) == -1)
 			fatal("calloc");
@@ -1665,12 +1887,12 @@ parse_config(const char *filename, u_int flags)
 		if (h->flags & ADDRESS_FLAG_NOTIFY)
 			found = 1;
 	}
-	if (conf->sc_traphandler && !found) {
+	if (ntrapcmds && !found) {
 		log_warnx("trap handler needs at least one notify listener");
 		free(conf);
 		return (NULL);
 	}
-	if (!conf->sc_traphandler && found) {
+	if (!ntrapcmds && found) {
 		log_warnx("notify listener needs at least one trap handler");
 		free(conf);
 		return (NULL);
@@ -1706,11 +1928,6 @@ parse_config(const char *filename, u_int flags)
 			TAILQ_REMOVE(&symhead, sym, entry);
 			free(sym);
 		}
-	}
-
-	if (errors) {
-		free(conf);
-		return (NULL);
 	}
 
 	return (conf);
@@ -1788,14 +2005,14 @@ symget(const char *nam)
 }
 
 int
-host(const char *s, const char *port, int type, struct sockaddr_storage *ss,
-    int max)
+host(const char *s, const char *port, int family, int type,
+    struct sockaddr_storage *ss, int max)
 {
 	struct addrinfo		 hints, *res0, *res;
 	int			 error, i;
 
 	bzero(&hints, sizeof(hints));
-	hints.ai_family = PF_UNSPEC;
+	hints.ai_family = family;
 	hints.ai_socktype = type;
 	/*
 	 * Without AI_NUMERICHOST getaddrinfo might not resolve ip addresses

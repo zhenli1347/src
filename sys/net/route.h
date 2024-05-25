@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.h,v 1.196 2022/06/28 10:01:13 bluhm Exp $	*/
+/*	$OpenBSD: route.h,v 1.210 2024/03/31 15:53:12 bluhm Exp $	*/
 /*	$NetBSD: route.h,v 1.9 1996/02/13 22:00:49 christos Exp $	*/
 
 /*
@@ -38,6 +38,10 @@
 /*
  * Locks used to protect struct members in this file:
  *	I	immutable after creation
+ *	N	net lock
+ *	X	exclusive net lock, or shared net lock + kernel lock
+ *	R	art (rtable) lock
+ *	L	arp/nd6/etc lock for updates, net lock for reads
  *	T	rttimer_mtx		route timer lists
  */
 
@@ -99,32 +103,38 @@ struct rttimer;
  * preferring the former if available.  For each route we infer
  * the interface to use from the gateway address supplied when
  * the route was entered.  Routes that forward packets through
- * gateways are marked so that the output routines know to address the
- * gateway rather than the ultimate destination.
+ * gateways are marked with RTF_GATEWAY so that the output routines
+ * know to address the gateway rather than the ultimate destination.
+ *
+ * How the RT_gw union is used also depends on RTF_GATEWAY. With
+ * RTF_GATEWAY set, rt_gwroute points at the rtentry for the rt_gateway
+ * address. If RTF_GATEWAY is not set, rt_cachecnt contains the
+ * number of RTF_GATEWAY rtentry structs with their rt_gwroute pointing
+ * at this rtentry.
  */
 
 struct rtentry {
-	struct sockaddr	*rt_dest;	/* destination */
-	SRPL_ENTRY(rtentry) rt_next;	/* Next multipath entry to our dst. */
-	struct sockaddr	*rt_gateway;	/* value */
-	struct ifaddr	*rt_ifa;	/* the answer: interface addr to use */
-	caddr_t		 rt_llinfo;	/* pointer to link level info cache or
-					   to an MPLS structure */
+	struct sockaddr	*rt_dest;	/* [I] destination */
+	SRPL_ENTRY(rtentry) rt_next;	/* [R] next mpath entry to our dst */
+	struct sockaddr	*rt_gateway;	/* [X] gateway address */
+	struct ifaddr	*rt_ifa;	/* [N] interface addr to use */
+	caddr_t		 rt_llinfo;	/* [L] pointer to link level info or
+					   an MPLS structure */
 	union {
-		struct rtentry	*_nh;	/* implied entry for gatewayed routes */
-		unsigned int	 _ref;	/* # gatewayed caching this route */
+		struct rtentry	*_nh;	/* [X] rtentry for rt_gateway */
+		unsigned int	 _ref;	/* [X] # gateway rtentry refs */
 	} RT_gw;
 #define rt_gwroute	 RT_gw._nh
 #define rt_cachecnt	 RT_gw._ref
-	struct rtentry	*rt_parent;	/* If cloned, parent of this route. */
+	struct rtentry	*rt_parent;	/* [N] if cloned, parent rtentry */
 	LIST_HEAD(, rttimer) rt_timer;  /* queue of timeouts for misc funcs */
 	struct rt_kmetrics rt_rmx;	/* metrics used by rx'ing protocols */
-	unsigned int	 rt_ifidx;	/* the answer: interface to use */
-	unsigned int	 rt_flags;	/* up/down?, host/net */
+	unsigned int	 rt_ifidx;	/* [N] interface to use */
+	unsigned int	 rt_flags;	/* [X] up/down?, host/net */
 	struct refcnt	 rt_refcnt;	/* # held references */
-	int		 rt_plen;	/* prefix length */
-	uint16_t	 rt_labelid;	/* route label ID */
-	uint8_t		 rt_priority;	/* routing priority to use */
+	int		 rt_plen;	/* [I] prefix length */
+	uint16_t	 rt_labelid;	/* [N] route label ID */
+	uint8_t		 rt_priority;	/* [N] routing priority to use */
 };
 #define	rt_use		rt_rmx.rmx_pksent
 #define	rt_expire	rt_rmx.rmx_expire
@@ -360,6 +370,19 @@ struct sockaddr_rtsearch {
 	char		sr_search[RTSEARCH_LEN];
 };
 
+struct rt_addrinfo {
+	int	rti_addrs;
+	const	struct sockaddr *rti_info[RTAX_MAX];
+	int	rti_flags;
+	struct	ifaddr *rti_ifa;
+	struct	rt_msghdr *rti_rtm;
+	u_char	rti_mpls;
+};
+
+#ifdef __BSD_VISIBLE
+
+#include <netinet/in.h>
+
 /*
  * A route consists of a destination address and a reference
  * to a routing entry.  These are often held by protocols
@@ -367,18 +390,20 @@ struct sockaddr_rtsearch {
  */
 struct route {
 	struct	rtentry *ro_rt;
+	u_long		 ro_generation;
 	u_long		 ro_tableid;	/* u_long because of alignment */
-	struct	sockaddr ro_dst;
+	union {
+		struct	sockaddr	ro_dstsa;
+		struct	sockaddr_in	ro_dstsin;
+		struct	sockaddr_in6	ro_dstsin6;
+	};
+	union {
+		struct	in_addr		ro_srcin;
+		struct	in6_addr	ro_srcin6;
+	};
 };
 
-struct rt_addrinfo {
-	int	rti_addrs;
-	struct	sockaddr *rti_info[RTAX_MAX];
-	int	rti_flags;
-	struct	ifaddr *rti_ifa;
-	struct	rt_msghdr *rti_rtm;
-	u_char	rti_mpls;
-};
+#endif /* __BSD_VISIBLE */
 
 #ifdef _KERNEL
 
@@ -416,8 +441,9 @@ struct rttimer_queue {
 	int				rtq_timeout;	/* [T] */
 };
 
-const char	*rtlabel_id2name(u_int16_t);
-u_int16_t	 rtlabel_name2id(char *);
+const char	*rtlabel_id2name_locked(u_int16_t);
+const char	*rtlabel_id2name(u_int16_t, char *, size_t);
+u_int16_t	 rtlabel_name2id(const char *);
 struct sockaddr	*rtlabel_id2sa(u_int16_t, struct sockaddr_rtlabel *);
 void		 rtlabel_unref(u_int16_t);
 
@@ -427,6 +453,7 @@ void		 rtlabel_unref(u_int16_t);
 #define	RT_RESOLVE	1
 
 extern struct rtstat rtstat;
+extern u_long rtgeneration;
 
 struct mbuf;
 struct socket;
@@ -436,6 +463,14 @@ struct if_ieee80211_data;
 struct bfd_config;
 
 void	 route_init(void);
+int	 route_cache(struct route *, const struct in_addr *,
+	    const struct in_addr *, u_int);
+struct rtentry *route_mpath(struct route *, const struct in_addr *,
+	    const struct in_addr *, u_int);
+int	 route6_cache(struct route *, const struct in6_addr *,
+	    const struct in6_addr *, u_int);
+struct rtentry *route6_mpath(struct route *, const struct in6_addr *,
+	    const struct in6_addr *, u_int);
 void	 rtm_ifchg(struct ifnet *);
 void	 rtm_ifannounce(struct ifnet *, int);
 void	 rtm_bfd(struct bfd_config *);
@@ -447,7 +482,7 @@ void	 rtm_send(struct rtentry *, int, int, unsigned int);
 void	 rtm_addr(int, struct ifaddr *);
 void	 rtm_miss(int, struct rt_addrinfo *, int, uint8_t, u_int, int, u_int);
 void	 rtm_proposal(struct ifnet *, struct rt_addrinfo *, int, uint8_t);
-int	 rt_setgate(struct rtentry *, struct sockaddr *, u_int);
+int	 rt_setgate(struct rtentry *, const struct sockaddr *, u_int);
 struct rtentry *rt_getll(struct rtentry *);
 
 void		rt_timer_init(void);
@@ -462,13 +497,13 @@ void		rt_timer_queue_flush(struct rttimer_queue *);
 unsigned long	rt_timer_queue_count(struct rttimer_queue *);
 void		rt_timer_timer(void *);
 
-int	 rt_mpls_set(struct rtentry *, struct sockaddr *, uint8_t);
+int	 rt_mpls_set(struct rtentry *, const struct sockaddr *, uint8_t);
 void	 rt_mpls_clear(struct rtentry *);
 
 int	 rtisvalid(struct rtentry *);
-int	 rt_hash(struct rtentry *, struct sockaddr *, uint32_t *);
-struct	 rtentry *rtalloc_mpath(struct sockaddr *, uint32_t *, u_int);
-struct	 rtentry *rtalloc(struct sockaddr *, int, unsigned int);
+int	 rt_hash(struct rtentry *, const struct sockaddr *, uint32_t *);
+struct	 rtentry *rtalloc_mpath(const struct sockaddr *, uint32_t *, u_int);
+struct	 rtentry *rtalloc(const struct sockaddr *, int, unsigned int);
 void	 rtref(struct rtentry *);
 void	 rtfree(struct rtentry *);
 

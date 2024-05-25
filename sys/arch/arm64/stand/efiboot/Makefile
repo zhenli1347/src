@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.17 2022/12/07 23:04:26 patrick Exp $
+#	$OpenBSD: Makefile,v 1.22 2023/10/26 14:13:37 jsg Exp $
 
 NOMAN=		#
 
@@ -19,7 +19,7 @@ OBJCOPY?=	objcopy
 OBJDUMP?=	objdump
 
 LDFLAGS+=-nostdlib -T ${.CURDIR}/ldscript.arm64 -Bsymbolic -shared
-LDFLAGS+=--pack-dyn-relocs=none
+LDFLAGS+=--pack-dyn-relocs=none --no-execute-only
 
 .PATH:	${S}/stand/boot
 SRCS+=	boot.c cmd.c vars.c
@@ -32,7 +32,7 @@ SRCS+=	alloc.c ctime.c exit.c getchar.c hexdump.c \
 SRCS+=	close.c closeall.c cons.c cread.c dev.c disklabel.c dkcksum.c fchmod.c \
 	fstat.c lseek.c open.c read.c readdir.c stat.c
 SRCS+=	loadfile.c arc4.c
-SRCS+=	ufs.c ufs2.c
+SRCS+=	ufs.c ufs2.c cd9660.c
 SRCS+=	arp.c ether.c globals.c in_cksum.c net.c netif.c netudp.c tftp.c
 SRCS+=	aes_xts.c bcrypt_pbkdf.c blowfish.c explicit_bzero.c hmac_sha1.c \
 	pkcs5_pbkdf2.c rijndael.c sha1.c sha2.c softraid.c
@@ -46,7 +46,7 @@ SRCS+=	adler32.c crc32.c inflate.c inftrees.c
 CPPFLAGS+=	-nostdinc
 CPPFLAGS+=	-I${S} -I. -I${.CURDIR}
 CPPFLAGS+=	-I${EFIDIR}/include -I${EFIDIR}/include/arm64
-CPPFLAGS+=	-D_STANDALONE
+CPPFLAGS+=	-D_STANDALONE -DBOOT_STTY
 CPPFLAGS+=	-DSMALL -DSLOW -DNOBYFOUR -D__INTERNAL_LIBSA_CREAD
 CPPFLAGS+=	-DNEEDS_HEAP_H -DMDRANDOM -DFWRANDOM
 COPTS+=		-Wno-attributes -Wno-format

@@ -1,4 +1,4 @@
-/*	$OpenBSD: logmsg.c,v 1.9 2022/08/24 17:14:02 claudio Exp $ */
+/*	$OpenBSD: logmsg.c,v 1.14 2024/05/20 10:00:00 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -60,55 +60,54 @@ log_fmt_peer(const struct peer_config *peer)
 void
 log_peer_info(const struct peer_config *peer, const char *emsg, ...)
 {
-	char	*p, *nfmt;
+	char	*p, *msg;
 	va_list	 ap;
 
 	p = log_fmt_peer(peer);
-	if (asprintf(&nfmt, "%s: %s", p, emsg) == -1)
-		fatal(NULL);
 	va_start(ap, emsg);
-	vlog(LOG_INFO, nfmt, ap);
+	if (vasprintf(&msg, emsg, ap) == -1)
+		fatal(NULL);
 	va_end(ap);
+	logit(LOG_INFO, "%s: %s", p, msg);
+	free(msg);
 	free(p);
-	free(nfmt);
 }
 
 void
 log_peer_warn(const struct peer_config *peer, const char *emsg, ...)
 {
-	char	*p, *nfmt;
+	char	*p, *msg;
 	va_list	 ap;
+	int	 saved_errno = errno;
 
 	p = log_fmt_peer(peer);
 	if (emsg == NULL) {
-		if (asprintf(&nfmt, "%s: %s", p, strerror(errno)) == -1)
-			fatal(NULL);
+		logit(LOG_ERR, "%s: %s", p, strerror(saved_errno));
 	} else {
-		if (asprintf(&nfmt, "%s: %s: %s", p, emsg, strerror(errno)) ==
-		    -1)
+		va_start(ap, emsg);
+		if (vasprintf(&msg, emsg, ap) == -1)
 			fatal(NULL);
+		va_end(ap);
+		logit(LOG_ERR, "%s: %s: %s", p, msg, strerror(saved_errno));
+		free(msg);
 	}
-	va_start(ap, emsg);
-	vlog(LOG_ERR, nfmt, ap);
-	va_end(ap);
 	free(p);
-	free(nfmt);
 }
 
 void
 log_peer_warnx(const struct peer_config *peer, const char *emsg, ...)
 {
-	char	*p, *nfmt;
+	char	*p, *msg;
 	va_list	 ap;
 
 	p = log_fmt_peer(peer);
-	if (asprintf(&nfmt, "%s: %s", p, emsg) == -1)
-		fatal(NULL);
 	va_start(ap, emsg);
-	vlog(LOG_ERR, nfmt, ap);
+	if (vasprintf(&msg, emsg, ap) == -1)
+		fatal(NULL);
 	va_end(ap);
+	logit(LOG_ERR, "%s: %s", p, msg);
+	free(msg);
 	free(p);
-	free(nfmt);
 }
 
 void
@@ -134,11 +133,17 @@ log_statechange(struct peer *peer, enum session_state nstate,
 
 void
 log_notification(const struct peer *peer, uint8_t errcode, uint8_t subcode,
-    u_char *data, uint16_t datalen, const char *dir)
+    const struct ibuf *data, const char *dir)
 {
+	struct ibuf	 ibuf;
 	char		*p;
 	const char	*suberrname = NULL;
 	int		 uk = 0;
+
+	if (data != NULL)
+		ibuf_from_ibuf(&ibuf, data);
+	else
+		ibuf_from_buffer(&ibuf, NULL, 0);
 
 	p = log_fmt_peer(&peer->conf);
 	switch (errcode) {
@@ -155,6 +160,18 @@ log_notification(const struct peer *peer, uint8_t errcode, uint8_t subcode,
 			uk = 1;
 		else
 			suberrname = suberr_open_names[subcode];
+		if (errcode == ERR_OPEN && subcode == ERR_OPEN_CAPA) {
+			uint8_t capa_code;
+
+			if (ibuf_get_n8(&ibuf, &capa_code) == -1)
+				break;
+
+			logit(LOG_ERR, "%s: %s notification: %s, %s: %s",
+			    p, dir, errnames[errcode], suberrname,
+			    log_capability(capa_code));
+			free(p);
+			return;
+		}
 		break;
 	case ERR_UPDATE:
 		if (subcode >= sizeof(suberr_update_names) / sizeof(char *) ||
@@ -169,6 +186,24 @@ log_notification(const struct peer *peer, uint8_t errcode, uint8_t subcode,
 			uk = 1;
 		else
 			suberrname = suberr_cease_names[subcode];
+
+		if (subcode == ERR_CEASE_ADMIN_DOWN ||
+		    subcode == ERR_CEASE_ADMIN_RESET) {
+			uint8_t len;
+			/* check if shutdown reason is included */
+			if (ibuf_get_n8(&ibuf, &len) != -1 && len != 0) {
+				char *s;
+				if ((s = ibuf_get_string(&ibuf, len)) != NULL) {
+					logit(LOG_ERR, "%s: %s notification: "
+					    "%s, %s: reason \"%s\"", p, dir,
+					    errnames[errcode], suberrname,
+					    log_reason(s));
+					free(s);
+					free(p);
+					return;
+				}
+			}
+		}
 		break;
 	case ERR_HOLDTIMEREXPIRED:
 		if (subcode != 0)

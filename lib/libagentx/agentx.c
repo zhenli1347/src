@@ -1,4 +1,4 @@
-/*	$OpenBSD: agentx.c,v 1.21 2022/12/02 10:57:12 martijn Exp $ */
+/*	$OpenBSD: agentx.c,v 1.24 2023/10/29 11:10:07 martijn Exp $ */
 /*
  * Copyright (c) 2019 Martijn van Duren <martijn@openbsd.org>
  *
@@ -2733,8 +2733,7 @@ agentx_get_finalize(struct agentx_get *axg)
 	free(logmsg);
 
 	if (ax_response(ax->ax_ax, axs->axs_id, axg->axg_transactionid,
-	    axg->axg_packetid, AGENTX_CONTEXT_CTX(axc), 0, error, index,
-	    vbl, nvarbind) == -1) {
+	    axg->axg_packetid, 0, error, index, vbl, nvarbind) == -1) {
 		agentx_log_axg_warn(axg, "Couldn't parse request");
 		agentx_reset(ax);
 	} else
@@ -2823,7 +2822,7 @@ getnext:
 		while (axo != NULL && axo->axo_cstate != AX_CSTATE_OPEN)
 			axo = RB_NEXT(axc_objects, &(axc->axc_objects), axo);
 		if (axo == NULL ||
-		    ax_oid_cmp(&(axo->axo_oid), &(axv->axv_end)) > 0) {
+		    ax_oid_cmp(&(axo->axo_oid), &(axv->axv_end)) >= 0) {
 			agentx_varbind_endofmibview(axv);
 			return;
 		}
@@ -2867,7 +2866,7 @@ getnext:
  * - AX_PDU_TYPE_GET: we always return AX_DATA_TYPE_NOSUCHINSTANCE
  * - AX_PDU_TYPE_GETNEXT:
  *   - Missing OID digits to match indices or !dynamic indices
- *     (AX_DATA_TYPE_INTEGER) undeflows will result in the following indices to
+ *     (AX_DATA_TYPE_INTEGER) underflows will result in the following indices to
  *     be NUL-initialized and the request type will be set to
  *     AGENTX_REQUEST_TYPE_GETNEXTINCLUSIVE
  *   - An overflow can happen on AX_DATA_TYPE_OCTETSTRING and
@@ -3350,19 +3349,53 @@ agentx_varbind_finalize(struct agentx_varbind *axv)
 #endif
 		}
 	}
-	cmp = ax_oid_cmp(&(axv->axv_vb.avb_oid), &oid);
-	if ((agentx_varbind_request(axv) == AGENTX_REQUEST_TYPE_GETNEXT &&
-	    cmp >= 0) || cmp > 0) {
+	cmp = ax_oid_cmp(&oid, &(axv->axv_vb.avb_oid));
+	switch (agentx_varbind_request(axv)) {
+	case AGENTX_REQUEST_TYPE_GET:
+		if (cmp != 0) {
 #ifdef AX_DEBUG
-		agentx_log_axg_fatalx(axg, "indices not incremented");
+			agentx_log_axg_fatalx(axg, "index changed");
 #else
-		agentx_log_axg_warnx(axg, "indices not incremented");
-		bcopy(&(axv->axv_start), &(axv->axv_vb.avb_oid),
-		    sizeof(axv->axv_start));
-		axv->axv_error = AX_PDU_ERROR_GENERR;
+			agentx_log_axg_warnx(axg, "index changed");
+			bcopy(&(axv->axv_start), &(axv->axv_vb.avb_oid),
+			    sizeof(axv->axv_start));
+			axv->axv_error = AX_PDU_ERROR_GENERR;
+			break;
 #endif
-	} else
+		}
+		break;
+	case AGENTX_REQUEST_TYPE_GETNEXT:
+		if (cmp <= 0) {
+#ifdef AX_DEBUG
+			agentx_log_axg_fatalx(axg, "indices not incremented");
+#else
+			agentx_log_axg_warnx(axg, "indices not incremented");
+			bcopy(&(axv->axv_start), &(axv->axv_vb.avb_oid),
+			    sizeof(axv->axv_start));
+			axv->axv_error = AX_PDU_ERROR_GENERR;
+			break;
+#endif
+		}
+		/* FALLTHROUGH */
+	case AGENTX_REQUEST_TYPE_GETNEXTINCLUSIVE:
+		if (cmp < 0) {
+#ifdef AX_DEBUG
+			agentx_log_axg_fatalx(axg, "index decremented");
+#else
+			agentx_log_axg_warnx(axg, "index decremented");
+			bcopy(&(axv->axv_start), &(axv->axv_vb.avb_oid),
+			    sizeof(axv->axv_start));
+			axv->axv_error = AX_PDU_ERROR_GENERR;
+			break;
+#endif
+		}
+		if (axv->axv_end.aoi_idlen != 0 &&
+		    ax_oid_cmp(&oid, &(axv->axv_end)) >= 0) {
+			agentx_varbind_endofmibview(axv);
+			return;
+		}
 		bcopy(&oid, &(axv->axv_vb.avb_oid), sizeof(oid));
+	}
 done:
 	agentx_object_unlock(axv->axv_axo);
 	agentx_get_finalize(axv->axv_axg);
@@ -4041,7 +4074,6 @@ agentx_read(struct agentx *ax)
 		if (ax_response(ax->ax_ax, axs->axs_id,
 		    pdu->ap_header.aph_transactionid,
 		    pdu->ap_header.aph_packetid,
-		    axc == NULL ? NULL : AGENTX_CONTEXT_CTX(axc),
 		    0, error, 1, NULL, 0) == -1)
 			agentx_log_axc_warn(axc,
 			    "transaction: %u packetid: %u: failed to send "

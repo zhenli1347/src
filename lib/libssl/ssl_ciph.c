@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_ciph.c,v 1.135 2022/11/26 16:08:55 tb Exp $ */
+/* $OpenBSD: ssl_ciph.c,v 1.142 2024/05/09 07:55:48 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -142,12 +142,9 @@
 
 #include <stdio.h>
 
+#include <openssl/evp.h>
 #include <openssl/objects.h>
 #include <openssl/opensslconf.h>
-
-#ifndef OPENSSL_NO_ENGINE
-#include <openssl/engine.h>
-#endif
 
 #include "ssl_local.h"
 
@@ -215,10 +212,6 @@ static const SSL_CIPHER cipher_aliases[] = {
 		.name = SSL_TXT_ECDH,
 		.algorithm_mkey = SSL_kECDHE,
 	},
-	{
-		.name = SSL_TXT_kGOST,
-		.algorithm_mkey = SSL_kGOST,
-	},
 
 	/* server authentication aliases */
 	{
@@ -244,14 +237,6 @@ static const SSL_CIPHER cipher_aliases[] = {
 	{
 		.name = SSL_TXT_ECDSA,
 		.algorithm_auth = SSL_aECDSA,
-	},
-	{
-		.name = SSL_TXT_aGOST01,
-		.algorithm_auth = SSL_aGOST01,
-	},
-	{
-		.name = SSL_TXT_aGOST,
-		.algorithm_auth = SSL_aGOST01,
 	},
 
 	/* aliases combining key exchange and server authentication */
@@ -359,24 +344,12 @@ static const SSL_CIPHER cipher_aliases[] = {
 		.algorithm_mac = SSL_SHA1,
 	},
 	{
-		.name = SSL_TXT_GOST94,
-		.algorithm_mac = SSL_GOST94,
-	},
-	{
-		.name = SSL_TXT_GOST89MAC,
-		.algorithm_mac = SSL_GOST89MAC,
-	},
-	{
 		.name = SSL_TXT_SHA256,
 		.algorithm_mac = SSL_SHA256,
 	},
 	{
 		.name = SSL_TXT_SHA384,
 		.algorithm_mac = SSL_SHA384,
-	},
-	{
-		.name = SSL_TXT_STREEBOG256,
-		.algorithm_mac = SSL_STREEBOG256,
 	},
 
 	/* protocol version aliases */
@@ -475,9 +448,6 @@ ssl_cipher_get_evp(const SSL_SESSION *ss, const EVP_CIPHER **enc,
 	case SSL_CAMELLIA256:
 		*enc = EVP_camellia_256_cbc();
 		break;
-	case SSL_eGOST2814789CNT:
-		*enc = EVP_gost2814789_cnt();
-		break;
 	}
 
 	switch (ss->cipher->algorithm_mac) {
@@ -493,20 +463,11 @@ ssl_cipher_get_evp(const SSL_SESSION *ss, const EVP_CIPHER **enc,
 	case SSL_SHA384:
 		*md = EVP_sha384();
 		break;
-	case SSL_GOST89MAC:
-		*md = EVP_gost2814789imit();
-		break;
-	case SSL_GOST94:
-		*md = EVP_gostr341194();
-		break;
-	case SSL_STREEBOG256:
-		*md = EVP_streebog256();
-		break;
 	}
-
 	if (*enc == NULL || *md == NULL)
 		return 0;
 
+	/* XXX remove these from ssl_cipher_get_evp? */
 	/*
 	 * EVP_CIPH_FLAG_AEAD_CIPHER and EVP_CIPH_GCM_MODE ciphers are not
 	 * supported via EVP_CIPHER (they should be using EVP_AEAD instead).
@@ -516,14 +477,8 @@ ssl_cipher_get_evp(const SSL_SESSION *ss, const EVP_CIPHER **enc,
 	if (EVP_CIPHER_mode(*enc) == EVP_CIPH_GCM_MODE)
 		return 0;
 
-	if (ss->cipher->algorithm_mac == SSL_GOST89MAC) {
-		*mac_pkey_type = EVP_PKEY_GOSTIMIT;
-		*mac_secret_size = 32; /* XXX */
-	} else {
-		*mac_pkey_type = EVP_PKEY_HMAC;
-		*mac_secret_size = EVP_MD_size(*md);
-	}
-
+	*mac_pkey_type = EVP_PKEY_HMAC;
+	*mac_secret_size = EVP_MD_size(*md);
 	return 1;
 }
 
@@ -567,8 +522,7 @@ ssl_get_handshake_evp_md(SSL *s, const EVP_MD **md)
 	if (s->s3->hs.cipher == NULL)
 		return 0;
 
-	handshake_mac = s->s3->hs.cipher->algorithm2 &
-	    SSL_HANDSHAKE_MAC_MASK;
+	handshake_mac = s->s3->hs.cipher->algorithm2 & SSL_HANDSHAKE_MAC_MASK;
 
 	/* For TLSv1.2 we upgrade the default MD5+SHA1 MAC to SHA256. */
 	if (SSL_USE_SHA256_PRF(s) && handshake_mac == SSL_HANDSHAKE_MAC_DEFAULT)
@@ -578,17 +532,11 @@ ssl_get_handshake_evp_md(SSL *s, const EVP_MD **md)
 	case SSL_HANDSHAKE_MAC_DEFAULT:
 		*md = EVP_md5_sha1();
 		return 1;
-	case SSL_HANDSHAKE_MAC_GOST94:
-		*md = EVP_gostr341194();
-		return 1;
 	case SSL_HANDSHAKE_MAC_SHA256:
 		*md = EVP_sha256();
 		return 1;
 	case SSL_HANDSHAKE_MAC_SHA384:
 		*md = EVP_sha384();
-		return 1;
-	case SSL_HANDSHAKE_MAC_STREEBOG256:
-		*md = EVP_streebog256();
 		return 1;
 	default:
 		break;
@@ -636,6 +584,7 @@ ll_append_head(CIPHER_ORDER **head, CIPHER_ORDER *curr,
 	*head = curr;
 }
 
+/* XXX beck: remove this in a followon to removing GOST */
 static void
 ssl_cipher_get_disabled(unsigned long *mkey, unsigned long *auth,
     unsigned long *enc, unsigned long *mac, unsigned long *ssl)
@@ -645,16 +594,6 @@ ssl_cipher_get_disabled(unsigned long *mkey, unsigned long *auth,
 	*enc = 0;
 	*mac = 0;
 	*ssl = 0;
-
-	/*
-	 * Check for the availability of GOST 34.10 public/private key
-	 * algorithms. If they are not available disable the associated
-	 * authentication and key exchange algorithms.
-	 */
-	if (EVP_PKEY_meth_find(NID_id_GostR3410_2001) == NULL) {
-		*auth |= SSL_aGOST01;
-		*mkey |= SSL_kGOST;
-	}
 
 #ifdef SSL_FORBID_ENULL
 	*enc |= SSL_eNULL;
@@ -1401,22 +1340,10 @@ ssl_create_cipher_list(const SSL_METHOD *ssl_method,
 	return ret;
 }
 
-const SSL_CIPHER *
-SSL_CIPHER_get_by_id(unsigned int id)
-{
-	return ssl3_get_cipher_by_id(id);
-}
-
-const SSL_CIPHER *
-SSL_CIPHER_get_by_value(uint16_t value)
-{
-	return ssl3_get_cipher_by_value(value);
-}
-
 char *
 SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 {
-	unsigned long alg_mkey, alg_auth, alg_enc, alg_mac, alg_ssl, alg2;
+	unsigned long alg_mkey, alg_auth, alg_enc, alg_mac, alg_ssl;
 	const char *ver, *kx, *au, *enc, *mac;
 	char *ret;
 	int l;
@@ -1426,8 +1353,6 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	alg_enc = cipher->algorithm_enc;
 	alg_mac = cipher->algorithm_mac;
 	alg_ssl = cipher->algorithm_ssl;
-
-	alg2 = cipher->algorithm2;
 
 	if (alg_ssl & SSL_SSLV3)
 		ver = "SSLv3";
@@ -1447,9 +1372,6 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 		break;
 	case SSL_kECDHE:
 		kx = "ECDH";
-		break;
-	case SSL_kGOST:
-		kx = "GOST";
 		break;
 	case SSL_kTLS1_3:
 		kx = "TLSv1.3";
@@ -1471,9 +1393,6 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	case SSL_aECDSA:
 		au = "ECDSA";
 		break;
-	case SSL_aGOST01:
-		au = "GOST01";
-		break;
 	case SSL_aTLS1_3:
 		au = "TLSv1.3";
 		break;
@@ -1487,7 +1406,7 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 		enc = "3DES(168)";
 		break;
 	case SSL_RC4:
-		enc = alg2 & SSL2_CF_8_BYTE_ENC ? "RC4(64)" : "RC4(128)";
+		enc = "RC4(128)";
 		break;
 	case SSL_eNULL:
 		enc = "None";
@@ -1513,9 +1432,6 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	case SSL_CHACHA20POLY1305:
 		enc = "ChaCha20-Poly1305";
 		break;
-	case SSL_eGOST2814789CNT:
-		enc = "GOST-28178-89-CNT";
-		break;
 	default:
 		enc = "unknown";
 		break;
@@ -1537,15 +1453,6 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	case SSL_AEAD:
 		mac = "AEAD";
 		break;
-	case SSL_GOST94:
-		mac = "GOST94";
-		break;
-	case SSL_GOST89MAC:
-		mac = "GOST89IMIT";
-		break;
-	case SSL_STREEBOG256:
-		mac = "STREEBOG256";
-		break;
 	default:
 		mac = "unknown";
 		break;
@@ -1565,6 +1472,7 @@ SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 
 	return (ret);
 }
+LSSL_ALIAS(SSL_CIPHER_description);
 
 const char *
 SSL_CIPHER_get_version(const SSL_CIPHER *c)
@@ -1576,6 +1484,7 @@ SSL_CIPHER_get_version(const SSL_CIPHER *c)
 	else
 		return("unknown");
 }
+LSSL_ALIAS(SSL_CIPHER_get_version);
 
 /* return the actual cipher being used */
 const char *
@@ -1585,6 +1494,7 @@ SSL_CIPHER_get_name(const SSL_CIPHER *c)
 		return (c->name);
 	return("(NONE)");
 }
+LSSL_ALIAS(SSL_CIPHER_get_name);
 
 /* number of bits for symmetric cipher */
 int
@@ -1599,18 +1509,21 @@ SSL_CIPHER_get_bits(const SSL_CIPHER *c, int *alg_bits)
 	}
 	return (ret);
 }
+LSSL_ALIAS(SSL_CIPHER_get_bits);
 
 unsigned long
 SSL_CIPHER_get_id(const SSL_CIPHER *c)
 {
 	return c->id;
 }
+LSSL_ALIAS(SSL_CIPHER_get_id);
 
 uint16_t
 SSL_CIPHER_get_value(const SSL_CIPHER *c)
 {
 	return ssl3_cipher_get_value(c);
 }
+LSSL_ALIAS(SSL_CIPHER_get_value);
 
 const SSL_CIPHER *
 SSL_CIPHER_find(SSL *ssl, const unsigned char *ptr)
@@ -1625,6 +1538,7 @@ SSL_CIPHER_find(SSL *ssl, const unsigned char *ptr)
 
 	return ssl3_get_cipher_by_value(cipher_value);
 }
+LSSL_ALIAS(SSL_CIPHER_find);
 
 int
 SSL_CIPHER_get_cipher_nid(const SSL_CIPHER *c)
@@ -1652,12 +1566,11 @@ SSL_CIPHER_get_cipher_nid(const SSL_CIPHER *c)
 		return NID_des_cbc;
 	case SSL_RC4:
 		return NID_rc4;
-	case SSL_eGOST2814789CNT:
-		return NID_gost89_cnt;
 	default:
 		return NID_undef;
 	}
 }
+LSSL_ALIAS(SSL_CIPHER_get_cipher_nid);
 
 int
 SSL_CIPHER_get_digest_nid(const SSL_CIPHER *c)
@@ -1665,10 +1578,6 @@ SSL_CIPHER_get_digest_nid(const SSL_CIPHER *c)
 	switch (c->algorithm_mac) {
 	case SSL_AEAD:
 		return NID_undef;
-	case SSL_GOST89MAC:
-		return NID_id_Gost28147_89_MAC;
-	case SSL_GOST94:
-		return NID_id_GostR3411_94;
 	case SSL_MD5:
 		return NID_md5;
 	case SSL_SHA1:
@@ -1677,12 +1586,11 @@ SSL_CIPHER_get_digest_nid(const SSL_CIPHER *c)
 		return NID_sha256;
 	case SSL_SHA384:
 		return NID_sha384;
-	case SSL_STREEBOG256:
-		return NID_id_tc26_gost3411_2012_256;
 	default:
 		return NID_undef;
 	}
 }
+LSSL_ALIAS(SSL_CIPHER_get_digest_nid);
 
 int
 SSL_CIPHER_get_kx_nid(const SSL_CIPHER *c)
@@ -1692,14 +1600,13 @@ SSL_CIPHER_get_kx_nid(const SSL_CIPHER *c)
 		return NID_kx_dhe;
 	case SSL_kECDHE:
 		return NID_kx_ecdhe;
-	case SSL_kGOST:
-		return NID_kx_gost;
 	case SSL_kRSA:
 		return NID_kx_rsa;
 	default:
 		return NID_undef;
 	}
 }
+LSSL_ALIAS(SSL_CIPHER_get_kx_nid);
 
 int
 SSL_CIPHER_get_auth_nid(const SSL_CIPHER *c)
@@ -1709,35 +1616,38 @@ SSL_CIPHER_get_auth_nid(const SSL_CIPHER *c)
 		return NID_auth_null;
 	case SSL_aECDSA:
 		return NID_auth_ecdsa;
-	case SSL_aGOST01:
-		return NID_auth_gost01;
 	case SSL_aRSA:
 		return NID_auth_rsa;
 	default:
 		return NID_undef;
 	}
 }
+LSSL_ALIAS(SSL_CIPHER_get_auth_nid);
 
 int
 SSL_CIPHER_is_aead(const SSL_CIPHER *c)
 {
 	return (c->algorithm_mac & SSL_AEAD) == SSL_AEAD;
 }
+LSSL_ALIAS(SSL_CIPHER_is_aead);
 
 void *
 SSL_COMP_get_compression_methods(void)
 {
 	return NULL;
 }
+LSSL_ALIAS(SSL_COMP_get_compression_methods);
 
 int
 SSL_COMP_add_compression_method(int id, void *cm)
 {
 	return 1;
 }
+LSSL_ALIAS(SSL_COMP_add_compression_method);
 
 const char *
 SSL_COMP_get_name(const void *comp)
 {
 	return NULL;
 }
+LSSL_ALIAS(SSL_COMP_get_name);

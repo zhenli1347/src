@@ -1,4 +1,4 @@
-/*	$OpenBSD: radiusd_radius.c,v 1.17 2019/06/28 13:32:49 deraadt Exp $	*/
+/*	$OpenBSD: radiusd_radius.c,v 1.20 2024/02/09 07:41:32 yasuoka Exp $	*/
 
 /*
  * Copyright (c) 2013 Internet Initiative Japan Inc.
@@ -125,7 +125,7 @@ main(int argc, char *argv[])
 	if ((module_radius.base = module_create(
 	    STDIN_FILENO, &module_radius, &module_radius_handlers)) == NULL)
 		err(1, "Could not create a module instance");
-	module_drop_privilege(module_radius.base);
+	module_drop_privilege(module_radius.base, 0);
 	setproctitle("[main]");
 
 	module_load(module_radius.base);
@@ -137,6 +137,8 @@ main(int argc, char *argv[])
 
 	module_start(module_radius.base);
 	event_loop(0);
+
+	module_destroy(module_radius.base);
 
 	exit(EXIT_SUCCESS);
 }
@@ -219,8 +221,7 @@ module_radius_config_set(void *ctx, const char *paramname, int paramvalc,
 	} else if (strcmp(paramname, "_debug") == 0)
 		log_init(1);
 	else if (strncmp(paramname, "_", 1) == 0)
-		/* ignore all internal messages */
-		module_send_message(module->base, IMSG_OK, NULL);
+		/* nothing */; /* ignore all internal messages */
 	else {
 		module_send_message(module->base, IMSG_NG,
 		    "Unknown config parameter name `%s'", paramname);
@@ -537,7 +538,7 @@ module_radius_req_reset_event(struct module_radius_req *req)
 	}
 	if (evtimer_add(&req->ev, &tv) != 0) {
 		module_radius_log(req->module, LOG_WARNING,
-		    "Cannot proccess the request for q=%u: "
+		    "Cannot process the request for q=%u: "
 		    "evtimer_add() failed: %m", req->q_id);
 		module_radius_req_on_failure(req);
 		return (-1);

@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: Tracker.pm,v 1.29 2018/10/22 10:29:06 espie Exp $
+# $OpenBSD: Tracker.pm,v 1.33 2023/10/08 09:16:39 espie Exp $
 #
 # Copyright (c) 2009 Marc Espie <espie@openbsd.org>
 #
@@ -28,21 +28,21 @@
 # the Tracker object does maintain that information globally so that
 # Update/Dependencies can do its job.
 
-use strict;
+use v5.36;
 use warnings;
 
 package OpenBSD::Tracker;
+
+# XXX we're a singleton class
 our $s;
 
-sub new
+sub new($class)
 {
-	my $class = shift;
-	return $s = bless {}, $class;
+	return $s //= bless {}, $class;
 }
 
-sub dump2
+sub dump2($set)
 {
-	my $set = shift;
 	if (defined $set->{merged}) {
 		return "merged from ".dump2($set->{merged});
 	}
@@ -53,7 +53,7 @@ sub dump2
 	    join(",", $set->hint_names));
 }
 
-sub dump
+sub dump($)
 {
 	return unless defined $s;
 	for my $l ('to_install', 'to_update') {
@@ -69,33 +69,29 @@ sub dump
 	}
 }
 
-sub sets_todo
+sub sets_todo($self, $offset = 0)
 {
-	my ($self, $offset) = @_;
 	return sprintf("%u/%u", (scalar keys %{$self->{done}})-$offset,
 		scalar keys %{$self->{total}});
 }
 
-sub handle_set
+sub handle_set($self, $set)
 {
-	my ($self, $set) = @_;
 	$self->{total}{$set} = 1;
 	if ($set->{finished}) {
 		$self->{done}{$set} = 1;
 	}
 }
 
-sub known
+sub known($self, $set)
 {
-	my ($self, $set) = @_;
 	for my $n ($set->newer, $set->older, $set->hints) {
 		$self->{known}{$n->pkgname} = 1;
 	}
 }
 
-sub add_set
+sub add_set($self, $set)
 {
-	my ($self, $set) = @_;
 	for my $n ($set->newer) {
 		$self->{to_install}{$n->pkgname} = $set;
 	}
@@ -105,24 +101,25 @@ sub add_set
 	for my $n ($set->kept) {
 		delete $self->{to_update}{$n->pkgname};
 		$self->{uptodate}{$n->pkgname} = 1;
+		if ($n->{is_firmware}) {
+			$self->{firmware}{$n->pkgname} = 1;
+		}
 	}
 	$self->known($set);
 	$self->handle_set($set);
 	return $self;
 }
 
-sub todo
+sub todo($self, @sets)
 {
-	my ($self, @sets) = @_;
 	for my $set (@sets) {
 		$self->add_set($set);
 	}
 	return $self;
 }
 
-sub remove_set
+sub remove_set($self, $set)
 {
-	my ($self, $set) = @_;
 	for my $n ($set->newer) {
 		delete $self->{to_install}{$n->pkgname};
 		delete $self->{cant_install}{$n->pkgname};
@@ -134,19 +131,20 @@ sub remove_set
 	$self->handle_set($set);
 }
 
-sub uptodate
+sub uptodate($self, $set)
 {
-	my ($self, $set) = @_;
 	$set->{finished} = 1;
 	$self->remove_set($set);
 	for my $n ($set->older, $set->kept) {
 		$self->{uptodate}{$n->pkgname} = 1;
+		if ($n->{is_firmware}) {
+			$self->{firmware}{$n->pkgname} = 1;
+		}
 	}
 }
 
-sub cant
+sub cant($self, $set)
 {
-	my ($self, $set) = @_;
 	$set->{finished} = 1;
 	$self->remove_set($set);
 	$self->known($set);
@@ -161,10 +159,8 @@ sub cant
 	}
 }
 
-sub done
+sub done($self, $set)
 {
-	my ($self, $set) = @_;
-
 	$set->{finished} = 1;
 	$self->remove_set($set);
 	$self->known($set);
@@ -178,10 +174,8 @@ sub done
 	}
 }
 
-sub is
+sub is($self, $k, $pkg)
 {
-	my ($self, $k, $pkg) = @_;
-
 	my $set = $self->{$k}{$pkg};
 	if (ref $set) {
 		return $set->real_set;
@@ -190,33 +184,37 @@ sub is
 	}
 }
 
-sub is_known
+sub is_known($self, $pkg)
 {
-	my ($self, $pkg) = @_;
 	return $self->is('known', $pkg);
 }
 
-sub is_installed
+sub is_installed($self, $pkg)
 {
-	my ($self, $pkg) = @_;
 	return $self->is('installed', $pkg);
 }
 
-sub is_to_update
+sub is_to_update($self, $pkg)
 {
-	my ($self, $pkg) = @_;
 	return $self->is('to_update', $pkg);
 }
 
-sub cant_list
+sub cant_list($self)
 {
-	my $self = shift;
 	return keys %{$self->{cant_update}};
 }
 
-sub cant_install_list
+sub did_something($self)
 {
-	my $self = shift;
+	for my $k (keys %{$self->{uptodate}}) {
+		next if $self->{firmware}{$k};
+		return 1;
+	}
+	return 0;
+}
+
+sub cant_install_list($self)
+{
 	return keys %{$self->{cant_install}};
 }
 

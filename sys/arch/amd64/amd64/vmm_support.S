@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmm_support.S,v 1.21 2022/12/01 00:26:15 guenther Exp $	*/
+/*	$OpenBSD: vmm_support.S,v 1.27 2024/04/01 05:11:49 guenther Exp $	*/
 /*
  * Copyright (c) 2014 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -60,7 +60,7 @@ vmm_dispatch_intr:
 	ret
 	lfence
 
-vmxon:
+ENTRY(vmxon)
 	RETGUARD_SETUP(vmxon, r11)
 	xorq	%rax, %rax
 	vmxon	(%rdi)
@@ -68,8 +68,9 @@ vmxon:
 	RETGUARD_CHECK(vmxon, r11)
 	ret
 	lfence
+END(vmxon)
 
-vmxoff:
+ENTRY(vmxoff)
 	RETGUARD_SETUP(vmxoff, r11)
 	xorq	%rax, %rax
 	vmxoff
@@ -77,8 +78,9 @@ vmxoff:
 	RETGUARD_CHECK(vmxoff, r11)
 	ret
 	lfence
+END(vmxoff)
 
-vmclear:
+ENTRY(vmclear)
 	RETGUARD_SETUP(vmclear, r11)
 	xorq	%rax, %rax
 	vmclear	(%rdi)
@@ -86,8 +88,9 @@ vmclear:
 	RETGUARD_CHECK(vmclear, r11)
 	ret
 	lfence
+END(vmclear)
 
-vmptrld:
+ENTRY(vmptrld)
 	RETGUARD_SETUP(vmptrld, r11)
 	xorq	%rax, %rax
 	vmptrld	(%rdi)
@@ -95,8 +98,9 @@ vmptrld:
 	RETGUARD_CHECK(vmptrld, r11)
 	ret
 	lfence
+END(vmptrld)
 
-vmptrst:
+ENTRY(vmptrst)
 	RETGUARD_SETUP(vmptrst, r11)
 	xorq	%rax, %rax
 	vmptrst	(%rdi)
@@ -105,7 +109,7 @@ vmptrst:
 	ret
 	lfence
 
-vmwrite:
+ENTRY(vmwrite)
 	RETGUARD_SETUP(vmwrite, r11)
 	xorq	%rax, %rax
 	vmwrite	%rsi, %rdi
@@ -113,8 +117,9 @@ vmwrite:
 	RETGUARD_CHECK(vmwrite, r11)
 	ret
 	lfence
+END(vmwrite)
 
-vmread:
+ENTRY(vmread)
 	RETGUARD_SETUP(vmread, r11)
 	xorq	%rax, %rax
 	vmread	%rdi, (%rsi)
@@ -122,22 +127,41 @@ vmread:
 	RETGUARD_CHECK(vmread, r11)
 	ret
 	lfence
+END(vmread)
 
-invvpid:
+/*
+ * Intel SDM Vol 3C, 31.2 defines different "vmfail" types, but there's no
+ * need to distinguish between CF=1 and ZF=1 for invvpid or invept.
+ */
+ENTRY(invvpid)
 	RETGUARD_SETUP(invvpid, r11)
 	invvpid (%rsi), %rdi
+        jbe     invvpid_fail
+        xorq    %rax, %rax
+        jmp     invvpid_ret
+invvpid_fail:
+        movq    $1, %rax
+invvpid_ret:
 	RETGUARD_CHECK(invvpid, r11)
 	ret
 	lfence
+END(invvpid)
 
-invept:
+ENTRY(invept)
 	RETGUARD_SETUP(invept, r11)
-	invept (%rsi), %rdi
+	invept  (%rsi), %rdi
+        jbe     invept_fail
+        xorq    %rax, %rax
+        jmp     invept_ret
+invept_fail:
+        movq    $1, %rax
+invept_ret:
 	RETGUARD_CHECK(invept, r11)
 	ret
 	lfence
+END(invept)
 
-vmx_enter_guest:
+ENTRY(vmx_enter_guest)
 	RETGUARD_SETUP(vmx_enter_guest, r11)
 	movq	%rdx, %r8	/* resume flag */
 	movq	%rcx, %r9	/* L1DF MSR support */
@@ -153,65 +177,6 @@ vmx_enter_guest:
 	vmwrite %rax, %rdi	/* Host RIP */
 
 skip_init:
-	/*
-	 * XXX use msr list here for restore instead of all this
-	 * stack jiggery-pokery
-	 */
-
-	pushfq
-	popq	%rax
-	andq	$(~PSL_I), %rax
-	pushq	%rax
-
-	/*
-	 * Save (possibly) lazy-switched selectors
-	 */
-	movw	%es, %ax
-	pushw	%ax
-	movw	%ds, %ax
-	pushw	%ax
-	movw	%ss, %ax
-	pushw	%ax
-
-	movq	$MSR_FSBASE, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-	pushw	%fs
-	movq	$MSR_GSBASE, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-	pushw	%gs
-	movq	$MSR_KERNELGSBASE, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
-	/*
-	 * Save various MSRs
-	 */
-	movq	$MSR_STAR, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
-	movq	$MSR_LSTAR, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
-	/* XXX - unused? */
-	movq	$MSR_CSTAR, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
-	movq	$MSR_SFMASK, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
 	RETGUARD_PUSH(r11)
 
 	/* Preserve callee-preserved registers as per AMD64 ABI */
@@ -229,6 +194,23 @@ skip_init:
 	 * XXX information yet to make the correct choices.
 	 */
 	CODEPATCH_START
+	xorl	%eax,%eax
+	xorl	%ebx,%ebx
+	xorl	%ecx,%ecx
+	xorl	%edx,%edx
+	xorl	%esi,%esi
+	xorl	%edi,%edi
+	xorl	%ebp,%ebp
+	/*
+	 * r8 is a boolean flagging launch or resume
+	 * r9 is 0-2 about the CPU
+	 */
+	xorl	%r10d,%r10d
+	xorl	%r11d,%r11d
+	xorl	%r12d,%r12d
+	xorl	%r13d,%r13d
+	xorl	%r14d,%r14d
+	xorl	%r15d,%r15d
 	subq	$8, %rsp
 	movw	%ds, (%rsp)
 	verw	(%rsp)
@@ -451,67 +433,13 @@ restore_host:
 
 	RETGUARD_POP(r11)
 
-	/*
-	 * Restore saved MSRs
-	 */
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_SFMASK, %rcx
-	wrmsr
-
-	/* XXX - unused? */
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_CSTAR, %rcx
-	wrmsr
-
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_LSTAR, %rcx
-	wrmsr
-
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_STAR, %rcx
-	wrmsr
-
-	/*
-	 * popw %gs will reset gsbase to 0, so preserve it
-	 * first. This is to accommodate possibly lazy-switched
-	 * selectors from above
-	 */
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_KERNELGSBASE, %rcx
-	wrmsr
-
-	popw	%gs
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_GSBASE, %rcx
-	wrmsr
-
-	popw	%fs
-	popq	%rdx
-	popq	%rax
-	movq	$MSR_FSBASE, %rcx
-	wrmsr
-
-	popw	%ax
-	movw	%ax, %ss
-	popw	%ax
-	movw	%ax, %ds
-	popw	%ax
-	movw	%ax, %es
-
-	popfq
-
 	movq	%rdi, %rax
 	RETGUARD_CHECK(vmx_enter_guest, r11)
 	ret
 	lfence
+END(vmx_enter_guest)
 
-svm_enter_guest:
+ENTRY(svm_enter_guest)
 	RETGUARD_SETUP(svm_enter_guest, r11)
 	clgi
 	movq	%rdi, %r8
@@ -555,12 +483,6 @@ svm_enter_guest:
 	pushq	%rdx
 
 	movq	$MSR_LSTAR, %rcx
-	rdmsr
-	pushq	%rax
-	pushq	%rdx
-
-	/* XXX - unused? */
-	movq	$MSR_CSTAR, %rcx
 	rdmsr
 	pushq	%rax
 	pushq	%rdx
@@ -671,9 +593,9 @@ restore_host_svm:
 	movq	$MSR_SFMASK, %rcx
 	wrmsr
 
-	/* XXX - unused? */
-	popq	%rdx
-	popq	%rax
+	/* make sure guest doesn't bleed into host */
+	xorl	%edx, %edx
+	xorl	%eax, %eax
 	movq	$MSR_CSTAR, %rcx
 	wrmsr
 
@@ -738,3 +660,4 @@ restore_host_svm:
 	RETGUARD_CHECK(svm_enter_guest, r11)
 	ret
 	lfence
+END(svm_enter_guest)

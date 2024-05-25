@@ -1,4 +1,4 @@
-/* $OpenBSD: mfii.c,v 1.87 2022/09/25 08:15:43 stsp Exp $ */
+/* $OpenBSD: mfii.c,v 1.91 2024/05/24 06:02:58 jsg Exp $ */
 
 /*
  * Copyright (c) 2012 David Gwynne <dlg@openbsd.org>
@@ -28,7 +28,6 @@
 #include <sys/atomic.h>
 #include <sys/sensors.h>
 #include <sys/rwlock.h>
-#include <sys/syslog.h>
 #include <sys/smr.h>
 
 #include <dev/biovar.h>
@@ -600,6 +599,14 @@ const struct mfii_device mfii_devices[] = {
 	{ PCI_VENDOR_SYMBIOS,	PCI_PRODUCT_SYMBIOS_MEGARAID_3416,
 	    &mfii_iop_35 },
 	{ PCI_VENDOR_SYMBIOS,	PCI_PRODUCT_SYMBIOS_MEGARAID_3516,
+	    &mfii_iop_35 },
+	{ PCI_VENDOR_SYMBIOS,   PCI_PRODUCT_SYMBIOS_MEGARAID_38XX,
+	    &mfii_iop_35 },
+	{ PCI_VENDOR_SYMBIOS,   PCI_PRODUCT_SYMBIOS_MEGARAID_38XX_2,
+	    &mfii_iop_35 },
+	{ PCI_VENDOR_SYMBIOS,   PCI_PRODUCT_SYMBIOS_MEGARAID_39XX,
+	    &mfii_iop_35 },
+	{ PCI_VENDOR_SYMBIOS,   PCI_PRODUCT_SYMBIOS_MEGARAID_39XX_2,
 	    &mfii_iop_35 }
 };
 
@@ -1764,7 +1771,9 @@ mfii_poll_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
 int
 mfii_exec(struct mfii_softc *sc, struct mfii_ccb *ccb)
 {
-	struct mutex m = MUTEX_INITIALIZER(IPL_BIO);
+	struct mutex m;
+
+	mtx_init(&m, IPL_BIO);
 
 #ifdef DIAGNOSTIC
 	if (ccb->ccb_cookie != NULL || ccb->ccb_done != NULL)

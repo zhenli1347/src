@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.30 2022/07/14 15:23:09 florian Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.33 2024/01/26 21:14:08 jan Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -269,7 +269,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 				fatalx("%s: received unexpected imsg fd "
 				    "to frontend", __func__);
 
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg fd to "
 				   "frontend but didn't receive any",
 				   __func__);
@@ -287,7 +287,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			event_add(&iev_engine->ev, NULL);
 			break;
 		case IMSG_BPFSOCK:
-			if ((bpfsock = imsg.fd) == -1)
+			if ((bpfsock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "bpf fd but didn't receive any",
 				    __func__);
@@ -298,7 +298,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			set_bpfsock(bpfsock, if_index);
 			break;
 		case IMSG_UDPSOCK:
-			if ((udpsock = imsg.fd) == -1)
+			if ((udpsock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "udpsocket fd but didn't receive any",
 				    __func__);
@@ -327,7 +327,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			}
 			break;
 		case IMSG_ROUTESOCK:
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "routesocket fd but didn't receive any",
 				    __func__);
@@ -430,7 +430,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			break;
 		}
 		case IMSG_CONTROLFD:
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "control fd but didn't receive any",
 				    __func__);
@@ -890,6 +890,7 @@ bpf_receive(int fd, short events, void *arg)
 		}
 		memcpy(&imsg_dhcp.packet, p + hdr->bh_hdrlen, hdr->bh_caplen);
 		imsg_dhcp.len = hdr->bh_caplen;
+		imsg_dhcp.csumflags = hdr->bh_csumflags;
 		frontend_imsg_compose_engine(IMSG_DHCP, 0, 0, &imsg_dhcp,
 		    sizeof(imsg_dhcp));
  cont:
@@ -924,6 +925,11 @@ build_packet(uint8_t message_type, char *if_name, uint32_t xid,
 		8, DHO_SUBNET_MASK, DHO_ROUTERS, DHO_DOMAIN_NAME_SERVERS,
 		DHO_HOST_NAME, DHO_DOMAIN_NAME, DHO_BROADCAST_ADDRESS,
 		DHO_DOMAIN_SEARCH, DHO_CLASSLESS_STATIC_ROUTES};
+	static uint8_t	 dhcp_req_list_v6[] = {DHO_DHCP_PARAMETER_REQUEST_LIST,
+		9, DHO_SUBNET_MASK, DHO_ROUTERS, DHO_DOMAIN_NAME_SERVERS,
+		DHO_HOST_NAME, DHO_DOMAIN_NAME, DHO_BROADCAST_ADDRESS,
+		DHO_DOMAIN_SEARCH, DHO_CLASSLESS_STATIC_ROUTES,
+		DHO_IPV6_ONLY_PREFERRED};
 	static uint8_t	 dhcp_requested_address[] = {DHO_DHCP_REQUESTED_ADDRESS,
 		4, 0, 0, 0, 0};
 	static uint8_t	 dhcp_server_identifier[] = {DHO_DHCP_SERVER_IDENTIFIER,
@@ -997,15 +1003,23 @@ build_packet(uint8_t message_type, char *if_name, uint32_t xid,
 			memcpy(p, iface_conf->vc_id, iface_conf->vc_id_len);
 			p += iface_conf->vc_id_len;
 		}
+		if (iface_conf->prefer_ipv6) {
+			memcpy(p, dhcp_req_list_v6, sizeof(dhcp_req_list_v6));
+			p += sizeof(dhcp_req_list_v6);
+
+		} else {
+			memcpy(p, dhcp_req_list, sizeof(dhcp_req_list));
+			p += sizeof(dhcp_req_list);
+		}
 	} else
 #endif /* SMALL */
 	{
 		memcpy(dhcp_client_id + 3, hw_address, sizeof(*hw_address));
 		memcpy(p, dhcp_client_id, sizeof(dhcp_client_id));
 		p += sizeof(dhcp_client_id);
+		memcpy(p, dhcp_req_list, sizeof(dhcp_req_list));
+		p += sizeof(dhcp_req_list);
 	}
-	memcpy(p, dhcp_req_list, sizeof(dhcp_req_list));
-	p += sizeof(dhcp_req_list);
 
 	if (requested_ip->s_addr != INADDR_ANY) {
 		memcpy(dhcp_requested_address + 2, requested_ip,

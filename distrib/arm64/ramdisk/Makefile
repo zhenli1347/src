@@ -1,7 +1,8 @@
-#	$OpenBSD: Makefile,v 1.24 2022/02/10 20:07:47 krw Exp $
+#	$OpenBSD: Makefile,v 1.31 2023/10/26 17:13:50 deraadt Exp $
 
 FS=		miniroot${OSrev}.img
 FSSIZE=		88064
+CDROM=		cd${OSrev}.iso
 MOUNT_POINT=	/mnt
 MTREE=		${UTILS}/mtree.conf
 RAMDISK=	RAMDISK
@@ -20,8 +21,8 @@ PRPI=		/usr/local/share/raspberrypi-firmware/boot
 LISTS=		${.CURDIR}/list
 UTILS=		${.CURDIR}/../../miniroot
 
-MRFSDISKTYPE=	rdroot
-MRMAKEFSARGS=	-o disklabel=${MRFSDISKTYPE},minfree=0,density=4096
+MRDISKTYPE=	rdroot
+MRMAKEFSARGS=	-o disklabel=${MRDISKTYPE},minfree=0,density=4096
 
 PIFILES=\
 	bootcode.bin \
@@ -40,13 +41,26 @@ PIFILES=\
 PIDTBO=\
 	disable-bt.dtbo
 
-all: ${FS}
+all: ${FS} ${CDROM}
+
+cdbr:	/usr/mdec/BOOTAA64.EFI
+	dd if=/dev/zero of=cdbr bs=512 count=5760
+	vnconfig -v cdbr > vnd
+	fdisk -iy -b "5744@16:c" `cat vnd` >/dev/null
+	newfs -t msdos /dev/r`cat vnd`i
+	mount ${MOUNT_ARGS_msdos} /dev/`cat vnd`i ${MOUNT_POINT}
+	mkdir -p ${MOUNT_POINT}/efi/boot
+	cp /usr/mdec/BOOTAA64.EFI ${MOUNT_POINT}/efi/boot/bootaa64.efi
+	echo bootaa64.efi > ${MOUNT_POINT}/efi/boot/startup.nsh
+	umount ${MOUNT_POINT}
+	vnconfig -u `cat vnd`
+	rm -f vnd
 
 ${FS}: bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	fdisk -iy -b "${MSDOSSIZE}@${MSDOSSTART}:c" `cat vnd` >/dev/null
-	echo 'a a\n\n\n\nw\nq\n' | disklabel -E `cat vnd` >/dev/null
+	echo '/ *' | disklabel -wAT- `cat vnd`
 	newfs -t msdos ${NEWFS_ARGS_msdos} /dev/r`cat vnd`i
 	mount ${MOUNT_ARGS_msdos} /dev/`cat vnd`i ${MOUNT_POINT}
 .for FILE in ${PIFILES}
@@ -61,8 +75,6 @@ ${FS}: bsd.rd
 	cp /usr/mdec/BOOTAA64.EFI ${MOUNT_POINT}/efi/boot/bootaa64.efi
 	echo bootaa64.efi > ${MOUNT_POINT}/efi/boot/startup.nsh
 	echo 'arm_64bit=1\nenable_uart=1\ndtoverlay=disable-bt\nkernel=u-boot.bin' > ${MOUNT_POINT}/config.txt
-	dd if=${PUBOOT}/pine64_plus/u-boot-sunxi-with-spl.bin \
-	    of=/dev/r`cat vnd`c bs=1024 seek=8 conv=sync
 	umount ${MOUNT_POINT}
 	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
@@ -73,7 +85,22 @@ ${FS}: bsd.rd
 	vnconfig -u `cat vnd`
 	rm -f vnd
 
-bsd.rd: mr.fs bsd
+${CDROM}: ${BASE} ${XBASE} cdbr bsd.rd
+	rm -rf ${.OBJDIR}/cd-dir
+	mkdir -p ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
+	mkdir -p ${.OBJDIR}/cd-dir/etc
+	echo "set image /${OSREV}/${MACHINE}/bsd.rd" > ${.OBJDIR}/cd-dir/etc/boot.conf
+	cp ${.OBJDIR}/bsd.rd ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
+	cp -p ${.OBJDIR}/cdbr ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
+	mkhybrid -a -R -T -L -l -d -D -N -o ${.OBJDIR}/${CDROM} \
+	    -A "OpenBSD ${OSREV} ${MACHINE} Install CD" \
+	    -P "Copyright (c) `date +%Y` Theo de Raadt, The OpenBSD project" \
+	    -p "Theo de Raadt <deraadt@openbsd.org>" \
+	    -V "OpenBSD/${MACHINE}   ${OSREV} Install CD" \
+	    -b ${OSREV}/${MACHINE}/cdbr -c ${OSREV}/${MACHINE}/boot.catalog \
+	    ${.OBJDIR}/cd-dir
+
+bsd.rd: mr.fs
 	cp bsd bsd.rd
 	rdsetroot bsd.rd mr.fs
 
@@ -82,7 +109,7 @@ bsd:
 	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && exec ${MAKE} ${MFLAGS}'
 	cp -p ${.CURDIR}/../../../sys/arch/${MACHINE}/compile/${RAMDISK}/obj/bsd bsd
 
-mr.fs: instbin
+mr.fs: instbin bsd
 	rm -rf $@.d
 	install -d -o root -g wheel $@.d
 	mtree -def ${MTREE} -p $@.d -u
@@ -110,13 +137,13 @@ unconfig:
 install:
 	cp bsd.rd ${RELEASEDIR}/bsd.rd
 	chmod a+r ${RELEASEDIR}/bsd.rd
-	cp ${FS} ${RELEASEDIR}
+	cp ${FS} ${CDROM} ${RELEASEDIR}
 .endif
 
 clean cleandir:
 	rm -f *.core mr.fs instbin instbin.mk instbin.cache \
 	    lib*.a lib*.olist instbin.map *.o *.lo *.c bsd.rd
 	rm -f instbin.conf
-	rm -rf cd-dir mr.fs.d
+	rm -rf cd-dir mr.fs.d cdbr
 
 .include <bsd.obj.mk>

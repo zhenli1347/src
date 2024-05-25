@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.95 2022/08/15 12:29:17 claudio Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.97 2023/11/08 19:19:10 millert Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -372,7 +372,17 @@ server_fcgi(struct httpd *env, struct client *clt)
 	    srv_conf->timeout.tv_sec, srv_conf->timeout.tv_sec);
 	bufferevent_enable(clt->clt_srvbev, EV_READ|EV_WRITE);
 	if (clt->clt_toread != 0) {
+		/*
+		 * XXX - Work around UAF: server_read_httpcontent() can call
+		 * server_close(), normally freeing clt. If clt->clt_fcgi_count
+		 * reaches 0, call server_close() via server_abort_http().
+		 */
+		clt->clt_fcgi_count++;
 		server_read_httpcontent(clt->clt_bev, clt);
+		if (clt->clt_fcgi_count-- <= 0) {
+			errstr = clt->clt_fcgi_error;
+			goto fail;
+		}
 		bufferevent_enable(clt->clt_bev, EV_READ);
 	} else {
 		bufferevent_disable(clt->clt_bev, EV_READ);

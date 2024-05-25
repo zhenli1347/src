@@ -1,4 +1,4 @@
-/*	$OpenBSD: buf_subs.c,v 1.31 2019/06/28 13:34:59 deraadt Exp $	*/
+/*	$OpenBSD: buf_subs.c,v 1.33 2024/04/23 13:34:50 jsg Exp $	*/
 /*	$NetBSD: buf_subs.c,v 1.5 1995/03/21 09:07:08 cgd Exp $	*/
 
 /*-
@@ -47,6 +47,9 @@
 /*
  * routines which implement archive and file buffering
  */
+
+static int buf_fill(void);
+static int buf_flush(int);
 
 #define MINFBSZ		512		/* default block size for hole detect */
 #define MAXFLT		10		/* default media read error limit */
@@ -762,7 +765,7 @@ cp_file(ARCHD *arcn, int fd1, int fd2)
 	 * check for holes in the source file. If none, we will use regular
 	 * write instead of file write.
 	 */
-	 if (((off_t)(arcn->sb.st_blocks * BLKMULT)) >= arcn->sb.st_size)
+	if (((off_t)(arcn->sb.st_blocks * BLKMULT)) >= arcn->sb.st_size)
 		++no_hole;
 
 	/*
@@ -825,7 +828,7 @@ cp_file(ARCHD *arcn, int fd1, int fd2)
  *	0 when finished (user specified termination in ar_next()).
  */
 
-int
+static int
 buf_fill(void)
 {
 	int cnt;
@@ -873,7 +876,7 @@ buf_fill(void)
  *	0 if all is ok, -1 when a write error occurs.
  */
 
-int
+static int
 buf_flush(int bufcnt)
 {
 	int cnt;

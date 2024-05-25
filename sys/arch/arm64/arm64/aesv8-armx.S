@@ -1,4 +1,4 @@
-/*	$OpenBSD: aesv8-armx.S,v 1.1 2021/02/21 14:55:16 tobhe Exp $	*/
+/*	$OpenBSD: aesv8-armx.S,v 1.3 2023/03/27 19:02:47 kettenis Exp $	*/
 /*
  * Copyright (c) 2006, CRYPTOGAMS by <appro@openssl.org>
  * All rights reserved.
@@ -47,17 +47,22 @@
  */
 
 .arch	armv8-a+crypto
-.text
+	
+.rodata
+
 .align	5
 .Lrcon:
 .long	0x01,0x01,0x01,0x01
 .long	0x0c0f0e0d,0x0c0f0e0d,0x0c0f0e0d,0x0c0f0e0d	// rotate-n-splat
 .long	0x1b,0x1b,0x1b,0x1b
 
+.text
+
 .globl	aes_v8_set_encrypt_key
 .type	aes_v8_set_encrypt_key,%function
 .align	5
 aes_v8_set_encrypt_key:
+	bti	c
 .Lenc_key:
 	stp	x29,x30,[sp,#-16]!
 	add	x29,sp,#0
@@ -74,7 +79,8 @@ aes_v8_set_encrypt_key:
 	tst	w1,#0x3f
 	b.ne	.Lenc_key_abort
 
-	adr	x3,.Lrcon
+	adrp	x3,.Lrcon
+	add	x3,x3,:lo12:.Lrcon
 	cmp	w1,#192
 
 	eor	v0.16b,v0.16b,v0.16b
@@ -225,6 +231,7 @@ aes_v8_set_encrypt_key:
 .type	aes_v8_set_decrypt_key,%function
 .align	5
 aes_v8_set_decrypt_key:
+	bti	c
 .inst	0xd503233f		// paciasp
 	stp	x29,x30,[sp,#-16]!
 	add	x29,sp,#0
@@ -266,6 +273,7 @@ aes_v8_set_decrypt_key:
 .type	aes_v8_encrypt,%function
 .align	5
 aes_v8_encrypt:
+	bti	c
 	ldr	w3,[x2,#240]
 	ld1	{v0.4s},[x2],#16
 	ld1	{v2.16b},[x0]
@@ -295,6 +303,7 @@ aes_v8_encrypt:
 .type	aes_v8_decrypt,%function
 .align	5
 aes_v8_decrypt:
+	bti	c
 	ldr	w3,[x2,#240]
 	ld1	{v0.4s},[x2],#16
 	ld1	{v2.16b},[x0]
@@ -324,6 +333,7 @@ aes_v8_decrypt:
 .type	aes_v8_cbc_encrypt,%function
 .align	5
 aes_v8_cbc_encrypt:
+	bti	c
 	stp	x29,x30,[sp,#-16]!
 	add	x29,sp,#0
 	subs	x2,x2,#16
@@ -799,6 +809,7 @@ aes_v8_cbc_encrypt:
 .type	aes_v8_ctr32_encrypt_blocks,%function
 .align	5
 aes_v8_ctr32_encrypt_blocks:
+	bti	c
 	stp	x29,x30,[sp,#-16]!
 	add	x29,sp,#0
 	ldr	w5,[x3,#240]

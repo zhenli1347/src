@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_msk.c,v 1.142 2022/03/11 18:00:46 mpi Exp $	*/
+/*	$OpenBSD: if_msk.c,v 1.144 2024/05/24 06:02:53 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999, 2000
@@ -94,8 +94,6 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/timeout.h>
 #include <sys/device.h>
 #include <sys/queue.h>
@@ -115,7 +113,6 @@
 #include <sys/kstat.h>
 #endif
 
-#include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
 
 #include <dev/pci/pcireg.h>
@@ -1068,7 +1065,7 @@ msk_attach(struct device *parent, struct device *self, void *aux)
 	if (sc->sk_type != SK_YUKON_FE &&
 	    sc->sk_type != SK_YUKON_FE_P)
 		ifp->if_hardmtu = SK_JUMBO_MTU;
-	ifq_set_maxlen(&ifp->if_snd, MSK_TX_RING_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, MSK_TX_RING_CNT - 1);
 	bcopy(sc_if->sk_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;

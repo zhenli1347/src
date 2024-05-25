@@ -1,4 +1,4 @@
-/*	$OpenBSD: pflogd.c,v 1.62 2019/07/25 17:32:33 brynet Exp $	*/
+/*	$OpenBSD: pflogd.c,v 1.66 2023/11/17 12:10:23 claudio Exp $	*/
 
 /*
  * Copyright (c) 2001 Theo de Raadt
@@ -160,18 +160,21 @@ usage(void)
 void
 sig_close(int sig)
 {
+	pcap_breakloop(hpcap);
 	gotsig_close = 1;
 }
 
 void
 sig_hup(int sig)
 {
+	pcap_breakloop(hpcap);
 	gotsig_hup = 1;
 }
 
 void
 sig_alrm(int sig)
 {
+	pcap_breakloop(hpcap);
 	gotsig_alrm = 1;
 }
 
@@ -251,8 +254,8 @@ pflog_read_live(const char *source, int slen, int promisc, int to_ms,
 		struct timeval to;
 		to.tv_sec = to_ms / 1000;
 		to.tv_usec = (to_ms * 1000) % 1000000;
-		if (ioctl(p->fd, BIOCSRTIMEOUT, &to) == -1) {
-			snprintf(ebuf, PCAP_ERRBUF_SIZE, "BIOCSRTIMEOUT: %s",
+		if (ioctl(p->fd, BIOCSWTIMEOUT, &to) == -1) {
+			snprintf(ebuf, PCAP_ERRBUF_SIZE, "BIOCSWTIMEOUT: %s",
 			    pcap_strerror(errno));
 			goto bad;
 		}
@@ -685,10 +688,15 @@ main(int argc, char **argv)
 	setproctitle("[initializing]");
 	/* Process is now unprivileged and inside a chroot */
 	signal(SIGTERM, sig_close);
+	siginterrupt(SIGTERM, 1);
 	signal(SIGINT, sig_close);
+	siginterrupt(SIGINT, 1);
 	signal(SIGQUIT, sig_close);
+	siginterrupt(SIGQUIT, 1);
 	signal(SIGALRM, sig_alrm);
+	siginterrupt(SIGALRM, 1);
 	signal(SIGHUP, sig_hup);
+	siginterrupt(SIGHUP, 1);
 	alarm(delay);
 
 	if (priv_init_pcap(snaplen))
@@ -717,7 +725,7 @@ main(int argc, char **argv)
 	while (1) {
 		np = pcap_dispatch(hpcap, PCAP_NUM_PKTS,
 		    phandler, (u_char *)dpcap);
-		if (np < 0) {
+		if (np == -1) {
 			if (!if_exists(interface)) {
 				logmsg(LOG_NOTICE, "interface %s went away",
 				    interface);

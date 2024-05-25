@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.61 2022/12/08 01:25:45 guenther Exp $	*/
+/*	$OpenBSD: locore.S,v 1.64 2023/12/12 07:37:21 deraadt Exp $	*/
 /*	$NetBSD: locore.S,v 1.2 1996/10/16 19:33:09 ws Exp $	*/
 
 /*
@@ -845,11 +845,7 @@ rfi1:	rfi
 	.globl	proc_trampoline
 	.type	proc_trampoline,@function
 proc_trampoline:
-#ifdef MULTIPROCESSOR
-	bl	proc_trampoline_mp
-#endif
-	li	%r3,0
-	bl	lcsplx
+	bl	proc_trampoline_mi
 	mtlr	%r31
 	mr	%r3,%r30
 	blrl				/* jump indirect to r31 */
@@ -1179,13 +1175,13 @@ sigcode:
 	lfd	%f13,104(%r6)
 	addi	%r3,%r1,((16+FPSIG_SIZEOF+15)&~0xf)+SF_SC	/* compute &sf_sc */
 	li	%r0,SYS_sigreturn
+	.globl	sigcodecall
+sigcodecall:
 	sc				/* sigreturn(scp) */
 	.globl	sigcoderet
 sigcoderet:
-	li	%r0,SYS_exit
-	sc				/* exit(errno) */
 esigcode:
-
+	/* FALLTHROUGH */
 	.globl	sigfill
 sigfill:
 	.long	0		# illegal

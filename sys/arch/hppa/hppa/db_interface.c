@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_interface.c,v 1.48 2020/04/18 04:45:20 visa Exp $	*/
+/*	$OpenBSD: db_interface.c,v 1.50 2024/02/23 18:19:03 cheloha Exp $	*/
 
 /*
  * Copyright (c) 1999-2003 Michael Shalayeff
@@ -134,8 +134,9 @@ db_enter(void)
 }
 
 void
-db_read_bytes(vaddr_t addr, size_t size, char *data)
+db_read_bytes(vaddr_t addr, size_t size, void *datap)
 {
+	char *data = datap;
 	register char *src = (char *)addr;
 
 	while (size--)
@@ -143,8 +144,9 @@ db_read_bytes(vaddr_t addr, size_t size, char *data)
 }
 
 void
-db_write_bytes(vaddr_t addr, size_t size, char *data)
+db_write_bytes(vaddr_t addr, size_t size, void *datap)
 {
+	char *data = datap;
 	register char *dst = (char *)addr;
 
 	while (size--)
@@ -340,4 +342,10 @@ stacktrace_save_at(struct stacktrace *st, unsigned int skip)
 		rp = fp[-5];
 		fp = (register_t *)fp[0];
 	}
+}
+
+void
+stacktrace_save_utrace(struct stacktrace *st)
+{
+	st->st_count = 0;
 }

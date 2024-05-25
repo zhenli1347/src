@@ -5,7 +5,7 @@ dnl
 sinclude(acx_nlnetlabs.m4)
 sinclude(dnstap/dnstap.m4)
 
-AC_INIT([NSD],[4.6.1],[nsd-bugs@nlnetlabs.nl])
+AC_INIT([NSD],[4.9.1],[https://github.com/NLnetLabs/nsd/issues or nsd-bugs@nlnetlabs.nl])
 AC_CONFIG_HEADERS([config.h])
 
 #
@@ -96,20 +96,8 @@ AC_ARG_WITH([pidfile],
 AC_SUBST(pidfile)
 AC_DEFINE_UNQUOTED(PIDFILE, ["`eval echo $pidfile`"], [Pathname to the NSD pidfile])
 
-#
-# Determine location of nsd.db
-#
-dbfile=${dbdir}/nsd.db
 AC_ARG_WITH([dbfile],
-	AS_HELP_STRING([--with-dbfile=path],[Pathname to the NSD database]),
-	[dbfile=$withval])
-AC_SUBST(dbfile)
-AC_DEFINE_UNQUOTED(DBFILE, ["`eval echo $dbfile`"], [Pathname to the NSD database])
-
-if test -n "$dbfile"; then
-	dbdir=`dirname $dbfile`
-fi
-AC_SUBST(dbdir)
+	AS_HELP_STRING([--with-dbfile=path],[Pathname to the NSD database (obsolete)]),[])
 
 piddir=`dirname $pidfile`
 AC_SUBST(piddir)
@@ -174,7 +162,10 @@ AC_ARG_WITH([user],
 AC_SUBST(user)
 AC_DEFINE_UNQUOTED(USER, ["$user"], [the user name to drop privileges to])
 
-m4_version_prereq([2.70], [AC_PROG_CC], [AC_PROG_CC_STDC])
+m4_version_prereq([2.70], [AC_PROG_CC], [m4_warn([obsolete],
+[AC_PROG_CC_STDC is obsolete; use AC_PROG_CC
+])dnl
+AC_REQUIRE(AC_PROG_CC)])
 AC_PROG_SED
 AC_PROG_AWK
 AC_PROG_GREP
@@ -296,7 +287,7 @@ AC_MSG_CHECKING(whether $CC supports -$1)
 cache=`echo $1 | $SED 'y%.=/+-%___p_%'`
 AC_CACHE_VAL(cv_prog_cc_flag_$cache,
 [
-echo 'void f(){}' >conftest.c
+echo 'void f(void){}' >conftest.c
 if test -z "`$CC -$1 -c conftest.c 2>&1`"; then
 eval "cv_prog_cc_flag_$cache=yes"
 else
@@ -569,7 +560,8 @@ AC_RUN_IFELSE([AC_LANG_SOURCE([[
 int main(void) { struct tm tm; char *res;
 res = strptime("20070207111842", "%Y%m%d%H%M%S", &tm);
 if (!res) return 1; return 0; }
-]])] , [eval "ac_cv_c_strptime_works=yes"], [eval "ac_cv_c_strptime_works=no"])
+]])] , [eval "ac_cv_c_strptime_works=yes"], [eval "ac_cv_c_strptime_works=no"],
+[eval "ac_cv_c_strptime_works=maybe"])
 else
 eval "ac_cv_c_strptime_works=maybe"
 fi
@@ -698,6 +690,9 @@ case "$enable_recvmmsg" in
         yes)
 		AC_CHECK_FUNC([recvmmsg], [
 AC_RUN_IFELSE([AC_LANG_SOURCE([[
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
 #include <sys/socket.h>
 #include <errno.h>
 int main(void)
@@ -714,6 +709,9 @@ AC_DEFINE([HAVE_RECVMMSG], [1], [Define if recvmmsg exists])]
 )])
 		AC_CHECK_FUNC([sendmmsg], [
 AC_RUN_IFELSE([AC_LANG_SOURCE([[
+#ifdef HAVE_UNISTD_H
+#include <unistd.h>
+#endif
 #include <sys/socket.h>
 #include <errno.h>
 int main(void)
@@ -881,21 +879,15 @@ AC_INCLUDES_DEFAULT
 # causes conflicts with our T_xx defines.
 #
 AC_MSG_CHECKING(for __b64_ntop)
-AC_TRY_LINK([#include <stddef.h>],
-	[__b64_ntop(NULL, 0, NULL, 0);],
-	found_b64_ntop=yes,
-	found_b64_ntop=no
-)
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <stddef.h>]], [[__b64_ntop(NULL, 0, NULL, 0);]])],[found_b64_ntop=yes],[found_b64_ntop=no
+])
 if test "x$found_b64_ntop" = xno; then
 	AC_MSG_RESULT(no)
 
 	AC_MSG_CHECKING(for __b64_ntop with -lresolv)
 	LIBS="$LIBS -lresolv"
-	AC_TRY_LINK([#include <stddef.h>],
-		[__b64_ntop(NULL, 0, NULL, 0);],
-		found_b64_ntop=yes,
-		found_b64_ntop=no
-	)
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <stddef.h>]], [[__b64_ntop(NULL, 0, NULL, 0);]])],[found_b64_ntop=yes],[found_b64_ntop=no
+	])
 	if test "x$found_b64_ntop" = xno; then
 		AC_MSG_RESULT(no)
 	fi
@@ -965,14 +957,7 @@ AC_DEFINE_UNQUOTED([TCP_TIMEOUT], $tcp_timeout, [Define to the default tcp timeo
 dnl
 dnl Features
 dnl
-AC_ARG_ENABLE(root-server, AS_HELP_STRING([--enable-root-server],[Configure NSD as a root server]))
-case "$enable_root_server" in
-        yes)
-		AC_DEFINE_UNQUOTED([ROOT_SERVER], [], [Define this to configure as a root server.])
-		;;
-        no|*)
-                ;;
-esac
+AC_ARG_ENABLE(root-server, AS_HELP_STRING([--enable-root-server],[Configure NSD as a root server (obsolete)]))
 
 AC_ARG_ENABLE(ipv6, AS_HELP_STRING([--disable-ipv6],[Disables IPv6 support]))
 case "$enable_ipv6" in
@@ -1015,6 +1000,16 @@ case "$enable_checking" in
                 AC_DEFINE([NDEBUG], [], [Undefine this to enable internal runtime checks.])
                 ;;
 esac
+
+AC_ARG_ENABLE(log-role, AS_HELP_STRING([--enable-log-role],[Shows the role of processes in the logfile (enable this only for debugging purposes)]))
+case "$enable_log_role" in
+        yes)
+		AC_DEFINE_UNQUOTED([USE_LOG_PROCESS_ROLE], [], [Define this to show the role of processes in the logfile for debugging purposes.])
+		;;
+        no|*)
+                ;;
+esac
+
 
 AC_ARG_ENABLE(memclean, AS_HELP_STRING([--enable-memclean],[Cleanup memory (at exit) for eg. valgrind, memcheck]))
 if test "$enable_memclean" = "yes"; then AC_DEFINE_UNQUOTED([MEMCLEAN], [1], [Define this to cleanup memory at exit (eg. for valgrind, etc.)])
@@ -1122,7 +1117,6 @@ AC_INCLUDES_DEFAULT
 	LIBS="$BAKLIBS"
 
 else
-	AC_MSG_WARN([No SSL, therefore remote-control is disabled])
 	AC_MSG_WARN([No SSL, therefore TLS is disabled])
 fi
 
@@ -1263,6 +1257,7 @@ AH_BOTTOM([
 #include <sys/types.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <string.h>
 
 #ifdef HAVE_TIME_H
 #include <time.h>
@@ -1433,3 +1428,5 @@ fi
 
 AC_CONFIG_FILES([Makefile $dnstap_config])
 AC_OUTPUT
+m4_unquote(
+  _m4_defn([_m4_wrap_text])_m4_popdef([_m4_wrap_text]))

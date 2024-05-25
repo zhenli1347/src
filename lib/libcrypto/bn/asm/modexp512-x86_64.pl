@@ -347,6 +347,7 @@ $code.=<<___;
 .type	MULADD_128x512,\@abi-omnipotent
 .align	16
 MULADD_128x512:
+	_CET_ENDBR
 ___
 	&MULSTEP_512([map("%r$_",(8..15))], "(+8*0)(%rcx)", "%rsi", "%rbp", "%rbx");
 $code.=<<___;
@@ -414,6 +415,7 @@ $code.=<<___;
 .type	mont_reduce,\@abi-omnipotent
 .align	16
 mont_reduce:
+	_CET_ENDBR
 ___
 
 my $STACK_DEPTH         =  8;
@@ -676,6 +678,7 @@ $code.=<<___;
 .type	mont_mul_a3b,\@abi-omnipotent
 .align	16
 mont_mul_a3b:
+	_CET_ENDBR
 	#
 	# multiply tmp = src1 * src2
 	# For multiply: dst = rcx, src1 = rdi, src2 = rsi
@@ -1077,6 +1080,7 @@ $code.=<<___;
 .type	sqr_reduce,\@abi-omnipotent
 .align	16
 sqr_reduce:
+	_CET_ENDBR
 	 mov	(+$pResult_offset+8)(%rsp), %rcx
 ___
 	&SQR_512("%rsp+$tmp16_offset+8", "%rcx", [map("%r$_",(10..15,8..9))], "%rbx", "%rbp", "%rsi", "%rdi");
@@ -1106,6 +1110,7 @@ $code.=<<___;
 .globl	mod_exp_512
 .type	mod_exp_512,\@function,4
 mod_exp_512:
+	_CET_ENDBR
 	 push	%rbp
 	 push	%rbx
 	 push	%r12
@@ -1307,7 +1312,7 @@ end_main_loop_a3b:
 	 movdqa	%xmm3, (+$tmp16_offset+16*3)(%rsp)
 	 call	mont_reduce
 
-	# If result > m, subract m
+	# If result > m, subtract m
 	# load result into r15:r8
 	 mov	(+$pResult_offset)(%rsp), %rax
 	 mov	(+8*0)(%rax), %r8

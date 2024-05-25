@@ -1,6 +1,6 @@
-/* $OpenBSD: man_term.c,v 1.194 2022/08/28 09:55:58 schwarze Exp $ */
+/* $OpenBSD: man_term.c,v 1.197 2023/11/13 19:13:00 schwarze Exp $ */
 /*
- * Copyright (c) 2010-2015,2017-2020,2022 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2010-15,2017-20,2022-23 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008-2012 Kristaps Dzonsons <kristaps@bsd.lv>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -72,6 +72,7 @@ static	int		  pre_DT(DECL_ARGS);
 static	int		  pre_HP(DECL_ARGS);
 static	int		  pre_I(DECL_ARGS);
 static	int		  pre_IP(DECL_ARGS);
+static	int		  pre_MR(DECL_ARGS);
 static	int		  pre_OP(DECL_ARGS);
 static	int		  pre_PD(DECL_ARGS);
 static	int		  pre_PP(DECL_ARGS);
@@ -81,7 +82,6 @@ static	int		  pre_SS(DECL_ARGS);
 static	int		  pre_SY(DECL_ARGS);
 static	int		  pre_TP(DECL_ARGS);
 static	int		  pre_UR(DECL_ARGS);
-static	int		  pre_abort(DECL_ARGS);
 static	int		  pre_alternate(DECL_ARGS);
 static	int		  pre_ign(DECL_ARGS);
 static	int		  pre_in(DECL_ARGS);
@@ -101,9 +101,9 @@ static const struct man_term_act man_term_acts[MAN_MAX - MAN_TH] = {
 	{ pre_SS, post_SH, 0 }, /* SS */
 	{ pre_TP, post_TP, 0 }, /* TP */
 	{ pre_TP, post_TP, 0 }, /* TQ */
-	{ pre_abort, NULL, 0 }, /* LP */
+	{ pre_PP, NULL, 0 }, /* LP */
 	{ pre_PP, NULL, 0 }, /* PP */
-	{ pre_abort, NULL, 0 }, /* P */
+	{ pre_PP, NULL, 0 }, /* P */
 	{ pre_IP, post_IP, 0 }, /* IP */
 	{ pre_HP, post_HP, 0 }, /* HP */
 	{ NULL, NULL, 0 }, /* SM */
@@ -133,6 +133,7 @@ static const struct man_term_act man_term_acts[MAN_MAX - MAN_TH] = {
 	{ NULL, NULL, 0 }, /* UE */
 	{ pre_UR, post_UR, 0 }, /* MT */
 	{ NULL, NULL, 0 }, /* ME */
+	{ pre_MR, NULL, 0 }, /* MR */
 };
 static const struct man_term_act *man_term_act(enum roff_tok);
 
@@ -150,19 +151,15 @@ terminal_man(void *arg, const struct roff_meta *man)
 	struct mtermp		 mt;
 	struct termp		*p;
 	struct roff_node	*n, *nc, *nn;
-	size_t			 save_defindent;
 
 	p = (struct termp *)arg;
-	save_defindent = p->defindent;
-	if (p->synopsisonly == 0 && p->defindent == 0)
-		p->defindent = 7;
 	p->tcol->rmargin = p->maxrmargin = p->defrmargin;
 	term_tab_set(p, NULL);
 	term_tab_set(p, "T");
 	term_tab_set(p, ".5i");
 
 	memset(&mt, 0, sizeof(mt));
-	mt.lmargin[mt.lmargincur] = term_len(p, p->defindent);
+	mt.lmargin[mt.lmargincur] = term_len(p, 7);
 	mt.offset = term_len(p, p->defindent);
 	mt.pardist = 1;
 
@@ -192,7 +189,6 @@ terminal_man(void *arg, const struct roff_meta *man)
 			print_man_nodelist(p, &mt, n, man);
 		term_end(p);
 	}
-	p->defindent = save_defindent;
 }
 
 /*
@@ -221,13 +217,6 @@ print_bvspace(struct termp *p, struct roff_node *n, int pardist)
 
 	for (i = 0; i < pardist; i++)
 		term_vspace(p);
-}
-
-
-static int
-pre_abort(DECL_ARGS)
-{
-	abort();
 }
 
 static int
@@ -331,6 +320,29 @@ pre_B(DECL_ARGS)
 {
 	term_fontrepl(p, TERMFONT_BOLD);
 	return 1;
+}
+
+static int
+pre_MR(DECL_ARGS)
+{
+	term_fontrepl(p, TERMFONT_NONE);
+	n = n->child;
+	if (n != NULL) {
+		term_word(p, n->string);   /* name */
+		p->flags |= TERMP_NOSPACE;
+	}
+	term_word(p, "(");
+	p->flags |= TERMP_NOSPACE;
+	if (n != NULL && (n = n->next) != NULL) {
+		term_word(p, n->string);   /* section */
+		p->flags |= TERMP_NOSPACE;
+	}
+	term_word(p, ")");
+	if (n != NULL && (n = n->next) != NULL) {
+		p->flags |= TERMP_NOSPACE;
+		term_word(p, n->string);   /* suffix */
+	}
+	return 0;
 }
 
 static int
@@ -485,7 +497,7 @@ pre_PP(DECL_ARGS)
 {
 	switch (n->type) {
 	case ROFFT_BLOCK:
-		mt->lmargin[mt->lmargincur] = term_len(p, p->defindent);
+		mt->lmargin[mt->lmargincur] = term_len(p, 7);
 		print_bvspace(p, n, mt->pardist);
 		break;
 	case ROFFT_HEAD:
@@ -661,7 +673,7 @@ pre_SS(DECL_ARGS)
 
 	switch (n->type) {
 	case ROFFT_BLOCK:
-		mt->lmargin[mt->lmargincur] = term_len(p, p->defindent);
+		mt->lmargin[mt->lmargincur] = term_len(p, 7);
 		mt->offset = term_len(p, p->defindent);
 
 		/*
@@ -702,7 +714,7 @@ pre_SH(DECL_ARGS)
 
 	switch (n->type) {
 	case ROFFT_BLOCK:
-		mt->lmargin[mt->lmargincur] = term_len(p, p->defindent);
+		mt->lmargin[mt->lmargincur] = term_len(p, 7);
 		mt->offset = term_len(p, p->defindent);
 
 		/*
@@ -786,7 +798,7 @@ pre_RS(DECL_ARGS)
 	if (++mt->lmarginsz < MAXMARGINS)
 		mt->lmargincur = mt->lmarginsz;
 
-	mt->lmargin[mt->lmargincur] = term_len(p, p->defindent);
+	mt->lmargin[mt->lmargincur] = term_len(p, 7);
 	return 1;
 }
 

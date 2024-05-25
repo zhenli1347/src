@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched_bsd.c,v 1.73 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: sched_bsd.c,v 1.91 2024/03/30 13:33:20 mpi Exp $	*/
 /*	$NetBSD: kern_synch.c,v 1.37 1996/04/22 01:38:37 christos Exp $	*/
 
 /*-
@@ -39,6 +39,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/clockintr.h>
 #include <sys/proc.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -53,44 +54,88 @@
 #include <sys/ktrace.h>
 #endif
 
-
+uint64_t roundrobin_period;	/* [I] roundrobin period (ns) */
 int	lbolt;			/* once a second sleep address */
-int	rrticks_init;		/* # of hardclock ticks per roundrobin() */
 
 #ifdef MULTIPROCESSOR
 struct __mp_lock sched_lock;
 #endif
 
+void			update_loadavg(void *);
 void			schedcpu(void *);
 uint32_t		decay_aftersleep(uint32_t, uint32_t);
+
+extern struct cpuset sched_idle_cpus;
+
+/*
+ * constants for averages over 1, 5, and 15 minutes when sampling at
+ * 5 second intervals.
+ */
+static const fixpt_t cexp[3] = {
+	0.9200444146293232 * FSCALE,	/* exp(-1/12) */
+	0.9834714538216174 * FSCALE,	/* exp(-1/60) */
+	0.9944598480048967 * FSCALE,	/* exp(-1/180) */
+};
+
+struct loadavg averunnable;
 
 /*
  * Force switch among equal priority processes every 100ms.
  */
 void
-roundrobin(struct cpu_info *ci)
+roundrobin(struct clockrequest *cr, void *cf, void *arg)
 {
+	uint64_t count;
+	struct cpu_info *ci = curcpu();
 	struct schedstate_percpu *spc = &ci->ci_schedstate;
 
-	spc->spc_rrticks = rrticks_init;
+	count = clockrequest_advance(cr, roundrobin_period);
 
 	if (ci->ci_curproc != NULL) {
-		if (spc->spc_schedflags & SPCF_SEENRR) {
+		if (spc->spc_schedflags & SPCF_SEENRR || count >= 2) {
 			/*
 			 * The process has already been through a roundrobin
 			 * without switching and may be hogging the CPU.
 			 * Indicate that the process should yield.
 			 */
 			atomic_setbits_int(&spc->spc_schedflags,
-			    SPCF_SHOULDYIELD);
+			    SPCF_SEENRR | SPCF_SHOULDYIELD);
 		} else {
 			atomic_setbits_int(&spc->spc_schedflags,
 			    SPCF_SEENRR);
 		}
 	}
 
-	if (spc->spc_nrun)
+	if (spc->spc_nrun || spc->spc_schedflags & SPCF_SHOULDYIELD)
 		need_resched(ci);
+}
+
+
+
+/*
+ * update_loadav: compute a tenex style load average of a quantity on
+ * 1, 5, and 15 minute intervals.
+ */
+void
+update_loadavg(void *unused)
+{
+	static struct timeout to = TIMEOUT_INITIALIZER(update_loadavg, NULL);
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *ci;
+	u_int i, nrun = 0;
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (!cpuset_isset(&sched_idle_cpus, ci))
+			nrun++;
+		nrun += ci->ci_schedstate.spc_nrun;
+	}
+
+	for (i = 0; i < 3; i++) {
+		averunnable.ldavg[i] = (cexp[i] * averunnable.ldavg[i] +
+		    nrun * FSCALE * (FSCALE - cexp[i])) >> FSHIFT;
+	}
+
+	timeout_add_sec(&to, 5);
 }
 
 /*
@@ -182,23 +227,13 @@ fixpt_t	ccpu = 0.95122942450071400909 * FSCALE;		/* exp(-1/20) */
  * Recompute process priorities, every second.
  */
 void
-schedcpu(void *arg)
+schedcpu(void *unused)
 {
-	struct timeout *to = (struct timeout *)arg;
+	static struct timeout to = TIMEOUT_INITIALIZER(schedcpu, NULL);
 	fixpt_t loadfac = loadfactor(averunnable.ldavg[0]);
 	struct proc *p;
 	int s;
 	unsigned int newcpu;
-	int phz;
-
-	/*
-	 * If we have a statistics clock, use that to calculate CPU
-	 * time, otherwise revert to using the profiling clock (which,
-	 * in turn, defaults to hz if there is no separate profiling
-	 * clock available)
-	 */
-	phz = stathz ? stathz : profhz;
-	KASSERT(phz);
 
 	LIST_FOREACH(p, &allproc, p_list) {
 		/*
@@ -225,13 +260,13 @@ schedcpu(void *arg)
 		 * p_pctcpu is only for diagnostic tools such as ps.
 		 */
 #if	(FSHIFT >= CCPU_SHIFT)
-		p->p_pctcpu += (phz == 100)?
+		p->p_pctcpu += (stathz == 100)?
 			((fixpt_t) p->p_cpticks) << (FSHIFT - CCPU_SHIFT):
                 	100 * (((fixpt_t) p->p_cpticks)
-				<< (FSHIFT - CCPU_SHIFT)) / phz;
+				<< (FSHIFT - CCPU_SHIFT)) / stathz;
 #else
 		p->p_pctcpu += ((FSCALE - ccpu) *
-			(p->p_cpticks * FSCALE / phz)) >> FSHIFT;
+			(p->p_cpticks * FSCALE / stathz)) >> FSHIFT;
 #endif
 		p->p_cpticks = 0;
 		newcpu = (u_int) decay_cpu(loadfac, p->p_estcpu);
@@ -244,9 +279,8 @@ schedcpu(void *arg)
 		}
 		SCHED_UNLOCK(s);
 	}
-	uvm_meter();
 	wakeup(&lbolt);
-	timeout_add_sec(to, 1);
+	timeout_add_sec(&to, 1);
 }
 
 /*
@@ -351,13 +385,23 @@ mi_switch(void)
 		    (long long)spc->spc_runtime.tv_sec,
 		    spc->spc_runtime.tv_nsec);
 #endif
+		timespecclear(&ts);
 	} else {
 		timespecsub(&ts, &spc->spc_runtime, &ts);
-		timespecadd(&p->p_rtime, &ts, &p->p_rtime);
 	}
 
 	/* add the time counts for this thread to the process's total */
-	tuagg_unlocked(pr, p);
+	tuagg_locked(pr, p, &ts);
+
+	/* Stop any optional clock interrupts. */
+	if (ISSET(spc->spc_schedflags, SPCF_ITIMER)) {
+		atomic_clearbits_int(&spc->spc_schedflags, SPCF_ITIMER);
+		clockintr_cancel(&spc->spc_itimer);
+	}
+	if (ISSET(spc->spc_schedflags, SPCF_PROFCLOCK)) {
+		atomic_clearbits_int(&spc->spc_schedflags, SPCF_PROFCLOCK);
+		clockintr_cancel(&spc->spc_profclock);
+	}
 
 	/*
 	 * Process is about to yield the CPU; clear the appropriate
@@ -398,12 +442,23 @@ mi_switch(void)
 
 	/*
 	 * We're running again; record our new start time.  We might
-	 * be running on a new CPU now, so don't use the cache'd
-	 * schedstate_percpu pointer.
+	 * be running on a new CPU now, so refetch the schedstate_percpu
+	 * pointer.
 	 */
 	KASSERT(p->p_cpu == curcpu());
+	spc = &p->p_cpu->ci_schedstate;
 
-	nanouptime(&p->p_cpu->ci_schedstate.spc_runtime);
+	/* Start any optional clock interrupts needed by the thread. */
+	if (ISSET(p->p_p->ps_flags, PS_ITIMER)) {
+		atomic_setbits_int(&spc->spc_schedflags, SPCF_ITIMER);
+		clockintr_advance(&spc->spc_itimer, hardclock_period);
+	}
+	if (ISSET(p->p_p->ps_flags, PS_PROFIL)) {
+		atomic_setbits_int(&spc->spc_schedflags, SPCF_PROFCLOCK);
+		clockintr_advance(&spc->spc_profclock, profclock_period);
+	}
+
+	nanouptime(&spc->spc_runtime);
 
 #ifdef MULTIPROCESSOR
 	/*
@@ -445,14 +500,19 @@ setrunnable(struct proc *p)
 		if ((pr->ps_flags & PS_TRACED) != 0 && pr->ps_xsig != 0)
 			atomic_setbits_int(&p->p_siglist, sigmask(pr->ps_xsig));
 		prio = p->p_usrpri;
-		unsleep(p);
+		setrunqueue(NULL, p, prio);
 		break;
 	case SSLEEP:
 		prio = p->p_slppri;
-		unsleep(p);		/* e.g. when sending signals */
+
+		/* if not yet asleep, don't add to runqueue */
+		if (ISSET(p->p_flag, P_WSLEEP))
+			return;
+		setrunqueue(NULL, p, prio);
+		TRACEPOINT(sched, wakeup, p->p_tid + THREAD_PID_OFFSET,
+		    p->p_p->ps_pid, CPU_INFO_UNIT(p->p_cpu));
 		break;
 	}
-	setrunqueue(NULL, p, prio);
 	if (p->p_slptime > 1) {
 		uint32_t newcpu;
 
@@ -664,21 +724,14 @@ sysctl_hwperfpolicy(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 }
 #endif
 
+/*
+ * Start the scheduler's periodic timeouts.
+ */
 void
 scheduler_start(void)
 {
-	static struct timeout schedcpu_to;
-
-	/*
-	 * We avoid polluting the global namespace by keeping the scheduler
-	 * timeouts static in this function.
-	 * We setup the timeout here and kick schedcpu once to make it do
-	 * its job.
-	 */
-	timeout_set(&schedcpu_to, schedcpu, &schedcpu_to);
-
-	rrticks_init = hz / 10;
-	schedcpu(&schedcpu_to);
+	schedcpu(NULL);
+	update_loadavg(NULL);
 
 #ifndef SMALL_KERNEL
 	if (perfpolicy == PERFPOL_AUTO)

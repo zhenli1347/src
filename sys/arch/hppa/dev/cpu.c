@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.44 2022/12/06 00:40:09 cheloha Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.47 2023/10/24 13:20:09 claudio Exp $	*/
 
 /*
  * Copyright (c) 1998-2003 Michael Shalayeff
@@ -202,6 +202,7 @@ cpu_boot_secondary_processors(void)
 
 		ci->ci_randseed = (arc4random() & 0x7fffffff) + 1;
 
+		clockqueue_init(&ci->ci_queue);
 		sched_init_cpu(ci);
 
 		/* Release the specified CPU by triggering an EIR{0}. */
@@ -242,7 +243,6 @@ void
 cpu_hatch(void)
 {
 	struct cpu_info *ci = curcpu();
-	int s;
 
 	/* Initialise IPIs. */
 	hppa_ipi_init(ci);
@@ -262,8 +262,7 @@ cpu_hatch(void)
 	while (!start_secondary_cpu)
 		;
 
-	SCHED_LOCK(s);
-	cpu_switchto(NULL, sched_chooseproc());
+	sched_toidle();
 }
 
 void

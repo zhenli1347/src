@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.inc,v 1.87 2021/01/09 11:58:50 dtucker Exp $
+#	$OpenBSD: Makefile.inc,v 1.92 2024/05/22 15:24:55 naddy Exp $
 
 .include <bsd.own.mk>
 
@@ -23,9 +23,9 @@ CDIAGFLAGS+=	-Widiomatic-parentheses -Wparentheses
 .if ${COMPILER_VERSION:L} != "gcc3"
 CDIAGFLAGS+=	-Wstrict-aliasing=2
 CDIAGFLAGS+=	-Wold-style-definition
+CDIAGFLAGS+=	-Werror
 .endif
 
-#CDIAGFLAGS+=	-Werror
 #CDIAGFLAGS+=	-fno-common
 #DEBUG=-g
 #INSTALL_STRIP=
@@ -34,6 +34,7 @@ WARNINGS=yes
 
 OPENSSL?=	yes
 ZLIB?=		yes
+DSAKEY?=	yes
 
 .if (${OPENSSL:L} == "yes")
 CFLAGS+=	-DWITH_OPENSSL
@@ -41,6 +42,10 @@ CFLAGS+=	-DWITH_OPENSSL
 
 .if (${ZLIB:L} == "yes")
 CFLAGS+=	-DWITH_ZLIB
+.endif
+
+.if (${DSAKEY:L} == "yes")
+CFLAGS+=	-DWITH_DSA
 .endif
 
 CFLAGS+=	-DENABLE_PKCS11
@@ -78,10 +83,12 @@ SRCS_KEY+=	cipher.c
 SRCS_KEY+=	chacha.c
 SRCS_KEY+=	poly1305.c
 .if (${OPENSSL:L} == "yes")
-SRCS_KEY+=	ssh-dss.c
 SRCS_KEY+=	ssh-ecdsa.c
 SRCS_KEY+=	ssh-ecdsa-sk.c
 SRCS_KEY+=	ssh-rsa.c
+.if (${DSAKEY:L} == "yes")
+SRCS_KEY+=	ssh-dss.c
+.endif
 SRCS_KEY+=	sshbuf-getput-crypto.c
 SRCS_KEY+=	digest-openssl.c
 SRCS_KEY+=	cipher-chachapoly-libcrypto.c
@@ -94,11 +101,7 @@ SRCS_KEY+=	cipher-chachapoly.c
 SRCS_KEY+=	ssh-ed25519.c
 SRCS_KEY+=	ssh-ed25519-sk.c
 # ed25519, from supercop
-SRCS_KEY+=	sc25519.c
-SRCS_KEY+=	ge25519.c
-SRCS_KEY+=	fe25519.c
 SRCS_KEY+=	ed25519.c
-SRCS_KEY+=	verify.c
 SRCS_KEY+=	hash.c
 
 SRCS_KEYP+=	authfile.c
@@ -108,14 +111,17 @@ SRCS_KEYP+=	atomicio.c
 SRCS_KRL+=	bitmap.c
 SRCS_KRL+=	krl.c
 
+SRCS_MAC+=	mac.c
+SRCS_MAC+=	hmac.c
+SRCS_MAC+=	umac.c
+SRCS_MAC+=	umac128.c
+
 SRCS_PKT+=	canohost.c
 SRCS_PKT+=	dispatch.c
-SRCS_PKT+=	hmac.c
 SRCS_PKT+=	kex.c
-SRCS_PKT+=	mac.c
+SRCS_PKT+=	kex-names.c
 SRCS_PKT+=	packet.c
-SRCS_PKT+=	umac.c
-SRCS_PKT+=	umac128.c
+SRCS_PKT+=	${SRCS_MAC}
 
 SRCS_PROT+=	channels.c
 SRCS_PROT+=	monitor_fdpass.c

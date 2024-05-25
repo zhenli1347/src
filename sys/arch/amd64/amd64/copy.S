@@ -1,4 +1,4 @@
-/*	$OpenBSD: copy.S,v 1.16 2022/12/01 00:26:15 guenther Exp $	*/
+/*	$OpenBSD: copy.S,v 1.19 2023/07/28 06:18:35 guenther Exp $	*/
 /*	$NetBSD: copy.S,v 1.1 2003/04/26 18:39:26 fvdl Exp $	*/
 
 /*
@@ -147,7 +147,7 @@ ENTRY(copyout)
 	ret
 	lfence
 
-ENTRY(copyin)
+ENTRY(_copyin)
 	RETGUARD_SETUP(kcopy, r10)
 	movq	CPUVAR(CURPCB),%rax
 	pushq	$0
@@ -239,7 +239,7 @@ ENTRY(copyoutstr)
 	movl	$ENAMETOOLONG,%eax
 	jmp	copystr_return
 
-ENTRY(copyinstr)
+ENTRY(_copyinstr)
 	RETGUARD_SETUP(copyoutstr, r10)
 	xchgq	%rdi,%rsi
 	movq	%rdx,%r8
@@ -299,43 +299,5 @@ copystr_return:
 	ret
 	lfence
 
-ENTRY(copystr)
-	RETGUARD_SETUP(copystr, r10)
-	xchgq	%rdi,%rsi
-	movq	%rdx,%r8
-
-	incq	%rdx
-
-1:	decq	%rdx
-	jz	4f
-	lodsb
-	stosb
-	testb	%al,%al
-	jnz	1b
-
-	/* Success -- 0 byte reached. */
-	decq	%rdx
-	xorl	%eax,%eax
-	jmp	6f
-
-4:	/* edx is zero -- return ENAMETOOLONG. */
-	movl	$ENAMETOOLONG,%eax
-
-6:	/* Set *lencopied and return %eax. */
-	testq	%rcx,%rcx
-	jz	7f
-	subq	%rdx,%r8
-	movq	%r8,(%rcx)
-7:
-	RETGUARD_CHECK(copystr, r10)
-	ret
-	lfence
-
-	.section .rodata
-	.globl	_stac
-_stac:
-	stac
-
-	.globl	_clac
-_clac:
-	clac
+CODEPATCH_CODE(_stac,	stac)
+CODEPATCH_CODE(_clac,	clac)

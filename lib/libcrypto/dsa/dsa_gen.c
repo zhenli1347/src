@@ -1,4 +1,4 @@
-/* $OpenBSD: dsa_gen.c,v 1.26 2022/11/26 16:08:52 tb Exp $ */
+/* $OpenBSD: dsa_gen.c,v 1.32 2024/05/11 06:43:50 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -75,25 +75,21 @@ int
 DSA_generate_parameters_ex(DSA *ret, int bits, const unsigned char *seed_in,
     int seed_len, int *counter_ret, unsigned long *h_ret, BN_GENCB *cb)
 {
-	if (ret->meth->dsa_paramgen)
-		return ret->meth->dsa_paramgen(ret, bits, seed_in, seed_len,
-		    counter_ret, h_ret, cb);
-	else {
-		const EVP_MD *evpmd;
-		size_t qbits;
+	const EVP_MD *evpmd;
+	size_t qbits;
 
-		if (bits >= 2048) {
-			qbits = 256;
-			evpmd = EVP_sha256();
-		} else {
-			qbits = 160;
-			evpmd = EVP_sha1();
-		}
-
-		return dsa_builtin_paramgen(ret, bits, qbits, evpmd, seed_in,
-		    seed_len, NULL, counter_ret, h_ret, cb);
+	if (bits >= 2048) {
+		qbits = 256;
+		evpmd = EVP_sha256();
+	} else {
+		qbits = 160;
+		evpmd = EVP_sha1();
 	}
+
+	return dsa_builtin_paramgen(ret, bits, qbits, evpmd, seed_in, seed_len,
+	    NULL, counter_ret, h_ret, cb);
 }
+LCRYPTO_ALIAS(DSA_generate_parameters_ex);
 
 int
 dsa_builtin_paramgen(DSA *ret, size_t bits, size_t qbits, const EVP_MD *evpmd,
@@ -142,11 +138,12 @@ dsa_builtin_paramgen(DSA *ret, size_t bits, size_t qbits, const EVP_MD *evpmd,
 	else if (seed_len != 0)
 		goto err;
 
-	if ((mont=BN_MONT_CTX_new()) == NULL)
+	if ((mont = BN_MONT_CTX_new()) == NULL)
 		goto err;
 
-	if ((ctx=BN_CTX_new()) == NULL)
+	if ((ctx = BN_CTX_new()) == NULL)
 		goto err;
+
 	BN_CTX_start(ctx);
 
 	if ((r0 = BN_CTX_get(ctx)) == NULL)
@@ -263,7 +260,7 @@ dsa_builtin_paramgen(DSA *ret, size_t bits, size_t qbits, const EVP_MD *evpmd,
 			/* more of step 8 */
 			if (!BN_mask_bits(W, bits - 1))
 				goto err;
-			if (!BN_copy(X, W))
+			if (!bn_copy(X, W))
 				goto err;
 			if (!BN_add(X, X, test))
 				goto err;
@@ -348,11 +345,11 @@ err:
 		if (seed_out != NULL)
 			memcpy(seed_out, seed, qsize);
 	}
-	if (ctx) {
-		BN_CTX_end(ctx);
-		BN_CTX_free(ctx);
-	}
+	BN_CTX_end(ctx);
+	BN_CTX_free(ctx);
 	BN_MONT_CTX_free(mont);
+
 	return ok;
 }
+
 #endif

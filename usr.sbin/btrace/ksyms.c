@@ -1,4 +1,4 @@
-/*	$OpenBSD: ksyms.c,v 1.4 2021/02/10 00:34:57 deraadt Exp $ */
+/*	$OpenBSD: ksyms.c,v 1.10 2024/04/01 22:49:04 jsg Exp $ */
 
 /*
  * Copyright (c) 2016 Martin Pieuchot <mpi@openbsd.org>
@@ -16,170 +16,211 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <assert.h>
+#define _DYN_LOADER	/* needed for AuxInfo */
+
+#include <sys/types.h>
+
 #include <err.h>
 #include <fcntl.h>
 #include <gelf.h>
-#include <paths.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "btrace.h"
 
-int		 kfd = -1;
-Elf		*kelf;
-Elf_Scn		*ksymtab;
-size_t		 kstrtabndx, knsymb;
+struct sym {
+	char *sym_name;
+	unsigned long sym_value;	/* from st_value */
+	unsigned long sym_size;		/* from st_size */
+};
 
-int		 kelf_parse(void);
+struct syms {
+	struct sym *table;
+	size_t nsymb;
+};
 
-int
-kelf_open(void)
+int sym_compare_search(const void *, const void *);
+int sym_compare_sort(const void *, const void *);
+
+struct syms *
+kelf_open(const char *path)
 {
-	int error;
-
-	assert(kfd == -1);
+	char *name;
+	Elf *elf;
+	Elf_Data *data = NULL;
+	Elf_Scn	*scn = NULL, *symtab = NULL;
+	GElf_Sym sym;
+	GElf_Shdr shdr;
+	size_t i, shstrndx, strtabndx = SIZE_MAX, symtab_size;
+	unsigned long diff;
+	struct sym *tmp;
+	struct syms *syms = NULL;
+	int fd;
 
 	if (elf_version(EV_CURRENT) == EV_NONE)
 		errx(1, "elf_version: %s", elf_errmsg(-1));
 
-	kfd = open(_PATH_KSYMS, O_RDONLY);
-	if (kfd == -1) {
-		warn("open");
-		return 1;
+	fd = open(path, O_RDONLY);
+	if (fd == -1) {
+		warn("open: %s", path);
+		return NULL;
 	}
 
-	if ((kelf = elf_begin(kfd, ELF_C_READ, NULL)) == NULL) {
+	if ((elf = elf_begin(fd, ELF_C_READ, NULL)) == NULL) {
 		warnx("elf_begin: %s", elf_errmsg(-1));
-		error = 1;
 		goto bad;
 	}
 
-	if (elf_kind(kelf) != ELF_K_ELF) {
-		error = 1;
+	if (elf_kind(elf) != ELF_K_ELF)
+		goto bad;
+
+	if (elf_getshdrstrndx(elf, &shstrndx) != 0) {
+		warnx("elf_getshdrstrndx: %s", elf_errmsg(-1));
 		goto bad;
 	}
 
-	error = kelf_parse();
-	if (error)
+	while ((scn = elf_nextscn(elf, scn)) != NULL) {
+		if (gelf_getshdr(scn, &shdr) != &shdr) {
+			warnx("elf_getshdr: %s", elf_errmsg(-1));
+			goto bad;
+		}
+		if ((name = elf_strptr(elf, shstrndx, shdr.sh_name)) == NULL) {
+			warnx("elf_strptr: %s", elf_errmsg(-1));
+			goto bad;
+		}
+		if (strcmp(name, ELF_SYMTAB) == 0 &&
+		    shdr.sh_type == SHT_SYMTAB && shdr.sh_entsize != 0) {
+			symtab = scn;
+			symtab_size = shdr.sh_size / shdr.sh_entsize;
+		}
+		if (strcmp(name, ELF_STRTAB) == 0 &&
+		    shdr.sh_type == SHT_STRTAB) {
+			strtabndx = elf_ndxscn(scn);
+		}
+	}
+	if (symtab == NULL) {
+		warnx("%s: %s: section not found", path, ELF_SYMTAB);
 		goto bad;
+	}
+	if (strtabndx == SIZE_MAX) {
+		warnx("%s: %s: section not found", path, ELF_STRTAB);
+		goto bad;
+	}
 
-	return 0;
-
-bad:
-	kelf_close();
-	return error;
-}
-
-void
-kelf_close(void)
-{
-	elf_end(kelf);
-	kelf = NULL;
-	close(kfd);
-	kfd = -1;
-}
-
-int
-kelf_snprintsym(char *str, size_t size, unsigned long pc)
-{
-	GElf_Sym	 sym;
-	Elf_Data	*data = NULL;
-	Elf_Addr	 offset, bestoff = 0;
-	size_t		 i, bestidx = 0;
-	char		*name;
-	int		 cnt;
-
-	data = elf_rawdata(ksymtab, data);
+	data = elf_rawdata(symtab, data);
 	if (data == NULL)
-		goto fallback;
+		goto bad;
 
-	for (i = 0; i < knsymb; i++) {
+	if ((syms = calloc(1, sizeof(*syms))) == NULL)
+		err(1, NULL);
+	syms->table = calloc(symtab_size, sizeof *syms->table);
+	if (syms->table == NULL)
+		err(1, NULL);
+	for (i = 0; i < symtab_size; i++) {
 		if (gelf_getsym(data, i, &sym) == NULL)
 			continue;
 		if (GELF_ST_TYPE(sym.st_info) != STT_FUNC)
 			continue;
-		if (pc >= sym.st_value) {
-			if (pc < (sym.st_value + sym.st_size))
-				break;
-			/* Workaround for symbols w/o size, usually asm ones. */
-			if (sym.st_size == 0 && sym.st_value > bestoff) {
-				bestidx = i;
-				bestoff = sym.st_value;
-			}
-		}
+		name = elf_strptr(elf, strtabndx, sym.st_name);
+		if (name == NULL)
+			continue;
+		syms->table[syms->nsymb].sym_name = strdup(name);
+		if (syms->table[syms->nsymb].sym_name == NULL)
+			err(1, NULL);
+		syms->table[syms->nsymb].sym_value = sym.st_value;
+		syms->table[syms->nsymb].sym_size = sym.st_size;
+		syms->nsymb++;
+	}
+	tmp = reallocarray(syms->table, syms->nsymb, sizeof *syms->table);
+	if (tmp == NULL)
+		err(1, NULL);
+	syms->table = tmp;
+
+	/* Sort symbols in ascending order by address. */
+	qsort(syms->table, syms->nsymb, sizeof *syms->table, sym_compare_sort);
+
+	/*
+	 * Some functions, particularly those written in assembly, have an
+	 * st_size of zero.  We can approximate a size for these by assuming
+	 * that they extend from their st_value to that of the next function.
+	 */
+	for (i = 0; i < syms->nsymb; i++) {
+		if (syms->table[i].sym_size != 0)
+			continue;
+		/* Can't do anything for the last symbol. */
+		if (i + 1 == syms->nsymb)
+			continue;
+		diff = syms->table[i + 1].sym_value - syms->table[i].sym_value;
+		syms->table[i].sym_size = diff;
 	}
 
-	if (i == knsymb) {
-		if (bestidx == 0 || gelf_getsym(data, bestidx, &sym) == NULL)
-			goto fallback;
-	}
+bad:
+	elf_end(elf);
+	close(fd);
+	return syms;
+}
 
-	name = elf_strptr(kelf, kstrtabndx, sym.st_name);
-	if (name != NULL)
-		cnt = snprintf(str, size, "\n%s", name);
-	else
-		cnt = snprintf(str, size, "\n0x%llx", sym.st_value);
-	if (cnt < 0)
-		return cnt;
+void
+kelf_close(struct syms *syms)
+{
+	size_t i;
 
-	offset = pc - sym.st_value;
+	if (syms == NULL)
+		return;
+
+	for (i = 0; i < syms->nsymb; i++)
+		free(syms->table[i].sym_name);
+	free(syms->table);
+	free(syms);
+}
+
+int
+kelf_snprintsym(struct syms *syms, char *str, size_t size, unsigned long pc,
+    unsigned long off)
+{
+	struct sym key = { .sym_value = pc + off };
+	struct sym *entry;
+	Elf_Addr offset;
+
+	if (syms == NULL)
+		goto fallback;
+
+	entry = bsearch(&key, syms->table, syms->nsymb, sizeof *syms->table,
+	    sym_compare_search);
+	if (entry == NULL)
+		goto fallback;
+
+	offset = pc - (entry->sym_value + off);
 	if (offset != 0) {
-		int l;
-
-		l = snprintf(str + cnt, size > (size_t)cnt ? size - cnt : 0,
-		    "+0x%llx", (unsigned long long)offset);
-		if (l < 0)
-			return l;
-		cnt += l;
+		return snprintf(str, size, "\n%s+0x%llx",
+		    entry->sym_name, (unsigned long long)offset);
 	}
 
-	return cnt;
+	return snprintf(str, size, "\n%s", entry->sym_name);
 
 fallback:
 	return snprintf(str, size, "\n0x%lx", pc);
 }
 
 int
-kelf_parse(void)
+sym_compare_sort(const void *ap, const void *bp)
 {
-	GElf_Shdr	 shdr;
-	Elf_Scn		*scn, *scnctf;
-	char		*name;
-	size_t		 shstrndx;
+	const struct sym *a = ap, *b = bp;
 
-	if (elf_getshdrstrndx(kelf, &shstrndx) != 0) {
-		warnx("elf_getshdrstrndx: %s", elf_errmsg(-1));
-		return 1;
-	}
+	if (a->sym_value < b->sym_value)
+		return -1;
+	return a->sym_value > b->sym_value;
+}
 
-	scn = scnctf = NULL;
-	while ((scn = elf_nextscn(kelf, scn)) != NULL) {
-		if (gelf_getshdr(scn, &shdr) != &shdr) {
-			warnx("elf_getshdr: %s", elf_errmsg(-1));
-			return 1;
-		}
+int
+sym_compare_search(const void *keyp, const void *entryp)
+{
+	const struct sym *entry = entryp, *key = keyp;
 
-		if ((name = elf_strptr(kelf, shstrndx, shdr.sh_name)) == NULL) {
-			warnx("elf_strptr: %s", elf_errmsg(-1));
-			return 1;
-		}
-
-		if (strcmp(name, ELF_SYMTAB) == 0 &&
-		    shdr.sh_type == SHT_SYMTAB && shdr.sh_entsize != 0) {
-			ksymtab = scn;
-			knsymb = shdr.sh_size / shdr.sh_entsize;
-		}
-
-		if (strcmp(name, ELF_STRTAB) == 0 &&
-		    shdr.sh_type == SHT_STRTAB) {
-			kstrtabndx = elf_ndxscn(scn);
-		}
-	}
-
-	if (ksymtab == NULL)
-		warnx("symbol table not found");
-
-	return 0;
+	if (key->sym_value < entry->sym_value)
+		return -1;
+	return key->sym_value >= entry->sym_value + entry->sym_size;
 }

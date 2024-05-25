@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.336 2022/12/07 20:08:29 mvs Exp $	*/
+/*	$OpenBSD: proc.h,v 1.361 2024/05/20 10:32:20 claudio Exp $	*/
 /*	$NetBSD: proc.h,v 1.44 1996/04/22 01:23:21 christos Exp $	*/
 
 /*-
@@ -117,6 +117,13 @@ struct tslpentry;
 TAILQ_HEAD(tslpqueue, tslpentry);
 struct unveil;
 
+struct pinsyscall {
+	vaddr_t		pn_start;
+	vaddr_t		pn_end;
+	u_int		*pn_pins; /* array of offsets indexed by syscall# */
+	int		pn_npins; /* number of entries in table */
+};
+
 /*
  * Locks used to protect struct members in this file:
  *	I	immutable after creation
@@ -138,7 +145,7 @@ struct process {
 	struct	ucred *ps_ucred;	/* Process owner's identity. */
 
 	LIST_ENTRY(process) ps_list;	/* List of all processes. */
-	TAILQ_HEAD(,proc) ps_threads;	/* [K|S] Threads in this process. */
+	TAILQ_HEAD(,proc) ps_threads;	/* [K|m] Threads in this process. */
 
 	LIST_ENTRY(process) ps_pglist;	/* List of processes in pgrp. */
 	struct	process *ps_pptr; 	/* Pointer to parent process. */
@@ -173,8 +180,9 @@ struct process {
 	u_int	ps_flags;		/* [a] PS_* flags. */
 	int	ps_siglist;		/* Signals pending for the process. */
 
-	struct	proc *ps_single;	/* [S] Thread for single-threading. */
-	u_int	ps_singlecount;		/* [a] Not yet suspended threads. */
+	struct	proc *ps_single;	/* [m] Thread for single-threading. */
+	u_int	ps_singlecnt;		/* [m] Number of threads to suspend. */
+	u_int	ps_exitcnt;		/* [m] Number of threads in exit1. */
 
 	int	ps_traceflag;		/* Kernel trace points. */
 	struct	vnode *ps_tracevp;	/* Trace to vnode. */
@@ -237,10 +245,15 @@ struct process {
 
 	int64_t ps_kbind_cookie;	/* [m] */
 	u_long  ps_kbind_addr;		/* [m] */
+/* an address that can't be in userspace or kernelspace */
+#define	BOGO_PC	(u_long)-1
+
+	struct pinsyscall ps_pin;	/* static or ld.so */
+	struct pinsyscall ps_libcpin;	/* libc.so, from pinsyscalls(2) */
 
 /* End area that is copied on creation. */
-#define ps_endcopy	ps_refcnt
-	int	ps_refcnt;		/* Number of references. */
+#define ps_endcopy	ps_threadcnt
+	u_int	ps_threadcnt;		/* [m] Number of threads. */
 
 	struct	timespec ps_start;	/* starting uptime. */
 	struct	timeout ps_realit_to;	/* [m] ITIMER_REAL timeout */
@@ -279,6 +292,10 @@ struct process {
 #define	PS_EXECPLEDGE	0x00400000	/* Has exec pledges */
 #define	PS_ORPHAN	0x00800000	/* Process is on an orphan list */
 #define	PS_CHROOT	0x01000000	/* Process is chrooted */
+#define	PS_NOBTCFI	0x02000000	/* No Branch Target CFI */
+#define	PS_ITIMER	0x04000000	/* Virtual interval timers running */
+#define	PS_PIN		0x08000000	/* ld.so or static syscall pin */
+#define	PS_LIBCPIN	0x10000000	/* libc.so syscall pin */
 
 #define	PS_BITS \
     ("\20" "\01CONTROLT" "\02EXEC" "\03INEXEC" "\04EXITING" "\05SUGID" \
@@ -286,7 +303,7 @@ struct process {
      "\013WAITED" "\014COREDUMP" "\015SINGLEEXIT" "\016SINGLEUNWIND" \
      "\017NOZOMBIE" "\020STOPPED" "\021SYSTEM" "\022EMBRYO" "\023ZOMBIE" \
      "\024NOBROADCASTKILL" "\025PLEDGE" "\026WXNEEDED" "\027EXECPLEDGE" \
-     "\030ORPHAN" "\031CHROOT")
+     "\030ORPHAN" "\031CHROOT" "\032NOBTCFI" "\033ITIMER")
 
 
 struct kcov_dev;
@@ -305,14 +322,15 @@ struct p_inentry {
  *	S	scheduler lock
  *	U	uidinfolk
  *	l	read only reference, see lim_read_enter()
- *	o	owned (read/modified only) by this thread
+ *	o	owned (modified only) by this thread
+ *	m	this proc's' `p->p_p->ps_mtx'
  */
 struct proc {
 	TAILQ_ENTRY(proc) p_runq;	/* [S] current run/sleep queue */
 	LIST_ENTRY(proc) p_list;	/* List of all threads. */
 
 	struct	process *p_p;		/* [I] The process of this thread. */
-	TAILQ_ENTRY(proc) p_thr_link;	/* Threads in a process linkage. */
+	TAILQ_ENTRY(proc) p_thr_link;	/* [K|m] Threads in a process linkage. */
 
 	TAILQ_ENTRY(proc) p_fut_link;	/* Threads in a futex linkage. */
 	struct	futex	*p_futex;	/* Current sleeping futex. */
@@ -321,7 +339,6 @@ struct proc {
 	struct	filedesc *p_fd;		/* copy of p_p->ps_fd */
 	struct	vmspace *p_vmspace;	/* [I] copy of p_p->ps_vmspace */
 	struct	p_inentry p_spinentry;	/* [o] cache for SP check */
-	struct	p_inentry p_pcinentry;	/* [o] cache for PC check */
 
 	int	p_flag;			/* P_* flags. */
 	u_char	p_spare;		/* unused */
@@ -350,7 +367,6 @@ struct proc {
 
 	struct	rusage p_ru;		/* Statistics */
 	struct	tusage p_tu;		/* accumulated times. */
-	struct	timespec p_rtime;	/* Real time. */
 
 	struct	plimit	*p_limit;	/* [l] read ref. of p_p->ps_limit */
 	struct	kcov_dev *p_kd;		/* kcov device handle */
@@ -365,8 +381,9 @@ struct proc {
 
 /* The following fields are all copied upon creation in fork. */
 #define	p_startcopy	p_sigmask
-	sigset_t p_sigmask;		/* [a] Current signal mask */
+	sigset_t p_sigmask;		/* [o] Current signal mask */
 
+	char	p_name[_MAXCOMLEN];	/* thread name, incl NUL */
 	u_char	p_slppri;		/* [S] Sleeping priority */
 	u_char	p_usrpri;	/* [S] Priority based on p_estcpu & ps_nice */
 	u_int	p_estcpu;		/* [S] Time averaged val of p_cpticks */
@@ -383,7 +400,7 @@ struct proc {
 	struct	user *p_addr;	/* Kernel virtual addr of u-area */
 	struct	mdproc p_md;	/* Any machine-dependent fields. */
 
-	sigset_t p_oldmask;	/* Saved mask from before sigpause */
+	sigset_t p_oldmask;	/* [o] Saved mask from before sigpause */
 	int	p_sisig;	/* For core dump/debugger XXX */
 	union sigval p_sigval;	/* For core dump/debugger XXX */
 	long	p_sitrapno;	/* For core dump/debugger XXX */
@@ -400,8 +417,7 @@ struct proc {
 #define	SONPROC	7		/* Thread is currently on a CPU. */
 
 #define	P_ZOMBIE(p)	((p)->p_stat == SDEAD)
-#define	P_HASSIBLING(p)	(TAILQ_FIRST(&(p)->p_p->ps_threads) != (p) || \
-			 TAILQ_NEXT((p), p_thr_link) != NULL)
+#define	P_HASSIBLING(p)	((p)->p_p->ps_threadcnt > 1)
 
 /*
  * These flags are per-thread and kept in p_flag
@@ -411,6 +427,7 @@ struct proc {
 #define	P_ALRMPEND	0x00000004	/* SIGVTALRM needs to be posted */
 #define	P_SIGSUSPEND	0x00000008	/* Need to restore before-suspend mask*/
 #define	P_CANTSLEEP	0x00000010	/* insomniac thread */
+#define	P_WSLEEP	0x00000020	/* Working on going to sleep. */
 #define	P_SINTR		0x00000080	/* Sleep is interruptible. */
 #define	P_SYSTEM	0x00000200	/* No sigs, stats or swapping. */
 #define	P_TIMEOUT	0x00000400	/* Timing out during sleep. */
@@ -420,12 +437,11 @@ struct proc {
 #define P_CONTINUED	0x00800000	/* Proc has continued from a stopped state. */
 #define	P_THREAD	0x04000000	/* Only a thread, not a real process */
 #define	P_SUSPSIG	0x08000000	/* Stopped from signal. */
-#define	P_SOFTDEP	0x10000000	/* Stuck processing softdep worklist */
 #define P_CPUPEG	0x40000000	/* Do not move to another cpu. */
 
 #define	P_BITS \
     ("\20" "\01INKTR" "\02PROFPEND" "\03ALRMPEND" "\04SIGSUSPEND" \
-     "\05CANTSLEEP" "\010SINTR" "\012SYSTEM" "\013TIMEOUT" \
+     "\05CANTSLEEP" "\06WSLEEP" "\010SINTR" "\012SYSTEM" "\013TIMEOUT" \
      "\016WEXIT" "\020OWEUPC" "\024SUSPSINGLE" "\027XX" \
      "\030CONTINUED" "\033THREAD" "\034SUSPSIG" "\035SOFTDEP" "\037CPUPEG")
 
@@ -524,6 +540,8 @@ struct process *prfind(pid_t);	/* Find process by id. */
 struct process *zombiefind(pid_t); /* Find zombie process by id. */
 struct proc *tfind(pid_t);	/* Find thread by id. */
 struct pgrp *pgfind(pid_t);	/* Find process group by id. */
+struct proc *tfind_user(pid_t, struct process *);
+				/* Find thread by userspace id. */
 void	proc_printit(struct proc *p, const char *modif,
     int (*pr)(const char *, ...));
 
@@ -538,13 +556,11 @@ void	procinit(void);
 void	setpriority(struct proc *, uint32_t, uint8_t);
 void	setrunnable(struct proc *);
 void	endtsleep(void *);
-int	wakeup_proc(struct proc *, const volatile void *);
+int	wakeup_proc(struct proc *, int);
 void	unsleep(struct proc *);
 void	reaper(void *);
 __dead void exit1(struct proc *, int, int, int);
 void	exit2(struct proc *);
-int	dowait4(struct proc *, pid_t, int *, int, struct rusage *,
-	    register_t *);
 void	cpu_fork(struct proc *_curp, struct proc *_child, void *_stack,
 	    void *_tcb, void (*_func)(void *), void *_arg);
 void	cpu_exit(struct proc *);
@@ -567,12 +583,15 @@ refreshcreds(struct proc *p)
 		dorefreshcreds(pr, p);
 }
 
-enum single_thread_mode {
-	SINGLE_SUSPEND,		/* other threads to stop wherever they are */
-	SINGLE_UNWIND,		/* other threads to unwind and stop */
-	SINGLE_EXIT		/* other threads to unwind and then exit */
-};
-int	single_thread_set(struct proc *, enum single_thread_mode, int);
+#define	SINGLE_SUSPEND	0x01	/* other threads to stop wherever they are */
+#define	SINGLE_UNWIND	0x02	/* other threads to unwind and stop */
+#define	SINGLE_EXIT	0x03	/* other threads to unwind and then exit */
+#define	SINGLE_MASK	0x0f
+/* extra flags for single_thread_set */
+#define	SINGLE_DEEP	0x10	/* call is in deep */
+#define	SINGLE_NOWAIT	0x20	/* do not wait for other threads to stop */
+
+int	single_thread_set(struct proc *, int);
 int	single_thread_wait(struct process *, int);
 void	single_thread_clear(struct proc *, int);
 int	single_thread_check(struct proc *, int);
@@ -581,21 +600,13 @@ void	child_return(void *);
 
 int	proc_cansugid(struct proc *);
 
-struct sleep_state {
-	int sls_s;
-	int sls_catch;
-	int sls_timeout;
-};
-
 struct cond {
 	unsigned int	c_wait;		/* [a] initialized and waiting */
 };
 
 #define COND_INITIALIZER()		{ .c_wait = 1 }
 
-#if defined(MULTIPROCESSOR)
-void	proc_trampoline_mp(void);	/* XXX */
-#endif
+void	proc_trampoline_mi(void);
 
 /*
  * functions to handle sets of cpus.

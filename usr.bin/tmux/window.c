@@ -1,4 +1,4 @@
-/* $OpenBSD: window.c,v 1.282 2022/08/24 07:22:30 nicm Exp $ */
+/* $OpenBSD: window.c,v 1.290 2024/04/10 07:15:21 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -66,6 +66,7 @@ static u_int	next_active_point;
 struct window_pane_input_data {
 	struct cmdq_item	*item;
 	u_int			 wp;
+	struct client_file	*file;
 };
 
 static struct window_pane *window_pane_create(struct window *, u_int, u_int,
@@ -247,21 +248,15 @@ winlink_stack_push(struct winlink_stack *stack, struct winlink *wl)
 
 	winlink_stack_remove(stack, wl);
 	TAILQ_INSERT_HEAD(stack, wl, sentry);
+	wl->flags |= WINLINK_VISITED;
 }
 
 void
 winlink_stack_remove(struct winlink_stack *stack, struct winlink *wl)
 {
-	struct winlink	*wl2;
-
-	if (wl == NULL)
-		return;
-
-	TAILQ_FOREACH(wl2, stack, sentry) {
-		if (wl2 == wl) {
-			TAILQ_REMOVE(stack, wl, sentry);
-			return;
-		}
+	if (wl != NULL && (wl->flags & WINLINK_VISITED)) {
+		TAILQ_REMOVE(stack, wl, sentry);
+		wl->flags &= ~WINLINK_VISITED;
 	}
 }
 
@@ -311,6 +306,7 @@ window_create(u_int sx, u_int sy, u_int xpixel, u_int ypixel)
 	w->flags = 0;
 
 	TAILQ_INIT(&w->panes);
+	TAILQ_INIT(&w->last_panes);
 	w->active = NULL;
 
 	w->lastlayout = -1;
@@ -344,6 +340,7 @@ window_destroy(struct window *w)
 {
 	log_debug("window @%u destroyed (%d references)", w->id, w->references);
 
+	window_unzoom(w, 0);
 	RB_REMOVE(windows, &windows, w);
 
 	if (w->layout_root != NULL)
@@ -477,7 +474,7 @@ window_pane_update_focus(struct window_pane *wp)
 	struct client	*c;
 	int		 focused = 0;
 
-	if (wp != NULL) {
+	if (wp != NULL && (~wp->flags & PANE_EXITED)) {
 		if (wp != wp->window->active)
 			focused = 0;
 		else {
@@ -511,18 +508,23 @@ window_pane_update_focus(struct window_pane *wp)
 int
 window_set_active_pane(struct window *w, struct window_pane *wp, int notify)
 {
+	struct window_pane *lastwp;
+
 	log_debug("%s: pane %%%u", __func__, wp->id);
 
 	if (wp == w->active)
 		return (0);
-	w->last = w->active;
+	lastwp = w->active;
+
+	window_pane_stack_remove(&w->last_panes, wp);
+	window_pane_stack_push(&w->last_panes, lastwp);
 
 	w->active = wp;
 	w->active->active_point = next_active_point++;
 	w->active->flags |= PANE_CHANGED;
 
 	if (options_get_number(global_options, "focus-events")) {
-		window_pane_update_focus(w->last);
+		window_pane_update_focus(lastwp);
 		window_pane_update_focus(w->active);
 	}
 
@@ -664,7 +666,7 @@ window_zoom(struct window_pane *wp)
 }
 
 int
-window_unzoom(struct window *w)
+window_unzoom(struct window *w, int notify)
 {
 	struct window_pane	*wp;
 
@@ -681,7 +683,9 @@ window_unzoom(struct window *w)
 		wp->saved_layout_cell = NULL;
 	}
 	layout_fix_panes(w, NULL);
-	notify_window("window-layout-changed", w);
+
+	if (notify)
+		notify_window("window-layout-changed", w);
 
 	return (0);
 }
@@ -695,7 +699,7 @@ window_push_zoom(struct window *w, int always, int flag)
 		w->flags |= WINDOW_WASZOOMED;
 	else
 		w->flags &= ~WINDOW_WASZOOMED;
-	return (window_unzoom(w) == 0);
+	return (window_unzoom(w, 1) == 0);
 }
 
 int
@@ -745,21 +749,21 @@ window_lost_pane(struct window *w, struct window_pane *wp)
 	if (wp == marked_pane.wp)
 		server_clear_marked();
 
+	window_pane_stack_remove(&w->last_panes, wp);
 	if (wp == w->active) {
-		w->active = w->last;
-		w->last = NULL;
+		w->active = TAILQ_FIRST(&w->last_panes);
 		if (w->active == NULL) {
 			w->active = TAILQ_PREV(wp, window_panes, entry);
 			if (w->active == NULL)
 				w->active = TAILQ_NEXT(wp, entry);
 		}
 		if (w->active != NULL) {
+			window_pane_stack_remove(&w->last_panes, w->active);
 			w->active->flags |= PANE_CHANGED;
 			notify_window("window-pane-changed", w);
 			window_update_focus(w);
 		}
-	} else if (wp == w->last)
-		w->last = NULL;
+	}
 }
 
 void
@@ -842,6 +846,11 @@ void
 window_destroy_panes(struct window *w)
 {
 	struct window_pane	*wp;
+
+	while (!TAILQ_EMPTY(&w->last_panes)) {
+		wp = TAILQ_FIRST(&w->last_panes);
+		window_pane_stack_remove(&w->last_panes, wp);
+	}
 
 	while (!TAILQ_EMPTY(&w->panes)) {
 		wp = TAILQ_FIRST(&w->panes);
@@ -1119,6 +1128,7 @@ window_pane_reset_mode(struct window_pane *wp)
 
 	next = TAILQ_FIRST(&wp->modes);
 	if (next == NULL) {
+		wp->flags &= ~PANE_UNSEENCHANGES;
 		log_debug("%s: no next mode", __func__);
 		wp->screen = &wp->base;
 	} else {
@@ -1194,6 +1204,12 @@ window_pane_visible(struct window_pane *wp)
 	if (~wp->window->flags & WINDOW_ZOOMED)
 		return (1);
 	return (wp == wp->window->active);
+}
+
+int
+window_pane_exited(struct window_pane *wp)
+{
+	return (wp->fd == -1 || (wp->flags & PANE_EXITED));
 }
 
 u_int
@@ -1476,6 +1492,25 @@ window_pane_find_right(struct window_pane *wp)
 	return (best);
 }
 
+void
+window_pane_stack_push(struct window_panes *stack, struct window_pane *wp)
+{
+	if (wp != NULL) {
+		window_pane_stack_remove(stack, wp);
+		TAILQ_INSERT_HEAD(stack, wp, sentry);
+		wp->flags |= PANE_VISITED;
+	}
+}
+
+void
+window_pane_stack_remove(struct window_panes *stack, struct window_pane *wp)
+{
+	if (wp != NULL && (wp->flags & PANE_VISITED)) {
+		TAILQ_REMOVE(stack, wp, sentry);
+		wp->flags &= ~PANE_VISITED;
+	}
+}
+
 /* Clear alert flags for a winlink */
 void
 winlink_clear_flags(struct winlink *wl)
@@ -1533,18 +1568,18 @@ window_pane_input_callback(struct client *c, __unused const char *path,
 	size_t				 len = EVBUFFER_LENGTH(buffer);
 
 	wp = window_pane_find_by_id(cdata->wp);
-	if (wp == NULL || closed || error != 0 || (c->flags & CLIENT_DEAD)) {
-		if (wp == NULL)
+	if (cdata->file != NULL && (wp == NULL || c->flags & CLIENT_DEAD)) {
+		if (wp == NULL) {
+			c->retval = 1;
 			c->flags |= CLIENT_EXIT;
-
-		evbuffer_drain(buffer, len);
+		}
+		file_cancel(cdata->file);
+	} else if (cdata->file == NULL || closed || error != 0) {
 		cmdq_continue(cdata->item);
-
 		server_client_unref(c);
 		free(cdata);
-		return;
-	}
-	input_parse_buffer(wp, buf, len);
+	} else
+		input_parse_buffer(wp, buf, len);
 	evbuffer_drain(buffer, len);
 }
 
@@ -1567,9 +1602,8 @@ window_pane_start_input(struct window_pane *wp, struct cmdq_item *item,
 	cdata = xmalloc(sizeof *cdata);
 	cdata->item = item;
 	cdata->wp = wp->id;
-
+	cdata->file = file_read(c, "-", window_pane_input_callback, cdata);
 	c->references++;
-	file_read(c, "-", window_pane_input_callback, cdata);
 
 	return (0);
 }

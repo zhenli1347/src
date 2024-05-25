@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.322 2022/01/02 23:14:27 jsg Exp $
+#	$OpenBSD: GENERIC,v 1.324 2024/02/09 11:05:22 bluhm Exp $
 #
 # For further information on compiling OpenBSD kernels, see the config(8)
 # man page.
@@ -98,6 +98,7 @@ re*	at cardbus?		# Realtek 8169/8169S/8110S
 thtc*	at pci?			# Tehuti Networks 10Gb ethernet
 tht*	at thtc?
 jme*	at pci?			# JMicron JMC250/JMC260 Ethernet
+igc*	at pci?			# Intel I225 Ethernet
 
 ath*	at pci?			# Atheros AR5k (802.11a/b/g)
 ath*	at cardbus?		# Atheros AR5k (802.11a/b/g)
@@ -341,9 +342,6 @@ clkbrd*	at fhc?
 
 ## PROM clock -- if all else failse
 prtc0	at mainbus0
-
-## Timer chip found on (some) sun4u systems.
-timer*	at mainbus0
 
 # Virtual devices for sun4v systems.
 vcons0	at vbus?

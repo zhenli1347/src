@@ -1,4 +1,4 @@
-/*	$OpenBSD: vars.c,v 1.15 2014/07/11 12:33:12 jasper Exp $	*/
+/*	$OpenBSD: vars.c,v 1.17 2023/03/13 20:19:22 miod Exp $	*/
 
 /*
  * Copyright (c) 1998-2000 Michael Shalayeff
@@ -37,7 +37,6 @@ extern char prog_ident[];
 extern int debug;
 int db_console = -1;
 
-static int Xaddr(void);
 static int Xdevice(void);
 #ifdef DEBUG
 static int Xdebug(void);
@@ -45,19 +44,22 @@ static int Xdebug(void);
 static int Xdb_console(void);
 static int Ximage(void);
 static int Xhowto(void);
+#ifdef BOOT_STTY
 static int Xtty(void);
+#endif
 static int Xtimeout(void);
 int Xset(void);
 int Xenv(void);
 
 const struct cmd_table cmd_set[] = {
-	{"addr",   CMDT_VAR, Xaddr},
 	{"howto",  CMDT_VAR, Xhowto},
 #ifdef DEBUG
 	{"debug",  CMDT_VAR, Xdebug},
 #endif
 	{"device", CMDT_VAR, Xdevice},
+#ifdef BOOT_STTY
 	{"tty",    CMDT_VAR, Xtty},
+#endif
 	{"image",  CMDT_VAR, Ximage},
 	{"timeout",CMDT_VAR, Xtimeout},
 	{"db_console", CMDT_VAR, Xdb_console},
@@ -149,16 +151,7 @@ Ximage(void)
 	return 0;
 }
 
-static int
-Xaddr(void)
-{
-	if (cmd.argc != 2)
-		printf("%p\n", cmd.addr);
-	else
-		cmd.addr = (void *)strtol(cmd.argv[1], NULL, 0);
-	return 0;
-}
-
+#ifdef BOOT_STTY
 static int
 Xtty(void)
 {
@@ -181,6 +174,13 @@ Xtty(void)
 	}
 	return 0;
 }
+#endif
+
+#ifdef __alpha__
+#define	ASKNAME_LETTER 'n'
+#else
+#define	ASKNAME_LETTER 'a'
+#endif
 
 static int
 Xhowto(void)
@@ -189,7 +189,7 @@ Xhowto(void)
 		if (cmd.boothowto) {
 			putchar('-');
 			if (cmd.boothowto & RB_ASKNAME)
-				putchar('a');
+				putchar(ASKNAME_LETTER);
 			if (cmd.boothowto & RB_CONFIG)
 				putchar('c');
 			if (cmd.boothowto & RB_SINGLE)
@@ -214,7 +214,7 @@ bootparse(int i)
 		if (*cp == '-') {
 			while (*++cp) {
 				switch (*cp) {
-				case 'a':
+				case ASKNAME_LETTER:
 					howto |= RB_ASKNAME;
 					break;
 				case 'c':

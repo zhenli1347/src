@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.62 2022/12/06 01:56:44 cheloha Exp $	*/
+/*	$OpenBSD: clock.c,v 1.69 2024/05/13 01:15:50 jsg Exp $	*/
 /*	$NetBSD: clock.c,v 1.39 1996/05/12 23:11:54 mycroft Exp $	*/
 
 /*-
@@ -90,13 +90,10 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <sys/time.h>
 #include <sys/kernel.h>
 #include <sys/clockintr.h>
-#include <sys/device.h>
-#include <sys/stdint.h>
 #include <sys/timeout.h>
 #include <sys/timetc.h>
 #include <sys/mutex.h>
 
-#include <machine/cpu.h>
 #include <machine/intr.h>
 #include <machine/pio.h>
 #include <machine/cpufunc.h>
@@ -108,7 +105,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <dev/ic/i8253reg.h>
 #include <i386/isa/nvram.h>
 
-void	spinwait(int);
 int	clockintr(void *);
 int	gettick(void);
 int	rtcget(mc_todregs *);
@@ -132,7 +128,6 @@ u_int i8254_simple_get_timecount(struct timecounter *tc);
 
 static struct timecounter i8254_timecounter = {
 	.tc_get_timecount = i8254_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = TIMER_FREQ,
 	.tc_name = "i8254",
@@ -430,14 +425,23 @@ i8254_initclocks(void)
 
 	stathz = 128;
 	profhz = 1024;		/* XXX does not divide into 1 billion */
-	clockintr_init(0);
+}
 
+void
+i8254_start_both_clocks(void)
+{
 	clockintr_cpu_init(NULL);
 
-	/* When using i8254 for clock, we also use the rtc for profclock */
-	(void)isa_intr_establish(NULL, 0, IST_PULSE, IPL_CLOCK,
+	/*
+	 * When using i8254 for clock, we also use the rtc for profclock.
+	 *
+	 * These IRQs are not MP-safe, but it is harmless to lie about it
+	 * because we cannot reach this point unless we are only booting
+	 * a single CPU.
+	 */
+	(void)isa_intr_establish(NULL, 0, IST_PULSE, IPL_CLOCK | IPL_MPSAFE,
 	    clockintr, 0, "clock");
-	(void)isa_intr_establish(NULL, 8, IST_PULSE, IPL_STATCLOCK,
+	(void)isa_intr_establish(NULL, 8, IST_PULSE, IPL_STATCLOCK | IPL_MPSAFE,
 	    rtcintr, 0, "rtc");
 
 	rtcstart();			/* start the mc146818 clock */
@@ -667,7 +671,6 @@ setstatclockrate(int arg)
 			mc146818_write(NULL, MC_REGA,
 			    MC_BASE_32_KHz | MC_RATE_1024_Hz);
 	}
-	clockintr_setstatclockrate(arg);
 }
 
 void

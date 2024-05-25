@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.44 2022/03/22 06:51:12 miod Exp $	*/
+/*	$OpenBSD: locore.S,v 1.48 2023/12/12 07:37:21 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -31,20 +31,20 @@
 	.rodata
 
 	.globl sigcode
-	.globl sigcoderet
 sigcode:
 	addi	%r1, %r1, -32
 	mtctr	%r12
 	bctrl
 	addi	%r3, %r1, 32+SF_SC
 	li	%r0, SYS_sigreturn
+	.globl	sigcodecall
+sigcodecall:
 	sc
+	.globl sigcoderet
 sigcoderet:
-	li	%r0, SYS_exit
-	sc
 	.globl esigcode
 esigcode:
-
+	/* FALLTHROUGH */
 	.globl sigfill
 sigfill:
 	.long	0
@@ -104,10 +104,6 @@ cpu_hatch_and_stop:
 	b	1b		/* Lighter states might not use PECE. */
 
 #endif
-
-	.globl cpu_idle_enter
-cpu_idle_enter:
-	blr
 
 	.globl cpu_idle_spin
 cpu_idle_spin:
@@ -190,10 +186,6 @@ cpu_idle_restore_context:
 	mtcr	%r4
 	mtsrr0	%r5
 	rfid	/* return from system reset interrupt */
-
-	.globl cpu_idle_leave
-cpu_idle_leave:
-	blr
 
 	.globl cpu_switchto_asm
 cpu_switchto_asm:
@@ -378,11 +370,7 @@ copystr:
 	.globl proc_trampoline
 	.type proc_trampoline, @function
 proc_trampoline:
-#ifdef MULTIPROCESSOR
-	bl	proc_trampoline_mp
-#endif
-	li	%r3, IPL_NONE
-	bl	splx
+	bl	proc_trampoline_mi
 	mr	%r12, %r31
 	mr	%r3, %r30
 	mtctr	%r12

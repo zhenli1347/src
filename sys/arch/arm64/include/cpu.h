@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.33 2022/12/10 10:13:58 patrick Exp $ */
+/* $OpenBSD: cpu.h,v 1.47 2024/05/01 12:54:27 mpi Exp $ */
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -52,6 +52,7 @@
 	{ "id_aa64pfr1", CTLTYPE_QUAD }, \
 	{ "id_aa64smfr0", CTLTYPE_QUAD }, \
 	{ "id_aa64zfr0", CTLTYPE_QUAD }, \
+	{ "lidaction", CTLTYPE_INT }, \
 }
 
 #ifdef _KERNEL
@@ -59,6 +60,11 @@
 /*
  * Kernel-only definitions
  */
+
+extern uint64_t cpu_id_aa64isar0;
+extern uint64_t cpu_id_aa64isar1;
+extern uint64_t cpu_id_aa64pfr0;
+extern uint64_t cpu_id_aa64pfr1;
 
 #include <machine/intr.h>
 #include <machine/frame.h>
@@ -90,10 +96,6 @@
 #define PROC_PC(p)	((p)->p_addr->u_pcb.pcb_tf->tf_elr)
 #define PROC_STACK(p)	((p)->p_addr->u_pcb.pcb_tf->tf_sp)
 
-/* The address of the vector page. */
-extern vaddr_t vector_page;
-void	arm32_vector_init(vaddr_t, int);
-
 /*
  * Per-CPU information.  For now we assume one CPU.
  */
@@ -102,6 +104,7 @@ void	arm32_vector_init(vaddr_t, int);
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
+#include <uvm/uvm_percpu.h>
 
 struct cpu_info {
 	struct device		*ci_dev; /* Device corresponding to this CPU */
@@ -110,6 +113,7 @@ struct cpu_info {
 
 	u_int32_t		ci_cpuid;
 	uint64_t		ci_mpidr;
+	uint64_t		ci_midr;
 	u_int			ci_acpi_proc_id;
 	int			ci_node;
 	struct cpu_info		*ci_self;
@@ -137,17 +141,25 @@ struct cpu_info {
 	int			ci_want_resched;
 
 	void			(*ci_flush_bp)(void);
+	void			(*ci_serror)(void);
 
 	uint64_t		ci_ttbr1;
 	vaddr_t			ci_el1_stkend;
+
+	uint32_t		ci_psci_suspend_param;
 
 	struct opp_table	*ci_opp_table;
 	volatile int		ci_opp_idx;
 	volatile int		ci_opp_max;
 	uint32_t		ci_cpu_supply;
 
+	u_long			ci_prev_sleep;
+	u_long			ci_last_itime;
+
 #ifdef MULTIPROCESSOR
 	struct srp_hazard	ci_srp_hazards[SRP_HAZARD_NUM];
+#define __HAVE_UVM_PERCPU
+	struct uvm_pmr_cache	ci_uvm;
 	volatile int		ci_flags;
 
 	volatile int		ci_ddb_paused;
@@ -161,8 +173,9 @@ struct cpu_info {
 
 #ifdef GPROF
 	struct gmonparam	*ci_gmon;
+	struct clockintr	ci_gmonclock;
 #endif
-	struct clockintr_queue	ci_queue;
+	struct clockqueue	ci_queue;
 	char			ci_panicbuf[512];
 };
 
@@ -262,28 +275,14 @@ void need_resched(struct cpu_info *);
 
 // asm code to start new kernel contexts.
 void	proc_trampoline(void);
-void	child_trampoline(void);
 
 /*
  * Random cruft
  */
 void	dumpconf(void);
 
-// cpuswitch.S
-struct pcb;
-void	savectx		(struct pcb *pcb);
-
-// machdep.h
-void bootsync		(int);
-
-// fault.c
-int badaddr_read	(void *, size_t, void *);
-
 // syscall.c
 void svc_handler	(trapframe_t *);
-
-/* machine_machdep.c */
-void board_startup(void);
 
 // functions to manipulate interrupt state
 static __inline void
@@ -332,9 +331,13 @@ intr_restore(u_long daif)
 }
 
 void	cpu_halt(void);
-void	cpu_startclock(void);
 int	cpu_suspend_primary(void);
 void	cpu_resume_secondary(struct cpu_info *);
+
+extern void (*cpu_idle_cycle_fcn)(void);
+extern void (*cpu_suspend_cycle_fcn)(void);
+
+void	cpu_wfi(void);
 
 void	delay (unsigned);
 #define	DELAY(x)	delay(x)

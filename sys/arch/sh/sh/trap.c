@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.51 2022/09/12 19:33:34 miod Exp $	*/
+/*	$OpenBSD: trap.c,v 1.57 2023/12/13 15:57:22 miod Exp $	*/
 /*	$NetBSD: exception.c,v 1.32 2006/09/04 23:57:52 uwe Exp $	*/
 /*	$NetBSD: syscall.c,v 1.6 2006/03/07 07:21:50 thorpej Exp $	*/
 
@@ -416,6 +416,10 @@ tlb_exception(struct proc *p, struct trapframe *tf, uint32_t va)
 	}
 
 	err = uvm_fault(map, va, 0, access_type);
+	if (usermode && access_type == PROT_READ && err == EACCES) {
+		access_type = PROT_EXEC;
+		err = uvm_fault(map, va, 0, access_type);
+	}
 
 	/* User stack extension */
 	if (err == 0 && map != kernel_map)
@@ -511,55 +515,22 @@ void
 syscall(struct proc *p, struct trapframe *tf)
 {
 	caddr_t params;
-	const struct sysent *callp;
+	const struct sysent *callp = sysent;
 	int error, opc;
-	int argoff, argsize;
+	int argsize;
 	register_t code, args[8], rval[2];
 
 	uvmexp.syscalls++;
 
 	opc = tf->tf_spc;
-	code = tf->tf_r0;
-
 	params = (caddr_t)tf->tf_r15;
 
-	switch (code) {
-	case SYS_syscall:
-		/*
-		 * Code is first argument, followed by actual args.
-		 */
-	        code = tf->tf_r4;
-		argoff = 1;
-		break;
-	case SYS___syscall:
-		/*
-		 * Like syscall, but code is a quad, so as to maintain
-		 * quad alignment for the rest of the arguments.
-		 */
-#if _BYTE_ORDER == BIG_ENDIAN
-		code = tf->tf_r5;
-#else
-		code = tf->tf_r4;
-#endif
-		argoff = 2;
-		break;
-	default:
-		argoff = 0;
-		break;
-	}
-
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
+	code = tf->tf_r0;
+	// XXX out of range stays on syscall0, which we assume is enosys
+	if (code > 0 && code < SYS_MAXSYSCALL)
 		callp += code;
+
 	argsize = callp->sy_argsize;
-#ifdef DIAGNOSTIC
-	if (argsize > sizeof args) {
-		callp += SYS_syscall - code;
-		argsize = callp->sy_argsize;
-	}
-#endif
 
 	if (argsize) {
 		register_t *ap;
@@ -577,19 +548,18 @@ syscall(struct proc *p, struct trapframe *tf)
 		}
 
 		ap = args;
-		switch (argoff) {
-		case 0:	*ap++ = tf->tf_r4; argsize -= sizeof(int);
-		case 1:	*ap++ = tf->tf_r5; argsize -= sizeof(int);
-		case 2: *ap++ = tf->tf_r6; argsize -= sizeof(int);
-			/*
-			 * off_t args aren't split between register
-			 * and stack, but rather r7 is skipped and
-			 * the entire off_t is on the stack.
-			 */
-			if (argoff + off_t_arg == 3)
-				break;
-			*ap++ = tf->tf_r7; argsize -= sizeof(int);
-			break;
+
+		*ap++ = tf->tf_r4; argsize -= sizeof(int);
+		*ap++ = tf->tf_r5; argsize -= sizeof(int);
+		*ap++ = tf->tf_r6; argsize -= sizeof(int);
+		/*
+		 * off_t args aren't split between register
+		 * and stack, but rather r7 is skipped and
+		 * the entire off_t is on the stack.
+		 */
+		if (off_t_arg != 3) {
+			*ap++ = tf->tf_r7;
+			argsize -= sizeof(int);
 		}
 
 		if (argsize > 0) {

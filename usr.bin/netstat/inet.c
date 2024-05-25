@@ -1,4 +1,4 @@
-/*	$OpenBSD: inet.c,v 1.174 2022/08/12 14:49:15 bluhm Exp $	*/
+/*	$OpenBSD: inet.c,v 1.182 2024/04/17 20:48:51 bluhm Exp $	*/
 /*	$NetBSD: inet.c,v 1.14 1995/10/03 21:42:37 thorpej Exp $	*/
 
 /*
@@ -408,6 +408,10 @@ tcp_stats(char *name)
 	p(tcps_sndwinup, "\t\t%u window update packet%s\n");
 	p(tcps_sndctrl, "\t\t%u control packet%s\n");
 	p(tcps_outswcsum, "\t\t%u packet%s software-checksummed\n");
+	p(tcps_outswtso, "\t\t%u output TSO packet%s software chopped\n");
+	p(tcps_outhwtso, "\t\t%u output TSO packet%s hardware processed\n");
+	p(tcps_outpkttso, "\t\t%u output TSO packet%s generated\n");
+	p(tcps_outbadtso, "\t\t%u output TSO packet%s dropped\n");
 	p(tcps_rcvtotal, "\t%u packet%s received\n");
 	p2(tcps_rcvackpack, tcps_rcvackbyte, "\t\t%u ack%s (for %llu byte%s)\n");
 	p(tcps_rcvdupack, "\t\t%u duplicate ack%s\n");
@@ -435,6 +439,12 @@ tcp_stats(char *name)
 	p(tcps_inswcsum, "\t\t%u packet%s software-checksummed\n");
 	p(tcps_rcvbadsig, "\t\t%u bad/missing md5 checksum%s\n");
 	p(tcps_rcvgoodsig, "\t\t%llu good md5 checksum%s\n");
+	p(tcps_inswlro,
+	    "\t\t%u input LRO packet%s passed through pseudo device\n");
+	p(tcps_inhwlro, "\t\t%u input LRO generated packet%s from hardware\n");
+	p(tcps_inpktlro,
+	    "\t\t%u input LRO coalesced packet%s by network device\n");
+	p(tcps_inbadlro, "\t\t%u input bad LRO packet%s dropped\n");
 	p(tcps_connattempt, "\t%u connection request%s\n");
 	p(tcps_accepts, "\t%u connection accept%s\n");
 	p(tcps_connects, "\t%u connection%s established (including accepts)\n");
@@ -488,7 +498,7 @@ tcp_stats(char *name)
 	    "\t%llu entr%s in current SYN cache, limit is %llu\n");
 	p2b(tcps_sc_bucket_maxlen, tcps_sc_bucket_limit,
 	    "\t%llu longest bucket length in current SYN cache, limit is %llu\n");
-	p(tcps_sc_uses_left, "\t%llu use%s of current SYN cache left\n");
+	p(tcps_sc_uses_left, "\t%lld use%s of current SYN cache left\n");
 
 	p(tcps_sack_recovery_episode, "\t%llu SACK recovery episode%s\n");
 	p(tcps_sack_rexmits,
@@ -611,6 +621,8 @@ ip_stats(char *name)
 	p(ips_inswcsum, "\t%lu input datagram%s software-checksummed\n");
 	p(ips_outswcsum, "\t%lu output datagram%s software-checksummed\n");
 	p(ips_notmember, "\t%lu multicast packet%s which we don't join\n");
+	p1(ips_rtcachehit, "\t%lu route cache hit\n");
+	p1(ips_rtcachemiss, "\t%lu route cache miss\n");
 	p(ips_wrongif, "\t%lu packet%s received on wrong interface\n");
 	p(ips_idropped, "\t%lu input packet%s dropped due to no bufs, etc.\n");
 #undef p
@@ -1449,14 +1461,14 @@ inpcb_dump(u_long off, short protocol, int af)
 	case AF_INET:
 		inet_ntop(af, &inp.inp_faddr, faddr, sizeof(faddr));
 		inet_ntop(af, &inp.inp_laddr, laddr, sizeof(laddr));
-		inet_ntop(af, &((struct sockaddr_in *)
-		    (&inp.inp_route.ro_dst))->sin_addr, raddr, sizeof(raddr));
+		inet_ntop(af, &inp.inp_route.ro_dstsin.sin_addr, raddr,
+		    sizeof(raddr));
 		break;
 	case AF_INET6:
 		inet_ntop(af, &inp.inp_faddr6, faddr, sizeof(faddr));
 		inet_ntop(af, &inp.inp_laddr6, laddr, sizeof(laddr));
-		inet_ntop(af, &inp.inp_route6.ro_dst.sin6_addr,
-		    raddr, sizeof(raddr));
+		inet_ntop(af, &inp.inp_route.ro_dstsin6.sin6_addr, raddr,
+		    sizeof(raddr));
 		break;
 	default:
 		faddr[0] = laddr[0] = '\0';
@@ -1477,10 +1489,10 @@ inpcb_dump(u_long off, short protocol, int af)
 	printf("ro_dst %s\n ", raddr);
 	p("%#.8x", inp_flags, "\n ");
 	p("%d", inp_hops, "\n ");
-	p("%u", inp_seclevel[0], ", ");
-	p("%u", inp_seclevel[1], ", ");
-	p("%u", inp_seclevel[2], ", ");
-	p("%u", inp_seclevel[3], "\n ");
+	p("%u", inp_seclevel.sl_auth, ", ");
+	p("%u", inp_seclevel.sl_esp_trans, ", ");
+	p("%u", inp_seclevel.sl_esp_network, ", ");
+	p("%u", inp_seclevel.sl_ipcomp, "\n ");
 	p("%u", inp_ip_minttl, "\n ");
 	p("%d", inp_cksum6, "\n ");
 	pp("%p", inp_icmp6filt, "\n ");
@@ -1546,8 +1558,8 @@ tcpcb_dump(u_long off)
 	p("%lu", snd_cwnd, ", ");
 	p("%lu", snd_ssthresh, ", ");
 	p("%lu", max_sndwnd, "\n ");
-	p("%u", t_rcvtime, ", ");
-	p("%u", t_rtttime, ", ");
+	p("%llu", t_rcvtime, ", ");
+	p("%llu", t_rtttime, ", ");
 	p("%u", t_rtseq, "\n ");
 	p("%u", t_srtt, ", ");
 	p("%u", t_rttvar, ", ");
@@ -1560,7 +1572,7 @@ tcpcb_dump(u_long off)
 	p("%u", request_r_scale, ", ");
 	p("%u", requested_s_scale, "\n ");
 	p("%u", ts_recent, ", ");
-	p("%u", ts_recent_age, "\n ");
+	p("%llu", ts_recent_age, "\n ");
 	p("%u", last_ack_sent, "\n ");
 	HTONS(tcpcb.t_pmtud_ip_len);
 	HTONS(tcpcb.t_pmtud_nextmtu);

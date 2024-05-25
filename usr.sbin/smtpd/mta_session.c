@@ -1,4 +1,4 @@
-/*	$OpenBSD: mta_session.c,v 1.147 2022/09/26 08:48:52 martijn Exp $	*/
+/*	$OpenBSD: mta_session.c,v 1.151 2024/01/20 09:01:03 claudio Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -26,6 +26,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <tls.h>
 #include <unistd.h>
 
@@ -268,7 +269,7 @@ mta_session_imsg(struct mproc *p, struct imsg *imsg)
 	struct msg		 m;
 	uint64_t		 reqid;
 	const char		*name;
-	int			 status;
+	int			 status, fd;
 	struct stat		 sb;
 	
 	switch (imsg->hdr.type) {
@@ -278,14 +279,15 @@ mta_session_imsg(struct mproc *p, struct imsg *imsg)
 		m_get_id(&m, &reqid);
 		m_end(&m);
 
+		fd = imsg_get_fd(imsg);
 		s = mta_tree_pop(&wait_fd, reqid);
 		if (s == NULL) {
-			if (imsg->fd != -1)
-				close(imsg->fd);
+			if (fd != -1)
+				close(fd);
 			return;
 		}
 
-		if (imsg->fd == -1) {
+		if (fd == -1) {
 			log_debug("debug: mta: failed to obtain msg fd");
 			mta_flush_task(s, IMSG_MTA_DELIVERY_TEMPFAIL,
 			    "Could not get message fd", 0, 0);
@@ -294,12 +296,12 @@ mta_session_imsg(struct mproc *p, struct imsg *imsg)
 		}
 
 		if ((s->ext & MTA_EXT_SIZE) && s->ext_size != 0) {
-			if (fstat(imsg->fd, &sb) == -1) {
+			if (fstat(fd, &sb) == -1) {
 				log_debug("debug: mta: failed to stat msg fd");
 				mta_flush_task(s, IMSG_MTA_DELIVERY_TEMPFAIL,
 				    "Could not stat message fd", 0, 0);
 				mta_enter_state(s, MTA_READY);
-				close(imsg->fd);
+				close(fd);
 				return;
 			}
 			if (sb.st_size > (off_t)s->ext_size) {
@@ -307,12 +309,12 @@ mta_session_imsg(struct mproc *p, struct imsg *imsg)
 				mta_flush_task(s, IMSG_MTA_DELIVERY_PERMFAIL,
 				    "message too large for peer", 0, 0);
 				mta_enter_state(s, MTA_READY);
-				close(imsg->fd);
+				close(fd);
 				return;
 			}
 		}
 		
-		s->datafp = fdopen(imsg->fd, "r");
+		s->datafp = fdopen(fd, "r");
 		if (s->datafp == NULL)
 			fatal("mta: fdopen");
 
@@ -808,7 +810,7 @@ again:
 			    e->dest,
 			    e->dsn_notify ? " NOTIFY=" : "",
 			    e->dsn_notify ? dsn_strnotify(e->dsn_notify) : "",
-			    e->dsn_orcpt ? " ORCPT=rfc822;" : "",
+			    e->dsn_orcpt ? " ORCPT=" : "",
 			    e->dsn_orcpt ? e->dsn_orcpt : "");
 		} else
 			mta_send(s, "RCPT TO:<%s>", e->dest);
@@ -1157,7 +1159,7 @@ mta_response(struct mta_session *s, char *line)
 			s->rcptcount = 0;
 			if (s->relay->limits->sessdelay_transaction) {
 				log_debug("debug: mta: waiting for %llds before next transaction",
-				    (long long int)s->relay->limits->sessdelay_transaction);
+				    (long long)s->relay->limits->sessdelay_transaction);
 				s->hangon = s->relay->limits->sessdelay_transaction -1;
 				s->flags |= MTA_HANGON;
 				runq_schedule(hangon,
@@ -1177,7 +1179,7 @@ mta_response(struct mta_session *s, char *line)
 		}
 		if (s->relay->limits->sessdelay_transaction) {
 			log_debug("debug: mta: waiting for %llds after reset",
-			    (long long int)s->relay->limits->sessdelay_transaction);
+			    (long long)s->relay->limits->sessdelay_transaction);
 			s->hangon = s->relay->limits->sessdelay_transaction -1;
 			s->flags |= MTA_HANGON;
 			runq_schedule(hangon,

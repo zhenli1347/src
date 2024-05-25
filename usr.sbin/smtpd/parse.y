@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.291 2022/02/10 14:59:35 millert Exp $	*/
+/*	$OpenBSD: parse.y,v 1.299 2024/02/19 21:00:19 gilles Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -34,6 +34,8 @@
 #include <ifaddrs.h>
 #include <inttypes.h>
 #include <resolv.h>
+#include <stdlib.h>
+#include <string.h>
 #include <syslog.h>
 #include <unistd.h>
 #include <util.h>
@@ -249,7 +251,7 @@ varset		: STRING '=' STRING		{
 		}
 		;
 
-comma		: ','
+comma		: ',' optnl
 		| nl
 		| /* empty */
 		;
@@ -275,7 +277,7 @@ keyval		: STRING assign STRING		{
 		}
 		;
 
-keyval_list	: keyval
+keyval_list	: keyval optnl
 		| keyval comma keyval_list
 		;
 
@@ -285,7 +287,7 @@ stringel	: STRING			{
 		}
 		;
 
-string_list	: stringel
+string_list	: stringel optnl
 		| stringel comma string_list
 		;
 
@@ -668,7 +670,6 @@ dispatcher_local_option dispatcher_local_options
 dispatcher_local:
 MBOX {
 	dsp->u.local.is_mbox = 1;
-	asprintf(&dsp->u.local.command, "/usr/libexec/mail.local -f %%{mbox.from} -- %%{user.username}");
 } dispatcher_local_options
 | MAILDIR {
 	asprintf(&dsp->u.local.command, "/usr/libexec/mail.maildir");
@@ -695,12 +696,10 @@ MBOX {
 | LMTP STRING {
 	asprintf(&dsp->u.local.command,
 	    "/usr/libexec/mail.lmtp -d %s -u", $2);
-	dsp->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | LMTP STRING RCPT_TO {
 	asprintf(&dsp->u.local.command,
 	    "/usr/libexec/mail.lmtp -d %s -r", $2);
-	dsp->u.local.user = SMTPD_USER;
 } dispatcher_local_options
 | MDA STRING {
 	asprintf(&dsp->u.local.command,
@@ -779,7 +778,7 @@ HELO STRING {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_SOURCE)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_SOURCE)) {
 		yyerror("table \"%s\" may not be used for source lookups",
 		    t->t_name);
 		YYERROR;
@@ -934,7 +933,7 @@ HELO STRING {
 	filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_OUT;
 	dict_init(&filter_config->chain_procs);
 	dsp->u.remote.filtername = filtername;
-} '{' filter_list '}' {
+} '{' optnl filter_list '}' {
 	dict_set(conf->sc_filters_dict, dsp->u.remote.filtername, filter_config);
 	filter_config = NULL;
 }
@@ -1103,7 +1102,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-       	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_STRING|K_CREDENTIALS)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_STRING|K_CREDENTIALS)) {
 		yyerror("table \"%s\" may not be used for auth lookups",
 		    t->t_name);
 		YYERROR;
@@ -1138,7 +1137,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_MAILADDR)) {
 		yyerror("table \"%s\" may not be used for mail-from lookups",
 		    t->t_name);
 		YYERROR;
@@ -1173,7 +1172,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_MAILADDR)) {
 		yyerror("table \"%s\" may not be used for rcpt-to lookups",
 		    t->t_name);
 		YYERROR;
@@ -1331,7 +1330,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-       	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_STRING|K_CREDENTIALS)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_STRING|K_CREDENTIALS)) {
 		yyerror("table \"%s\" may not be used for from lookups",
 		    t->t_name);
 		YYERROR;
@@ -1373,7 +1372,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_MAILADDR)) {
 		yyerror("table \"%s\" may not be used for from lookups",
 		    t->t_name);
 		YYERROR;
@@ -1470,7 +1469,7 @@ negation TAG REGEX tables {
 		YYERROR;
 	}
 
-	if (!table_check_use(t, T_DYNAMIC|T_LIST, K_MAILADDR)) {
+	if (!table_check_use(t, T_DYNAMIC|T_LIST|T_HASH, K_MAILADDR)) {
 		yyerror("table \"%s\" may not be used for for lookups",
 		    t->t_name);
 		YYERROR;
@@ -1885,7 +1884,7 @@ STRING	{
 ;
 
 filter_list:
-filterel
+filterel optnl
 | filterel comma filter_list
 ;
 
@@ -1957,7 +1956,7 @@ FILTER STRING CHAIN {
 	filter_config = xcalloc(1, sizeof *filter_config);
 	filter_config->filter_type = FILTER_TYPE_CHAIN;
 	dict_init(&filter_config->chain_procs);
-} '{' filter_list '}' {
+} '{' optnl filter_list '}' {
 	dict_set(conf->sc_filters_dict, $2, filter_config);
 	filter_config = NULL;
 }
@@ -2138,7 +2137,7 @@ opt_sock_listen : FILTER STRING {
 			filter_config->filter_type = FILTER_TYPE_CHAIN;
 			filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			dict_init(&filter_config->chain_procs);
-		} '{' filter_list '}' {
+		} '{' optnl filter_list '}' {
 			dict_set(conf->sc_filters_dict, listen_opts.filtername, filter_config);
 			filter_config = NULL;
 		}
@@ -2146,6 +2145,14 @@ opt_sock_listen : FILTER STRING {
 			if (config_lo_mask_source(&listen_opts)) {
 				YYERROR;
 			}
+		}
+		| NO_DSN	{
+			if (listen_opts.options & LO_NODSN) {
+				yyerror("no-dsn already specified");
+				YYERROR;
+			}
+			listen_opts.options |= LO_NODSN;
+			listen_opts.flags &= ~F_EXT_DSN;
 		}
 		| TAG STRING			{
 			if (listen_opts.options & LO_TAG) {
@@ -2276,7 +2283,7 @@ opt_if_listen : INET4 {
 			filter_config->filter_type = FILTER_TYPE_CHAIN;
 			filter_config->filter_subsystem |= FILTER_SUBSYSTEM_SMTP_IN;
 			dict_init(&filter_config->chain_procs);
-		} '{' filter_list '}' {
+		} '{' optnl filter_list '}' {
 			dict_set(conf->sc_filters_dict, listen_opts.filtername, filter_config);
 			filter_config = NULL;
 		}
@@ -2565,7 +2572,7 @@ table		: TABLE STRING STRING	{
 		| TABLE STRING {
 			table = table_create(conf, "static", $2, NULL);
 			free($2);
-		} '{' tableval_list '}' {
+		} '{' optnl tableval_list '}' {
 			table = NULL;
 		}
 		;
@@ -2578,7 +2585,7 @@ tablenew	: STRING			{
 			free($1);
 			$$ = t;
 		}
-		| '{'				{
+		| '{' optnl			{
 			table = table_create(conf, "static", NULL, NULL);
 		} tableval_list '}'		{
 			$$ = table;
@@ -3121,6 +3128,8 @@ parse_config(struct smtpd *x_conf, const char *filename, int opts)
 	/* If the socket listener was not configured, create a default one. */
 	if (!conf->sc_sock_listener) {
 		memset(&listen_opts, 0, sizeof listen_opts);
+		listen_opts.family = AF_UNSPEC;
+		listen_opts.flags |= F_EXT_DSN;
 		create_sock_listener(&listen_opts);
 	}
 

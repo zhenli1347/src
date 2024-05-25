@@ -1,4 +1,4 @@
-/*	$OpenBSD: adb.c,v 1.48 2022/10/23 03:43:03 gkoehler Exp $	*/
+/*	$OpenBSD: adb.c,v 1.52 2024/04/14 03:26:25 jsg Exp $	*/
 /*	$NetBSD: adb.c,v 1.6 1999/08/16 06:28:09 tsubai Exp $	*/
 /*	$NetBSD: adb_direct.c,v 1.14 2000/06/08 22:10:45 tsubai Exp $	*/
 
@@ -96,6 +96,7 @@
 #include <machine/autoconf.h>
 #include <machine/cpu.h>
 #include <dev/ofw/openfirm.h>
+#include <dev/wscons/wsconsio.h>
 
 #include <dev/adb/adb.h>
 #include <macppc/dev/adbvar.h>
@@ -153,7 +154,7 @@ int	adb_debug;		/* Output debugging messages */
 
 /*
  * This is the delay that is required (in uS) between certain
- * ADB transactions. The actual timing delay for for each uS is
+ * ADB transactions. The actual timing delay for each uS is
  * calculated at boot time to account for differences in machine speed.
  */
 #define ADB_DELAY	150
@@ -203,7 +204,7 @@ u_char	adbOutputBuffer[ADB_MAX_MSG_LENGTH];	/* data output buffer */
 int	adbSentChars;		/* how many characters we have sent */
 
 struct	adbCommand adbInbound[ADB_QUEUE];	/* incoming queue */
-int	adbInCount;			/* how many packets in in queue */
+int	adbInCount;			/* how many packets in queue */
 int	adbInHead;			/* head of in queue */
 int	adbInTail;			/* tail of in queue */
 
@@ -242,6 +243,12 @@ void	setsoftadb(void);
 int	adb_intr(void *arg);
 void	adb_cuda_autopoll(void);
 void 	adb_cuda_fileserver_mode(void);
+uint8_t pmu_backlight; /* keyboard backlight value */
+int	pmu_get_backlight(struct wskbd_backlight *);
+int	pmu_set_backlight(struct wskbd_backlight *);
+extern int (*wskbd_get_backlight)(struct wskbd_backlight *);
+extern int (*wskbd_set_backlight)(struct wskbd_backlight *);
+
 
 #ifndef SMALL_KERNEL
 void	adb_shutdown(void *);
@@ -311,7 +318,7 @@ adb_cuda_tickle(void *unused)
 }
 
 /*
- * called when when an adb interrupt happens
+ * called when an adb interrupt happens
  *
  * Cuda version of adb_intr
  * TO DO: do we want to add some calls to intr_dispatch() here to
@@ -612,7 +619,7 @@ send_adb_cuda(u_char * in, u_char * buffer, void *compRout, void *data,
 
 	splx(s);
 
-	if ((s & (1 << 18)) || adb_polling) /* XXX were VIA1 interrupts blocked ? */
+	if (adb_polling) /* XXX were VIA1 interrupts blocked ? */
 		/* poll until byte done */
 		while ((adbActionState != ADB_ACTION_IDLE) || (ADB_INTR_IS_ON)
 		    || (adbWaiting == 1))
@@ -627,7 +634,7 @@ send_adb_cuda(u_char * in, u_char * buffer, void *compRout, void *data,
 }
 
 /*
- * Called when when an adb interrupt happens.
+ * Called when an adb interrupt happens.
  * This routine simply transfers control over to the appropriate
  * code for the machine we are running on.
  */
@@ -1519,7 +1526,8 @@ adb_poweroff(void)
 		pmu_fileserver_mode(0);
 		pm_adb_poweroff();
 
-		for (;;);		/* wait for power off */
+		for (;;)	/* wait for power off */
+			;
 
 		return 0;
 
@@ -1532,7 +1540,8 @@ adb_poweroff(void)
 		if (result != 0)	/* exit if not sent */
 			return -1;
 
-		for (;;);		/* wait for power off */
+		for (;;)		/* wait for power off */
+			;
 
 		return 0;
 
@@ -1730,8 +1739,11 @@ adbattach(struct device *parent, struct device *self, void *aux)
 
 	if (adbHardware == ADB_HW_CUDA)
 		adb_cuda_fileserver_mode();
-	if (adbHardware == ADB_HW_PMU)
+	if (adbHardware == ADB_HW_PMU) {
+		wskbd_get_backlight = pmu_get_backlight;
+		wskbd_set_backlight = pmu_set_backlight;
 		pmu_fileserver_mode(1);
+	}
 
 	/*
 	 * XXX If the machine doesn't have an ADB bus (PowerBook5,6+)
@@ -1757,4 +1769,20 @@ adbattach(struct device *parent, struct device *self, void *aux)
 	if (adbHardware == ADB_HW_CUDA)
 		adb_cuda_autopoll();
 	adb_polling = 0;
+}
+
+int
+pmu_get_backlight(struct wskbd_backlight *kbl)
+{
+	kbl->min = 0;
+	kbl->max = 0xff;
+	kbl->curval = pmu_backlight;
+	return 0;
+}
+
+int
+pmu_set_backlight(struct wskbd_backlight *kbl)
+{
+	pmu_backlight = kbl->curval;
+	return pmu_set_kbl(pmu_backlight);
 }

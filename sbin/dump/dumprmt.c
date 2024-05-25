@@ -1,4 +1,4 @@
-/*	$OpenBSD: dumprmt.c,v 1.31 2021/01/21 00:16:36 mortimer Exp $	*/
+/*	$OpenBSD: dumprmt.c,v 1.33 2023/12/21 08:01:21 otto Exp $	*/
 /*	$NetBSD: dumprmt.c,v 1.17 1997/06/05 16:10:47 mrg Exp $	*/
 
 /*-
@@ -90,7 +90,7 @@ rmthost(char *host)
 	if (rmtpeer)
 		strlcpy(rmtpeer, host, len);
 	else
-		rmtpeer = host;
+		return (0);
 	signal(SIGPIPE, rmtconnaborted);
 	rmtgetconn();
 	if (rmtape < 0)
@@ -98,7 +98,6 @@ rmthost(char *host)
 	return (1);
 }
 
-/* ARGSUSED */
 static void
 rmtconnaborted(int signo)
 {

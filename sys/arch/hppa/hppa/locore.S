@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.204 2022/10/25 15:15:38 guenther Exp $	*/
+/*	$OpenBSD: locore.S,v 1.207 2023/12/12 07:37:20 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1998-2004 Michael Shalayeff
@@ -2697,16 +2697,12 @@ EXIT(cpu_idle_leave)
 
 ENTRY(proc_trampoline,0)
 	copy	r0, r3
-#ifdef MULTIPROCESSOR
 	copy	t4, r5
 	copy	arg0, r4
-	bl	proc_trampoline_mp, rp
+	bl	proc_trampoline_mi, rp
 	nop
 	copy	r4, arg0
 	copy	r5, t4
-#endif
-	mfctl	cr29, t1
-	stw	r0, CI_CPL(t1)
 	.call
 	blr	r0, rp
 	bv,n	r0(t4)
@@ -2870,19 +2866,16 @@ sigcode_call
 	ldil	L%SYSCALLGATE, r1
 	copy	r4, arg0
 	.call
+	.globl	sigcodecall
+sigcodecall:
 	ble	4(sr7, r1)
-	ldi	SYS_sigreturn, t1
+	 ldi	SYS_sigreturn, t1
 	.globl  sigcoderet
 sigcoderet:
-
-	ldil	L%SYSCALLGATE, r1
-	copy	ret0, arg0
-	.call
-	ble	4(sr7, r1)
-	ldi	SYS_exit, t1
+	break	0,0
 ALTENTRY(esigcode)
-EXIT(sigcode)
 
+EXIT(sigcode)
 	.globl	sigfill
 sigfill:
 	break	0,0

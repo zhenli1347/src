@@ -45,24 +45,14 @@
 #endif
 
 #include <sys/systm.h>
-#include <sys/proc.h>
-#include <sys/signal.h>
-#include <sys/signalvar.h>
 #include <sys/malloc.h>
 #include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/pool.h>
-#include <sys/timetc.h>
 #include <sys/task.h>
-#include <sys/syslog.h>
-#include <sys/socket.h>
 #include <sys/sensors.h>
 
 #include <machine/bus.h>
-#include <machine/cpu.h>
-#include <machine/cpufunc.h>
-
-#include <machine/i82489var.h>
 
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -70,7 +60,6 @@
 #include <netinet/if_ether.h>
 
 #include <dev/pv/pvvar.h>
-#include <dev/pv/pvreg.h>
 #include <dev/pv/hypervreg.h>
 #include <dev/pv/hypervvar.h>
 #include <dev/pv/hypervicreg.h>
@@ -889,7 +878,7 @@ kvp_get_ip_info(struct hv_kvp *kvp, const uint8_t *mac, uint8_t *family,
 	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 		/*
 		 * First IPv4 address is always a best match unless
-		 * we were asked for for an IPv6 address.
+		 * we were asked for an IPv6 address.
 		 */
 		if ((af == AF_INET || af == AF_UNSPEC) &&
 		    (ifa->ifa_addr->sa_family == AF_INET)) {
@@ -1151,11 +1140,12 @@ hv_kvop(void *arg, int op, char *key, char *val, size_t vallen)
 	kvpl = &kvp->kvp_pool[pool];
 	if (strlen(key) == 0) {
 		for (next = 0; next < MAXPOOLENTS; next++) {
-			if ((val + vallen < vp + HV_KVP_MAX_KEY_SIZE / 2) ||
-			    kvp_pool_keys(kvpl, next, vp, &keylen))
+			if (val + vallen < vp + HV_KVP_MAX_KEY_SIZE / 2)
+				return (ERANGE);
+			if (kvp_pool_keys(kvpl, next, vp, &keylen))
 				goto out;
 			if (strlcat(val, "\n", vallen) >= vallen)
-				goto out;
+				return (ERANGE);
 			vp += keylen;
 		}
  out:

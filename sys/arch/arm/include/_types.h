@@ -1,4 +1,4 @@
-/*	$OpenBSD: _types.h,v 1.19 2018/03/05 01:15:25 deraadt Exp $	*/
+/*	$OpenBSD: _types.h,v 1.21 2023/07/02 19:02:27 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 1990, 1993

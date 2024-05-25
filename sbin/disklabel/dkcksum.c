@@ -1,4 +1,4 @@
-/*	$OpenBSD: dkcksum.c,v 1.8 2009/10/27 23:59:32 deraadt Exp $	*/
+/*	$OpenBSD: dkcksum.c,v 1.10 2023/07/03 06:07:40 krw Exp $	*/
 /*	$NetBSD: dkcksum.c,v 1.6 1995/03/18 14:54:42 cgd Exp $	*/
 
 /*-
@@ -36,7 +36,7 @@
 #include "extern.h"
 
 u_short
-dkcksum(struct disklabel *lp)
+dkcksum(const struct disklabel *lp)
 {
 	u_short *start, *end;
 	u_short sum = 0;
@@ -45,5 +45,5 @@ dkcksum(struct disklabel *lp)
 	end = (u_short *)&lp->d_partitions[lp->d_npartitions];
 	while (start < end)
 		sum ^= *start++;
-	return (sum);
+	return sum;
 }

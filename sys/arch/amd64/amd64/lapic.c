@@ -1,4 +1,4 @@
-/*	$OpenBSD: lapic.c,v 1.65 2022/11/10 08:26:54 jmatthew Exp $	*/
+/*	$OpenBSD: lapic.c,v 1.72 2024/04/03 02:01:21 guenther Exp $	*/
 /* $NetBSD: lapic.c,v 1.2 2003/05/08 01:04:35 fvdl Exp $ */
 
 /*-
@@ -171,7 +171,6 @@ lapic_cpu_number(void)
 	return i82489_cpu_number();
 }
 
-
 void
 lapic_map(paddr_t lapic_base)
 {
@@ -285,14 +284,14 @@ lapic_set_lvt(void)
 	}
 #endif
 
-	if (strcmp(cpu_vendor, "AuthenticAMD") == 0) {
+	if (ci->ci_vendor == CPUV_AMD) {
 		/*
 		 * Detect the presence of C1E capability mostly on latest
 		 * dual-cores (or future) k8 family. This mis-feature renders
 		 * the local APIC timer dead, so we disable it by reading
 		 * the Interrupt Pending Message register and clearing both
 		 * C1eOnCmpHalt (bit 28) and SmiOnCmpHalt (bit 27).
-		 * 
+		 *
 		 * Reference:
 		 *   "BIOS and Kernel Developer's Guide for AMD NPT
 		 *    Family 0Fh Processors"
@@ -431,13 +430,17 @@ lapic_timer_rearm(void *unused, uint64_t nsecs)
 	cycles = (nsecs * lapic_timer_nsec_cycle_ratio) >> 32;
 	if (cycles == 0)
 		cycles = 1;
-	lapic_timer_oneshot(0, cycles);
+	lapic_writereg(LAPIC_ICR_TIMER, cycles);
 }
 
 void
 lapic_timer_trigger(void *unused)
 {
+	u_long s;
+
+	s = intr_disable();
 	lapic_timer_oneshot(0, 1);
+	intr_restore(s);
 }
 
 /*
@@ -495,9 +498,7 @@ lapic_initclocks(void)
 
 	stathz = hz;
 	profhz = stathz * 10;
-	clockintr_init(CL_RNDSTAT);
-
-	lapic_startclock();
+	statclock_is_randomized = 1;
 }
 
 
@@ -596,6 +597,7 @@ skip_calibration:
 	    lapic_per_second * (1ULL << 32) / 1000000000;
 	lapic_timer_nsec_max = UINT64_MAX / lapic_timer_nsec_cycle_ratio;
 	initclock_func = lapic_initclocks;
+	startclock_func = lapic_startclock;
 }
 
 /*

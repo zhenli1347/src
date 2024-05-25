@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore.S,v 1.131 2022/12/01 00:26:15 guenther Exp $	*/
+/*	$OpenBSD: locore.S,v 1.147 2024/03/17 05:49:41 guenther Exp $	*/
 /*	$NetBSD: locore.S,v 1.13 2004/03/25 18:33:17 drochner Exp $	*/
 
 /*
@@ -171,20 +171,20 @@ lapic_isr:
 	.section .rodata
 	.globl	sigcode
 sigcode:
+	endbr64
 	call	1f
 	movq	%rsp,%rdi
 	pushq	%rdi			/* fake return address */
 	movq	$SYS_sigreturn,%rax
+	.globl sigcodecall
+sigcodecall:
 	syscall
 	.globl	sigcoderet
 sigcoderet:
-	movq	$SYS_exit,%rax
-	syscall
-	_ALIGN_TRAPS
+	int3
 1:	JMP_RETPOLINE(rax)
 	.globl	esigcode
 esigcode:
-
 	.globl	sigfill
 sigfill:
 	int3
@@ -341,7 +341,7 @@ switch_exited:
 #endif
 	CODEPATCH_START
 	fxrstor64	(%rdi)
-	CODEPATCH_END(CPTAG_XRSTOR)
+	CODEPATCH_END(CPTAG_XRSTORS)
 	andl	$~CPUPF_USERXSTATE,CPUVAR(PFLAGS)
 
 .Lxstate_reset:
@@ -472,31 +472,26 @@ bogus_proc_pmap:
 #endif /* DIAGNOSTIC */
 END(cpu_switchto)
 
-ENTRY(cpu_idle_enter)
-	ret
-	lfence
-END(cpu_idle_enter)
-
-ENTRY(cpu_idle_leave)
-	ret
-	lfence
-END(cpu_idle_leave)
-
-/* placed here for correct static branch prediction in cpu_idle_* */
 NENTRY(retpoline_rax)
+	CODEPATCH_START
 	JMP_RETPOLINE(rax)
+	CODEPATCH_END(CPTAG_RETPOLINE_RAX)
+END(retpoline_rax)
 
-ENTRY(cpu_idle_cycle)
-	RETGUARD_SETUP(cpu_idle_cycle, r11)
-	movq	cpu_idle_cycle_fcn,%rax
-	cmpq	$0,%rax
-	jne	retpoline_rax
+NENTRY(__x86_indirect_thunk_r11)
+	CODEPATCH_START
+	JMP_RETPOLINE(r11)
+	CODEPATCH_END(CPTAG_RETPOLINE_R11)
+END(__x86_indirect_thunk_r11)
+
+ENTRY(cpu_idle_cycle_hlt)
+	RETGUARD_SETUP(cpu_idle_cycle_hlt, r11)
 	sti
 	hlt
-	RETGUARD_CHECK(cpu_idle_cycle, r11)
+	RETGUARD_CHECK(cpu_idle_cycle_hlt, r11)
 	ret
 	lfence
-END(cpu_idle_cycle)
+END(cpu_idle_cycle_hlt)
 
 /*
  * savectx(struct pcb *pcb);
@@ -511,10 +506,6 @@ ENTRY(savectx)
 	ret
 	lfence
 END(savectx)
-
-IDTVEC(syscall32)
-	sysret		/* go away please */
-END(Xsyscall32)
 
 /*
  * syscall insn entry.
@@ -540,6 +531,7 @@ XUsyscall_meltdown:
 	 * In case the CPU speculates past the mov to cr3, we put a
 	 * retpoline-style pause-lfence-jmp-to-pause loop.
 	 */
+	endbr64
 	swapgs
 	movq	%rax,CPUVAR(SCRATCH)
 	movq	CPUVAR(KERN_CR3),%rax
@@ -551,11 +543,12 @@ KUTEXT_PAGE_END
 
 KTEXT_PAGE_START
 	.align	NBPG, 0xcc
-IDTVEC_NOALIGN(syscall_meltdown)
+GENTRY(Xsyscall_meltdown)
 	/* pad to match real Xsyscall_meltdown positioning above */
 	movq	CPUVAR(KERN_CR3),%rax
 	movq	%rax,%cr3
-IDTVEC_NOALIGN(syscall)
+GENTRY(Xsyscall)
+	endbr64
 	swapgs
 	movq	%rax,CPUVAR(SCRATCH)
 	SYSCALL_ENTRY			/* create trapframe */
@@ -597,6 +590,23 @@ IDTVEC_NOALIGN(syscall)
 	jz	.Lsyscall_restore_fsbase
 
 .Lsyscall_restore_registers:
+	/*
+	 * If the pmap we're now on isn't the same as the one we
+	 * were on last time we were in userspace, then use IBPB
+	 * to prevent cross-process branch-target injection.
+	 */
+	CODEPATCH_START
+	movq	CPUVAR(PROC_PMAP),%rbx
+	cmpq	CPUVAR(USER_PMAP),%rbx
+	je	1f
+	xorl	%edx,%edx
+	movl	$PRED_CMD_IBPB,%eax
+	movl	$MSR_PRED_CMD,%ecx
+	wrmsr
+	movq	%rbx,CPUVAR(USER_PMAP)
+1:
+	CODEPATCH_END(CPTAG_IBPB_NOP)
+	call	pku_xonly
 	RET_STACK_REFILL_WITH_RCX
 
 	movq	TF_R8(%rsp),%r8
@@ -606,8 +616,15 @@ IDTVEC_NOALIGN(syscall)
 	movq	TF_R13(%rsp),%r13
 	movq	TF_R14(%rsp),%r14
 	movq	TF_R15(%rsp),%r15
+	movq	TF_RBX(%rsp),%rbx
+	movq	TF_RDX(%rsp),%rdx
 
 	CODEPATCH_START
+	xorl	%edi,%edi
+	xorl	%esi,%esi
+	xorl	%r11d,%r11d
+	xorl	%eax,%eax
+	xorl	%ecx,%ecx
 	movw	%ds,TF_R8(%rsp)
 	verw	TF_R8(%rsp)
 	CODEPATCH_END(CPTAG_MDS)
@@ -615,7 +632,6 @@ IDTVEC_NOALIGN(syscall)
 	movq	TF_RDI(%rsp),%rdi
 	movq	TF_RSI(%rsp),%rsi
 	movq	TF_RBP(%rsp),%rbp
-	movq	TF_RBX(%rsp),%rbx
 
 	/*
 	 * We need to finish reading from the trapframe, then switch
@@ -625,7 +641,6 @@ IDTVEC_NOALIGN(syscall)
 	 * user page tables, so save it in CPUVAR(SCRATCH) across
 	 * the switch.
 	 */
-	movq	TF_RDX(%rsp),%rdx
 	movq	TF_RAX(%rsp),%rax
 	movq	TF_RIP(%rsp),%rcx
 	movq	TF_RFLAGS(%rsp),%r11
@@ -676,7 +691,7 @@ KUTEXT_PAGE_END
 	/* untouched state so can't fault */
 	CODEPATCH_START
 	fxrstor64	(%rdi)
-	CODEPATCH_END(CPTAG_XRSTOR)
+	CODEPATCH_END(CPTAG_XRSTORS)
 #if PCB_SAVEFPU != 0
 	subq	$PCB_SAVEFPU,%rdi
 #endif
@@ -710,10 +725,7 @@ spl_lowered:
 #endif
 
 NENTRY(proc_trampoline)
-#ifdef MULTIPROCESSOR
-	call	proc_trampoline_mp
-#endif
-	movl	$IPL_NONE,CPUVAR(ILEVEL)
+	call	proc_trampoline_mi
 	movq	%r13,%rdi
 	movq	%r12,%rax
 	call	retpoline_rax
@@ -762,17 +774,34 @@ intr_user_exit_post_ast:
 	testl	$CPUPF_USERXSTATE,CPUVAR(PFLAGS)
 	jz	.Lintr_restore_xstate
 
+	/* Restore FS.base if it's not already in the CPU */
+	testl	$CPUPF_USERSEGS,CPUVAR(PFLAGS)
+	jz	.Lintr_restore_fsbase
+
+.Lintr_restore_registers:
 #ifdef DIAGNOSTIC
 	/* no more C calls after this, so check the SPL */
 	cmpl	$0,CPUVAR(ILEVEL)
 	jne	.Luser_spl_not_lowered
 #endif /* DIAGNOSTIC */
 
-	/* Restore FS.base if it's not already in the CPU */
-	testl	$CPUPF_USERSEGS,CPUVAR(PFLAGS)
-	jz	.Lintr_restore_fsbase
-
-.Lintr_restore_registers:
+	/*
+	 * If the pmap we're now on isn't the same as the one we
+	 * were on last time we were in userspace, then use IBPB
+	 * to prevent cross-process branch-target injection.
+	 */
+	CODEPATCH_START
+	movq	CPUVAR(PROC_PMAP),%rbx
+	cmpq	CPUVAR(USER_PMAP),%rbx
+	je	1f
+	xorl	%edx,%edx
+	movl	$PRED_CMD_IBPB,%eax
+	movl	$MSR_PRED_CMD,%ecx
+	wrmsr
+	movq	%rbx,CPUVAR(USER_PMAP)
+1:
+	CODEPATCH_END(CPTAG_IBPB_NOP)
+	call	pku_xonly
 	RET_STACK_REFILL_WITH_RCX
 
 	movq	TF_R8(%rsp),%r8
@@ -782,8 +811,15 @@ intr_user_exit_post_ast:
 	movq	TF_R13(%rsp),%r13
 	movq	TF_R14(%rsp),%r14
 	movq	TF_R15(%rsp),%r15
+	movq	TF_RBX(%rsp),%rbx
 
 	CODEPATCH_START
+	xorl	%edi,%edi
+	xorl	%esi,%esi
+	xorl	%r11d,%r11d
+	xorl	%eax,%eax
+	xorl	%edx,%edx
+	xorl	%ecx,%ecx
 	movw	%ds,TF_R8(%rsp)
 	verw	TF_R8(%rsp)
 	CODEPATCH_END(CPTAG_MDS)
@@ -791,7 +827,6 @@ intr_user_exit_post_ast:
 	movq	TF_RDI(%rsp),%rdi
 	movq	TF_RSI(%rsp),%rsi
 	movq	TF_RBP(%rsp),%rbp
-	movq	TF_RBX(%rsp),%rbx
 
 	/*
 	 * To get the final value for the register that was used
@@ -863,10 +898,14 @@ KTEXT_PAGE_END
 #if PCB_SAVEFPU != 0
 	addq	$PCB_SAVEFPU,%rdi
 #endif
-	movq	xsave_mask(%rip),%rsi
-	call	xrstor_user
-	testl	%eax,%eax
-	jnz	.Lintr_xrstor_faulted
+	movq	xsave_mask(%rip),%rdx
+	movl	%edx,%eax
+	shrq	$32, %rdx
+	CODEPATCH_START
+	fxrstor64	(%rdi)
+	CODEPATCH_END(CPTAG_XRSTORS)
+	//testl	%eax,%eax
+	//jnz	.Lintr_xrstor_faulted
 .Lintr_restore_fsbase:		/* CPU doesn't have curproc's FS.base */
 	orl	$CPUPF_USERSEGS,CPUVAR(PFLAGS)
 	movq	CPUVAR(CURPCB),%rdx
@@ -889,7 +928,7 @@ KTEXT_PAGE_END
 #endif
 	CODEPATCH_START
 	fxrstor64	(%rdi)
-	CODEPATCH_END(CPTAG_XRSTOR)
+	CODEPATCH_END(CPTAG_XRSTORS)
 	movq	$T_PROTFLT,TF_TRAPNO(%rsp)
 	jmp	recall_trap
 
@@ -986,8 +1025,14 @@ END(intr_fast_exit)
 
 /*
  * FPU/"extended CPU state" handling
+ *	void xrstor_kern(sfp, mask)
+ *		using first of xrstors/xrstor/fxrstor, load given state
+ *		which is assumed to be trusted: i.e., unaltered from
+ *		xsaves/xsaveopt/xsave/fxsave by kernel
  * 	int xrstor_user(sfp, mask)
- *		load given state, returns 0/1 if okay/it trapped
+ *		using first of xrstor/fxrstor, load given state which might
+ *		not be trustable: #GP faults will be caught; returns 0/1 if
+ *		okay/it trapped.
  *	void fpusave(sfp) 
  *		save current state, but retain it in the FPU
  *	void fpusavereset(sfp)
@@ -995,6 +1040,19 @@ END(intr_fast_exit)
  *	int xsetbv_user(reg, mask)
  *		load specified %xcr# register, returns 0/1 if okay/it trapped
  */
+
+ENTRY(xrstor_kern)
+	RETGUARD_SETUP(xrstor_kern, r11)
+	movq	%rsi, %rdx
+	movl	%esi, %eax
+	shrq	$32, %rdx
+	CODEPATCH_START
+	fxrstor64	(%rdi)
+	CODEPATCH_END(CPTAG_XRSTORS)
+	RETGUARD_CHECK(xrstor_kern, r11)
+	ret
+	lfence
+END(xrstor_kern)
 
 ENTRY(xrstor_user)
 	RETGUARD_SETUP(xrstor_user, r11)
@@ -1044,7 +1102,7 @@ ENTRY(fpusavereset)
 #endif
 	CODEPATCH_START
 	fxrstor64	(%rdi)
-	CODEPATCH_END(CPTAG_XRSTOR)
+	CODEPATCH_END(CPTAG_XRSTORS)
 	RETGUARD_CHECK(fpusavereset, r11)
 	ret
 	lfence
@@ -1070,22 +1128,16 @@ NENTRY(xsetbv_resume)
 	lfence
 END(xsetbv_user)
 
-	.section .rodata
-	.globl	_xrstor
-_xrstor:
-	xrstor64	(%rdi)
-
-	.globl	_xsave
-_xsave:
-	xsave64	(%rdi)
-
-	.globl	_xsaveopt
-_xsaveopt:
-	xsaveopt64	(%rdi)
-
-	.globl	_pcid_set_reuse
-_pcid_set_reuse:
-	orl	$(CR3_REUSE_PCID >> 32),CPUVAR(USER_CR3 + 4)
+CODEPATCH_CODE(_xrstor,		xrstor64 (%rdi))
+CODEPATCH_CODE(_xrstors,	xrstors64 (%rdi))
+CODEPATCH_CODE(_xsave,		xsave64 (%rdi))
+CODEPATCH_CODE(_xsaves,		xsaves64 (%rdi))
+CODEPATCH_CODE(_xsaveopt,	xsaveopt64 (%rdi))
+CODEPATCH_CODE(_pcid_set_reuse,
+		orl	$(CR3_REUSE_PCID >> 32),CPUVAR(USER_CR3 + 4))
+CODEPATCH_CODE_LEN(_jmprax,	jmp *%rax; int3)
+CODEPATCH_CODE_LEN(_jmpr11,	jmp *%r11; int3)
+CODEPATCH_CODE_LEN(_jmpr13,	jmp *%r13; int3)
 
 ENTRY(pagezero)
 	RETGUARD_SETUP(pagezero, r11)
@@ -1104,6 +1156,19 @@ ENTRY(pagezero)
 	ret
 	lfence
 END(pagezero)
+
+/* void pku_xonly(void) */
+ENTRY(pku_xonly)
+	movq	pg_xo,%rax	/* have PKU support? */
+	cmpq	$0,%rax
+	je	1f
+	movl	$0,%ecx		/* force PKRU for xonly restriction */
+	movl	$0,%edx
+	movl	$PGK_VALUE,%eax	/* key0 normal, key1 is exec without read */
+	wrpkru
+1:	ret
+	lfence
+END(pku_xonly)
 
 /* int rdmsr_safe(u_int msr, uint64_t *data) */
 ENTRY(rdmsr_safe)
@@ -1130,20 +1195,28 @@ NENTRY(rdmsr_resume)
 	lfence
 END(rdmsr_safe)
 
+#if NHYPERV > 0
+/* uint64_t hv_hypercall_trampoline(uint64_t control, paddr_t input, paddr_t output) */
+NENTRY(hv_hypercall_trampoline)
+	endbr64
+	mov	%rdx, %r8
+	mov	%rsi, %rdx
+	mov	%rdi, %rcx
+	jmp	hv_hypercall_page
+END(hv_hypercall_trampoline)
+	/* Hypercall page needs to be page aligned */
+	.text
+	.align	NBPG, 0xcc
+	.globl	hv_hypercall_page
+hv_hypercall_page:
+	.skip	0x1000, 0xcc
+#endif /* NHYPERV > 0 */
+
 #if NXEN > 0
 	/* Hypercall page needs to be page aligned */
 	.text
 	.align	NBPG, 0xcc
 	.globl	xen_hypercall_page
 xen_hypercall_page:
-	.skip	0x1000, 0xcc
-#endif /* NXEN > 0 */
-
-#if NHYPERV > 0
-	/* Hypercall page needs to be page aligned */
-	.text
-	.align	NBPG, 0xcc
-	.globl	hv_hypercall_page
-hv_hypercall_page:
 	.skip	0x1000, 0xcc
 #endif /* NXEN > 0 */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipifuncs.c,v 1.33 2020/09/13 11:53:16 jsg Exp $	*/
+/*	$OpenBSD: ipifuncs.c,v 1.36 2024/05/22 05:51:49 jsg Exp $	*/
 /* $NetBSD: ipifuncs.c,v 1.1.2.3 2000/06/26 02:04:06 sommerfeld Exp $ */
 
 /*-
@@ -39,20 +39,14 @@
 #include "npx.h"
 
 #include <sys/param.h>
-#include <sys/device.h>
 #include <sys/memrange.h>
 #include <sys/systm.h>
-
-#include <uvm/uvm_extern.h>
 
 #include <machine/cpufunc.h>
 #include <machine/cpuvar.h>
 #include <machine/intr.h>
 #include <machine/atomic.h>
-#include <machine/i82093var.h>
 #include <machine/db_machdep.h>
-#include <machine/mplock.h>
-#include <machine/vmmvar.h>
 
 void i386_ipi_nop(struct cpu_info *);
 void i386_ipi_halt(struct cpu_info *);
@@ -79,11 +73,7 @@ void (*ipifunc[I386_NIPI])(struct cpu_info *) =
 	i386_ipi_flush_fpu,
 	i386_ipi_synch_fpu,
 	i386_ipi_reload_mtrr,
-#if 0
-	gdt_reload_cpu,
-#else
 	NULL,
-#endif
 #ifdef DDB
 	i386_ipi_db,
 #else
@@ -102,7 +92,7 @@ void
 i386_ipi_halt(struct cpu_info *ci)
 {
 	SCHED_ASSERT_UNLOCKED();
-	KASSERT(!_kernel_lock_held());
+	KERNEL_ASSERT_UNLOCKED();
 
 	npxsave_cpu(ci, 1);
 	intr_disable();

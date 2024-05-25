@@ -1,4 +1,4 @@
-# $OpenBSD: services,v 1.104 2022/03/02 11:43:52 landry Exp $
+# $OpenBSD: services,v 1.106 2023/12/07 14:53:31 sthen Exp $
 #
 # Network services, Internet style
 # https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.txt
@@ -118,6 +118,7 @@ svrloc		427/tcp				# Server Location
 svrloc		427/udp
 nnsp		433/tcp		usenet		# Network News Transfer
 https		443/tcp				# secure http (TLS)
+https		443/udp				# secure http (TLS)
 snpp		444/tcp				# Simple Network Paging Protocol
 microsoft-ds	445/tcp				# Microsoft-DS
 microsoft-ds	445/udp				# Microsoft-DS
@@ -248,6 +249,8 @@ mdnsresponder	5354/tcp			# Multicast DNS Responder IPC
 mdnsresponder	5354/udp			# Multicast DNS Responder IPC
 postgresql	5432/tcp			# PostgreSQL
 postgresql	5432/udp			# PostgreSQL
+matter		5540/tcp			# Matter IoT
+matter		5540/udp			# Matter IoT
 rfb		5900/tcp	vnc		# Remote Framebuffer
 syslog-tls	6514/tcp			# syslog over TLS
 afs3-fileserver	7000/tcp			# AFS fileserver

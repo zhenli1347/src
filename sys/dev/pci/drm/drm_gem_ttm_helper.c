@@ -5,9 +5,9 @@
 #include <uvm/uvm.h>
 
 #include <linux/kernel.h>
-#include <linux/dma-buf-map.h>
+#include <linux/iosys-map.h>
 #include <drm/drm_gem.h>
-#include <drm/ttm/ttm_bo_api.h>
+#include <drm/ttm/ttm_bo.h>
 
 int
 drm_gem_ttm_mmap(struct drm_gem_object *obj,
@@ -22,14 +22,19 @@ drm_gem_ttm_mmap(struct drm_gem_object *obj,
 }
 
 int
-drm_gem_ttm_vmap(struct drm_gem_object *obj, struct dma_buf_map *dbm)
+drm_gem_ttm_vmap(struct drm_gem_object *obj, struct iosys_map *ism)
 {
-	STUB();
-	return -ENOSYS;
+	struct ttm_buffer_object *tbo =
+	    container_of(obj, struct ttm_buffer_object, base);
+
+	return ttm_bo_vmap(tbo, ism);
 }
 
 void
-drm_gem_ttm_vunmap(struct drm_gem_object *obj, struct dma_buf_map *dbm)
+drm_gem_ttm_vunmap(struct drm_gem_object *obj, struct iosys_map *ism)
 {
-	STUB();
+	struct ttm_buffer_object *tbo =
+	    container_of(obj, struct ttm_buffer_object, base);
+
+	ttm_bo_vunmap(tbo, ism);
 }

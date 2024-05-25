@@ -1,4 +1,4 @@
-/*	$OpenBSD: in.c,v 1.179 2022/12/06 22:19:39 mvs Exp $	*/
+/*	$OpenBSD: in.c,v 1.186 2024/01/06 10:58:45 bluhm Exp $	*/
 /*	$NetBSD: in.c,v 1.26 1996/02/13 23:41:39 christos Exp $	*/
 
 /*
@@ -84,8 +84,8 @@
 
 void in_socktrim(struct sockaddr_in *);
 
-int in_ioctl_set_ifaddr(u_long, caddr_t, struct ifnet *, int);
-int in_ioctl_change_ifaddr(u_long, caddr_t, struct ifnet *, int);
+int in_ioctl_set_ifaddr(u_long, caddr_t, struct ifnet *);
+int in_ioctl_change_ifaddr(u_long, caddr_t, struct ifnet *);
 int in_ioctl_get(u_long, caddr_t, struct ifnet *);
 void in_purgeaddr(struct ifaddr *);
 int in_addhost(struct in_ifaddr *, struct sockaddr_in *);
@@ -200,7 +200,6 @@ int
 in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 {
 	int privileged;
-	int error;
 
 	privileged = 0;
 	if ((so->so_state & SS_PRIV) != 0)
@@ -210,19 +209,11 @@ in_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 #ifdef MROUTING
 	case SIOCGETVIFCNT:
 	case SIOCGETSGCNT:
-		KERNEL_LOCK();
-		error = mrt_ioctl(so, cmd, data);
-		KERNEL_UNLOCK();
-		break;
+		return mrt_ioctl(so, cmd, data);
 #endif /* MROUTING */
 	default:
-		KERNEL_LOCK();
-		error = in_ioctl(cmd, data, ifp, privileged);
-		KERNEL_UNLOCK();
-		break;
+		return in_ioctl(cmd, data, ifp, privileged);
 	}
-
-	return error;
 }
 
 int
@@ -244,10 +235,14 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 	case SIOCGIFBRDADDR:
 		return in_ioctl_get(cmd, data, ifp);
 	case SIOCSIFADDR:
-		return in_ioctl_set_ifaddr(cmd, data, ifp, privileged);
+		if (!privileged)
+			return (EPERM);
+		return in_ioctl_set_ifaddr(cmd, data, ifp);
 	case SIOCAIFADDR:
 	case SIOCDIFADDR:
-		return in_ioctl_change_ifaddr(cmd, data, ifp, privileged);
+		if (!privileged)
+			return (EPERM);
+		return in_ioctl_change_ifaddr(cmd, data, ifp);
 	case SIOCSIFNETMASK:
 	case SIOCSIFDSTADDR:
 	case SIOCSIFBRDADDR:
@@ -256,6 +251,9 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 		return (EOPNOTSUPP);
 	}
 
+	if (!privileged)
+		return (EPERM);
+
 	if (ifr->ifr_addr.sa_family == AF_INET) {
 		error = in_sa2sin(&ifr->ifr_addr, &sin);
 		if (error)
@@ -263,6 +261,7 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 	}
 
 	NET_LOCK();
+	KERNEL_LOCK();
 
 	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 		if (ifa->ifa_addr->sa_family != AF_INET)
@@ -285,11 +284,6 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 
 	switch (cmd) {
 	case SIOCSIFDSTADDR:
-		if (!privileged) {
-			error = EPERM;
-			break;
-		}
-
 		if ((ifp->if_flags & IFF_POINTOPOINT) == 0) {
 			error = EINVAL;
 			break;
@@ -309,11 +303,6 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 		break;
 
 	case SIOCSIFBRDADDR:
-		if (!privileged) {
-			error = EPERM;
-			break;
-		}
-
 		if ((ifp->if_flags & IFF_BROADCAST) == 0) {
 			error = EINVAL;
 			break;
@@ -325,11 +314,6 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 		break;
 
 	case SIOCSIFNETMASK:
-		if (!privileged) {
-			error = EPERM;
-			break;
-		}
-
 		if (ifr->ifr_addr.sa_len < 8) {
 			error = EINVAL;
 			break;
@@ -347,13 +331,13 @@ in_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp, int privileged)
 		break;
 	}
 err:
+	KERNEL_UNLOCK();
 	NET_UNLOCK();
 	return (error);
 }
 
 int
-in_ioctl_set_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
-    int privileged)
+in_ioctl_set_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp)
 {
 	struct ifreq *ifr = (struct ifreq *)data;
 	struct ifaddr *ifa;
@@ -365,14 +349,12 @@ in_ioctl_set_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 	if (cmd != SIOCSIFADDR)
 		panic("%s: invalid ioctl %lu", __func__, cmd);
 
-	if (!privileged)
-		return (EPERM);
-
 	error = in_sa2sin(&ifr->ifr_addr, &sin);
 	if (error)
 		return (error);
 
 	NET_LOCK();
+	KERNEL_LOCK();
 
 	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 		if (ifa->ifa_addr->sa_family != AF_INET)
@@ -405,13 +387,13 @@ in_ioctl_set_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 	if (!error)
 		if_addrhooks_run(ifp);
 
+	KERNEL_UNLOCK();
 	NET_UNLOCK();
 	return error;
 }
 
 int
-in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
-    int privileged)
+in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp)
 {
 	struct ifaddr *ifa;
 	struct in_ifaddr *ia = NULL;
@@ -428,6 +410,7 @@ in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 	}
 
 	NET_LOCK();
+	KERNEL_LOCK();
 
 	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
 		if (ifa->ifa_addr->sa_family != AF_INET)
@@ -443,11 +426,6 @@ in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 	switch (cmd) {
 	case SIOCAIFADDR: {
 		int needinit = 0;
-
-		if (!privileged) {
-			error = EPERM;
-			break;
-		}
 
 		if (ifra->ifra_mask.sin_len) {
 			if (ifra->ifra_mask.sin_len < 8) {
@@ -531,11 +509,6 @@ in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 		break;
 	    }
 	case SIOCDIFADDR:
-		if (!privileged) {
-			error = EPERM;
-			break;
-		}
-
 		if (ia == NULL) {
 			error = EADDRNOTAVAIL;
 			break;
@@ -554,6 +527,7 @@ in_ioctl_change_ifaddr(u_long cmd, caddr_t data, struct ifnet *ifp,
 		panic("%s: invalid ioctl %lu", __func__, cmd);
 	}
 
+	KERNEL_UNLOCK();
 	NET_UNLOCK();
 	return (error);
 }
@@ -865,7 +839,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		/*
 		 * Found it; just increment the reference count.
 		 */
-		++inm->inm_refcnt;
+		refcnt_take(&inm->inm_refcnt);
 	} else {
 		/*
 		 * New address; allocate a new multicast record
@@ -875,7 +849,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		inm->inm_sin.sin_len = sizeof(struct sockaddr_in);
 		inm->inm_sin.sin_family = AF_INET;
 		inm->inm_sin.sin_addr = *ap;
-		inm->inm_refcnt = 1;
+		refcnt_init_trace(&inm->inm_refcnt, DT_REFCNT_IDX_IFMADDR);
 		inm->inm_ifidx = ifp->if_index;
 		inm->inm_ifma.ifma_addr = sintosa(&inm->inm_sin);
 
@@ -916,7 +890,7 @@ in_delmulti(struct in_multi *inm)
 
 	NET_ASSERT_LOCKED();
 
-	if (--inm->inm_refcnt != 0)
+	if (refcnt_rele(&inm->inm_refcnt) == 0)
 		return;
 
 	ifp = if_get(inm->inm_ifidx);

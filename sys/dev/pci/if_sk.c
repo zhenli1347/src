@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_sk.c,v 1.194 2022/03/11 18:00:48 mpi Exp $	*/
+/*	$OpenBSD: if_sk.c,v 1.196 2024/05/24 06:02:57 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999, 2000
@@ -93,8 +93,6 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/timeout.h>
 #include <sys/device.h>
 #include <sys/queue.h>
@@ -998,7 +996,7 @@ sk_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_start = sk_start;
 	ifp->if_watchdog = sk_watchdog;
 	ifp->if_hardmtu = SK_JUMBO_MTU;
-	ifq_set_maxlen(&ifp->if_snd, SK_TX_RING_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, SK_TX_RING_CNT - 1);
 	bcopy(sc_if->sk_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;

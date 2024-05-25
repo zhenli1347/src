@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_trace.c,v 1.13 2021/07/09 20:59:51 jasper Exp $	*/
+/*	$OpenBSD: db_trace.c,v 1.16 2024/03/12 13:32:53 kettenis Exp $	*/
 /*	$NetBSD: db_trace.c,v 1.8 2003/01/17 22:28:48 thorpej Exp $	*/
 
 /*
@@ -49,18 +49,6 @@ db_regs_t ddb_regs;
 
 #define INKERNEL(va)	(((vaddr_t)(va)) & (1ULL << 63))
 
-#ifndef __clang__
-/*
- * Clang uses a different stack frame, which looks like the following.
- *
- *          return link value       [fp, #+4]
- *          return fp value         [fp]        <- fp points to here
- *
- */
-#define FR_RFP	(0x0)
-#define FR_RLV	(0x4)
-#endif /* !__clang__ */
-
 void
 db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif, int (*pr)(const char *, ...))
@@ -98,7 +86,7 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 			lastlr =  p->p_addr->u_pcb.pcb_tf->tf_elr;
 		} else {
 			sp = addr;
-			db_read_bytes(sp+16, sizeof(vaddr_t),
+			db_read_bytes(sp, sizeof(vaddr_t),
 			    (char *)&frame);
 			db_read_bytes(sp + 8, sizeof(vaddr_t),
 			    (char *)&lr);
@@ -109,8 +97,13 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 	while (count-- && frame != 0) {
 		lastframe = frame;
 
-		sym = db_search_symbol(lastlr, DB_STGY_ANY, &offset);
-		db_symbol_values(sym, &name, NULL);
+		if (INKERNEL(frame)) {
+			sym = db_search_symbol(lastlr, DB_STGY_ANY, &offset);
+			db_symbol_values(sym, &name, NULL);
+		} else {
+			sym = NULL;
+			name = NULL;
+		}
 
 		if (name == NULL || strcmp(name, "end") == 0) {
 			(*pr)("%llx at 0x%lx", lastlr, lr - 4);
@@ -119,13 +112,6 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 			db_printsym(lr - 4, DB_STGY_PROC, pr);
 		}
 		(*pr)("\n");
-
-		// can we detect traps ?
-		db_read_bytes(frame, sizeof(vaddr_t), (char *)&frame);
-		if (frame == 0)
-			break;
-		lastlr = lr;
-		db_read_bytes(frame + 8, sizeof(vaddr_t), (char *)&lr);
 
 		if (name != NULL) {
 			if ((strcmp (name, "handle_el0_irq") == 0) ||
@@ -137,15 +123,39 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 				(*pr)("--- trap ---\n");
 			}
 		}
+
+		lastframe = frame;
+		db_read_bytes(frame, sizeof(vaddr_t), (char *)&frame);
+
+		if (frame == 0) {
+			/* end of chain */
+			break;
+		}
+
 		if (INKERNEL(frame)) {
+			/* staying in kernel */
 			if (frame <= lastframe) {
 				(*pr)("Bad frame pointer: 0x%lx\n", frame);
 				break;
 			}
+		} else if (INKERNEL(lastframe)) {
+			/* switch from user to kernel */
+			if (kernel_only) {
+				(*pr)("end of kernel\n");
+				break;	/* kernel stack only */
+			}
 		} else {
-			if (kernel_only)
+			/* in user */
+			if (frame <= lastframe) {
+				(*pr)("Bad user frame pointer: 0x%lx\n",
+					frame);
 				break;
+			}
 		}
+
+		lastlr = lr;
+		db_read_bytes(frame + 8, sizeof(vaddr_t), (char *)&lr);
+
 		--count;
 	}
 }
@@ -182,4 +192,10 @@ stacktrace_save_at(struct stacktrace *st, unsigned int skip)
 		if (!INKERNEL(frame->f_lr))
 			break;
 	}
+}
+
+void
+stacktrace_save_utrace(struct stacktrace *st)
+{
+	st->st_count = 0;
 }

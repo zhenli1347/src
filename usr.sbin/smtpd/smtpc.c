@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpc.c,v 1.19 2021/07/14 13:33:57 kn Exp $	*/
+/*	$OpenBSD: smtpc.c,v 1.21 2024/05/13 06:48:26 jsg Exp $	*/
 
 /*
  * Copyright (c) 2018 Eric Faurot <eric@openbsd.org>
@@ -237,7 +237,7 @@ main(int argc, char **argv)
 	if (cafile == NULL)
 		cafile = tls_default_ca_cert_file();
 	if (tls_config_set_ca_file(tls_config, cafile) == -1)
-		fatal("tls_set_ca_file");
+		fatalx("tls_set_ca_file: %s", tls_config_error(tls_config));
 	if (!params.tls_verify) {
 		tls_config_insecure_noverifycert(tls_config);
 		tls_config_insecure_noverifyname(tls_config);
@@ -399,6 +399,7 @@ parse_message(FILE *ifp)
 			fatal("fputc");
 	}
 
+	free(line);
 	fclose(ifp);
 	rewind(mail.fp);
 }
@@ -455,7 +456,7 @@ smtp_require_tls(void *tag, struct smtp_client *proto)
 		fatal("tls_client");
 
 	if (tls_configure(tls, tls_config) == -1)
-		fatal("tls_configure");
+		fatalx("tls_configure: %s", tls_error(tls));
 
 	smtp_set_tls(proto, tls);
 }

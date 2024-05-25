@@ -1,4 +1,4 @@
-.\"	$OpenBSD: port-modules.5,v 1.260 2022/06/26 05:24:06 jsg Exp $
+.\"	$OpenBSD: port-modules.5,v 1.268 2024/04/15 16:11:01 bentley Exp $
 .\"
 .\" Copyright (c) 2008 Marc Espie
 .\"
@@ -24,7 +24,7 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: June 26 2022 $
+.Dd $Mdocdate: April 15 2024 $
 .Dt PORT-MODULES 5
 .Os
 .Sh NAME
@@ -589,7 +589,8 @@ is added to DPB_PROPERTIES because CMake's include files parser cheats
 too much.
 .It devel/cabal
 See
-.Xr cabal-module 5 for porting Haskell applications .
+.Xr cabal-module 5
+for porting Haskell applications.
 .It devel/cargo
 See
 .Xr cargo-module 5 .
@@ -688,26 +689,26 @@ and
 Appends to
 .Ev CATEGORIES .
 When
-.Ev TYPEFACE
+.Ev MODFONT_FAMILY
 is set in combination with
-.Ev V
-or
-.Ev VERSION ,
+.Ev MODFONT_VERSION ,
 it sets
 .Ev PKGNAME .
-.Ev TYPEFACE
-should be set to the name of the typeface.
+.Ev MODFONT_FAMILY
+should be set to the name of the font family.
 This sets
-.Ev FONTDIR
-using said typeface name.
-.Ev FONTTYPES
-defaults to `ttf' but can be set to include the extensions of
-fonts which are to be installed.
-Also sets
-.Ev FONT_DISTDIR .
+.Ev MODFONT_DIR
+using said family name.
 A
 .Cm do-install
-target is provided if the port tself does not provide it.
+target is provided if the port itself does not provide it.
+This installs fonts from
+.Ev WRKSRC
+in the distribution.
+If one or more file extensions are listed in
+.Ev MODFONT_TYPES ,
+files of those types will be used.
+Otherwise, otf files are preferred, with a fallback to ttf.
 .It fortran
 Sets
 .Ev MODFORTRAN_LIB_DEPENDS ,
@@ -786,7 +787,7 @@ target (if not already defined).
 It heeds
 .Ev NO_BUILD .
 .It lang/clang
-Similar to gcc3 and gcc4 modules.
+Similar to gcc4 module.
 If architecture is in MODCLANG_ARCHS, the Clang compilers will be
 put at the front of the path.
 By default, only C language support is included by this module.
@@ -975,6 +976,20 @@ See
 .It lang/ruby
 See
 .Xr ruby-module 5 .
+.It lang/rust
+Ports using Rust must use this module so a rebuild can be triggered via
+.Ev SYSTEM_VERSION-rust
+on updates of the lang/rust port or changes to the Rust standard library.
+Sets
+.Ev MODRUST_WANTLIB
+as appropriate for the architecture so it can be added to
+.Ev WANTLIB .
+It adds lang/rust to the
+.Ev BUILD_DEPENDS
+unless
+.Ev MODRUST_BUILDDEP
+is set to anything but
+.Dq yes .
 .It lang/tcl
 Sets
 .Ev MODTCL_VERSION ,
@@ -1237,7 +1252,7 @@ and
 If
 .Ev MODXFCE_ICON_CACHE
 is set to yes, it adds
-.Pa x11/gtk+3,-guic
+.Pa x11/gtk+4,-guic
 to
 .Ev RUN_DEPENDS .
 Unless

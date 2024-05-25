@@ -1,4 +1,4 @@
-/*	$OpenBSD: probe.c,v 1.4 2015/05/05 01:26:37 jsg Exp $ */
+/*	$OpenBSD: probe.c,v 1.6 2024/04/23 13:34:51 jsg Exp $ */
 
 /*
  * Copyright (c) 2005, 2006 Esben Norby <norby@openbsd.org>
@@ -39,7 +39,6 @@ send_probe(struct iface *iface)
 {
 	struct sockaddr_in	 dst;
 	struct ibuf		*buf;
-	struct dvmrp_hdr	*dvmrp_hdr;
 	struct nbr		*nbr;
 	int			 ret = 0;
 
@@ -67,11 +66,7 @@ send_probe(struct iface *iface)
 	dst.sin_len = sizeof(struct sockaddr_in);
 	inet_aton(AllDVMRPRouters, &dst.sin_addr);
 
-	/* update chksum */
-	dvmrp_hdr = ibuf_seek(buf, 0, sizeof(*dvmrp_hdr));
-	dvmrp_hdr->chksum = in_cksum(buf->buf, buf->wpos);
-
-	ret = send_packet(iface, buf->buf, buf->wpos, &dst);
+	ret = send_packet(iface, buf, &dst);
 	ibuf_free(buf);
 	return (ret);
 fail:
@@ -120,7 +115,7 @@ recv_probe(struct iface *iface, struct in_addr src, u_int32_t src_ip,
 		if (nbr_id == iface->addr.s_addr) {
 			/* seen myself */
 			if (nbr->state < NBR_STA_2_WAY)
-			nbr_fsm(nbr, NBR_EVT_2_WAY_RCVD);
+				nbr_fsm(nbr, NBR_EVT_2_WAY_RCVD);
 			break;
 		}
 		buf += sizeof(nbr_id);

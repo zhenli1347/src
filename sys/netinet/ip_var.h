@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_var.h,v 1.108 2022/11/17 18:05:43 mvs Exp $	*/
+/*	$OpenBSD: ip_var.h,v 1.117 2024/04/17 20:48:51 bluhm Exp $	*/
 /*	$NetBSD: ip_var.h,v 1.16 1996/02/13 23:43:20 christos Exp $	*/
 
 /*
@@ -87,6 +87,8 @@ struct	ipstat {
 	u_long	ips_inswcsum;		/* software checksummed on input */
 	u_long	ips_outswcsum;		/* software checksummed on output */
 	u_long	ips_notmember;		/* multicasts for unregistered groups */
+	u_long	ips_rtcachehit;		/* valid route found in cache */
+	u_long	ips_rtcachemiss;	/* route cache with new destination */
 	u_long	ips_wrongif;		/* packet received on wrong interface */
 	u_long	ips_idropped;		/* lost input due to nobufs, etc. */
 };
@@ -133,6 +135,8 @@ enum ipstat_counters {
 	ips_inswcsum,		/* software checksummed on input */
 	ips_outswcsum,		/* software checksummed on output */
 	ips_notmember,		/* multicasts for unregistered groups */
+	ips_rtcachehit,		/* valid route to destination found in cache */
+	ips_rtcachemiss,	/* route cache filled with new destination */
 	ips_wrongif,		/* packet received on wrong interface */
 	ips_idropped,		/* lost input packets due to nobufs, etc. */
 
@@ -194,6 +198,11 @@ struct ipq {
 	struct	  in_addr ipq_src, ipq_dst;
 };
 
+struct ipoffnxt {
+	int	ion_off;
+	int	ion_nxt;
+};
+
 /* flags passed to ip_output */
 #define	IP_FORWARDING		0x1		/* most of ip header exists */
 #define	IP_RAWOUTPUT		0x2		/* raw ip header exists */
@@ -217,14 +226,16 @@ extern int ipforwarding;		/* enable IP forwarding */
 extern int ipmforwarding;		/* enable multicast forwarding */
 #endif
 extern int ipmultipath;			/* enable multipath routing */
-extern int la_hold_total;
+extern unsigned int la_hold_total;
 
 extern const struct pr_usrreqs rip_usrreqs;
 
 extern struct rttimer_queue ip_mtudisc_timeout_q;
 extern struct pool ipqent_pool;
+struct rtentry;
 struct route;
 struct inpcb;
+struct ipsec_level;
 
 int	 ip_ctloutput(int, struct socket *, int, int, struct mbuf *);
 int	 ip_fragment(struct mbuf *, struct mbuf_list *, struct ifnet *, u_long);
@@ -236,7 +247,7 @@ struct mbuf*
 int	 ip_mforward(struct mbuf *, struct ifnet *);
 int	 ip_optcopy(struct ip *, struct ip *);
 int	 ip_output(struct mbuf *, struct mbuf *, struct route *, int,
-	    struct ip_moptions *, struct inpcb *, u_int32_t);
+	    struct ip_moptions *, const struct ipsec_level *, u_int32_t);
 u_int16_t
 	 ip_randomid(void);
 void	 ip_send(struct mbuf *);
@@ -249,17 +260,20 @@ int	 ip_sysctl(int *, u_int, void *, size_t *, void *, size_t);
 void	 ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
 	    struct mbuf *);
 int	 ip_input_if(struct mbuf **, int *, int, int, struct ifnet *);
-int	 ip_deliver(struct mbuf **, int *, int, int);
-void	 ip_forward(struct mbuf *, struct ifnet *, struct rtentry *, int);
+int	 ip_deliver(struct mbuf **, int *, int, int, int);
+void	 ip_forward(struct mbuf *, struct ifnet *, struct route *, int);
 int	 rip_ctloutput(int, struct socket *, int, int, struct mbuf *);
 void	 rip_init(void);
 int	 rip_input(struct mbuf **, int *, int, int);
 int	 rip_output(struct mbuf *, struct socket *, struct sockaddr *,
 	    struct mbuf *);
+struct mbuf *
+	 rip_chkhdr(struct mbuf *, struct mbuf *);
 int	 rip_attach(struct socket *, int, int);
 int	 rip_detach(struct socket *);
 void	 rip_lock(struct socket *);
 void	 rip_unlock(struct socket *);
+int	 rip_locked(struct socket *);
 int	 rip_bind(struct socket *, struct mbuf *, struct proc *);
 int	 rip_connect(struct socket *, struct mbuf *);
 int	 rip_disconnect(struct socket *);

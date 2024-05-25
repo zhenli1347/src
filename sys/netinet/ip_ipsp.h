@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipsp.h,v 1.240 2022/07/14 13:52:10 mvs Exp $	*/
+/*	$OpenBSD: ip_ipsp.h,v 1.245 2024/04/17 20:48:51 bluhm Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr),
@@ -50,6 +50,7 @@
  *	P	ipo_tdb_mtx		link policy to TDB global mutex
  *	D	tdb_sadb_mtx		SA database global mutex
  *	m	tdb_mtx			fields of struct tdb
+ *	S	pfsync			fields of struct tdb
  */
 
 /* IPSP global definitions. */
@@ -146,6 +147,13 @@ struct ipsecstat {
 	uint64_t	ipsec_notdb;		/* No TDB was found */
 	uint64_t	ipsec_noxform;		/* Crypto error */
 	uint64_t	ipsec_exctdb;		/* TDBs with hardlimit excess */
+};
+
+struct ipsec_level {
+	u_char	sl_auth;	/* Authentication level */
+	u_char	sl_esp_trans;	/* ESP transport level */
+	u_char	sl_esp_network;	/* ESP network (encapsulation) level */
+	u_char	sl_ipcomp;	/* Compression level */
 };
 
 #ifdef _KERNEL
@@ -356,6 +364,7 @@ struct tdb {				/* tunnel descriptor block */
 #define	TDBF_PFSYNC_RPL		0x80000	/* Replay counter should be bumped */
 #define	TDBF_ESN		0x100000 /* 64-bit sequence numbers (ESN) */
 #define	TDBF_PFSYNC_SNAPPED	0x200000 /* entry is being dispatched to peer */
+#define	TDBF_IFACE		0x400000 /* entry policy is via sec(4) */ 
 
 #define TDBF_BITS ("\20" \
 	"\1UNIQUE\2TIMER\3BYTES\4ALLOCATIONS" \
@@ -363,7 +372,7 @@ struct tdb {				/* tunnel descriptor block */
 	"\11SOFT_BYTES\12SOFT_ALLOCATIONS\13SOFT_FIRSTUSE\14PFS" \
 	"\15TUNNELING" \
 	"\21USEDTUNNEL\22UDPENCAP\23PFSYNC\24PFSYNC_RPL" \
-	"\25ESN")
+	"\25ESN" "\26IFACE")
 
 	u_int32_t	tdb_flags;	/* [m] Flags related to this TDB */
 
@@ -405,7 +414,7 @@ struct tdb {				/* tunnel descriptor block */
 	u_int8_t	tdb_sproto;	/* [I] IPsec protocol */
 	u_int8_t	tdb_wnd;	/* Replay window */
 	u_int8_t	tdb_satype;	/* SA type (RFC2367, PF_KEY) */
-	u_int8_t	tdb_updates;	/* pfsync update counter */
+	u_int8_t	tdb_iface_dir;	/* [I] sec(4) iface direction */
 
 	union sockaddr_union	tdb_dst;	/* [N] Destination address */
 	union sockaddr_union	tdb_src;	/* [N] Source address */
@@ -431,6 +440,7 @@ struct tdb {				/* tunnel descriptor block */
 
 	u_int16_t	tdb_tag;		/* Packet filter tag */
 	u_int32_t	tdb_tap;		/* Alternate enc(4) interface */
+	unsigned int	tdb_iface;		/* [I] sec(4) iface */
 
 	u_int		tdb_rdomain;		/* [I] Routing domain */
 	u_int		tdb_rdomain_post;	/* [I] Change domain */
@@ -439,8 +449,8 @@ struct tdb {				/* tunnel descriptor block */
 	struct sockaddr_encap   tdb_filtermask; /* And the mask */
 
 	TAILQ_HEAD(tdb_policy_head, ipsec_policy) tdb_policy_head; /* [P] */
-	TAILQ_ENTRY(tdb)	tdb_sync_entry;
-	TAILQ_ENTRY(tdb)	tdb_sync_snap;
+	TAILQ_ENTRY(tdb)	tdb_sync_entry;	/* [S] pfsync tdb queue */
+	u_int32_t	tdb_updates;	/* [S] pfsync update counter */
 };
 
 enum tdb_counters {
@@ -610,6 +620,7 @@ void	tdb_unlink(struct tdb *);
 void	tdb_unlink_locked(struct tdb *);
 void	tdb_cleanspd(struct tdb *);
 void	tdb_unbundle(struct tdb *);
+void	tdb_addtimeouts(struct tdb *);
 void	tdb_deltimeouts(struct tdb *);
 int	tdb_walk(u_int, int (*)(struct tdb *, void *, int), void *);
 void	tdb_printit(void *, int, int (*)(const char *, ...));
@@ -667,7 +678,7 @@ int	checkreplaywindow(struct tdb *, u_int64_t, u_int32_t, u_int32_t *, int);
 int	ipsp_process_packet(struct mbuf *, struct tdb *, int, int);
 int	ipsp_process_done(struct mbuf *, struct tdb *);
 int	ipsp_spd_lookup(struct mbuf *, int, int, int, struct tdb *,
-	    struct inpcb *, struct tdb **, struct ipsec_ids *);
+	    const struct ipsec_level *, struct tdb **, struct ipsec_ids *);
 int	ipsp_is_unspecified(union sockaddr_union);
 int	ipsp_aux_match(struct tdb *, struct ipsec_ids *,
 	    struct sockaddr_encap *, struct sockaddr_encap *);

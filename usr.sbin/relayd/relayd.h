@@ -1,4 +1,4 @@
-/*	$OpenBSD: relayd.h,v 1.269 2022/08/31 16:17:18 dv Exp $	*/
+/*	$OpenBSD: relayd.h,v 1.272 2024/05/18 06:34:46 jsg Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -176,7 +176,6 @@ struct ctl_icmp_event {
 
 struct ctl_tcp_event {
 	int			 s;
-	char			*req;
 	struct ibuf		*buf;
 	struct host		*host;
 	struct table		*table;
@@ -1211,7 +1210,6 @@ void	 hce_notify_done(struct host *, enum host_error);
 /* relay.c */
 void	 relay(struct privsep *, struct privsep_proc *);
 int	 relay_privinit(struct relay *);
-void	 relay_notify_done(struct host *, const char *);
 int	 relay_session_cmp(struct rsession *, struct rsession *);
 void	 relay_close(struct rsession *, const char *, int);
 int	 relay_reset_event(struct rsession *, struct ctl_relay_event *);
@@ -1247,8 +1245,6 @@ int	 relay_test(struct protocol *, struct ctl_relay_event *);
 void	 relay_calc_skip_steps(struct relay_rules *);
 void	 relay_match(struct kvlist *, struct kv *, struct kv *,
 	    struct kvtree *);
-void	 relay_session_insert(struct rsession *);
-void	 relay_session_remove(struct rsession *);
 void	 relay_session_publish(struct rsession *);
 void	 relay_session_unpublish(struct rsession *);
 
@@ -1294,7 +1290,6 @@ void	 script_done(struct relayd *, struct ctl_script *);
 int	 script_exec(struct relayd *, struct ctl_script *);
 
 /* ssl.c */
-void	 ssl_init(struct relayd *);
 char	*ssl_load_key(struct relayd *, const char *, off_t *, char *);
 uint8_t *ssl_update_certificate(const uint8_t *, size_t, EVP_PKEY *,
 	    EVP_PKEY *, X509 *, size_t *);

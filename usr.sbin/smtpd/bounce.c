@@ -1,4 +1,4 @@
-/*	$OpenBSD: bounce.c,v 1.86 2021/07/28 19:39:50 benno Exp $	*/
+/*	$OpenBSD: bounce.c,v 1.90 2023/05/31 16:51:46 op Exp $	*/
 
 /*
  * Copyright (c) 2009 Gilles Chehade <gilles@poolp.org>
@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -236,7 +237,7 @@ bounce_timeout(int fd, short ev, void *arg)
 }
 
 static void
-bounce_drain()
+bounce_drain(void)
 {
 	struct bounce_message	*msg;
 	struct timeval		 tv;
@@ -305,7 +306,7 @@ bounce_send(struct bounce_session *s, const char *fmt, ...)
 }
 
 static const char *
-bounce_duration(long long int d)
+bounce_duration(long long d)
 {
 	static char buf[32];
 
@@ -538,8 +539,8 @@ bounce_next(struct bounce_session *s)
 			if ((len = getline(&line, &sz, s->msgfp)) == -1)
 				break;
 			if (len == 1 && line[0] == '\n' && /* end of headers */
-			    s->msg->bounce.type == B_DELIVERED &&
-			    s->msg->bounce.dsn_ret ==  DSN_RETHDRS) {
+			    (s->msg->bounce.type != B_FAILED ||
+			    s->msg->bounce.dsn_ret != DSN_RETFULL)) {
 				free(line);
 				fclose(s->msgfp);
 				s->msgfp = NULL;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.156 2022/11/29 21:41:39 guenther Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.167 2024/05/03 13:48:29 dv Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -231,6 +231,9 @@ struct pmap kernel_pmap_store;	/* the kernel's pmap (proc0) */
  */
 pt_entry_t pg_nx = 0;
 pt_entry_t pg_g_kern = 0;
+
+/* pg_xo: XO PTE bits, set to PKU key1 (if cpu supports PKU) */
+pt_entry_t pg_xo;
 
 /*
  * pmap_pg_wc: if our processor supports PAT then we set this
@@ -656,13 +659,28 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 	virtual_avail = kva_start;		/* first free KVA */
 
 	/*
+	 * If PKU is available, initialize PROT_EXEC entry correctly,
+	 * and enable the feature before it gets used
+	 * XXX Some Hypervisors forget to save/restore PKU
+	 */
+	if (cpuid_level >= 0x7) {
+		uint32_t ecx, dummy;
+
+		CPUID_LEAF(0x7, 0, dummy, dummy, ecx, dummy);
+		if (ecx & SEFF0ECX_PKU) {
+			lcr4(rcr4() | CR4_PKE);
+			pg_xo = PG_XO;
+		}
+	}
+
+	/*
 	 * set up protection_codes: we need to be able to convert from
 	 * a MI protection code (some combo of VM_PROT...) to something
 	 * we can jam into a i386 PTE.
 	 */
 
 	protection_codes[PROT_NONE] = pg_nx;			/* --- */
-	protection_codes[PROT_EXEC] = PG_RO;			/* --x */
+	protection_codes[PROT_EXEC] = pg_xo;		;	/* --x */
 	protection_codes[PROT_READ] = PG_RO | pg_nx;		/* -r- */
 	protection_codes[PROT_READ | PROT_EXEC] = PG_RO;	/* -rx */
 	protection_codes[PROT_WRITE] = PG_RW | pg_nx;		/* w-- */
@@ -893,6 +911,12 @@ pmap_bootstrap(paddr_t first_avail, paddr_t max_pa)
 	tlbflush();
 
 	return first_avail;
+}
+
+void
+pmap_init_percpu(void)
+{
+	pool_cache_init(&pmap_pv_pool);
 }
 
 /*
@@ -1835,7 +1859,7 @@ pmap_do_remove(struct pmap *pmap, vaddr_t sva, vaddr_t eva, int flags)
 		 * with pmap_remove!  if we allow this (and why would
 		 * we?) then we end up freeing the pmap's page
 		 * directory page (PDP) before we are finished using
-		 * it when we hit in in the recursive mapping.  this
+		 * it when we hit it in the recursive mapping.  this
 		 * is BAD.
 		 *
 		 * long term solution is to move the PTEs out of user
@@ -2105,7 +2129,8 @@ pmap_clear_attrs(struct vm_page *pg, unsigned long clearbits)
 void
 pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 {
-	pt_entry_t nx, *spte, *epte;
+	pt_entry_t *spte, *epte;
+	pt_entry_t clear = 0, set = 0;
 	vaddr_t blockend;
 	int shootall = 0, shootself;
 	vaddr_t va;
@@ -2118,9 +2143,12 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 	sva &= PG_FRAME;
 	eva &= PG_FRAME;
 
-	nx = 0;
+	if (!(prot & PROT_READ))
+		set |= pg_xo;
+	if (!(prot & PROT_WRITE))
+		clear = PG_RW;
 	if (!(prot & PROT_EXEC))
-		nx = pg_nx;
+		set |= pg_nx;
 
 	if ((eva - sva > 32 * PAGE_SIZE) && sva < VM_MIN_KERNEL_ADDRESS)
 		shootall = 1;
@@ -2158,8 +2186,8 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 		for (/*null */; spte < epte ; spte++) {
 			if (!pmap_valid_entry(*spte))
 				continue;
-			pmap_pte_clearbits(spte, PG_RW);
-			pmap_pte_setbits(spte, nx);
+			pmap_pte_clearbits(spte, clear);
+			pmap_pte_setbits(spte, set);
 		}
 	}
 
@@ -2234,17 +2262,6 @@ pmap_collect(struct pmap *pmap)
 	    PMAP_REMOVE_SKIPWIRED);
 }
 #endif
-
-/*
- * pmap_copy: copy mappings from one pmap to another
- *
- * => optional function
- * void pmap_copy(dst_pmap, src_pmap, dst_addr, len, src_addr)
- */
-
-/*
- * defined as macro in pmap.h
- */
 
 void
 pmap_enter_special(vaddr_t va, paddr_t pa, vm_prot_t prot)
@@ -3088,13 +3105,6 @@ pmap_steal_memory(vsize_t size, vaddr_t *start, vaddr_t *end)
 	return (va);
 }
 
-void
-pmap_virtual_space(vaddr_t *vstartp, vaddr_t *vendp)
-{
-	*vstartp = virtual_avail;
-	*vendp = VM_MAX_KERNEL_ADDRESS;
-}
-
 /*
  * pmap_convert
  *
@@ -3109,6 +3119,7 @@ pmap_convert(struct pmap *pmap, int mode)
 {
 	pt_entry_t *pte;
 
+	mtx_enter(&pmap->pm_mtx);
 	pmap->pm_type = mode;
 
 	if (mode == PMAP_TYPE_EPT) {
@@ -3122,6 +3133,7 @@ pmap_convert(struct pmap *pmap, int mode)
 			pmap->pm_pdir_intel = NULL;
 		}
 	}
+	mtx_leave(&pmap->pm_mtx);
 }
 
 #ifdef MULTIPROCESSOR

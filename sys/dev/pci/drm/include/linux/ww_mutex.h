@@ -39,7 +39,6 @@
 #include <sys/param.h>
 #include <sys/mutex.h>
 #include <machine/intr.h>
-#include <linux/compiler.h>
 #include <linux/mutex.h>
 
 struct ww_class {
@@ -106,7 +105,7 @@ ww_mutex_is_locked(struct ww_mutex *lock) {
  * Return 1 if lock could be acquired, else 0 (contended).
  */
 static inline int
-ww_mutex_trylock(struct ww_mutex *lock) {
+ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx) {
 	int res = 0;
 
 	mtx_enter(&lock->base);

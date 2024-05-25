@@ -1,4 +1,4 @@
-.\"	$OpenBSD: sh.1,v 1.155 2022/08/31 22:27:14 jmc Exp $
+.\"	$OpenBSD: sh.1,v 1.158 2024/03/06 06:26:22 jmc Exp $
 .\"
 .\" Copyright (c) 2015 Jason McIntyre <jmc@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 31 2022 $
+.Dd $Mdocdate: March 6 2024 $
 .Dt SH 1
 .Os
 .Sh NAME
@@ -1390,7 +1390,7 @@ The format is:
 .Pp
 Where
 .Ar expression
-is an integer, parameter name, or array reference,
+is an integer or parameter name,
 optionally combined with any of the operators described below,
 listed and grouped according to precedence:
 .Bl -tag -width Ds
@@ -2108,7 +2108,7 @@ on
 .Ox
 is:
 .Bd -literal -offset 2n
-/usr/bin:/bin:/usr/sbin:/sbin:/usr/X11R6/bin:/usr/local/bin
+/usr/bin:/bin:/usr/sbin:/sbin:/usr/X11R6/bin:/usr/local/bin:/usr/local/sbin
 .Ed
 .It Ev POSIXLY_CORRECT
 Enable POSIX mode
@@ -2140,7 +2140,7 @@ before each command is traced
 option).
 The default is
 .Sq +\ \& .
-.It PWD
+.It Ev PWD
 The absolute pathname to the current working directory.
 .El
 .Sh ASYNCHRONOUS EVENTS

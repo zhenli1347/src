@@ -1,4 +1,4 @@
-/* $OpenBSD: bn_local.h,v 1.3 2022/11/30 03:08:39 jsing Exp $ */
+/* $OpenBSD: bn_local.h,v 1.43 2024/04/16 13:07:14 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -127,28 +127,27 @@ struct bignum_st {
 	int flags;
 };
 
-/* Used for montgomery multiplication */
 struct bn_mont_ctx_st {
-	int ri;        /* number of bits in R */
-	BIGNUM RR;     /* used to convert to montgomery form */
-	BIGNUM N;      /* The modulus */
-	BIGNUM Ni;     /* R*(1/R mod N) - N*Ni = 1
-	                * (Ni is only stored for bignum algorithm) */
-	BN_ULONG n0[2];/* least significant word(s) of Ni;
-	                  (type changed with 0.9.9, was "BN_ULONG n0;" before) */
+	int ri;		/* Number of bits in R */
+	BIGNUM RR;	/* Used to convert to Montgomery form */
+	BIGNUM N;	/* Modulus */
+
+	/* Least significant word(s) of Ni; R*(1/R mod N) - N*Ni = 1 */
+	BN_ULONG n0[2];
+
 	int flags;
 };
 
 /* Used for reciprocal division/mod functions
  * It cannot be shared between threads
  */
-struct bn_recp_ctx_st {
+typedef struct bn_recp_ctx_st {
 	BIGNUM N;	/* the divisor */
 	BIGNUM Nr;	/* the reciprocal */
 	int num_bits;
 	int shift;
 	int flags;
-};
+} BN_RECP_CTX;
 
 /* Used for slow "generation" functions. */
 struct bn_gencb_st {
@@ -241,287 +240,58 @@ struct bn_gencb_st {
 #define BN_MUL_LOW_RECURSIVE_SIZE_NORMAL	(32) /* 32 */
 #define BN_MONT_CTX_SET_SIZE_WORD		(64) /* 32 */
 
-#if !defined(OPENSSL_NO_ASM) && !defined(OPENSSL_NO_INLINE_ASM)
-/*
- * BN_UMULT_HIGH section.
- *
- * No, I'm not trying to overwhelm you when stating that the
- * product of N-bit numbers is 2*N bits wide:-) No, I don't expect
- * you to be impressed when I say that if the compiler doesn't
- * support 2*N integer type, then you have to replace every N*N
- * multiplication with 4 (N/2)*(N/2) accompanied by some shifts
- * and additions which unavoidably results in severe performance
- * penalties. Of course provided that the hardware is capable of
- * producing 2*N result... That's when you normally start
- * considering assembler implementation. However! It should be
- * pointed out that some CPUs (most notably Alpha, PowerPC and
- * upcoming IA-64 family:-) provide *separate* instruction
- * calculating the upper half of the product placing the result
- * into a general purpose register. Now *if* the compiler supports
- * inline assembler, then it's not impossible to implement the
- * "bignum" routines (and have the compiler optimize 'em)
- * exhibiting "native" performance in C. That's what BN_UMULT_HIGH
- * macro is about:-)
- *
- *					<appro@fy.chalmers.se>
- */
-# if defined(__alpha)
-#  if defined(__GNUC__) && __GNUC__>=2
-#   define BN_UMULT_HIGH(a,b)	({	\
-	BN_ULONG ret;		\
-	asm ("umulh	%1,%2,%0"	\
-	     : "=r"(ret)		\
-	     : "r"(a), "r"(b));		\
-	ret;			})
-#  endif	/* compiler */
-# elif defined(_ARCH_PPC) && defined(_LP64)
-#  if defined(__GNUC__) && __GNUC__>=2
-#   define BN_UMULT_HIGH(a,b)	({	\
-	BN_ULONG ret;		\
-	asm ("mulhdu	%0,%1,%2"	\
-	     : "=r"(ret)		\
-	     : "r"(a), "r"(b));		\
-	ret;			})
-#  endif	/* compiler */
-# elif defined(__x86_64) || defined(__x86_64__)
-#  if defined(__GNUC__) && __GNUC__>=2
-#   define BN_UMULT_HIGH(a,b)	({	\
-	BN_ULONG ret,discard;	\
-	asm ("mulq	%3"		\
-	     : "=a"(discard),"=d"(ret)	\
-	     : "a"(a), "g"(b)		\
-	     : "cc");			\
-	ret;			})
-#   define BN_UMULT_LOHI(low,high,a,b)	\
-	asm ("mulq	%3"		\
-		: "=a"(low),"=d"(high)	\
-		: "a"(a),"g"(b)		\
-		: "cc");
-#  endif
-# elif defined(__mips) && defined(_LP64)
-#  if defined(__GNUC__) && __GNUC__>=2
-#   if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 4) /* "h" constraint is no more since 4.4 */
-#     define BN_UMULT_HIGH(a,b)		 (((__uint128_t)(a)*(b))>>64)
-#     define BN_UMULT_LOHI(low,high,a,b) ({	\
-	__uint128_t ret=(__uint128_t)(a)*(b);	\
-	(high)=ret>>64; (low)=ret;	 })
-#   else
-#     define BN_UMULT_HIGH(a,b)	({	\
-	BN_ULONG ret;		\
-	asm ("dmultu	%1,%2"		\
-	     : "=h"(ret)		\
-	     : "r"(a), "r"(b) : "l");	\
-	ret;			})
-#     define BN_UMULT_LOHI(low,high,a,b)\
-	asm ("dmultu	%2,%3"		\
-	     : "=l"(low),"=h"(high)	\
-	     : "r"(a), "r"(b));
-#    endif
-#  endif
-# endif		/* cpu */
-#endif		/* OPENSSL_NO_ASM */
-
-/*************************************************************
- * Using the long long type
- */
-#define Lw(t)    (((BN_ULONG)(t))&BN_MASK2)
-#define Hw(t)    (((BN_ULONG)((t)>>BN_BITS2))&BN_MASK2)
-
-#ifdef BN_LLONG
-#define mul_add(r,a,w,c) { \
-	BN_ULLONG t; \
-	t=(BN_ULLONG)w * (a) + (r) + (c); \
-	(r)= Lw(t); \
-	(c)= Hw(t); \
-	}
-
-#define mul(r,a,w,c) { \
-	BN_ULLONG t; \
-	t=(BN_ULLONG)w * (a) + (c); \
-	(r)= Lw(t); \
-	(c)= Hw(t); \
-	}
-
-#define sqr(r0,r1,a) { \
-	BN_ULLONG t; \
-	t=(BN_ULLONG)(a)*(a); \
-	(r0)=Lw(t); \
-	(r1)=Hw(t); \
-	}
-
-#elif defined(BN_UMULT_LOHI)
-#define mul_add(r,a,w,c) {		\
-	BN_ULONG high,low,ret,tmp=(a);	\
-	ret =  (r);			\
-	BN_UMULT_LOHI(low,high,w,tmp);	\
-	ret += (c);			\
-	(c) =  (ret<(c))?1:0;		\
-	(c) += high;			\
-	ret += low;			\
-	(c) += (ret<low)?1:0;		\
-	(r) =  ret;			\
-	}
-
-#define mul(r,a,w,c)	{		\
-	BN_ULONG high,low,ret,ta=(a);	\
-	BN_UMULT_LOHI(low,high,w,ta);	\
-	ret =  low + (c);		\
-	(c) =  high;			\
-	(c) += (ret<low)?1:0;		\
-	(r) =  ret;			\
-	}
-
-#define sqr(r0,r1,a)	{		\
-	BN_ULONG tmp=(a);		\
-	BN_UMULT_LOHI(r0,r1,tmp,tmp);	\
-	}
-
-#elif defined(BN_UMULT_HIGH)
-#define mul_add(r,a,w,c) {		\
-	BN_ULONG high,low,ret,tmp=(a);	\
-	ret =  (r);			\
-	high=  BN_UMULT_HIGH(w,tmp);	\
-	ret += (c);			\
-	low =  (w) * tmp;		\
-	(c) =  (ret<(c))?1:0;		\
-	(c) += high;			\
-	ret += low;			\
-	(c) += (ret<low)?1:0;		\
-	(r) =  ret;			\
-	}
-
-#define mul(r,a,w,c)	{		\
-	BN_ULONG high,low,ret,ta=(a);	\
-	low =  (w) * ta;		\
-	high=  BN_UMULT_HIGH(w,ta);	\
-	ret =  low + (c);		\
-	(c) =  high;			\
-	(c) += (ret<low)?1:0;		\
-	(r) =  ret;			\
-	}
-
-#define sqr(r0,r1,a)	{		\
-	BN_ULONG tmp=(a);		\
-	(r0) = tmp * tmp;		\
-	(r1) = BN_UMULT_HIGH(tmp,tmp);	\
-	}
-
-#else
-/*************************************************************
- * No long long type
- */
-
-#define LBITS(a)	((a)&BN_MASK2l)
-#define HBITS(a)	(((a)>>BN_BITS4)&BN_MASK2l)
-#define	L2HBITS(a)	(((a)<<BN_BITS4)&BN_MASK2)
-
-#define mul64(l,h,bl,bh) \
-	{ \
-	BN_ULONG m,m1,lt,ht; \
- \
-	lt=l; \
-	ht=h; \
-	m =(bh)*(lt); \
-	lt=(bl)*(lt); \
-	m1=(bl)*(ht); \
-	ht =(bh)*(ht); \
-	m=(m+m1)&BN_MASK2; if (m < m1) ht+=L2HBITS((BN_ULONG)1); \
-	ht+=HBITS(m); \
-	m1=L2HBITS(m); \
-	lt=(lt+m1)&BN_MASK2; if (lt < m1) ht++; \
-	(l)=lt; \
-	(h)=ht; \
-	}
-
-#define sqr64(lo,ho,in) \
-	{ \
-	BN_ULONG l,h,m; \
- \
-	h=(in); \
-	l=LBITS(h); \
-	h=HBITS(h); \
-	m =(l)*(h); \
-	l*=l; \
-	h*=h; \
-	h+=(m&BN_MASK2h1)>>(BN_BITS4-1); \
-	m =(m&BN_MASK2l)<<(BN_BITS4+1); \
-	l=(l+m)&BN_MASK2; if (l < m) h++; \
-	(lo)=l; \
-	(ho)=h; \
-	}
-
-#define mul_add(r,a,bl,bh,c) { \
-	BN_ULONG l,h; \
- \
-	h= (a); \
-	l=LBITS(h); \
-	h=HBITS(h); \
-	mul64(l,h,(bl),(bh)); \
- \
-	/* non-multiply part */ \
-	l=(l+(c))&BN_MASK2; if (l < (c)) h++; \
-	(c)=(r); \
-	l=(l+(c))&BN_MASK2; if (l < (c)) h++; \
-	(c)=h&BN_MASK2; \
-	(r)=l; \
-	}
-
-#define mul(r,a,bl,bh,c) { \
-	BN_ULONG l,h; \
- \
-	h= (a); \
-	l=LBITS(h); \
-	h=HBITS(h); \
-	mul64(l,h,(bl),(bh)); \
- \
-	/* non-multiply part */ \
-	l+=(c); if ((l&BN_MASK2) < (c)) h++; \
-	(c)=h&BN_MASK2; \
-	(r)=l&BN_MASK2; \
-	}
-#endif /* !BN_LLONG */
-
 /* The least significant word of a BIGNUM. */
 #define BN_lsw(n) (((n)->top == 0) ? (BN_ULONG) 0 : (n)->d[0])
 
+BN_ULONG bn_add(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len,
+    const BN_ULONG *b, int b_len);
+BN_ULONG bn_sub(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len,
+    const BN_ULONG *b, int b_len);
+
 void bn_mul_normal(BN_ULONG *r, BN_ULONG *a, int na, BN_ULONG *b, int nb);
-void bn_mul_comba8(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b);
 void bn_mul_comba4(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b);
-void bn_sqr_normal(BN_ULONG *r, const BN_ULONG *a, int n, BN_ULONG *tmp);
-void bn_sqr_comba8(BN_ULONG *r, const BN_ULONG *a);
+void bn_mul_comba8(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b);
+
 void bn_sqr_comba4(BN_ULONG *r, const BN_ULONG *a);
-int bn_cmp_words(const BN_ULONG *a, const BN_ULONG *b, int n);
-int bn_cmp_part_words(const BN_ULONG *a, const BN_ULONG *b,
-    int cl, int dl);
-void bn_mul_recursive(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n2,
-    int dna, int dnb, BN_ULONG *t);
-void bn_mul_part_recursive(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b,
-    int n, int tna, int tnb, BN_ULONG *t);
-void bn_sqr_recursive(BN_ULONG *r, const BN_ULONG *a, int n2, BN_ULONG *t);
-void bn_mul_low_normal(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n);
-void bn_mul_low_recursive(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n2,
-    BN_ULONG *t);
-void bn_mul_high(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, BN_ULONG *l, int n2,
-    BN_ULONG *t);
-BN_ULONG bn_add_part_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
-    int cl, int dl);
-BN_ULONG bn_sub_part_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
-    int cl, int dl);
-int bn_mul_mont(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp, const BN_ULONG *np, const BN_ULONG *n0, int num);
+void bn_sqr_comba8(BN_ULONG *r, const BN_ULONG *a);
+
+int bn_mul_mont(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
+    const BN_ULONG *np, const BN_ULONG *n0, int num);
 
 void bn_correct_top(BIGNUM *a);
-int bn_expand(BIGNUM *a, int bits);
+int bn_expand_bits(BIGNUM *a, size_t bits);
+int bn_expand_bytes(BIGNUM *a, size_t bytes);
 int bn_wexpand(BIGNUM *a, int words);
 
+BN_ULONG bn_add_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
+    int num);
+BN_ULONG bn_sub_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
+    int num);
 BN_ULONG bn_mul_add_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w);
 BN_ULONG bn_mul_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w);
 void     bn_sqr_words(BN_ULONG *rp, const BN_ULONG *ap, int num);
 BN_ULONG bn_div_words(BN_ULONG h, BN_ULONG l, BN_ULONG d);
-BN_ULONG bn_add_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp, int num);
-BN_ULONG bn_sub_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp, int num);
+void bn_div_rem_words(BN_ULONG h, BN_ULONG l, BN_ULONG d, BN_ULONG *out_q,
+    BN_ULONG *out_r);
 
 int BN_bntest_rand(BIGNUM *rnd, int bits, int top, int bottom);
-int bn_rand_interval(BIGNUM *rnd, const BIGNUM *lower_inc, const BIGNUM *upper_exc);
+int bn_rand_in_range(BIGNUM *rnd, const BIGNUM *lower_inc, const BIGNUM *upper_exc);
+int bn_rand_interval(BIGNUM *rnd, BN_ULONG lower_word, const BIGNUM *upper_exc);
+
+void	BN_init(BIGNUM *);
+
+int	BN_reciprocal(BIGNUM *r, const BIGNUM *m, int len, BN_CTX *ctx);
+
+void	BN_RECP_CTX_init(BN_RECP_CTX *recp);
+BN_RECP_CTX *BN_RECP_CTX_new(void);
+void	BN_RECP_CTX_free(BN_RECP_CTX *recp);
+int	BN_RECP_CTX_set(BN_RECP_CTX *recp, const BIGNUM *rdiv, BN_CTX *ctx);
+int	BN_mod_mul_reciprocal(BIGNUM *r, const BIGNUM *x, const BIGNUM *y,
+    BN_RECP_CTX *recp, BN_CTX *ctx);
+int	BN_mod_exp_recp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
+    const BIGNUM *m, BN_CTX *ctx);
+int	BN_div_recp(BIGNUM *dv, BIGNUM *rem, const BIGNUM *m,
+    BN_RECP_CTX *recp, BN_CTX *ctx);
 
 /* Explicitly const time / non-const time versions for internal use */
 int BN_mod_exp_ct(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
@@ -532,25 +302,43 @@ int BN_mod_exp_mont_ct(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx);
 int BN_mod_exp_mont_nonct(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx);
-int BN_div_nonct(BIGNUM *dv, BIGNUM *rem, const BIGNUM *m, const BIGNUM *d,
+int BN_div_nonct(BIGNUM *q, BIGNUM *r, const BIGNUM *n, const BIGNUM *d,
     BN_CTX *ctx);
-int BN_div_ct(BIGNUM *dv, BIGNUM *rem, const BIGNUM *m, const BIGNUM *d,
+int BN_div_ct(BIGNUM *q, BIGNUM *r, const BIGNUM *n, const BIGNUM *d,
     BN_CTX *ctx);
-#define BN_mod_ct(rem,m,d,ctx) BN_div_ct(NULL,(rem),(m),(d),(ctx))
-#define BN_mod_nonct(rem,m,d,ctx) BN_div_nonct(NULL,(rem),(m),(d),(ctx))
+int BN_mod_ct(BIGNUM *r, const BIGNUM *a, const BIGNUM *m, BN_CTX *ctx);
+int BN_mod_nonct(BIGNUM *r, const BIGNUM *a, const BIGNUM *m, BN_CTX *ctx);
+
+int BN_mod_exp_mont_word(BIGNUM *r, BN_ULONG a, const BIGNUM *p,
+    const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *m_ctx);
+int BN_mod_exp2_mont(BIGNUM *r, const BIGNUM *a1, const BIGNUM *p1,
+    const BIGNUM *a2, const BIGNUM *p2, const BIGNUM *m,
+    BN_CTX *ctx, BN_MONT_CTX *m_ctx);
+
+int BN_mod_exp_simple(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
+    const BIGNUM *m, BN_CTX *ctx);
+
 BIGNUM *BN_mod_inverse_ct(BIGNUM *ret, const BIGNUM *a, const BIGNUM *n,
     BN_CTX *ctx);
 BIGNUM *BN_mod_inverse_nonct(BIGNUM *ret, const BIGNUM *a, const BIGNUM *n,
     BN_CTX *ctx);
 int	BN_gcd_ct(BIGNUM *r, const BIGNUM *a, const BIGNUM *b, BN_CTX *ctx);
-int	BN_gcd_nonct(BIGNUM *r, const BIGNUM *a, const BIGNUM *b, BN_CTX *ctx);
 
 int	BN_swap_ct(BN_ULONG swap, BIGNUM *a, BIGNUM *b, size_t nwords);
+
+int bn_copy(BIGNUM *dst, const BIGNUM *src);
 
 int bn_isqrt(BIGNUM *out_sqrt, int *out_perfect, const BIGNUM *n, BN_CTX *ctx);
 int bn_is_perfect_square(int *out_perfect, const BIGNUM *n, BN_CTX *ctx);
 
-int bn_is_prime_bpsw(int *is_prime, const BIGNUM *n, BN_CTX *in_ctx);
+int bn_is_prime_bpsw(int *is_prime, const BIGNUM *n, BN_CTX *ctx, size_t rounds);
+
+int bn_printf(BIO *bio, const BIGNUM *bn, int indent, const char *fmt, ...)
+    __attribute__((__format__ (printf, 4, 5)))
+    __attribute__((__nonnull__ (4)));
+
+int bn_bn2hex_nosign(const BIGNUM *bn, char **out, size_t *out_len);
+int bn_bn2hex_nibbles(const BIGNUM *bn, char **out, size_t *out_len);
 
 __END_HIDDEN_DECLS
 #endif /* !HEADER_BN_LOCAL_H */

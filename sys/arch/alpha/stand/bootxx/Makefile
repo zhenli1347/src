@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.17 2017/06/12 18:49:34 espie Exp $
+#	$OpenBSD: Makefile,v 1.19 2023/03/11 20:49:33 miod Exp $
 #	$NetBSD: Makefile,v 1.12 1997/04/17 07:27:49 thorpej Exp $
 
 S=	${.CURDIR}/../../../..
@@ -23,15 +23,15 @@ DEFNS= -DPRIMARY_BOOTBLOCK
 
 AFLAGS += -DASSEMBLER ${DEFNS} -fno-pie
 CPPFLAGS += -I${.CURDIR}/../.. -I${S} ${DEFNS}
-CFLAGS = -Werror -mno-fp-regs -fno-pie \
+CFLAGS = -Oz -Werror -mno-fp-regs -fno-pie \
 	-msmall-data -msmall-text
 
 ${PROG}.nosym: ${PROG}.sym
 	cp ${PROG}.sym ${PROG}.nosym
-	strip ${PROG}.nosym
+	${STRIP} ${PROG}.nosym
 
 ${PROG}: ${PROG}.nosym
-	objcopy --output-target=binary ${PROG}.nosym ${PROG}.trunc
+	${OBJCOPY} --output-target=binary ${PROG}.nosym ${PROG}.trunc
 	dd if=${PROG}.trunc of=${PROG} obs=`expr 15 \* 512` conv=osync
 
 .include <bsd.prog.mk>

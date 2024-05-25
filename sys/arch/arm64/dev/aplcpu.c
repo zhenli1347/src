@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplcpu.c,v 1.5 2022/12/03 13:31:32 kettenis Exp $	*/
+/*	$OpenBSD: aplcpu.c,v 1.8 2023/07/13 08:33:36 kettenis Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -41,6 +41,8 @@
 #define DVFS_T8103_STATUS_CUR_PS_SHIFT	4
 #define DVFS_T8112_STATUS_CUR_PS_MASK	(0x1f << 5)
 #define DVFS_T8112_STATUS_CUR_PS_SHIFT	5
+
+#define APLCPU_DEEP_WFI_LATENCY		10 /* microseconds */
 
 struct opp {
 	uint64_t opp_hz;
@@ -97,6 +99,8 @@ uint32_t aplcpu_opp_level(struct aplcpu_softc *, int);
 int	aplcpu_clockspeed(int *);
 void	aplcpu_setperf(int level);
 void	aplcpu_refresh_sensors(void *);
+void	aplcpu_idle_cycle();
+void	aplcpu_deep_wfi(void);
 
 int
 aplcpu_match(struct device *parent, void *match, void *aux)
@@ -171,6 +175,8 @@ aplcpu_attach(struct device *parent, struct device *self, void *aux)
 	sensordev_install(&sc->sc_sensordev);
 	sensor_task_register(sc, aplcpu_refresh_sensors, 1);
 
+	cpu_idle_cycle_fcn = aplcpu_idle_cycle;
+	cpu_suspend_cycle_fcn = aplcpu_deep_wfi;
 	cpu_cpuspeed = aplcpu_clockspeed;
 	cpu_setperf = aplcpu_setperf;
 	return;
@@ -223,11 +229,8 @@ aplcpu_opp_init(struct aplcpu_softc *sc, int node)
 		return;
 
 	count = 0;
-	for (child = OF_child(node); child != 0; child = OF_peer(child)) {
-		if (OF_getproplen(child, "turbo-mode") == 0)
-			continue;
+	for (child = OF_child(node); child != 0; child = OF_peer(child))
 		count++;
-	}
 	if (count == 0)
 		return;
 
@@ -239,8 +242,6 @@ aplcpu_opp_init(struct aplcpu_softc *sc, int node)
 
 	count = 0;
 	for (child = OF_child(node); child != 0; child = OF_peer(child)) {
-		if (OF_getproplen(child, "turbo-mode") == 0)
-			continue;
 		opp_hz = OF_getpropint64(child, "opp-hz", 0);
 		opp_level = OF_getpropint(child, "opp-level", 0);
 
@@ -375,8 +376,8 @@ aplcpu_setperf(int level)
 				continue;
 
 			/* Translate performance level to a P-state. */
-			opp_level = 1;
 			ot = sc->sc_opp_table[j];
+			opp_level = ot->ot_opp[0].opp_level;
 			for (k = 0; k < ot->ot_nopp; k++) {
 				if (ot->ot_opp[k].opp_hz <= level_hz &&
 				    ot->ot_opp[k].opp_level >= opp_level)
@@ -396,9 +397,7 @@ aplcpu_setperf(int level)
 
 			/* Set desired P-state. */
 			reg &= ~DVFS_CMD_PS1_MASK;
-			reg &= ~DVFS_CMD_PS2_MASK;
 			reg |= (opp_level << DVFS_CMD_PS1_SHIFT);
-			reg |= (opp_level << DVFS_CMD_PS2_SHIFT);
 			reg |= DVFS_CMD_SET;
 			bus_space_write_8(sc->sc_iot, sc->sc_ioh[j],
 			    DVFS_CMD, reg);
@@ -431,4 +430,28 @@ aplcpu_refresh_sensors(void *arg)
 			}
 		}
 	}
+}
+
+void
+aplcpu_idle_cycle(void)
+{
+	struct cpu_info *ci = curcpu();
+	struct timeval start, stop;
+	u_long itime;
+
+	microuptime(&start);
+
+	if (ci->ci_prev_sleep > 3 * APLCPU_DEEP_WFI_LATENCY)
+		aplcpu_deep_wfi();
+	else
+		cpu_wfi();
+
+	microuptime(&stop);
+	timersub(&stop, &start, &stop);
+	itime = stop.tv_sec * 1000000 + stop.tv_usec;
+
+	ci->ci_last_itime = itime;
+	itime >>= 1;
+	ci->ci_prev_sleep = (ci->ci_prev_sleep + (ci->ci_prev_sleep >> 1)
+	    + itime) >> 1;
 }

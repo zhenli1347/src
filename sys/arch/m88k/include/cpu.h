@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.71 2022/12/06 00:56:52 cheloha Exp $ */
+/*	$OpenBSD: cpu.h,v 1.77 2024/03/31 07:23:29 miod Exp $ */
 /*
  * Copyright (c) 1996 Nivas Madhur
  * Copyright (c) 1992, 1993
@@ -177,8 +177,9 @@ struct cpu_info {
 #endif
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
+	struct clockintr ci_gmonclock;
 #endif
-	struct clockintr_queue ci_queue;
+	struct clockqueue ci_queue;
 	char		 ci_panicbuf[512];
 };
 
@@ -242,7 +243,6 @@ unsigned int cpu_rnd_messybits(void);
  * definitions of cpu-dependent requirements
  * referenced in generic code
  */
-#define	cpu_exec(p)		do { /* nothing */ } while (0)
 
 #define	cpu_idle_enter()	do { /* nothing */ } while (0)
 #define	cpu_idle_cycle()	do { /* nothing */ } while (0)
@@ -253,7 +253,7 @@ unsigned int cpu_rnd_messybits(void);
 #endif
 
 /*
- * Arguments to hardclock and gatherstats encapsulate the previous
+ * Arguments to clockintr_dispatch encapsulate the previous
  * machine state in an opaque clockframe. CLKF_INTR is only valid
  * if the process is in kernel mode. Clockframe is really trapframe,
  * so pointer to clockframe can be safely cast into a pointer to
@@ -297,6 +297,8 @@ void	softipi(void);
 int	badaddr(vaddr_t addr, int size);
 void	set_vbr(register_t);
 extern register_t kernel_vbr;
+
+#define copyinsn(p, v, ip) copyin32((v), (ip))
 
 #endif /* _KERNEL */
 #endif /* _M88K_CPU_H_ */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.177 2022/09/10 20:35:28 miod Exp $ */
+/*	$OpenBSD: pmap.c,v 1.184 2024/05/22 05:51:49 jsg Exp $ */
 
 /*
  * Copyright (c) 2015 Martin Pieuchot
@@ -81,6 +81,7 @@
 #include <sys/queue.h>
 #include <sys/pool.h>
 #include <sys/atomic.h>
+#include <sys/user.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -154,8 +155,6 @@ void pmap_fill_pte32(pmap_t, vaddr_t, paddr_t, struct pte_desc *, vm_prot_t,
 
 void pmap_syncicache_user_virt(pmap_t pm, vaddr_t va);
 
-void _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags,
-    int cache);
 void pmap_remove_pted(pmap_t, struct pte_desc *);
 
 /* setup/initialization functions */
@@ -185,9 +184,7 @@ int physmem;
 int physmaxaddr;
 
 #ifdef MULTIPROCESSOR
-struct __ppc_lock pmap_hash_lock;
-
-#define	PMAP_HASH_LOCK_INIT()		__ppc_lock_init(&pmap_hash_lock)
+struct __ppc_lock pmap_hash_lock = PPC_LOCK_INITIALIZER;
 
 #define	PMAP_HASH_LOCK(s)						\
 do {									\
@@ -223,7 +220,6 @@ do {									\
 
 #else /* ! MULTIPROCESSOR */
 
-#define	PMAP_HASH_LOCK_INIT()		/* nothing */
 #define	PMAP_HASH_LOCK(s)		(void)s
 #define	PMAP_HASH_UNLOCK(s)		/* nothing */
 
@@ -576,7 +572,7 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	}
 
 	pg = PHYS_TO_VM_PAGE(pa);
-	if (pg->pg_flags & PG_PMAP_UC)
+	if (pg != NULL && (pg->pg_flags & PG_PMAP_UC))
 		nocache = TRUE;
 	if (wt)
 		cache = PMAP_CACHE_WT;
@@ -900,6 +896,9 @@ pmap_fill_pte64(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	else
 		pte64->pte_lo |= (PTE_M_64 | PTE_I_64 | PTE_G_64);
 
+	if ((prot & (PROT_READ | PROT_WRITE)) == 0)
+		pte64->pte_lo |= PTE_AC_64;
+
 	if (prot & PROT_WRITE)
 		pte64->pte_lo |= PTE_RW_64;
 	else
@@ -1094,8 +1093,9 @@ int pmap_id_avail = 0;
 pmap_t
 pmap_create(void)
 {
-	int i, k, try, tblidx, tbloff;
-	int s, seg;
+	u_int bits;
+	int first, i, k, try, tblidx, tbloff;
+	int seg;
 	pmap_t pm;
 
 	pm = pool_get(&pmap_pmap_pool, PR_WAITOK|PR_ZERO);
@@ -1107,23 +1107,21 @@ pmap_create(void)
 	 * Allocate segment registers for this pmap.
 	 * Try not to reuse pmap ids, to spread the hash table usage.
 	 */
+	first = pmap_id_avail;
 again:
 	for (i = 0; i < NPMAPS; i++) {
-		try = pmap_id_avail + i;
+		try = first + i;
 		try = try % NPMAPS; /* truncate back into bounds */
 		tblidx = try / (8 * sizeof usedsr[0]);
 		tbloff = try % (8 * sizeof usedsr[0]);
-		if ((usedsr[tblidx] & (1 << tbloff)) == 0) {
-			/* pmap create lock? */
-			s = splvm();
-			if ((usedsr[tblidx] & (1 << tbloff)) == 1) {
-				/* entry was stolen out from under us, retry */
-				splx(s); /* pmap create unlock */
+		bits = usedsr[tblidx];
+		if ((bits & (1U << tbloff)) == 0) {
+			if (atomic_cas_uint(&usedsr[tblidx], bits,
+			    bits | (1U << tbloff)) != bits) {
+				first = try;
 				goto again;
 			}
-			usedsr[tblidx] |= (1 << tbloff); 
 			pmap_id_avail = try + 1;
-			splx(s); /* pmap create unlock */
 
 			seg = try << 4;
 			for (k = 0; k < 16; k++)
@@ -1173,17 +1171,14 @@ void
 pmap_release(pmap_t pm)
 {
 	int i, tblidx, tbloff;
-	int s;
 
 	pmap_vp_destroy(pm);
 	i = (pm->pm_sr[0] & SR_VSID) >> 4;
 	tblidx = i / (8  * sizeof usedsr[0]);
 	tbloff = i % (8  * sizeof usedsr[0]);
 
-	/* LOCK? */
-	s = splvm();
-	usedsr[tblidx] &= ~(1 << tbloff);
-	splx(s);
+	/* powerpc can do atomic cas, clearbits on same word. */
+	atomic_clearbits_int(&usedsr[tblidx], 1U << tbloff);
 }
 
 void
@@ -1608,6 +1603,13 @@ pmap_enable_mmu(void)
 	uint32_t scratch, sdr1;
 	int i;
 
+	/*
+	 * For the PowerPC 970, ACCR = 3 inhibits loads and stores to
+	 * pages with PTE_AC_64.  This is for execute-only mappings.
+	 */
+	if (ppc_proc_is_64b)
+		asm volatile ("mtspr 29, %0" :: "r" (3));
+
 	if (!ppc_nobat) {
 		extern caddr_t etext;
 
@@ -1640,12 +1642,19 @@ pmap_enable_mmu(void)
 
 /*
  * activate a pmap entry
- * NOOP on powerpc, all PTE entries exist in the same hash table.
+ * All PTE entries exist in the same hash table.
  * Segment registers are filled on exit to user mode.
  */
 void
 pmap_activate(struct proc *p)
 {
+	struct pcb *pcb = &p->p_addr->u_pcb;
+
+	/* Set the current pmap. */
+	pcb->pcb_pm = p->p_vmspace->vm_map.pmap;
+	pmap_extract(pmap_kernel(),
+	    (vaddr_t)pcb->pcb_pm, (paddr_t *)&pcb->pcb_pmreal);
+	curcpu()->ci_curpm = pcb->pcb_pmreal;
 }
 
 /*
@@ -1689,6 +1698,39 @@ pmap_extract(pmap_t pm, vaddr_t va, paddr_t *pa)
 	return TRUE;
 }
 
+#ifdef ALTIVEC
+/*
+ * Read an instruction from a given virtual memory address.
+ * Execute-only protection is bypassed.
+ */
+int
+pmap_copyinsn(pmap_t pm, vaddr_t va, uint32_t *insn)
+{
+	struct pte_desc *pted;
+	paddr_t pa;
+
+	/* Assume pm != pmap_kernel(). */
+	if (ppc_proc_is_64b) {
+		/* inline pmap_extract */
+		PMAP_VP_LOCK(pm);
+		pted = pmap_vp_lookup(pm, va);
+		if (pted == NULL || !PTED_VALID(pted)) {
+			PMAP_VP_UNLOCK(pm);
+			return EFAULT;
+		}
+		pa = (pted->p.pted_pte64.pte_lo & PTE_RPGN_64) |
+		    (va & ~PTE_RPGN_64);
+		PMAP_VP_UNLOCK(pm);
+
+		if (pa > physmaxaddr - sizeof(*insn))
+			return EFAULT;
+		*insn = *(uint32_t *)pa;
+		return 0;
+	} else
+		return copyin32((void *)va, insn);
+}
+#endif
+
 u_int32_t
 pmap_setusr(pmap_t pm, vaddr_t va)
 {
@@ -1711,7 +1753,7 @@ pmap_popusr(u_int32_t sr)
 }
 
 int
-copyin(const void *udaddr, void *kaddr, size_t len)
+_copyin(const void *udaddr, void *kaddr, size_t len)
 {
 	void *p;
 	size_t l;
@@ -1796,7 +1838,7 @@ copyin32(const uint32_t *udaddr, uint32_t *kaddr)
 }
 
 int
-copyinstr(const void *udaddr, void *kaddr, size_t len, size_t *done)
+_copyinstr(const void *udaddr, void *kaddr, size_t len, size_t *done)
 {
 	const u_char *uaddr = udaddr;
 	u_char *kp    = kaddr;
@@ -1969,6 +2011,9 @@ pmap_pted_ro64(struct pte_desc *pted, vm_prot_t prot)
 	if ((prot & PROT_EXEC) == 0)
 		pted->p.pted_pte64.pte_lo |= PTE_N_64;
 
+	if ((prot & (PROT_READ | PROT_WRITE)) == 0)
+		pted->p.pted_pte64.pte_lo |= PTE_AC_64;
+
 	PMAP_HASH_LOCK(s);
 	if ((pte = pmap_ptedinhash(pted)) != NULL) {
 		struct pte_64 *ptp64 = pte;
@@ -1981,8 +2026,7 @@ pmap_pted_ro64(struct pte_desc *pted, vm_prot_t prot)
 		}
 
 		/* Add a Page Table Entry, section 7.6.3.1. */
-		ptp64->pte_lo &= ~(PTE_CHG_64|PTE_PP_64);
-		ptp64->pte_lo |= PTE_RO_64;
+		ptp64->pte_lo = pted->p.pted_pte64.pte_lo;
 		eieio();	/* Order 1st PTE update before 2nd. */
 		ptp64->pte_hi |= PTE_VALID_64;
 		sync();		/* Ensure updates completed. */
@@ -2158,8 +2202,6 @@ pmap_init()
 	    "pted", NULL);
 	pool_setlowat(&pmap_pted_pool, 20);
 
-	PMAP_HASH_LOCK_INIT();
-
 	pmap_initialized = 1;
 }
 
@@ -2246,6 +2288,13 @@ pte_spill_v(pmap_t pm, u_int32_t va, u_int32_t dsisr, int exec_fault)
 {
 	struct pte_desc *pted;
 	int inserted = 0;
+
+	/*
+	 * DSISR_DABR is set if the PowerPC 970 attempted to read or
+	 * write an execute-only page.
+	 */
+	if (dsisr & DSISR_DABR)
+		return 0;
 
 	/*
 	 * If the current mapping is RO and the access was a write

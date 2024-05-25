@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_attr.c,v 1.131 2022/09/01 13:19:11 claudio Exp $ */
+/*	$OpenBSD: rde_attr.c,v 1.134 2023/07/12 14:45:43 claudio Exp $ */
 
 /*
  * Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -30,42 +30,6 @@
 #include "log.h"
 
 int
-attr_write(void *p, uint16_t p_len, uint8_t flags, uint8_t type,
-    void *data, uint16_t data_len)
-{
-	u_char		*b = p;
-	uint16_t	 tmp, tot_len = 2; /* attribute header (without len) */
-
-	flags &= ~ATTR_DEFMASK;
-	if (data_len > 255) {
-		tot_len += 2 + data_len;
-		flags |= ATTR_EXTLEN;
-	} else {
-		tot_len += 1 + data_len;
-	}
-
-	if (tot_len > p_len)
-		return (-1);
-
-	*b++ = flags;
-	*b++ = type;
-	if (data_len > 255) {
-		tmp = htons(data_len);
-		memcpy(b, &tmp, sizeof(tmp));
-		b += 2;
-	} else
-		*b++ = (u_char)data_len;
-
-	if (data == NULL)
-		return (tot_len - data_len);
-
-	if (data_len != 0)
-		memcpy(b, data, data_len);
-
-	return (tot_len);
-}
-
-int
 attr_writebuf(struct ibuf *buf, uint8_t flags, uint8_t type, void *data,
     uint16_t data_len)
 {
@@ -85,7 +49,7 @@ attr_writebuf(struct ibuf *buf, uint8_t flags, uint8_t type, void *data,
 
 	if (ibuf_add(buf, hdr, flags & ATTR_EXTLEN ? 4 : 3) == -1)
 		return (-1);
-	if (data && ibuf_add(buf, data, data_len) == -1)
+	if (data != NULL && ibuf_add(buf, data, data_len) == -1)
 		return (-1);
 	return (0);
 }
@@ -516,18 +480,6 @@ aspath_merge(struct rde_aspath *a, struct attr *attr)
 	attr_free(a, attr);
 }
 
-u_char *
-aspath_dump(struct aspath *aspath)
-{
-	return (aspath->data);
-}
-
-uint16_t
-aspath_length(struct aspath *aspath)
-{
-	return (aspath->len);
-}
-
 uint32_t
 aspath_neighbor(struct aspath *aspath)
 {
@@ -540,12 +492,6 @@ aspath_neighbor(struct aspath *aspath)
 	    aspath->data[0] != AS_SEQUENCE)
 		return (rde_local_as());
 	return (aspath_extract(aspath->data, 0));
-}
-
-uint32_t
-aspath_origin(struct aspath *aspath)
-{
-	return aspath->source_as;
 }
 
 static uint16_t

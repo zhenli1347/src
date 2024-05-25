@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.9 2022/07/26 15:34:33 jca Exp $
+# $OpenBSD: Makefile,v 1.11 2024/02/08 20:28:54 miod Exp $
 
 .include <bsd.own.mk>
 
@@ -7,20 +7,22 @@ BINDIR=	/usr/bin
 NOMAN=
 
 SRCS=	Acceptor.cpp \
-	lldb.cpp \
 	lldb-gdbserver.cpp \
 	lldb-platform.cpp \
 	lldb-server.cpp \
 	LLDBServerUtilities.cpp \
-	SystemInitializerLLGS.cpp
+	SystemInitializerLLGS.cpp \
+	Version.cpp
 
 LDADD+=	-lcurses -ledit -lpanel
 
 
 .PATH:	${.CURDIR}/../../../llvm/lldb/source
+.PATH: ${.CURDIR}/../../../llvm/lldb/source/Version
 .PATH:	${.CURDIR}/../../../llvm/lldb/tools/lldb-server
 
 LLVM_LIBDEPS=	clangAST \
+    clangASTMatchers \
     clangAnalysis \
     clangBasic \
     clangCodeGen \
@@ -33,6 +35,7 @@ LLVM_LIBDEPS=	clangAST \
     clangRewriteFrontend \
     clangSema \
     clangSerialization \
+    clangSupport \
     lldbABI \
     lldbAPI \
     lldbBreakpoint \
@@ -71,6 +74,7 @@ LLVM_LIBDEPS=	clangAST \
     lldbUtility
 
 BUILDFIRST=	VCSVersion.inc LLGSOptions.inc
+CLEANFILES+=	VCSVersion.inc LLGSOptions.inc
 
 VCSVersion.inc:
 	touch $@

@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplmca.c,v 1.5 2022/10/28 15:09:45 kn Exp $	*/
+/*	$OpenBSD: aplmca.c,v 1.7 2023/07/26 11:09:24 kettenis Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -48,6 +48,9 @@
 
 #define MCA_STATUS(idx)			((idx) * MCA_CL_STRIDE + 0x0000)
 #define  MCA_STATUS_MCLK_EN		(1 << 0)
+#define MCA_MCLK_CONF(idx)		((idx) * MCA_CL_STRIDE + 0x0004)
+#define  MCA_MCLK_CONF_DIV_MASK		(0xf << 8)
+#define  MCA_MCLK_CONF_DIV_SHIFT	8
 
 #define MCA_SYNCGEN_STATUS(idx)		((idx) * MCA_CL_STRIDE + 0x0100)
 #define  MCA_SYNCGEN_STATUS_EN		(1 << 0)
@@ -149,9 +152,11 @@ const struct audio_hw_if aplmca_hw_if = {
 
 int	aplmca_match(struct device *, void *, void *);
 void	aplmca_attach(struct device *, struct device *, void *);
+int	aplmca_activate(struct device *, int);
 
 const struct cfattach aplmca_ca = {
-	sizeof (struct aplmca_softc), aplmca_match, aplmca_attach
+	sizeof (struct aplmca_softc), aplmca_match, aplmca_attach, NULL,
+	aplmca_activate
 };
 
 struct cfdriver aplmca_cd = {
@@ -218,6 +223,32 @@ aplmca_attach(struct device *parent, struct device *self, void *aux)
 		HCLR4(sc, MCA_SYNCGEN_STATUS(i), MCA_SYNCGEN_STATUS_EN);
 		HCLR4(sc, MCA_STATUS(i), MCA_STATUS_MCLK_EN);
 	}
+}
+
+int
+aplmca_activate(struct device *self, int act)
+{
+	struct aplmca_softc *sc = (struct aplmca_softc *)self;
+	int i;
+
+	switch (act) {
+	case DVACT_SUSPEND:
+		for (i = 0; i < sc->sc_nclusters; i++) {
+			if (sc->sc_ad[i].ad_ac)
+				power_domain_disable_idx(sc->sc_node, i + 1);
+		}
+		power_domain_disable_idx(sc->sc_node, 0);
+		break;
+	case DVACT_RESUME:
+		power_domain_enable_idx(sc->sc_node, 0);
+		for (i = 0; i < sc->sc_nclusters; i++) {
+			if (sc->sc_ad[i].ad_ac)
+				power_domain_enable_idx(sc->sc_node, i + 1);
+		}
+		break;
+	}
+
+	return 0;
 }
 
 int
@@ -462,6 +493,8 @@ aplmca_trigger_output(void *cookie, void *start, void *end, int blksize,
 	period = params->channels * 32;
 	HWRITE4(sc, MCA_SYNCGEN_HI_PERIOD(ad->ad_cluster), period - 2);
 	HWRITE4(sc, MCA_SYNCGEN_LO_PERIOD(ad->ad_cluster), 0);
+	HWRITE4(sc, MCA_MCLK_CONF(ad->ad_cluster),
+	    1 << MCA_MCLK_CONF_DIV_SHIFT);
 
 	clock_enable_idx(sc->sc_node, ad->ad_cluster);
 

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.7 2021/02/16 21:39:17 jan Exp $
+#	$OpenBSD: Makefile,v 1.9 2023/06/01 09:46:00 tb Exp $
 
 SUBDIR= options x509
 

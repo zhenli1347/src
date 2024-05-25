@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_pledge.c,v 1.300 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: kern_pledge.c,v 1.314 2024/05/18 05:20:22 guenther Exp $	*/
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
@@ -105,13 +105,13 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	 */
 	[SYS_exit] = PLEDGE_ALWAYS,
 	[SYS_kbind] = PLEDGE_ALWAYS,
-	[SYS_msyscall] = PLEDGE_ALWAYS,
 	[SYS___get_tcb] = PLEDGE_ALWAYS,
 	[SYS___set_tcb] = PLEDGE_ALWAYS,
 	[SYS_pledge] = PLEDGE_ALWAYS,
 	[SYS_sendsyslog] = PLEDGE_ALWAYS,	/* stack protector reporting */
 	[SYS_thrkill] = PLEDGE_ALWAYS,		/* raise, abort, stack pro */
 	[SYS_utrace] = PLEDGE_ALWAYS,		/* ltrace(1) from ld.so */
+	[SYS_pinsyscalls] = PLEDGE_ALWAYS,
 
 	/* "getting" information about self is considered safe */
 	[SYS_getuid] = PLEDGE_STDIO,
@@ -144,6 +144,9 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	 */
 	[SYS_sysctl] = PLEDGE_STDIO,
 
+	/* For moncontrol(3).  Only allowed to disable profiling. */
+	[SYS_profil] = PLEDGE_STDIO,
+
 	/* Support for malloc(3) family of operations */
 	[SYS_getentropy] = PLEDGE_STDIO,
 	[SYS_madvise] = PLEDGE_STDIO,
@@ -173,18 +176,6 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_ftruncate] = PLEDGE_STDIO,
 	[SYS_lseek] = PLEDGE_STDIO,
 	[SYS_fpathconf] = PLEDGE_STDIO,
-
-#if 1
-	[SYS_pad_mquery] = PLEDGE_STDIO,
-	[SYS_pad_mmap] = PLEDGE_STDIO,
-	[SYS_pad_pread] = PLEDGE_STDIO,
-	[SYS_pad_preadv] = PLEDGE_STDIO,
-	[SYS_pad_pwrite] = PLEDGE_STDIO,
-	[SYS_pad_pwritev] = PLEDGE_STDIO,
-	[SYS_pad_ftruncate] = PLEDGE_STDIO,
-	[SYS_pad_lseek] = PLEDGE_STDIO,
-	[SYS_pad_truncate] = PLEDGE_WPATH,
-#endif
 
 	/*
 	 * Address selection required a network pledge ("inet",
@@ -217,6 +208,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_ppoll] = PLEDGE_STDIO,
 	[SYS_kevent] = PLEDGE_STDIO,
 	[SYS_kqueue] = PLEDGE_STDIO,
+	[SYS_kqueue1] = PLEDGE_STDIO,
 	[SYS_select] = PLEDGE_STDIO,
 	[SYS_pselect] = PLEDGE_STDIO,
 
@@ -242,6 +234,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_socketpair] = PLEDGE_STDIO,
 
 	[SYS_wait4] = PLEDGE_STDIO,
+	[SYS_waitid] = PLEDGE_STDIO,
 
 	/*
 	 * Can kill self with "stdio".  Killing another pid
@@ -280,6 +273,8 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS___thrwakeup] = PLEDGE_STDIO,
 	[SYS___threxit] = PLEDGE_STDIO,
 	[SYS___thrsigdivert] = PLEDGE_STDIO,
+	[SYS_getthrname] = PLEDGE_STDIO,
+	[SYS_setthrname] = PLEDGE_STDIO,
 
 	[SYS_fork] = PLEDGE_PROC,
 	[SYS_vfork] = PLEDGE_PROC,
@@ -345,6 +340,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_statfs] = PLEDGE_RPATH,
 	[SYS_fstatfs] = PLEDGE_RPATH,
 	[SYS_pathconf] = PLEDGE_RPATH,
+	[SYS_pathconfat] = PLEDGE_RPATH,
 
 	[SYS_utimes] = PLEDGE_FATTR,
 	[SYS_futimes] = PLEDGE_FATTR,
@@ -430,8 +426,7 @@ parsepledges(struct proc *p, const char *kname, const char *promises, u_int64_t 
 	int error;
 
 	rbuf = malloc(MAXPATHLEN, M_TEMP, M_WAITOK);
-	error = copyinstr(promises, rbuf, MAXPATHLEN,
-	    &rbuflen);
+	error = copyinstr(promises, rbuf, MAXPATHLEN, &rbuflen);
 	if (error) {
 		free(rbuf, M_TEMP, MAXPATHLEN);
 		return (error);
@@ -583,9 +578,9 @@ pledge_fail(struct proc *p, int error, uint64_t code)
 	    p->p_p->ps_comm, p->p_p->ps_pid, codes, p->p_pledge_syscall);
 	p->p_p->ps_acflag |= APLEDGE;
 
-	/* Stop threads immediately, because this process is suspect */
+	/* Try to stop threads immediately, because this process is suspect */
 	if (P_HASSIBLING(p))
-		single_thread_set(p, SINGLE_SUSPEND, 1);
+		single_thread_set(p, SINGLE_UNWIND | SINGLE_DEEP);
 
 	/* Send uncatchable SIGABRT for coredump */
 	sigabort(p);
@@ -1143,6 +1138,7 @@ pledge_ioctl(struct proc *p, long com, struct file *fp)
 #if NAUDIO > 0
 	if ((pledge & PLEDGE_AUDIO)) {
 		switch (com) {
+		case AUDIO_GETDEV:
 		case AUDIO_GETPOS:
 		case AUDIO_GETPAR:
 		case AUDIO_SETPAR:
@@ -1593,6 +1589,16 @@ pledge_kill(struct proc *p, pid_t pid)
 	if (pid == 0 || pid == p->p_p->ps_pid)
 		return 0;
 	return pledge_fail(p, EPERM, PLEDGE_PROC);
+}
+
+int
+pledge_profil(struct proc *p, u_int scale)
+{
+	if ((p->p_p->ps_flags & PS_PLEDGE) == 0)
+		return 0;
+	if (scale != 0)
+		return pledge_fail(p, EPERM, PLEDGE_STDIO);
+	return 0;
 }
 
 int

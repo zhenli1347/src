@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpbios.c,v 1.44 2022/02/21 10:24:28 mpi Exp $	*/
+/*	$OpenBSD: mpbios.c,v 1.46 2024/05/13 01:15:50 jsg Exp $	*/
 /*	$NetBSD: mpbios.c,v 1.2 2002/10/01 12:56:57 fvdl Exp $	*/
 
 /*-
@@ -98,14 +98,11 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/malloc.h>
 
 #include <uvm/uvm_extern.h>
 
-#include <machine/specialreg.h>
-#include <machine/cputypes.h>
 #include <machine/cpuvar.h>
 #include <machine/bus.h>
 #include <machine/biosvar.h>
@@ -155,7 +152,6 @@ struct mp_map
 
 int	mp_print(void *, const char *);
 int	mp_match(struct device *, void *, void *);
-int	mpbios_cpu_start(struct cpu_info *);
 const void *mpbios_search(struct device *, paddr_t, int, struct mp_map *);
 static __inline int mpbios_cksum(const void *, int);
 

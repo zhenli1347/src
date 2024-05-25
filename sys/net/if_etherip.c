@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_etherip.c,v 1.50 2022/02/28 00:12:11 dlg Exp $	*/
+/*	$OpenBSD: if_etherip.c,v 1.55 2024/02/13 12:22:09 bluhm Exp $	*/
 /*
  * Copyright (c) 2015 Kazuya GODA <goda@openbsd.org>
  *
@@ -31,6 +31,7 @@
 #include <net/if_var.h>
 #include <net/if_dl.h>
 #include <net/if_media.h>
+#include <net/route.h>
 #include <net/rtable.h>
 
 #include <netinet/in.h>
@@ -422,11 +423,11 @@ etherip_set_tunnel(struct etherip_softc *sc, struct if_laddrreq *req)
 		    IN6_IS_ADDR_MULTICAST(&dst6->sin6_addr))
 			return (EINVAL);
 
-		error = in6_embedscope(&sc->sc_tunnel.t_src6, src6, NULL);
+		error = in6_embedscope(&sc->sc_tunnel.t_src6, src6, NULL, NULL);
 		if (error != 0)
 			return (error);
 
-		error = in6_embedscope(&sc->sc_tunnel.t_dst6, dst6, NULL);
+		error = in6_embedscope(&sc->sc_tunnel.t_dst6, dst6, NULL, NULL);
 		if (error != 0)
 			return (error);
 
@@ -789,7 +790,7 @@ etherip_sysctl_etheripstat(void *oldp, size_t *oldlenp, void *newp)
 	    sizeof(uint64_t)));
 	memset(&etheripstat, 0, sizeof etheripstat);
 	counters_read(etheripcounters, (uint64_t *)&etheripstat,
-	    etherips_ncounters);
+	    etherips_ncounters, NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &etheripstat,
 	    sizeof(etheripstat)));
 }

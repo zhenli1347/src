@@ -1,4 +1,4 @@
-/*	$OpenBSD: disklabel.c,v 1.246 2022/12/04 23:50:46 cheloha Exp $	*/
+/*	$OpenBSD: disklabel.c,v 1.254 2023/07/03 15:27:07 krw Exp $	*/
 
 /*
  * Copyright (c) 1987, 1993
@@ -316,7 +316,7 @@ writelabel(int f, struct disklabel *lp)
 		/* Write new label to disk. */
 		if (ioctl(f, DIOCWDINFO, lp) == -1) {
 			warn("DIOCWDINFO");
-			return (1);
+			return 1;
 		}
 
 		/* Refresh our copy of the on-disk current label to get UID. */
@@ -327,7 +327,7 @@ writelabel(int f, struct disklabel *lp)
 		mpsave(lp);
 	}
 
-	return (0);
+	return 0;
 }
 
 /*
@@ -354,6 +354,7 @@ readlabel(int f)
 		lab.d_ntracks = dl.d_ntracks;
 		lab.d_secpercyl = dl.d_secpercyl;
 		lab.d_ncylinders = dl.d_ncylinders;
+		lab.d_type = dl.d_type;
 	}
 }
 
@@ -366,13 +367,13 @@ parsefstab(void)
 
 	i = asprintf(&partname, "/dev/%s%c", dkname, 'a');
 	if (i == -1)
-		err(4, NULL);
+		err(1, NULL);
 	i = asprintf(&partduid,
 	    "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx.a",
 	    lab.d_uid[0], lab.d_uid[1], lab.d_uid[2], lab.d_uid[3],
 	    lab.d_uid[4], lab.d_uid[5], lab.d_uid[6], lab.d_uid[7]);
 	if (i == -1)
-		err(4, NULL);
+		err(1, NULL);
 	setfsent();
 	for (i = 0; i < MAXPARTITIONS; i++) {
 		partname[strlen(dkname) + 5] = 'a' + i;
@@ -455,7 +456,7 @@ makedisktab(FILE *f, struct disklabel *lp)
 }
 
 double
-scale(u_int64_t sz, char unit, struct disklabel *lp)
+scale(u_int64_t sz, char unit, const struct disklabel *lp)
 {
 	double fsz;
 
@@ -483,9 +484,9 @@ scale(u_int64_t sz, char unit, struct disklabel *lp)
  * Display a particular partition.
  */
 void
-display_partition(FILE *f, struct disklabel *lp, int i, char unit)
+display_partition(FILE *f, const struct disklabel *lp, int i, char unit)
 {
-	struct partition *pp = &lp->d_partitions[i];
+	const struct partition *pp = &lp->d_partitions[i];
 	double p_size;
 
 	p_size = scale(DL_GETPSIZE(pp), unit, lp);
@@ -523,9 +524,9 @@ display_partition(FILE *f, struct disklabel *lp, int i, char unit)
 }
 
 char
-canonical_unit(struct disklabel *lp, char unit)
+canonical_unit(const struct disklabel *lp, char unit)
 {
-	struct partition *pp;
+	const struct partition *pp;
 	u_int64_t small;
 	int i;
 
@@ -546,11 +547,11 @@ canonical_unit(struct disklabel *lp, char unit)
 	}
 	unit = toupper((unsigned char)unit);
 
-	return (unit);
+	return unit;
 }
 
 void
-display(FILE *f, struct disklabel *lp, char unit, int all)
+display(FILE *f, const struct disklabel *lp, char unit, int all)
 {
 	int i;
 	double d;
@@ -610,7 +611,7 @@ edit(struct disklabel *lp, int f)
 		warn("%s", tmpfil);
 		if (fd != -1)
 			close(fd);
-		return (1);
+		return 1;
 	}
 	display(fp, lp, 0, 1);
 	fprintf(fp, "\n# Notes:\n");
@@ -639,13 +640,13 @@ edit(struct disklabel *lp, int f)
 				puts("No changes.");
 				fclose(fp);
 				(void) unlink(tmpfil);
-				return (0);
+				return 0;
 			}
 			*lp = label;
 			if (writelabel(f, lp) == 0) {
 				fclose(fp);
 				(void) unlink(tmpfil);
-				return (0);
+				return 0;
 			}
 		}
 		fclose(fp);
@@ -658,7 +659,7 @@ edit(struct disklabel *lp, int f)
 			break;
 	}
 	(void)unlink(tmpfil);
-	return (1);
+	return 1;
 }
 
 /*
@@ -681,7 +682,7 @@ editit(const char *pathname)
 	if (ed == NULL || ed[0] == '\0')
 		ed = _PATH_VI;
 	if (asprintf(&p, "%s %s", ed, pathname) == -1)
-		return (-1);
+		return -1;
 	argp[2] = p;
 
 	sighup = signal(SIGHUP, SIG_IGN);
@@ -710,7 +711,7 @@ fail:
 	(void)signal(SIGCHLD, sigchld);
 	free(p);
 	errno = saved_errno;
-	return (ret);
+	return ret;
 }
 
 char *
@@ -719,8 +720,8 @@ skip(char *cp)
 
 	cp += strspn(cp, " \t");
 	if (*cp == '\0')
-		return (NULL);
-	return (cp);
+		return NULL;
+	return cp;
 }
 
 char *
@@ -729,12 +730,12 @@ word(char *cp)
 
 	cp += strcspn(cp, " \t");
 	if (*cp == '\0')
-		return (NULL);
+		return NULL;
 	*cp++ = '\0';
 	cp += strspn(cp, " \t");
 	if (*cp == '\0')
-		return (NULL);
-	return (cp);
+		return NULL;
+	return cp;
 }
 
 /* Base the max value on the sizeof of the value we are reading */
@@ -756,7 +757,7 @@ getnum(char *nptr, u_int64_t min, u_int64_t max, const char **errstr)
 	*p = '\0';
 	ret = strtonum(nptr, min, max, errstr);
 	*p = c;
-	return (ret);
+	return ret;
 }
 
 int
@@ -811,7 +812,7 @@ getasciilabel(FILE *f, struct disklabel *lp)
 	lp->d_version = 1;
 
 	if (!(omountpoints = calloc(MAXPARTITIONS, sizeof(char *))))
-		errx(4, "out of memory");
+		err(1, NULL);
 
 	mpcopy(omountpoints, mountpoints);
 	for (part = 0; part < MAXPARTITIONS; part++) {
@@ -840,24 +841,6 @@ getasciilabel(FILE *f, struct disklabel *lp)
 			continue;
 		}
 		*tp++ = '\0', tp = skip(tp);
-		if (!strcmp(cp, "type")) {
-			if (tp == NULL)
-				tp = "unknown";
-			else if (strcasecmp(tp, "IDE") == 0)
-				tp = "ESDI";
-			cpp = dktypenames;
-			for (; cpp < &dktypenames[DKMAXTYPES]; cpp++)
-				if ((s = *cpp) && !strcasecmp(s, tp)) {
-					lp->d_type = cpp - dktypenames;
-					goto next;
-				}
-			v = GETNUM(lp->d_type, tp, 0, &errstr);
-			if (errstr || v >= DKMAXTYPES)
-				warnx("line %d: warning, unknown disk type: %s",
-				    lineno, tp);
-			lp->d_type = v;
-			continue;
-		}
 		if (!strcmp(cp, "flags")) {
 			for (v = 0; (cp = tp) && *cp != '\0';) {
 				tp = word(cp);
@@ -919,7 +902,8 @@ getasciilabel(FILE *f, struct disklabel *lp)
 		    !strcmp(cp, "sectors/track") ||
 		    !strcmp(cp, "sectors/cylinder") ||
 		    !strcmp(cp, "tracks/cylinder") ||
-		    !strcmp(cp, "cylinders"))
+		    !strcmp(cp, "cylinders") ||
+		    !strcmp(cp, "type"))
 			continue;
 
 		if ('a' <= *cp && *cp <= 'z' && cp[1] == '\0') {
@@ -937,7 +921,7 @@ getasciilabel(FILE *f, struct disklabel *lp)
 			}
 			pp = &lp->d_partitions[part];
 #define NXTNUM(n, field, errstr) {					\
-	if (tp == NULL) {						\
+	if (tp == NULL || *tp == '\0') {				\
 		warnx("line %d: too few fields", lineno);		\
 		errors++;						\
 		break;							\
@@ -1014,16 +998,14 @@ gottype:
 		}
 		warnx("line %d: unknown field: %s", lineno, cp);
 		errors++;
-next:
-		;
 	}
 	errors += checklabel(lp);
 
 	if (errors > 0)
 		mpcopy(mountpoints, omountpoints);
-	mpfree(omountpoints);
+	mpfree(omountpoints, DISCARD);
 
-	return (errors > 0);
+	return errors > 0;
 }
 
 /*
@@ -1038,19 +1020,19 @@ checklabel(struct disklabel *lp)
 	char part;
 
 	if (lp->d_secsize == 0) {
-		warnx("sector size %d", lp->d_secsize);
-		return (1);
+		warnx("sector size 0");
+		return 1;
 	}
 	if (lp->d_nsectors == 0) {
-		warnx("sectors/track %d", lp->d_nsectors);
-		return (1);
+		warnx("sectors/track 0");
+		return 1;
 	}
 	if (lp->d_ntracks == 0) {
-		warnx("tracks/cylinder %d", lp->d_ntracks);
-		return (1);
+		warnx("tracks/cylinder 0");
+		return 1;
 	}
 	if  (lp->d_ncylinders == 0) {
-		warnx("cylinders/unit %d", lp->d_ncylinders);
+		warnx("cylinders/unit 0");
 		errors++;
 	}
 	if (lp->d_secpercyl == 0)
@@ -1108,7 +1090,7 @@ checklabel(struct disklabel *lp)
 			    "offset %llu", part, DL_GETPSIZE(pp),
 			    DL_GETPOFFSET(pp));
 	}
-	return (errors > 0);
+	return errors > 0;
 }
 
 int
@@ -1126,7 +1108,7 @@ cmplabel(struct disklabel *lp1, struct disklabel *lp2)
 	lab1.d_bend = lab2.d_bend;
 	lab1.d_bendh = lab2.d_bendh;
 
-	return (memcmp(&lab1, &lab2, sizeof(struct disklabel)));
+	return memcmp(&lab1, &lab2, sizeof(struct disklabel));
 }
 
 void

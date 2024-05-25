@@ -1,4 +1,4 @@
-/*	$OpenBSD: crl.c,v 1.21 2022/11/30 09:03:44 job Exp $ */
+/*	$OpenBSD: crl.c,v 1.34 2024/04/21 19:27:44 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -20,14 +20,19 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <openssl/x509.h>
+
 #include "extern.h"
 
 struct crl *
 crl_parse(const char *fn, const unsigned char *der, size_t len)
 {
-	struct crl	*crl;
-	const ASN1_TIME	*at;
-	int		 rc = 0;
+	const unsigned char	*oder;
+	struct crl		*crl;
+	const X509_ALGOR	*palg;
+	const ASN1_OBJECT	*cobj;
+	const ASN1_TIME		*at;
+	int			 count, nid, rc = 0;
 
 	/* just fail for empty buffers, the warning was printed elsewhere */
 	if (der == NULL)
@@ -36,13 +41,52 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 	if ((crl = calloc(1, sizeof(*crl))) == NULL)
 		err(1, NULL);
 
+	oder = der;
 	if ((crl->x509_crl = d2i_X509_CRL(NULL, &der, len)) == NULL) {
-		cryptowarnx("%s: d2i_X509_CRL", fn);
+		warnx("%s: d2i_X509_CRL", fn);
+		goto out;
+	}
+	if (der != oder + len) {
+		warnx("%s: %td bytes trailing garbage", fn, oder + len - der);
 		goto out;
 	}
 
+	if (X509_CRL_get_version(crl->x509_crl) != 1) {
+		warnx("%s: RFC 6487 section 5: version 2 expected", fn);
+		goto out;
+	}
+
+	X509_CRL_get0_signature(crl->x509_crl, NULL, &palg);
+	if (palg == NULL) {
+		warnx("%s: X509_CRL_get0_signature", fn);
+		goto out;
+	}
+	X509_ALGOR_get0(&cobj, NULL, NULL, palg);
+	nid = OBJ_obj2nid(cobj);
+	if (experimental && nid == NID_ecdsa_with_SHA256) {
+		if (verbose)
+			warnx("%s: P-256 support is experimental", fn);
+	} else if (nid != NID_sha256WithRSAEncryption) {
+		warnx("%s: RFC 7935: wrong signature algorithm %s, want %s",
+		    fn, nid2str(nid), LN_sha256WithRSAEncryption);
+		goto out;
+	}
+
+	/*
+	 * RFC 6487, section 5: AKI and crlNumber MUST be present, no other
+	 * CRL extensions are allowed.
+	 */
 	if ((crl->aki = x509_crl_get_aki(crl->x509_crl, fn)) == NULL) {
-		warnx("x509_crl_get_aki failed");
+		warnx("%s: x509_crl_get_aki failed", fn);
+		goto out;
+	}
+	if ((crl->number = x509_crl_get_number(crl->x509_crl, fn)) == NULL) {
+		warnx("%s: x509_crl_get_number failed", fn);
+		goto out;
+	}
+	if ((count = X509_CRL_get_ext_count(crl->x509_crl)) != 2) {
+		warnx("%s: RFC 6487 section 5: unexpected number of extensions "
+		    "%d != 2", fn, count);
 		goto out;
 	}
 
@@ -51,8 +95,8 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_CRL_get0_lastUpdate failed", fn);
 		goto out;
 	}
-	if (!x509_get_time(at, &crl->issued)) {
-		warnx("%s: ASN1_time_parse failed", fn);
+	if (!x509_get_time(at, &crl->thisupdate)) {
+		warnx("%s: ASN1_TIME_to_tm failed", fn);
 		goto out;
 	}
 
@@ -61,8 +105,8 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 		warnx("%s: X509_CRL_get0_nextUpdate failed", fn);
 		goto out;
 	}
-	if (!x509_get_time(at, &crl->expires)) {
-		warnx("%s: ASN1_time_parse failed", fn);
+	if (!x509_get_time(at, &crl->nextupdate)) {
+		warnx("%s: ASN1_TIME_to_tm failed", fn);
 		goto out;
 	}
 
@@ -78,7 +122,28 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 static inline int
 crlcmp(struct crl *a, struct crl *b)
 {
-	return strcmp(a->aki, b->aki);
+	int	 cmp;
+
+	cmp = strcmp(a->aki, b->aki);
+	if (cmp > 0)
+		return 1;
+	if (cmp < 0)
+		return -1;
+
+	/*
+	 * In filemode the mftpath cannot be determined easily,
+	 * but it is always set in normal top-down validation.
+	 */
+	if (a->mftpath == NULL || b->mftpath == NULL)
+		return 0;
+
+	cmp = strcmp(a->mftpath, b->mftpath);
+	if (cmp > 0)
+		return 1;
+	if (cmp < 0)
+		return -1;
+
+	return 0;
 }
 
 RB_GENERATE_STATIC(crl_tree, crl, entry, crlcmp);
@@ -93,7 +158,10 @@ crl_get(struct crl_tree *crlt, const struct auth *a)
 
 	if (a == NULL)
 		return NULL;
+
 	find.aki = a->cert->ski;
+	find.mftpath = a->cert->mft;
+
 	return RB_FIND(crl_tree, crlt, &find);
 }
 
@@ -109,6 +177,8 @@ crl_free(struct crl *crl)
 	if (crl == NULL)
 		return;
 	free(crl->aki);
+	free(crl->mftpath);
+	free(crl->number);
 	X509_CRL_free(crl->x509_crl);
 	free(crl);
 }

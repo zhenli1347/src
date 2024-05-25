@@ -1,4 +1,4 @@
-/*	$Id: test-ip.c,v 1.6 2022/11/05 10:32:51 job Exp $ */
+/*	$Id: test-ip.c,v 1.10 2024/04/22 05:54:01 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -34,6 +34,7 @@
 int outformats;
 int verbose;
 int filemode;
+int experimental;
 
 static void
 test(const char *res, uint16_t afiv, size_t sz, size_t unused, ...)
@@ -127,4 +128,10 @@ main(int argc, char *argv[])
 
 	printf("OK\n");
 	return 0;
+}
+
+time_t
+get_current_time(void)
+{
+	return time(NULL);
 }

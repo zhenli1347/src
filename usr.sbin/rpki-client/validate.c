@@ -1,4 +1,4 @@
-/*	$OpenBSD: validate.c,v 1.51 2022/11/30 08:17:21 job Exp $ */
+/*	$OpenBSD: validate.c,v 1.74 2024/05/20 15:51:43 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -50,7 +50,7 @@ valid_as(struct auth *a, uint32_t min, uint32_t max)
 		return 0;
 
 	/* If it inherits, walk up the chain. */
-	return valid_as(a->parent, min, max);
+	return valid_as(a->issuer, min, max);
 }
 
 /*
@@ -76,46 +76,7 @@ valid_ip(struct auth *a, enum afi afi,
 		return 0;
 
 	/* If it inherits, walk up the chain. */
-	return valid_ip(a->parent, afi, min, max);
-}
-
-/*
- * Make sure that the SKI doesn't already exist and return the parent by
- * its AKI.
- * Returns the parent auth or NULL on failure.
- */
-struct auth *
-valid_ski_aki(const char *fn, struct auth_tree *auths,
-    const char *ski, const char *aki)
-{
-	struct auth *a;
-
-	if (auth_find(auths, ski) != NULL) {
-		warnx("%s: RFC 6487: duplicate SKI", fn);
-		return NULL;
-	}
-
-	a = auth_find(auths, aki);
-	if (a == NULL)
-		warnx("%s: RFC 6487: unknown AKI", fn);
-
-	return a;
-}
-
-/*
- * Validate a trust anchor by making sure that the SKI is unique.
- * Returns 1 if valid, 0 otherwise.
- */
-int
-valid_ta(const char *fn, struct auth_tree *auths, const struct cert *cert)
-{
-	/* SKI must not be a dupe. */
-	if (auth_find(auths, cert->ski) != NULL) {
-		warnx("%s: RFC 6487: duplicate SKI", fn);
-		return 0;
-	}
-
-	return 1;
+	return valid_ip(a->issuer, afi, min, max);
 }
 
 /*
@@ -128,46 +89,35 @@ valid_cert(const char *fn, struct auth *a, const struct cert *cert)
 {
 	size_t		 i;
 	uint32_t	 min, max;
-	char		 buf1[64], buf2[64];
 
 	for (i = 0; i < cert->asz; i++) {
 		if (cert->as[i].type == CERT_AS_INHERIT)
 			continue;
-		min = cert->as[i].type == CERT_AS_ID ?
-		    cert->as[i].id : cert->as[i].range.min;
-		max = cert->as[i].type == CERT_AS_ID ?
-		    cert->as[i].id : cert->as[i].range.max;
+
+		if (cert->as[i].type == CERT_AS_ID) {
+			min = cert->as[i].id;
+			max = cert->as[i].id;
+		} else {
+			min = cert->as[i].range.min;
+			max = cert->as[i].range.max;
+		}
+
 		if (valid_as(a, min, max))
 			continue;
-		warnx("%s: RFC 6487: uncovered AS: "
-		    "%u--%u", fn, min, max);
+
+		as_warn(fn, "RFC 6487: uncovered resource", &cert->as[i]);
 		return 0;
 	}
 
 	for (i = 0; i < cert->ipsz; i++) {
+		if (cert->ips[i].type == CERT_IP_INHERIT)
+			continue;
+
 		if (valid_ip(a, cert->ips[i].afi, cert->ips[i].min,
 		    cert->ips[i].max))
 			continue;
-		switch (cert->ips[i].type) {
-		case CERT_IP_RANGE:
-			ip_addr_print(&cert->ips[i].range.min,
-			    cert->ips[i].afi, buf1, sizeof(buf1));
-			ip_addr_print(&cert->ips[i].range.max,
-			    cert->ips[i].afi, buf2, sizeof(buf2));
-			warnx("%s: RFC 6487: uncovered IP: "
-			    "%s--%s", fn, buf1, buf2);
-			break;
-		case CERT_IP_ADDR:
-			ip_addr_print(&cert->ips[i].ip,
-			    cert->ips[i].afi, buf1, sizeof(buf1));
-			warnx("%s: RFC 6487: uncovered IP: "
-			    "%s", fn, buf1);
-			break;
-		case CERT_IP_INHERIT:
-			warnx("%s: RFC 6487: uncovered IP: "
-			    "(inherit)", fn);
-			break;
-		}
+
+		ip_warn(fn, "RFC 6487: uncovered resource", &cert->ips[i]);
 		return 0;
 	}
 
@@ -196,6 +146,22 @@ valid_roa(const char *fn, struct cert *cert, struct roa *roa)
 	}
 
 	return 1;
+}
+
+/*
+ * Validate our SPL: check that the asID is contained in the end-entity
+ * certificate's resources.
+ * Returns 1 if valid, 0 otherwise.
+ */
+int
+valid_spl(const char *fn, struct cert *cert, struct spl *spl)
+{
+	if (as_check_covered(spl->asid, spl->asid, cert->as, cert->asz) > 0)
+		return 1;
+
+	warnx("%s: SPL: uncovered ASID: %u", fn, spl->asid);
+
+	return 0;
 }
 
 /*
@@ -325,25 +291,37 @@ valid_origin(const char *uri, const char *proto)
 }
 
 /*
- * Walk the certificate tree to the root and build a certificate
- * chain from cert->x509. All certs in the tree are validated and
- * can be loaded as trusted stack into the validator.
+ * Walk the tree of known valid CA certificates until we find a certificate that
+ * doesn't inherit. Build a chain of intermediates and use the non-inheriting
+ * certificate as a trusted root by virtue of X509_V_FLAG_PARTIAL_CHAIN. The
+ * RFC 3779 path validation needs a non-inheriting trust root to ensure that
+ * all delegated resources are covered.
  */
 static void
-build_chain(const struct auth *a, STACK_OF(X509) **chain)
+build_chain(const struct auth *a, STACK_OF(X509) **intermediates,
+    STACK_OF(X509) **root)
 {
-	*chain = NULL;
+	*intermediates = NULL;
+	*root = NULL;
 
 	if (a == NULL)
 		return;
 
-	if ((*chain = sk_X509_new_null()) == NULL)
+	if ((*intermediates = sk_X509_new_null()) == NULL)
 		err(1, "sk_X509_new_null");
-	for (; a != NULL; a = a->parent) {
+	if ((*root = sk_X509_new_null()) == NULL)
+		err(1, "sk_X509_new_null");
+	for (; a != NULL; a = a->issuer) {
 		assert(a->cert->x509 != NULL);
-		if (!sk_X509_push(*chain, a->cert->x509))
+		if (!a->any_inherits) {
+			if (!sk_X509_push(*root, a->cert->x509))
+				errx(1, "sk_X509_push");
+			break;
+		}
+		if (!sk_X509_push(*intermediates, a->cert->x509))
 			errx(1, "sk_X509_push");
 	}
+	assert(sk_X509_num(*root) == 1);
 }
 
 /*
@@ -364,6 +342,29 @@ build_crls(const struct crl *crl, STACK_OF(X509_CRL) **crls)
 }
 
 /*
+ * Attempt to upgrade the generic 'certificate revoked' message to include
+ * a timestamp.
+ */
+static void
+pretty_revocation_time(X509 *x509, X509_CRL *crl, const char **errstr)
+{
+	static char		 buf[64];
+	X509_REVOKED		*revoked;
+	const ASN1_TIME		*atime;
+	time_t			 t;
+
+	if (X509_CRL_get0_by_cert(crl, &revoked, x509) != 1)
+		return;
+	if ((atime = X509_REVOKED_get0_revocationDate(revoked)) == NULL)
+		return;
+	if (!x509_get_time(atime, &t))
+		return;
+
+	snprintf(buf, sizeof(buf), "certificate revoked on %s", time2str(t));
+	*errstr = buf;
+}
+
+/*
  * Validate the X509 certificate. Returns 1 for valid certificates,
  * returns 0 if there is a verify error and sets *errstr to the error
  * returned by X509_verify_cert_error_string().
@@ -374,46 +375,58 @@ valid_x509(char *file, X509_STORE_CTX *store_ctx, X509 *x509, struct auth *a,
 {
 	X509_VERIFY_PARAM	*params;
 	ASN1_OBJECT		*cp_oid;
-	STACK_OF(X509)		*chain;
+	STACK_OF(X509)		*intermediates, *root;
 	STACK_OF(X509_CRL)	*crls = NULL;
 	unsigned long		 flags;
 	int			 error;
 
 	*errstr = NULL;
-	build_chain(a, &chain);
+	build_chain(a, &intermediates, &root);
 	build_crls(crl, &crls);
 
 	assert(store_ctx != NULL);
 	assert(x509 != NULL);
 	if (!X509_STORE_CTX_init(store_ctx, NULL, x509, NULL))
-		cryptoerrx("X509_STORE_CTX_init");
+		err(1, "X509_STORE_CTX_init");
 
 	if ((params = X509_STORE_CTX_get0_param(store_ctx)) == NULL)
-		cryptoerrx("X509_STORE_CTX_get0_param");
+		errx(1, "X509_STORE_CTX_get0_param");
 	if ((cp_oid = OBJ_dup(certpol_oid)) == NULL)
-		cryptoerrx("OBJ_dup");
+		err(1, "OBJ_dup");
 	if (!X509_VERIFY_PARAM_add0_policy(params, cp_oid))
-		cryptoerrx("X509_VERIFY_PARAM_add0_policy");
+		err(1, "X509_VERIFY_PARAM_add0_policy");
+	X509_VERIFY_PARAM_set_time(params, get_current_time());
 
 	flags = X509_V_FLAG_CRL_CHECK;
+	flags |= X509_V_FLAG_PARTIAL_CHAIN;
+	flags |= X509_V_FLAG_POLICY_CHECK;
 	flags |= X509_V_FLAG_EXPLICIT_POLICY;
 	flags |= X509_V_FLAG_INHIBIT_MAP;
 	X509_STORE_CTX_set_flags(store_ctx, flags);
 	X509_STORE_CTX_set_depth(store_ctx, MAX_CERT_DEPTH);
-	X509_STORE_CTX_set0_trusted_stack(store_ctx, chain);
+	/*
+	 * See the comment above build_chain() for details on what's happening
+	 * here. The nomenclature in this API is dubious and poorly documented.
+	 */
+	X509_STORE_CTX_set0_untrusted(store_ctx, intermediates);
+	X509_STORE_CTX_set0_trusted_stack(store_ctx, root);
 	X509_STORE_CTX_set0_crls(store_ctx, crls);
 
 	if (X509_verify_cert(store_ctx) <= 0) {
 		error = X509_STORE_CTX_get_error(store_ctx);
 		*errstr = X509_verify_cert_error_string(error);
+		if (filemode && error == X509_V_ERR_CERT_REVOKED)
+			pretty_revocation_time(x509, crl->x509_crl, errstr);
 		X509_STORE_CTX_cleanup(store_ctx);
-		sk_X509_free(chain);
+		sk_X509_free(intermediates);
+		sk_X509_free(root);
 		sk_X509_CRL_free(crls);
 		return 0;
 	}
 
 	X509_STORE_CTX_cleanup(store_ctx);
-	sk_X509_free(chain);
+	sk_X509_free(intermediates);
+	sk_X509_free(root);
 	sk_X509_CRL_free(crls);
 	return 1;
 }
@@ -427,29 +440,20 @@ valid_rsc(const char *fn, struct cert *cert, struct rsc *rsc)
 {
 	size_t		i;
 	uint32_t	min, max;
-	char		buf1[64], buf2[64];
 
 	for (i = 0; i < rsc->asz; i++) {
-		min = rsc->as[i].type == CERT_AS_RANGE ? rsc->as[i].range.min
-		    : rsc->as[i].id;
-		max = rsc->as[i].type == CERT_AS_RANGE ? rsc->as[i].range.max
-		    : rsc->as[i].id;
+		if (rsc->as[i].type == CERT_AS_ID) {
+			min = rsc->as[i].id;
+			max = rsc->as[i].id;
+		} else {
+			min = rsc->as[i].range.min;
+			max = rsc->as[i].range.max;
+		}
 
 		if (as_check_covered(min, max, cert->as, cert->asz) > 0)
 			continue;
 
-		switch (rsc->as[i].type) {
-		case CERT_AS_ID:
-			warnx("%s: RSC resourceBlock: uncovered AS Identifier: "
-			    "%u", fn, rsc->as[i].id);
-			break;
-		case CERT_AS_RANGE:
-			warnx("%s: RSC resourceBlock: uncovered AS Range: "
-			    "%u--%u", fn, min, max);
-			break;
-		default:
-			break;
-		}
+		as_warn(fn, "RSC ResourceBlock uncovered", &rsc->as[i]);
 		return 0;
 	}
 
@@ -458,24 +462,7 @@ valid_rsc(const char *fn, struct cert *cert, struct rsc *rsc)
 		    rsc->ips[i].max, cert->ips, cert->ipsz) > 0)
 			continue;
 
-		switch (rsc->ips[i].type) {
-		case CERT_IP_RANGE:
-			ip_addr_print(&rsc->ips[i].range.min,
-			    rsc->ips[i].afi, buf1, sizeof(buf1));
-			ip_addr_print(&rsc->ips[i].range.max,
-			    rsc->ips[i].afi, buf2, sizeof(buf2));
-			warnx("%s: RSC ResourceBlock: uncovered IP Range: "
-			    "%s--%s", fn, buf1, buf2);
-			break;
-		case CERT_IP_ADDR:
-			ip_addr_print(&rsc->ips[i].ip,
-			    rsc->ips[i].afi, buf1, sizeof(buf1));
-			warnx("%s: RSC ResourceBlock: uncovered IP: "
-			    "%s", fn, buf1);
-			break;
-		default:
-			break;
-		}
+		ip_warn(fn, "RSC ResourceBlock uncovered", &rsc->ips[i]);
 		return 0;
 	}
 
@@ -483,26 +470,35 @@ valid_rsc(const char *fn, struct cert *cert, struct rsc *rsc)
 }
 
 int
-valid_econtent_version(const char *fn, const ASN1_INTEGER *aint)
+valid_econtent_version(const char *fn, const ASN1_INTEGER *aint,
+    uint64_t expected)
 {
-	long version;
+	uint64_t version;
 
-	if (aint == NULL)
-		return 1;
-
-	if ((version = ASN1_INTEGER_get(aint)) < 0) {
-		warnx("%s: ASN1_INTEGER_get failed", fn);
+	if (aint == NULL) {
+		if (expected == 0)
+			return 1;
+		warnx("%s: unexpected version 0", fn);
 		return 0;
 	}
 
-	switch (version) {
-	case 0:
+	if (!ASN1_INTEGER_get_uint64(&version, aint)) {
+		warnx("%s: ASN1_INTEGER_get_uint64 failed", fn);
+		return 0;
+	}
+
+	if (version == 0) {
 		warnx("%s: incorrect encoding for version 0", fn);
 		return 0;
-	default:
-		warnx("%s: version %ld not supported (yet)", fn, version);
+	}
+
+	if (version != expected) {
+		warnx("%s: unexpected version (expected %llu, got %llu)", fn,
+		    (unsigned long long)expected, (unsigned long long)version);
 		return 0;
 	}
+
+	return 1;
 }
 
 /*
@@ -545,4 +541,127 @@ valid_geofeed(const char *fn, struct cert *cert, struct geofeed *g)
 	}
 
 	return 1;
+}
+
+/*
+ * Validate whether a given string is a valid UUID.
+ * Returns 1 if valid, 0 otherwise.
+ */
+int
+valid_uuid(const char *s)
+{
+	int n = 0;
+
+	while (1) {
+		switch (n) {
+		case 8:
+		case 13:
+		case 18:
+		case 23:
+			if (s[n] != '-')
+				return 0;
+			break;
+		/* Check UUID is version 4 */
+		case 14:
+			if (s[n] != '4')
+				return 0;
+			break;
+		/* Check UUID variant is 1 */
+		case 19:
+			if (s[n] != '8' && s[n] != '9' && s[n] != 'a' &&
+			    s[n] != 'A' && s[n] != 'b' && s[n] != 'B')
+				return 0;
+			break;
+		case 36:
+			return s[n] == '\0';
+		default:
+			if (!isxdigit((unsigned char)s[n]))
+				return 0;
+			break;
+		}
+		n++;
+	}
+}
+
+static int
+valid_ca_pkey_rsa(const char *fn, EVP_PKEY *pkey)
+{
+	RSA		*rsa;
+	const BIGNUM	*rsa_e;
+	int		 key_bits;
+
+	if ((key_bits = EVP_PKEY_bits(pkey)) != 2048) {
+		warnx("%s: RFC 7935: expected 2048-bit modulus, got %d bits",
+		    fn, key_bits);
+		return 0;
+	}
+
+	if ((rsa = EVP_PKEY_get0_RSA(pkey)) == NULL) {
+		warnx("%s: failed to extract RSA public key", fn);
+		return 0;
+	}
+
+	if ((rsa_e = RSA_get0_e(rsa)) == NULL) {
+		warnx("%s: failed to get RSA exponent", fn);
+		return 0;
+	}
+
+	if (!BN_is_word(rsa_e, 65537)) {
+		warnx("%s: incorrect exponent (e) in RSA public key", fn);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int
+valid_ca_pkey_ec(const char *fn, EVP_PKEY *pkey)
+{
+	EC_KEY		*ec;
+	const EC_GROUP	*group;
+	int		 nid;
+	const char	*cname;
+
+	if ((ec = EVP_PKEY_get0_EC_KEY(pkey)) == NULL) {
+		warnx("%s: failed to extract ECDSA public key", fn);
+		return 0;
+	}
+
+	if ((group = EC_KEY_get0_group(ec)) == NULL) {
+		warnx("%s: EC_KEY_get0_group failed", fn);
+		return 0;
+	}
+
+	nid = EC_GROUP_get_curve_name(group);
+	if (nid != NID_X9_62_prime256v1) {
+		if ((cname = EC_curve_nid2nist(nid)) == NULL)
+			cname = nid2str(nid);
+		warnx("%s: Expected P-256, got %s", fn, cname);
+		return 0;
+	}
+
+	if (!EC_KEY_check_key(ec)) {
+		warnx("%s: EC_KEY_check_key failed", fn);
+		return 0;
+	}
+
+	return 1;
+}
+
+int
+valid_ca_pkey(const char *fn, EVP_PKEY *pkey)
+{
+	if (pkey == NULL) {
+		warnx("%s: failure, pkey is NULL", fn);
+		return 0;
+	}
+
+	if (EVP_PKEY_base_id(pkey) == EVP_PKEY_RSA)
+		return valid_ca_pkey_rsa(fn, pkey);
+
+	if (EVP_PKEY_base_id(pkey) == EVP_PKEY_EC)
+		return valid_ca_pkey_ec(fn, pkey);
+
+	warnx("%s: unsupported public key algorithm", fn);
+	return 0;
 }

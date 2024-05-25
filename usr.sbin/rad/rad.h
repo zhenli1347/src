@@ -1,4 +1,4 @@
-/*	$OpenBSD: rad.h,v 1.23 2022/10/15 13:26:15 florian Exp $	*/
+/*	$OpenBSD: rad.h,v 1.27 2024/05/17 06:50:14 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -29,8 +29,8 @@
 #define	MAX_RTR_ADV_INTERVAL	600
 #define	MIN_RTR_ADV_INTERVAL	200
 #define	ADV_DEFAULT_LIFETIME	3 * MAX_RTR_ADV_INTERVAL
-#define	ADV_PREFERRED_LIFETIME	604800	/* 7 days */
-#define	ADV_VALID_LIFETIME	2592000	/* 30 days */
+#define	ADV_PREFERRED_LIFETIME	2700	/* 45 minutes */
+#define	ADV_VALID_LIFETIME	5400	/* 90 minutes */
 #define	MAX_RA_DELAY_TIME	500	/* 500 milliseconds */
 #define	MIN_DELAY_BETWEEN_RAS	3	/* 3 seconds */
 #define	MAX_SEARCH		1025	/* MAXDNAME in arpa/nameser.h */
@@ -93,9 +93,11 @@ struct ra_options_conf {
 	int		cur_hl;			/* current hop limit */
 	int		m_flag;			/* managed address conf flag */
 	int		o_flag;			/* other conf flag */
+	int		rtpref;			/* router preference */
 	int		router_lifetime;	/* default router lifetime */
 	uint32_t	reachable_time;
 	uint32_t	retrans_timer;
+	int		source_link_addr;	/* source link-layer address */
 	uint32_t	mtu;
 	uint32_t	rdns_lifetime;
 	SIMPLEQ_HEAD(, ra_rdnss_conf)		 ra_rdnss_list;
@@ -111,7 +113,7 @@ struct ra_prefix_conf {
 	struct in6_addr			 prefix;	/* prefix */
 	int				 prefixlen;	/* prefix length */
 	uint32_t			 vltime;	/* valid lifetime */
-	uint32_t			 pltime;	/* prefered lifetime */
+	uint32_t			 pltime;	/* preferred lifetime */
 	int				 lflag;		/* on-link flag*/
 	int				 aflag;		/* autonom. addr flag */
 };

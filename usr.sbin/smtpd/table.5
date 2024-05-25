@@ -1,4 +1,4 @@
-.\"	$OpenBSD: table.5,v 1.12 2021/02/13 08:05:57 jmc Exp $
+.\"	$OpenBSD: table.5,v 1.14 2024/05/02 18:14:33 op Exp $
 .\"
 .\" Copyright (c) 2013 Eric Faurot <eric@openbsd.org>
 .\" Copyright (c) 2013 Gilles Chehade <gilles@poolp.org>
@@ -16,7 +16,7 @@
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
 .\"
-.Dd $Mdocdate: February 13 2021 $
+.Dd $Mdocdate: May 2 2024 $
 .Dt TABLE 5
 .Os
 .Sh NAME
@@ -42,9 +42,6 @@ table mymapping { key1 = value1, key2 = value2, key3 = value3 }
 When using a
 .Ql file
 table, a list will be written with each value on a line by itself.
-Comments can be put anywhere in the file using a hash mark
-.Pq Sq # ,
-and extend to the end of the current line.
 .Bd -literal -offset indent
 value1
 value2
@@ -52,12 +49,21 @@ value3
 .Ed
 .Pp
 A mapping will be written with each key and value on a line,
-whitespaces separating both columns:
+whitespace and an optional colon separating both columns:
 .Bd -literal -offset indent
-key1	value1
+key1:	value1
 key2	value2
 key3	value3
 .Ed
+.Pp
+Blank lines, leading and trailing spaces and tabs are ignored.
+Lines whose first non-space character is a hash mark
+.Pq Sq #
+are comments and are ignored.
+To force the parsing of a file table as a list rather than a mapping, use
+this special comment:
+.Pp
+.Dl # @list
 .Pp
 A file table can be converted to a Berkeley database using the
 .Xr makemap 8
@@ -167,10 +173,11 @@ of addresses in the table until a match is found.
 A netaddr table can contain exact addresses or netmasks, and looks as follow:
 .Bd -literal -offset indent
 192.168.1.1
-::1
-ipv6:::1
+[::1]
 192.168.1.0/24
 .Ed
+.Pp
+IPv6 addresses must be enclosed in square brackets.
 .Ss Userinfo tables
 Userinfo tables are used in rule context to specify an alternate userbase,
 mapping virtual users to local system users by UID, GID and home directory.
@@ -208,11 +215,11 @@ A source table looks as follow:
 .Bd -literal -offset indent
 192.168.1.2
 192.168.1.3
-::1
-::2
-ipv6:::3
-ipv6:::4
+[::1]
+[::2]
 .Ed
+.Pp
+IPv6 address must be enclosed in square brackets.
 .Ss Mailaddr tables
 Mailaddr tables are lists of email addresses.
 They can be used in the following contexts:
@@ -248,10 +255,12 @@ outgoing connection.
 .Pp
 The format is a mapping from inet4 or inet6 addresses to hostnames:
 .Bd -literal -offset indent
-::1		localhost
+[::1]		localhost
 127.0.0.1	localhost
 88.190.23.165	www.opensmtpd.org
 .Ed
+.Pp
+IPv6 addresses must be enclosed in square brackets.
 .Sh SEE ALSO
 .Xr smtpd.conf 5 ,
 .Xr makemap 8 ,

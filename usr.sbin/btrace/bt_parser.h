@@ -1,4 +1,4 @@
-/*	$OpenBSD: bt_parser.h,v 1.22 2021/11/12 16:57:24 claudio Exp $	*/
+/*	$OpenBSD: bt_parser.h,v 1.26 2024/03/30 07:41:45 mpi Exp $	*/
 
 /*
  * Copyright (c) 2019-2021 Martin Pieuchot <mpi@openbsd.org>
@@ -94,7 +94,7 @@ struct bt_rule {
 };
 
 /*
- * Global variable representation.
+ * Global and local variable representation.
  *
  * Variables are untyped and also include maps and histograms.
  */
@@ -105,13 +105,14 @@ struct bt_var {
 	enum bt_vartype	{
 		B_VT_STR = 1,
 		B_VT_LONG,
+		B_VT_TUPLE,
 		B_VT_MAP,
 		B_VT_HIST,
 	}			 bv_type;
 };
 
 /*
- * Respresentation of an argument.
+ * Representation of an argument.
  *
  * A so called "argument" can be any symbol representing a value or
  * a combination of those through an operation.
@@ -126,6 +127,8 @@ struct bt_arg {
 		B_AT_VAR,			/* global/local variable */
 		B_AT_MAP,			/* global map (@map[]) */
 		B_AT_HIST,			/* histogram */
+		B_AT_TUPLE,			/* tuple (1, 42, "str") */
+		B_AT_TMEMBER,			/* tuple member $t.2 */
 		B_AT_NIL,			/* empty value */
 
 		B_AT_BI_PID,
@@ -160,6 +163,7 @@ struct bt_arg {
 		B_AT_OP_MINUS,
 		B_AT_OP_MULT,
 		B_AT_OP_DIVIDE,
+		B_AT_OP_MODULO,
 		B_AT_OP_BAND,
 		B_AT_OP_XOR,
 		B_AT_OP_BOR,
@@ -175,6 +179,14 @@ struct bt_arg {
 };
 
 #define BA_INITIALIZER(v, t)	{ { NULL }, (void *)(v), NULL, (t) }
+
+/*
+ * Represents branches of an if-else statement.
+ */
+struct bt_cond {
+	struct bt_stmt		*bc_condbs;
+	struct bt_stmt		*bc_elsebs;
+};
 
 /*
  * Each action associated with a given probe is made of at least one

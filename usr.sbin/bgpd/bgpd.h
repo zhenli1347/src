@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.h,v 1.455 2022/11/18 10:17:23 claudio Exp $ */
+/*	$OpenBSD: bgpd.h,v 1.493 2024/05/18 11:17:30 jsg Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -37,7 +37,7 @@
 #define	RTR_PORT			323
 #define	CONFFILE			"/etc/bgpd.conf"
 #define	BGPD_USER			"_bgpd"
-#define	PEER_DESCR_LEN			32
+#define	PEER_DESCR_LEN			64
 #define	REASON_LEN			256	/* includes NUL terminator */
 #define	PFTABLE_LEN			32
 #define	ROUTELABEL_LEN			32
@@ -53,6 +53,7 @@
 #define	RT_BUF_SIZE			16384
 #define	MAX_RTSOCK_BUF			(2 * 1024 * 1024)
 #define	MAX_COMM_MATCH			3
+#define	MAX_ASPA_SPAS_COUNT		10000
 
 #define	BGPD_OPT_VERBOSE		0x0001
 #define	BGPD_OPT_VERBOSE2		0x0002
@@ -83,17 +84,22 @@
 #define	F_MPLS			0x0080
 #define	F_LONGER		0x0200
 #define	F_SHORTER		0x0400
-#define	F_CTL_DETAIL		0x1000	/* only set on requests */
-#define	F_CTL_ADJ_IN		0x2000	/* only set on requests */
-#define	F_CTL_ADJ_OUT		0x4000	/* only set on requests */
+#define	F_CTL_DETAIL		0x1000		/* only set on requests */
+#define	F_CTL_ADJ_IN		0x2000		/* only set on requests */
+#define	F_CTL_ADJ_OUT		0x4000		/* only set on requests */
 #define	F_CTL_BEST		0x8000
-#define	F_CTL_SSV		0x20000	/* only used by bgpctl */
-#define	F_CTL_INVALID		0x40000 /* only set on requests */
+#define	F_CTL_INELIGIBLE	0x10000		/* only set on requests */
+#define	F_CTL_LEAKED		0x20000		/* only set on requests */
+#define	F_CTL_INVALID		0x40000		/* only set on requests */
 #define	F_CTL_OVS_VALID		0x80000
 #define	F_CTL_OVS_INVALID	0x100000
 #define	F_CTL_OVS_NOTFOUND	0x200000
-#define	F_CTL_NEIGHBORS		0x400000 /* only used by bgpctl */
-#define	F_CTL_HAS_PATHID	0x800000 /* only set on requests */
+#define	F_CTL_NEIGHBORS		0x400000	 /* only used by bgpctl */
+#define	F_CTL_HAS_PATHID	0x800000	 /* only set on requests */
+#define	F_CTL_AVS_VALID		0x1000000
+#define	F_CTL_AVS_INVALID	0x2000000
+#define	F_CTL_AVS_UNKNOWN	0x4000000
+#define	F_CTL_SSV		0x80000000	/* only used by bgpctl */
 
 #define CTASSERT(x)	extern char  _ctassert[(x) ? 1 : -1 ] \
 			    __attribute__((__unused__))
@@ -106,6 +112,12 @@
 #define	ROA_INVALID		0x1
 #define	ROA_VALID		0x2
 #define	ROA_MASK		0x3
+
+#define	ASPA_UNKNOWN		0x00	/* default */
+#define	ASPA_INVALID		0x01
+#define	ASPA_VALID		0x02
+#define	ASPA_MASK		0x03
+#define	ASPA_NEVER_KNOWN	0x08	/* unknown and check never needed */
 
 /*
  * Limit the number of messages queued in the session engine.
@@ -141,17 +153,19 @@ enum reconf_action {
 #define	AFI_IPv6	2
 
 /* Subsequent Address Family Identifier as per RFC 4760 */
-#define	SAFI_NONE	0
-#define	SAFI_UNICAST	1
-#define	SAFI_MULTICAST	2
-#define	SAFI_MPLS	4
-#define	SAFI_MPLSVPN	128
+#define	SAFI_NONE		0
+#define	SAFI_UNICAST		1
+#define	SAFI_MULTICAST		2
+#define	SAFI_MPLS		4
+#define	SAFI_MPLSVPN		128
+#define	SAFI_FLOWSPEC		133
+#define	SAFI_VPNFLOWSPEC	134
 
 struct aid {
 	uint16_t	 afi;
 	sa_family_t	 af;
 	uint8_t		 safi;
-	char		*name;
+	const char	*name;
 };
 
 extern const struct aid aid_vals[];
@@ -161,7 +175,9 @@ extern const struct aid aid_vals[];
 #define	AID_INET6	2
 #define	AID_VPN_IPv4	3
 #define	AID_VPN_IPv6	4
-#define	AID_MAX		5
+#define	AID_FLOWSPECv4	5
+#define	AID_FLOWSPECv6	6
+#define	AID_MAX		7
 #define	AID_MIN		1	/* skip AID_UNSPEC since that is a dummy */
 
 #define AID_VALS	{					\
@@ -170,17 +186,10 @@ extern const struct aid aid_vals[];
 	{ AFI_IPv4, AF_INET, SAFI_UNICAST, "IPv4 unicast" },	\
 	{ AFI_IPv6, AF_INET6, SAFI_UNICAST, "IPv6 unicast" },	\
 	{ AFI_IPv4, AF_INET, SAFI_MPLSVPN, "IPv4 vpn" },	\
-	{ AFI_IPv6, AF_INET6, SAFI_MPLSVPN, "IPv6 vpn" }	\
+	{ AFI_IPv6, AF_INET6, SAFI_MPLSVPN, "IPv6 vpn" },	\
+	{ AFI_IPv4, AF_INET, SAFI_FLOWSPEC, "IPv4 flowspec" },	\
+	{ AFI_IPv6, AF_INET6, SAFI_FLOWSPEC, "IPv6 flowspec" },	\
 }
-
-#define AID_PTSIZE	{				\
-	0,						\
-	sizeof(struct pt_entry4),			\
-	sizeof(struct pt_entry6),			\
-	sizeof(struct pt_entry_vpn4),			\
-	sizeof(struct pt_entry_vpn6)			\
-}
-
 
 #define BGP_MPLS_BOS	0x01
 
@@ -189,14 +198,12 @@ struct bgpd_addr {
 		struct in_addr		v4;
 		struct in6_addr		v6;
 		/* maximum size for a prefix is 256 bits */
-	} ba;		    /* 128-bit address */
+	};		    /* 128-bit address */
 	uint64_t	rd;		/* route distinguisher for VPN addrs */
 	uint32_t	scope_id;	/* iface scope id for v6 */
 	uint8_t		aid;
 	uint8_t		labellen;	/* size of the labelstack */
 	uint8_t		labelstack[18];	/* max that makes sense */
-#define	v4	ba.v4
-#define	v6	ba.v6
 };
 
 #define	DEFAULT_LISTENER	0x01
@@ -222,6 +229,9 @@ SIMPLEQ_HEAD(l3vpn_head, l3vpn);
 
 struct network;
 TAILQ_HEAD(network_head, network);
+
+struct flowspec_config;
+RB_HEAD(flowspec_tree, flowspec_config);
 
 struct prefixset;
 SIMPLEQ_HEAD(prefixset_head, prefixset);
@@ -263,6 +273,7 @@ struct roa {
 };
 
 RB_HEAD(roa_tree, roa);
+struct aspa_set;
 RB_HEAD(aspa_tree, aspa_set);
 
 struct set_table;
@@ -279,6 +290,7 @@ struct bgpd_config {
 	struct peer_head			 peers;
 	struct l3vpn_head			 l3vpns;
 	struct network_head			 networks;
+	struct flowspec_tree			 flowspecs;
 	struct filter_head			*filters;
 	struct listen_addrs			*listen_addrs;
 	struct mrt_head				*mrt;
@@ -333,6 +345,15 @@ enum enforce_as {
 	ENFORCE_AS_ON
 };
 
+enum role {
+	ROLE_NONE,
+	ROLE_CUSTOMER,
+	ROLE_PROVIDER,
+	ROLE_RS,
+	ROLE_RS_CLIENT,
+	ROLE_PEER,
+};
+
 enum auth_method {
 	AUTH_NONE,
 	AUTH_MD5SIG,
@@ -381,12 +402,22 @@ struct capabilities {
 		int8_t	restart;	/* graceful restart, RFC 4724 */
 	}	grestart;
 	int8_t	mp[AID_MAX];		/* multiprotocol extensions, RFC 4760 */
+	int8_t	add_path[AID_MAX];	/* ADD_PATH, RFC 7911 */
 	int8_t	refresh;		/* route refresh, RFC 2918 */
 	int8_t	as4byte;		/* 4-byte ASnum, RFC 4893 */
 	int8_t	enhanced_rr;		/* enhanced route refresh, RFC 7313 */
-	int8_t	add_path[AID_MAX];	/* ADD_PATH, RFC 7911 */
-	uint8_t	role;			/* Open Policy, RFC 9234 */
-	int8_t	role_ena;		/* 1 for enable, 2 for enforce */
+	int8_t	policy;			/* Open Policy, RFC 9234, 2 = enforce */
+};
+
+enum capa_codes {
+	CAPA_NONE = 0,
+	CAPA_MP = 1,
+	CAPA_REFRESH = 2,
+	CAPA_ROLE = 9,
+	CAPA_RESTART = 64,
+	CAPA_AS4BYTE = 65,
+	CAPA_ADD_PATH = 69,
+	CAPA_ENHANCED_RR = 70,
 };
 
 /* flags for RFC 4724 - graceful restart */
@@ -402,6 +433,9 @@ struct capabilities {
 #define	CAPA_AP_RECV		0x01
 #define	CAPA_AP_SEND		0x02
 #define	CAPA_AP_BIDIR		0x03
+#define	CAPA_AP_MASK		0x0f
+#define	CAPA_AP_RECV_ENFORCE	0x10	/* internal only */
+#define	CAPA_AP_SEND_ENFORCE	0x20	/* internal only */
 
 /* values for RFC 9234 - BGP Open Policy */
 #define CAPA_ROLE_PROVIDER	0x00
@@ -432,6 +466,7 @@ struct peer_config {
 	enum export_type	 export_type;
 	enum enforce_as		 enforce_as;
 	enum enforce_as		 enforce_local_as;
+	enum role		 role;
 	uint16_t		 max_prefix_restart;
 	uint16_t		 max_out_prefix_restart;
 	uint16_t		 holdtime;
@@ -444,7 +479,6 @@ struct peer_config {
 	uint8_t			 distance;	/* 1 = direct, >1 = multihop */
 	uint8_t			 passive;
 	uint8_t			 down;
-	uint8_t			 announce_capa;
 	uint8_t			 reflector_client;
 	uint8_t			 ttlsec;	/* TTL security hack */
 	uint8_t			 flags;
@@ -460,6 +494,19 @@ struct peer_config {
 #define PEERFLAG_LOG_UPDATES	0x02
 #define PEERFLAG_EVALUATE_ALL	0x04
 #define PEERFLAG_NO_AS_SET	0x08
+
+struct rde_peer_stats {
+	uint64_t			 prefix_rcvd_update;
+	uint64_t			 prefix_rcvd_withdraw;
+	uint64_t			 prefix_rcvd_eor;
+	uint64_t			 prefix_sent_update;
+	uint64_t			 prefix_sent_withdraw;
+	uint64_t			 prefix_sent_eor;
+	uint32_t			 prefix_cnt;
+	uint32_t			 prefix_out_cnt;
+	uint32_t			 pending_update;
+	uint32_t			 pending_withdraw;
+};
 
 enum network_type {
 	NETWORK_DEFAULT,	/* from network statements */
@@ -484,8 +531,23 @@ struct network_config {
 };
 
 struct network {
-	struct network_config		net;
-	TAILQ_ENTRY(network)		entry;
+	struct network_config	net;
+	TAILQ_ENTRY(network)	entry;
+};
+
+struct flowspec {
+	uint16_t		len;
+	uint8_t			aid;
+	uint8_t			flags;
+	uint8_t			data[1];
+};
+#define FLOWSPEC_SIZE	(offsetof(struct flowspec, data))
+
+struct flowspec_config {
+	RB_ENTRY(flowspec_config)	 entry;
+	struct filter_set_head		 attrset;
+	struct flowspec			*flow;
+	enum reconf_action		 reconf_action;
 };
 
 enum rtr_error {
@@ -507,11 +569,12 @@ struct rtr_config {
 	struct bgpd_addr		remote_addr;
 	struct bgpd_addr		local_addr;
 	uint32_t			id;
-	in_addr_t			remote_port;
+	uint16_t			remote_port;
 };
 
 struct ctl_show_rtr {
 	char			descr[PEER_DESCR_LEN];
+	char			state[PEER_DESCR_LEN];
 	struct bgpd_addr	remote_addr;
 	struct bgpd_addr	local_addr;
 	uint32_t		serial;
@@ -519,7 +582,8 @@ struct ctl_show_rtr {
 	uint32_t		retry;
 	uint32_t		expire;
 	int			session_id;
-	in_addr_t		remote_port;
+	uint16_t		remote_port;
+	uint8_t			version;
 	enum rtr_error		last_sent_error;
 	enum rtr_error		last_recv_error;
 	char			last_sent_msg[REASON_LEN];
@@ -548,6 +612,7 @@ enum imsg_type {
 	IMSG_CTL_SHOW_RIB_COMMUNITIES,
 	IMSG_CTL_SHOW_RIB_ATTR,
 	IMSG_CTL_SHOW_NETWORK,
+	IMSG_CTL_SHOW_FLOWSPEC,
 	IMSG_CTL_SHOW_RIB_MEM,
 	IMSG_CTL_SHOW_TERSE,
 	IMSG_CTL_SHOW_TIMER,
@@ -562,6 +627,10 @@ enum imsg_type {
 	IMSG_NETWORK_REMOVE,
 	IMSG_NETWORK_FLUSH,
 	IMSG_NETWORK_DONE,
+	IMSG_FLOWSPEC_ADD,
+	IMSG_FLOWSPEC_DONE,
+	IMSG_FLOWSPEC_REMOVE,
+	IMSG_FLOWSPEC_FLUSH,
 	IMSG_FILTER_SET,
 	IMSG_SOCKET_CONN,
 	IMSG_SOCKET_CONN_CTL,
@@ -586,8 +655,8 @@ enum imsg_type {
 	IMSG_RECONF_ROA_ITEM,
 	IMSG_RECONF_ASPA,
 	IMSG_RECONF_ASPA_TAS,
-	IMSG_RECONF_ASPA_TAS_AID,
 	IMSG_RECONF_ASPA_DONE,
+	IMSG_RECONF_ASPA_PREP,
 	IMSG_RECONF_RTR_CONFIG,
 	IMSG_RECONF_DRAIN,
 	IMSG_RECONF_DONE,
@@ -635,7 +704,8 @@ enum ctl_results {
 	CTL_RES_NOMEM,
 	CTL_RES_BADPEER,
 	CTL_RES_BADSTATE,
-	CTL_RES_NOSUCHRIB
+	CTL_RES_NOSUCHRIB,
+	CTL_RES_OPNOTSUPP,
 };
 
 /* needed for session.h parse prototype */
@@ -649,7 +719,8 @@ enum err_codes {
 	ERR_HOLDTIMEREXPIRED,
 	ERR_FSM,
 	ERR_CEASE,
-	ERR_RREFRESH
+	ERR_RREFRESH,
+	ERR_SENDHOLDTIMEREXPIRED,
 };
 
 enum suberr_update {
@@ -739,6 +810,7 @@ struct session_up {
 	struct bgpd_addr	remote_addr;
 	struct capabilities	capa;
 	uint32_t		remote_bgpid;
+	unsigned int		if_scope;
 	uint16_t		short_as;
 };
 
@@ -785,6 +857,7 @@ struct ctl_show_set {
 		PREFIX_SET,
 		ORIGIN_SET,
 		ROA_SET,
+		ASPA_SET,
 	}			type;
 };
 
@@ -803,7 +876,7 @@ struct ctl_neighbor {
 #define	F_PREF_STALE	0x010
 #define	F_PREF_INVALID	0x020
 #define	F_PREF_PATH_ID	0x040
-#define	F_PREF_OTC_LOOP	0x080
+#define	F_PREF_OTC_LEAK	0x080
 #define	F_PREF_ECMP	0x100
 #define	F_PREF_AS_WIDE	0x200
 
@@ -822,7 +895,8 @@ struct ctl_show_rib {
 	uint32_t		flags;
 	uint8_t			prefixlen;
 	uint8_t			origin;
-	uint8_t			validation_state;
+	uint8_t			roa_validation_state;
+	uint8_t			aspa_validation_state;
 	int8_t			dmetric;
 	/* plus an aspath */
 };
@@ -877,7 +951,7 @@ struct filter_originset {
 	struct rde_prefixset	*ps;
 };
 
-struct filter_ovs {
+struct filter_vs {
 	uint8_t			 validity;
 	uint8_t			 is_set;
 };
@@ -912,6 +986,11 @@ struct ctl_show_rib_request {
 	uint8_t			validation_state;
 	uint8_t			prefixlen;
 	uint8_t			aid;
+};
+
+struct ctl_kroute_req {
+	int			flags;
+	sa_family_t		af;
 };
 
 enum filter_actions {
@@ -976,18 +1055,22 @@ struct filter_peers {
 #define EXT_COMMUNITY_IANA		0x80
 #define EXT_COMMUNITY_NON_TRANSITIVE	0x40
 #define EXT_COMMUNITY_VALUE		0x3f
-/* extended types transitive */
+/* extended transitive types */
 #define EXT_COMMUNITY_TRANS_TWO_AS	0x00	/* 2 octet AS specific */
 #define EXT_COMMUNITY_TRANS_IPV4	0x01	/* IPv4 specific */
 #define EXT_COMMUNITY_TRANS_FOUR_AS	0x02	/* 4 octet AS specific */
 #define EXT_COMMUNITY_TRANS_OPAQUE	0x03	/* opaque ext community */
 #define EXT_COMMUNITY_TRANS_EVPN	0x06	/* EVPN RFC 7432 */
-/* extended types non-transitive */
+/* extended non-transitive types */
 #define EXT_COMMUNITY_NON_TRANS_TWO_AS	0x40	/* 2 octet AS specific */
 #define EXT_COMMUNITY_NON_TRANS_IPV4	0x41	/* IPv4 specific */
 #define EXT_COMMUNITY_NON_TRANS_FOUR_AS	0x42	/* 4 octet AS specific */
 #define EXT_COMMUNITY_NON_TRANS_OPAQUE	0x43	/* opaque ext community */
 #define EXT_COMMUNITY_UNKNOWN		-1
+/* generic transitive types */
+#define EXT_COMMUNITY_GEN_TWO_AS	0x80	/* 2 octet AS specific */
+#define EXT_COMMUNITY_GEN_IPV4		0x81	/* IPv4 specific */
+#define EXT_COMMUNITY_GEN_FOUR_AS	0x82	/* 4 octet AS specific */
 
 /* BGP Origin Validation State Extended Community RFC 8097 */
 #define EXT_COMMUNITY_SUBTYPE_OVS	0
@@ -1035,10 +1118,57 @@ struct ext_comm_pairs {
 	{ EXT_COMMUNITY_TRANS_EVPN, 0x01, "esi-lab" },		\
 	{ EXT_COMMUNITY_TRANS_EVPN, 0x02, "esi-rt" },		\
 								\
+	{ EXT_COMMUNITY_GEN_TWO_AS, 0x06, "flow-rate" },	\
+	{ EXT_COMMUNITY_GEN_TWO_AS, 0x0c, "flow-pps" },		\
+	{ EXT_COMMUNITY_GEN_TWO_AS, 0x07, "flow-action" },	\
+	{ EXT_COMMUNITY_GEN_TWO_AS, 0x08, "flow-rt-redir" },	\
+	{ EXT_COMMUNITY_GEN_IPV4,   0x08, "flow-rt-redir" },	\
+	{ EXT_COMMUNITY_GEN_FOUR_AS, 0x08, "flow-rt-redir" },	\
+	{ EXT_COMMUNITY_GEN_TWO_AS, 0x09, "flow-dscp" },	\
+								\
 	{ 0 }							\
 }
 
 extern const struct ext_comm_pairs iana_ext_comms[];
+
+/* BGP flowspec defines RFC 8955 and 8956 */
+#define FLOWSPEC_LEN_LIMIT	0xf0
+#define FLOWSPEC_OP_EOL		0x80
+#define FLOWSPEC_OP_AND		0x40
+#define FLOWSPEC_OP_LEN_MASK	0x30
+#define FLOWSPEC_OP_LEN_SHIFT	4
+#define FLOWSPEC_OP_LEN(op)					\
+	(1 << (((op) & FLOWSPEC_OP_LEN_MASK) >> FLOWSPEC_OP_LEN_SHIFT))
+#define FLOWSPEC_OP_NUM_LT	0x04
+#define FLOWSPEC_OP_NUM_GT	0x02
+#define FLOWSPEC_OP_NUM_EQ	0x01
+#define FLOWSPEC_OP_NUM_LE	(FLOWSPEC_OP_NUM_LT | FLOWSPEC_OP_NUM_EQ)
+#define FLOWSPEC_OP_NUM_GE	(FLOWSPEC_OP_NUM_GT | FLOWSPEC_OP_NUM_EQ)
+#define FLOWSPEC_OP_NUM_NOT	(FLOWSPEC_OP_NUM_GT | FLOWSPEC_OP_NUM_LT)
+#define FLOWSPEC_OP_NUM_MASK	0x07
+#define FLOWSPEC_OP_BIT_NOT	0x02
+#define FLOWSPEC_OP_BIT_MATCH	0x01
+#define FLOWSPEC_OP_BIT_MASK	0x03
+
+#define FLOWSPEC_TYPE_MIN		1
+#define FLOWSPEC_TYPE_DEST		1
+#define FLOWSPEC_TYPE_SOURCE		2
+#define FLOWSPEC_TYPE_PROTO		3
+#define FLOWSPEC_TYPE_PORT		4
+#define FLOWSPEC_TYPE_DST_PORT		5
+#define FLOWSPEC_TYPE_SRC_PORT		6
+#define FLOWSPEC_TYPE_ICMP_TYPE		7
+#define FLOWSPEC_TYPE_ICMP_CODE		8
+#define FLOWSPEC_TYPE_TCP_FLAGS		9
+#define FLOWSPEC_TYPE_PKT_LEN		10
+#define FLOWSPEC_TYPE_DSCP		11
+#define FLOWSPEC_TYPE_FRAG		12
+#define FLOWSPEC_TYPE_FLOW		13
+#define FLOWSPEC_TYPE_MAX		14
+
+#define FLOWSPEC_TCP_FLAG_STRING	"FSRPAUEW"
+#define FLOWSPEC_FRAG_STRING4		"DIFL"
+#define FLOWSPEC_FRAG_STRING6		" IFL"
 
 struct filter_prefix {
 	struct bgpd_addr	addr;
@@ -1063,7 +1193,8 @@ struct filter_match {
 	struct community		community[MAX_COMM_MATCH];
 	struct filter_prefixset		prefixset;
 	struct filter_originset		originset;
-	struct filter_ovs		ovs;
+	struct filter_vs		ovs;
+	struct filter_vs		avs;
 	int				maxcomm;
 	int				maxextcomm;
 	int				maxlargecomm;
@@ -1075,11 +1206,10 @@ struct filter_rule {
 	struct filter_peers		peer;
 	struct filter_match		match;
 	struct filter_set_head		set;
-#define RDE_FILTER_SKIP_DIR		0
+#define RDE_FILTER_SKIP_PEERID		0
 #define RDE_FILTER_SKIP_GROUPID		1
 #define RDE_FILTER_SKIP_REMOTE_AS	2
-#define RDE_FILTER_SKIP_PEERID		3
-#define RDE_FILTER_SKIP_COUNT		4
+#define RDE_FILTER_SKIP_COUNT		3
 	struct filter_rule		*skip[RDE_FILTER_SKIP_COUNT];
 	enum filter_actions		action;
 	enum directions			dir;
@@ -1160,8 +1290,12 @@ struct aspa_set {
 	uint32_t			 as;
 	uint32_t			 num;
 	uint32_t			 *tas;
-	uint8_t				 *tas_aid;
 	RB_ENTRY(aspa_set)		 entry;
+};
+
+struct aspa_prep {
+	size_t				datasize;
+	uint32_t			entries;
 };
 
 struct l3vpn {
@@ -1204,6 +1338,7 @@ struct rde_memstats {
 	long long	prefix_cnt;
 	long long	rib_cnt;
 	long long	pt_cnt[AID_MAX];
+	long long	pt_size[AID_MAX];
 	long long	nexthop_cnt;
 	long long	aspath_cnt;
 	long long	aspath_size;
@@ -1273,12 +1408,14 @@ void		 set_pollfd(struct pollfd *, struct imsgbuf *);
 int		 handle_pollfd(struct pollfd *, struct imsgbuf *);
 
 /* control.c */
-int	control_imsg_relay(struct imsg *);
+int	control_imsg_relay(struct imsg *, struct peer *);
 
 /* config.c */
 struct bgpd_config	*new_config(void);
 void		copy_config(struct bgpd_config *, struct bgpd_config *);
 void		network_free(struct network *);
+struct flowspec_config	*flowspec_alloc(uint8_t, int);
+void		flowspec_free(struct flowspec_config *);
 void		free_l3vpns(struct l3vpn_head *);
 void		free_config(struct bgpd_config *);
 void		free_prefixsets(struct prefixset_head *);
@@ -1295,6 +1432,7 @@ void		expand_networks(struct bgpd_config *, struct network_head *);
 RB_PROTOTYPE(prefixset_tree, prefixset_item, entry, prefixset_cmp);
 RB_PROTOTYPE(roa_tree, roa, entry, roa_cmp);
 RB_PROTOTYPE(aspa_tree, aspa_set, entry, aspa_cmp);
+RB_PROTOTYPE(flowspec_tree, flowspec_config, entry, flowspec_config_cmp);
 
 /* kroute.c */
 int		 kr_init(int *, uint8_t);
@@ -1321,6 +1459,7 @@ void		 kr_ifinfo(char *);
 void		 kr_net_reload(u_int, uint64_t, struct network_head *);
 int		 kr_reload(void);
 int		 get_mpe_config(const char *, u_int *, u_int *);
+uint8_t		 mask2prefixlen(sa_family_t, struct sockaddr *);
 
 /* log.c */
 void		 log_peer_info(const struct peer_config *, const char *, ...)
@@ -1331,7 +1470,6 @@ void		 log_peer_warnx(const struct peer_config *, const char *, ...)
 			__attribute__((__format__ (printf, 2, 3)));
 
 /* mrt.c */
-void		 mrt_clear_seq(void);
 void		 mrt_write(struct mrt *);
 void		 mrt_clean(struct mrt *);
 void		 mrt_init(struct imsgbuf *, struct imsgbuf *);
@@ -1342,10 +1480,6 @@ struct mrt	*mrt_get(struct mrt_head *, struct mrt *);
 void		 mrt_mergeconfig(struct mrt_head *, struct mrt_head *);
 
 /* name2id.c */
-uint16_t	 rib_name2id(const char *);
-const char	*rib_id2name(uint16_t);
-void		 rib_unref(uint16_t);
-void		 rib_ref(uint16_t);
 uint16_t	 rtlabel_name2id(const char *);
 const char	*rtlabel_id2name(uint16_t);
 void		 rtlabel_unref(uint16_t);
@@ -1409,6 +1543,7 @@ int	trie_equal(struct trie_head *, struct trie_head *);
 time_t			 getmonotime(void);
 
 /* util.c */
+char		*ibuf_get_string(struct ibuf *, size_t);
 const char	*log_addr(const struct bgpd_addr *);
 const char	*log_in6addr(const struct in6_addr *);
 const char	*log_sockaddr(struct sockaddr *, socklen_t);
@@ -1416,26 +1551,27 @@ const char	*log_as(uint32_t);
 const char	*log_rd(uint64_t);
 const char	*log_ext_subtype(int, uint8_t);
 const char	*log_reason(const char *);
+const char	*log_aspath_error(int);
+const char	*log_roa(struct roa *);
+const char	*log_aspa(struct aspa_set *);
 const char	*log_rtr_error(enum rtr_error);
-const char	*log_policy(uint8_t);
-int		 aspath_snprint(char *, size_t, void *, uint16_t);
-int		 aspath_asprint(char **, void *, uint16_t);
-size_t		 aspath_strlen(void *, uint16_t);
+const char	*log_policy(enum role);
+const char	*log_capability(uint8_t);
+int		 aspath_asprint(char **, struct ibuf *);
 uint32_t	 aspath_extract(const void *, int);
-int		 aspath_verify(void *, uint16_t, int, int);
+int		 aspath_verify(struct ibuf *, int, int);
 #define		 AS_ERR_LEN	-1
 #define		 AS_ERR_TYPE	-2
 #define		 AS_ERR_BAD	-3
 #define		 AS_ERR_SOFT	-4
-u_char		*aspath_inflate(void *, uint16_t, uint16_t *);
-int		 nlri_get_prefix(u_char *, uint16_t, struct bgpd_addr *,
-		    uint8_t *);
-int		 nlri_get_prefix6(u_char *, uint16_t, struct bgpd_addr *,
-		    uint8_t *);
-int		 nlri_get_vpn4(u_char *, uint16_t, struct bgpd_addr *,
-		    uint8_t *, int);
-int		 nlri_get_vpn6(u_char *, uint16_t, struct bgpd_addr *,
-		    uint8_t *, int);
+struct ibuf	*aspath_inflate(struct ibuf *);
+int		 extract_prefix(const u_char *, int, void *, uint8_t, uint8_t);
+int		 nlri_get_prefix(struct ibuf *, struct bgpd_addr *, uint8_t *);
+int		 nlri_get_prefix6(struct ibuf *, struct bgpd_addr *, uint8_t *);
+int		 nlri_get_vpn4(struct ibuf *, struct bgpd_addr *, uint8_t *,
+		    int);
+int		 nlri_get_vpn6(struct ibuf *, struct bgpd_addr *, uint8_t *,
+		    int);
 int		 prefix_compare(const struct bgpd_addr *,
 		    const struct bgpd_addr *, int);
 void		 inet4applymask(struct in_addr *, const struct in_addr *, int);
@@ -1450,6 +1586,17 @@ int		 af2aid(sa_family_t, uint8_t, uint8_t *);
 struct sockaddr	*addr2sa(const struct bgpd_addr *, uint16_t, socklen_t *);
 void		 sa2addr(struct sockaddr *, struct bgpd_addr *, uint16_t *);
 const char *	 get_baudrate(unsigned long long, char *);
+
+/* flowspec.c */
+int	flowspec_valid(const uint8_t *, int, int);
+int	flowspec_cmp(const uint8_t *, int, const uint8_t *, int, int);
+int	flowspec_get_component(const uint8_t *, int, int, int,
+	    const uint8_t **, int *);
+int	flowspec_get_addr(const uint8_t *, int, int, int, struct bgpd_addr *,
+	    uint8_t *, uint8_t *);
+const char	*flowspec_fmt_label(int);
+const char	*flowspec_fmt_num_op(const uint8_t *, int, int *);
+const char	*flowspec_fmt_bin_op(const uint8_t *, int, int *, const char *);
 
 static const char * const log_procnames[] = {
 	"parent",
@@ -1580,7 +1727,8 @@ static const char * const ctl_res_strerror[] = {
 	"out of memory",
 	"not a cloned peer",
 	"peer still active, down peer first",
-	"no such RIB"
+	"no such RIB",
+	"operation not supported",
 };
 
 static const char * const timernames[] = {
@@ -1596,6 +1744,7 @@ static const char * const timernames[] = {
 	"RTR RefreshTimer",
 	"RTR RetryTimer",
 	"RTR ExpireTimer",
+	"RTR ActiveTimer",
 	""
 };
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tl.c,v 1.76 2022/03/11 18:00:50 mpi Exp $	*/
+/*	$OpenBSD: if_tl.c,v 1.79 2024/05/24 06:02:57 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998
@@ -186,9 +186,6 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
 
@@ -1015,7 +1012,7 @@ tl_newbuf(struct tl_softc *sc, struct tl_chain_onefrag *c)
  * into mbufs. This saves us from having to do a buffer copy: we can
  * just hand the mbufs directly to the network stack. Once the frame
  * has been sent on its way, the 'list' structure is assigned a new
- * buffer and moved to the end of the RX chain. As long we we stay
+ * buffer and moved to the end of the RX chain. As long we stay
  * ahead of the chip, it will always think it has an endless receive
  * channel.
  *
@@ -1962,7 +1959,7 @@ tl_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = tl_ioctl;
 	ifp->if_start = tl_start;
 	ifp->if_watchdog = tl_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, TL_TX_LIST_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, TL_TX_LIST_CNT - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;

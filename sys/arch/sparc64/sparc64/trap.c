@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.112 2022/11/02 07:20:08 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.125 2024/03/29 21:19:30 miod Exp $	*/
 /*	$NetBSD: trap.c,v 1.73 2001/08/09 01:03:01 eeh Exp $ */
 
 /*
@@ -67,6 +67,7 @@
 
 #include <machine/cpu.h>
 #include <machine/ctlreg.h>
+#include <machine/fsr.h>
 #include <machine/trap.h>
 #include <machine/instr.h>
 #include <machine/pmap.h>
@@ -80,44 +81,13 @@
 #include <sparc64/fpu/fpu_extern.h>
 #include <sparc64/sparc64/cache.h>
 
-#ifndef offsetof
-#define	offsetof(s, f) ((int)&((s *)0)->f)
-#endif
-
-/* trapstats */
-int trapstats = 0;
-int protfix = 0;
-int udmiss = 0;	/* Number of normal/nucleus data/text miss/protection faults */
-int udhit = 0;
-int udprot = 0;
-int utmiss = 0;
-int kdmiss = 0;
-int kdhit = 0;
-int kdprot = 0;
-int ktmiss = 0;
-int iveccnt = 0; /* number if normal/nucleus interrupt/interrupt vector faults */
-int uintrcnt = 0;
-int kiveccnt = 0;
-int kintrcnt = 0;
-int intristk = 0; /* interrupts when already on intrstack */
-int intrpoll = 0; /* interrupts not using vector lists */
-int wfill = 0;
-int kwfill = 0;
-int wspill = 0;
-int wspillskip = 0;
-int rftucnt = 0;
-int rftuld = 0;
-int rftudone = 0;
-int rftkcnt[5] = { 0, 0, 0, 0, 0 };
-
 /*
  * Initial FPU state is all registers == all 1s, everything else == all 0s.
  * This makes every floating point register a signalling NaN, with sign bit
  * set, no matter how it is interpreted.  Appendix N of the Sparc V8 document
  * seems to imply that we should do this, and it does make sense.
  */
-__asm(".align 64");
-struct	fpstate initfpstate = {
+const struct fpstate initfpstate = {
 	{ ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0,
 	  ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0 }
 };
@@ -322,6 +292,8 @@ void text_access_error(struct trapframe *tf, unsigned type,
 	vaddr_t pc, u_long sfsr, vaddr_t afva, u_long afsr);
 void syscall(struct trapframe *, register_t code, register_t pc);
 
+int	copyinsn(struct proc *p, vaddr_t uva, int *insn);
+
 /*
  * If someone stole the FPU while we were away, do not enable it
  * on return.  This is not done in userret() above as it must follow
@@ -465,7 +437,7 @@ dopanic:
 	{
 		union instr ins;
 
-		if (copyin((caddr_t)pc, &ins, sizeof(ins)) != 0) {
+		if (copyinsn(p, pc, &ins.i_int) != 0) {
 			/* XXX Can this happen? */
 			trapsignal(p, SIGILL, 0, ILL_ILLOPC, sv);
 			break;
@@ -502,25 +474,10 @@ dopanic:
 
 		if (fs == NULL) {
 			KERNEL_LOCK();
-			/* NOTE: fpstate must be 64-bit aligned */
 			fs = malloc((sizeof *fs), M_SUBPROC, M_WAITOK);
 			*fs = initfpstate;
-			fs->fs_qsize = 0;
 			p->p_md.md_fpstate = fs;
 			KERNEL_UNLOCK();
-		}
-
-		/*
-		 * We may have more FPEs stored up and/or ops queued.
-		 * If they exist, handle them and get out.  Otherwise,
-		 * resolve the FPU state, turn it on, and try again.
-		 *
-		 * Ultras should never have a FPU queue.
-		 */
-		if (fs->fs_qsize) {
-			printf("trap: Warning fs_qsize is %d\n",fs->fs_qsize);
-			fpu_cleanup(p, fs);
-			break;
 		}
 		if (fpproc != p) {		/* we do not have it */
 			/* but maybe another CPU has it? */
@@ -543,7 +500,7 @@ dopanic:
 	{
 		union instr ins;
 
-		if (copyin((caddr_t)pc, &ins, sizeof(ins)) != 0) {
+		if (copyinsn(p, pc, &ins.i_int) != 0) {
 			/* XXX Can this happen? */
 			trapsignal(p, SIGILL, 0, ILL_ILLOPC, sv);
 			break;
@@ -579,16 +536,6 @@ dopanic:
 	case T_ALIGN:
 	case T_LDDF_ALIGN:
 	case T_STDF_ALIGN:
-#if 0
-	{
-		int64_t dsfsr, dsfar=0, isfsr;
-
-		dsfsr = ldxa(SFSR, ASI_DMMU);
-		if (dsfsr & SFSR_FV)
-			dsfar = ldxa(SFAR, ASI_DMMU);
-		isfsr = ldxa(SFSR, ASI_IMMU);
-	}
-#endif
 		/*
 		 * If we're busy doing copyin/copyout continue
 		 */
@@ -604,6 +551,9 @@ dopanic:
 
 	case T_FP_IEEE_754:
 	case T_FP_OTHER:
+	{
+		union instr ins;
+
 		/*
 		 * Clean up after a floating point exception.
 		 * fpu_cleanup can (and usually does) modify the
@@ -619,19 +569,19 @@ dopanic:
 		fpproc = NULL;
 		intr_restore(s);
 		/* tf->tf_psr &= ~PSR_EF; */	/* share_fpu will do this */
-		if (type == T_FP_OTHER && p->p_md.md_fpstate->fs_qsize == 0) {
+		if (type == T_FP_OTHER) {
 			/*
-			 * Push the faulting instruction on the queue;
+			 * Read the faulting instruction;
 			 * we might need to emulate it.
 			 */
-			copyin((caddr_t)pc, &p->p_md.md_fpstate->fs_queue[0].fq_instr, sizeof(int));
-			p->p_md.md_fpstate->fs_queue[0].fq_addr = (int *)pc;
-			p->p_md.md_fpstate->fs_qsize = 1;
-		}
+			(void)copyinsn(p, pc, &ins.i_int);
+		} else
+			ins.i_int = 0;
 		ADVANCE;
-		fpu_cleanup(p, p->p_md.md_fpstate);
+		fpu_cleanup(p, p->p_md.md_fpstate, ins, sv);
 		/* fpu_cleanup posts signals if needed */
 		break;
+	}
 
 	case T_TAGOF:
 		trapsignal(p, SIGEMT, 0, EMT_TAGOVF, sv);	/* XXX code? */
@@ -734,8 +684,7 @@ accesstype(unsigned int type, u_long sfsr)
 }
 
 /*
- * This routine handles MMU generated faults.  About half
- * of them could be recoverable through uvm_fault.
+ * This routine handles MMU generated faults.
  */
 void
 data_access_fault(struct trapframe *tf, unsigned type, vaddr_t pc,
@@ -922,8 +871,7 @@ out:
 }
 
 /*
- * This routine handles MMU generated faults.  About half
- * of them could be recoverable through uvm_fault.
+ * This routine handles MMU generated faults.
  */
 void
 text_access_fault(struct trapframe *tf, unsigned type, vaddr_t pc,
@@ -955,28 +903,8 @@ text_access_fault(struct trapframe *tf, unsigned type, vaddr_t pc,
 		goto out;
 
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-
-	/*
-	 * If this was a stack access we keep track of the maximum
-	 * accessed stack size.  Also, if uvm_fault gets a protection
-	 * failure it is due to accessing the stack region outside
-	 * the current limit and we need to reflect that as an access
-	 * error.
-	 */
-	if (error == 0) {
-		uvm_grow(p, va);
+	if (error == 0)
 		goto out;
-	}
-
-	/*
-	 * Pagein failed. Any other page fault in kernel, die; if user
-	 * fault, deliver SIGSEGV.
-	 */
-	if (tf->tf_tstate & TSTATE_PRIV) {
-		(void) splhigh();
-		panic("kernel text fault: pc=%llx", (unsigned long long)pc);
-		/* NOTREACHED */
-	}
 
 	signal = SIGSEGV;
 	sicode = SEGV_MAPERR;
@@ -989,10 +917,8 @@ text_access_fault(struct trapframe *tf, unsigned type, vaddr_t pc,
 	trapsignal(p, signal, access_type, sicode, sv);
 
 out:
-	if ((tf->tf_tstate & TSTATE_PRIV) == 0) {
-		userret(p);
-		share_fpu(p, tf);
-	}
+	userret(p);
+	share_fpu(p, tf);
 }
 
 
@@ -1049,30 +975,8 @@ text_access_error(struct trapframe *tf, unsigned type, vaddr_t pc,
 		goto out;
 
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
-
-	/*
-	 * If this was a stack access we keep track of the maximum
-	 * accessed stack size.  Also, if uvm_fault gets a protection
-	 * failure it is due to accessing the stack region outside
-	 * the current limit and we need to reflect that as an access
-	 * error.
-	 */
-	if (error == 0) {
-		uvm_grow(p, va);
+	if (error == 0)
 		goto out;
-	}
-
-	/*
-	 * Pagein failed.  If doing copyin/out, return to onfault
-	 * address.  Any other page fault in kernel, die; if user
-	 * fault, deliver SIGSEGV.
-	 */
-	if (tf->tf_tstate & TSTATE_PRIV) {
-		(void) splhigh();
-		panic("kernel text error: pc=%lx sfsr=%lb", pc,
-		    sfsr, SFSR_BITS);
-		/* NOTREACHED */
-	}
 
 	signal = SIGSEGV;
 	sicode = SEGV_MAPERR;
@@ -1102,13 +1006,11 @@ out:
 void
 syscall(struct trapframe *tf, register_t code, register_t pc)
 {
-	int i, nap;
-	int64_t *ap;
 	const struct sysent *callp;
 	struct proc *p = curproc;
-	int error, new;
-	register_t args[8];
+	int error = ENOSYS, new;
 	register_t rval[2];
+	register_t *args;
 
 	if ((tf->tf_out[6] & 1) == 0)
 		sigexit(p, SIGILL);
@@ -1126,53 +1028,17 @@ syscall(struct trapframe *tf, register_t code, register_t pc)
 	new = code & SYSCALL_G2RFLAG;
 	code &= ~SYSCALL_G2RFLAG;
 
+	if (code <= 0 || code >= SYS_MAXSYSCALL)
+		goto bad;
+	callp = sysent + code;
+
 	/*
 	 * The first six system call arguments are in the six %o registers.
 	 * Any arguments beyond that are in the `argument extension' area
-	 * of the user's stack frame (see <machine/frame.h>).
-	 *
-	 * Check for ``special'' codes that alter this, namely syscall and
-	 * __syscall.  These both pass a syscall number in the first argument
-	 * register, so the other arguments are just shifted down, possibly
-	 * pushing one off the end into the extension area.  This happens
-	 * with mmap() and mquery() used via __syscall().
+	 * of the user's stack frame (see <machine/frame.h>), but no system
+	 * call currently uses more than six arguments.
 	 */
-	ap = &tf->tf_out[0];
-	nap = 6;
-
-	switch (code) {
-	case SYS_syscall:
-	case SYS___syscall:
-		code = *ap++;
-		nap--;
-		break;
-	}
-
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else {
-		register_t *argp;
-
-		callp += code;
-		i = callp->sy_narg; /* Why divide? */
-		if (i > nap) {	/* usually false */
-			if (i > 8)
-				panic("syscall nargs");
-			/* Read the whole block in */
-			if ((error = copyin((caddr_t)tf->tf_out[6]
-			    + BIAS + offsetof(struct frame, fr_argx),
-			    &args[nap], (i - nap) * sizeof(register_t))))
-				goto bad;
-			i = nap;
-		}
-		/*
-		 * It should be faster to do <= 6 longword copies than
-		 * to call bcopy
-		 */
-		for (argp = args; i--;)
-			*argp++ = *ap++;
-	}
+	args = (register_t *)&tf->tf_out[0];
 
 	rval[0] = 0;
 	rval[1] = 0;
@@ -1250,4 +1116,22 @@ child_return(void *arg)
 	KERNEL_UNLOCK();
 
 	mi_child_return(p);
+}
+
+int
+copyinsn(struct proc *p, vaddr_t uva, int *insn)
+{
+	struct vm_map *map = &p->p_vmspace->vm_map;
+	int error = 0;
+
+	if (__predict_false((uva & 3) != 0))
+		return EFAULT;
+
+	do {
+		if (pmap_copyinsn(map->pmap, uva, (uint32_t *)insn) == 0)
+			break;
+		error = uvm_fault(map, trunc_page(uva), 0, PROT_EXEC);
+	} while (error == 0);
+
+	return error;
 }

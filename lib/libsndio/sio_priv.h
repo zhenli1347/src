@@ -1,4 +1,4 @@
-/*	$OpenBSD: sio_priv.h,v 1.10 2022/04/29 08:30:48 ratchov Exp $	*/
+/*	$OpenBSD: sio_priv.h,v 1.12 2024/05/21 06:07:06 jsg Exp $	*/
 /*
  * Copyright (c) 2008 Alexandre Ratchov <alex@caoua.org>
  *
@@ -33,7 +33,7 @@ struct sio_hdl {
 	unsigned mode;			/* SIO_PLAY | SIO_REC */
 	int started;			/* true if started */
 	int nbio;			/* true if non-blocking io */
-	int eof;			/* true if error occured */
+	int eof;			/* true if error occurred */
 	int rdrop;			/* recorded bytes to drop */
 	int wsil;			/* silence to play */
 	int rused;			/* bytes used in read buffer */
@@ -69,7 +69,6 @@ struct sio_ops {
 struct sio_hdl *_sio_aucat_open(const char *, unsigned, int);
 struct sio_hdl *_sio_sun_open(const char *, unsigned, int);
 void _sio_create(struct sio_hdl *, struct sio_ops *, unsigned, int);
-void _sio_destroy(struct sio_hdl *);
 void _sio_onmove_cb(struct sio_hdl *, int);
 void _sio_onvol_cb(struct sio_hdl *, unsigned);
 #ifdef DEBUG

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_dual.c,v 1.29 2022/01/20 14:11:27 naddy Exp $ */
+/*	$OpenBSD: rde_dual.c,v 1.31 2023/03/08 04:43:13 guenther Exp $ */
 
 /*
  * Copyright (c) 2015 Renato Westphal <renato@openbsd.org>
@@ -483,7 +483,6 @@ reply_outstanding_remove(struct reply_node *reply)
 	free(reply);
 }
 
-/* ARGSUSED */
 static void
 reply_active_timer(int fd, short event, void *arg)
 {
@@ -516,7 +515,6 @@ reply_active_stop_timer(struct reply_node *reply)
 		fatal("reply_active_stop_timer");
 }
 
-/* ARGSUSED */
 static void
 reply_sia_timer(int fd, short event, void *arg)
 {
@@ -633,7 +631,7 @@ rt_update_fib(struct rt_node *rn)
 
 			/*
 			 * Only feasible successors and the successor itself
-			 * are elegible to be installed.
+			 * are eligible to be installed.
 			 */
 			if (route->rdistance >= rn->successor.fdistance)
 				goto uninstall;
@@ -708,7 +706,7 @@ rt_get_successor_fc(struct rt_node *rn)
 	TAILQ_FOREACH(route, &rn->routes, entry)
 		if (route->type == EIGRP_ROUTE_INTERNAL) {
 			/*
-			 * connected routes should always be prefered over
+			 * connected routes should always be preferred over
 			 * received routes independent of the metric.
 			 */
 			if (route->nbr->flags & F_RDE_NBR_LOCAL)
@@ -720,7 +718,7 @@ rt_get_successor_fc(struct rt_node *rn)
 	TAILQ_FOREACH(route, &rn->routes, entry) {
 		/*
 		 * draft-savage-eigrp-04 - Section 5.4.7:
-		 * "Internal routes MUST be prefered over external routes
+		 * "Internal routes MUST be preferred over external routes
 		 * independent of the metric."
 		 */
 		if (route->type == EIGRP_ROUTE_EXTERNAL && !external_only)

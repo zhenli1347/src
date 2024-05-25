@@ -57,6 +57,7 @@ $code=<<___;
 .type	bn_mul_mont_gather5,\@function,6
 .align	64
 bn_mul_mont_gather5:
+	_CET_ENDBR
 	test	\$3,${num}d
 	jnz	.Lmul_enter
 	cmp	\$8,${num}d
@@ -387,6 +388,7 @@ $code.=<<___;
 .type	bn_mul4x_mont_gather5,\@function,6
 .align	16
 bn_mul4x_mont_gather5:
+	_CET_ENDBR
 .Lmul4x_enter:
 	mov	${num}d,${num}d
 	movd	`($win64?56:8)`(%rsp),%xmm5	# load 7th argument
@@ -925,6 +927,7 @@ $code.=<<___;
 .type	bn_scatter5,\@abi-omnipotent
 .align	16
 bn_scatter5:
+	_CET_ENDBR
 	cmp	\$0, $num
 	jz	.Lscatter_epilogue
 	lea	($tbl,$idx,8),$tbl
@@ -943,6 +946,7 @@ bn_scatter5:
 .type	bn_gather5,\@abi-omnipotent
 .align	16
 bn_gather5:
+	_CET_ENDBR
 .LSEH_begin_bn_gather5:			# Win64 thing, but harmless in other cases
 	# I can't trust assembler to use specific encoding:-(
 	.byte	0x4c,0x8d,0x14,0x24			# lea    (%rsp),%r10
@@ -1032,11 +1036,12 @@ $code.=<<___;
 ___
 }
 $code.=<<___;
+.section .rodata
 .align	64
 .Linc:
 	.long	0,0, 1,1
 	.long	2,2, 2,2
-.asciz	"Montgomery Multiplication with scatter/gather for x86_64, CRYPTOGAMS by <appro\@openssl.org>"
+.text
 ___
 
 # EXCEPTION_DISPOSITION handler (EXCEPTION_RECORD *rec,ULONG64 frame,
@@ -1052,6 +1057,7 @@ $code.=<<___;
 .type	mul_handler,\@abi-omnipotent
 .align	16
 mul_handler:
+	_CET_ENDBR
 	push	%rsi
 	push	%rdi
 	push	%rbx

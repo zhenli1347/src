@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_bio.c,v 1.210 2022/08/14 01:58:28 jsg Exp $	*/
+/*	$OpenBSD: vfs_bio.c,v 1.213 2024/02/03 18:51:58 beck Exp $	*/
 /*	$NetBSD: vfs_bio.c,v 1.44 1996/06/11 11:15:36 pk Exp $	*/
 
 /*
@@ -65,7 +65,6 @@ int fliphigh;
 
 int nobuffers;
 int needbuffer;
-struct bio_ops bioops;
 
 /* private bufcache functions */
 void bufcache_init(void);
@@ -84,6 +83,7 @@ struct buf *bio_doread(struct vnode *, daddr_t, int, int);
 struct buf *buf_get(struct vnode *, daddr_t, size_t);
 void bread_cluster_callback(struct buf *);
 int64_t bufcache_recover_dmapages(int discard, int64_t howmany);
+static struct buf *incore_locked(struct vnode *vp, daddr_t blkno);
 
 struct bcachestats bcstats;  /* counters */
 long lodirtypages;      /* dirty page count low water mark */
@@ -119,8 +119,6 @@ buf_put(struct buf *bp)
 	if (bp->b_vnbufs.le_next != NOLIST &&
 	    bp->b_vnbufs.le_next != (void *)-1)
 		panic("buf_put: still on the vnode list");
-	if (!LIST_EMPTY(&bp->b_dep))
-		panic("buf_put: b_dep is not empty");
 #endif
 
 	LIST_REMOVE(bp, b_list);
@@ -374,7 +372,6 @@ bufbackoff(struct uvm_constraint_range *range, long size)
 int
 buf_flip_high(struct buf *bp)
 {
-	int s;
 	int ret = -1;
 
 	KASSERT(ISSET(bp->b_flags, B_BC));
@@ -382,15 +379,15 @@ buf_flip_high(struct buf *bp)
 	KASSERT(bp->cache == DMA_CACHE);
 	KASSERT(fliphigh);
 
+	splassert(IPL_BIO);
+
 	/* Attempt to move the buffer to high memory if we can */
-	s = splbio();
 	if (buf_realloc_pages(bp, &high_constraint, UVM_PLA_NOWAIT) == 0) {
 		KASSERT(!ISSET(bp->b_flags, B_DMA));
 		bcstats.highflips++;
 		ret = 0;
 	} else
 		bcstats.highflops++;
-	splx(s);
 
 	return ret;
 }
@@ -407,14 +404,14 @@ buf_flip_dma(struct buf *bp)
 	KASSERT(ISSET(bp->b_flags, B_BUSY));
 	KASSERT(bp->cache < NUM_CACHES);
 
+	splassert(IPL_BIO);
+
 	if (!ISSET(bp->b_flags, B_DMA)) {
-		int s = splbio();
 
 		/* move buf to dma reachable memory */
 		(void) buf_realloc_pages(bp, &dma_constraint, UVM_PLA_WAITOK);
 		KASSERT(ISSET(bp->b_flags, B_DMA));
 		bcstats.dmaflips++;
-		splx(s);
 	}
 
 	if (bp->cache > DMA_CACHE) {
@@ -747,9 +744,9 @@ bwrite(struct buf *bp)
 
 	/* Initiate disk write.  Make sure the appropriate party is charged. */
 	bp->b_vp->v_numoutput++;
-	splx(s);
 	buf_flip_dma(bp);
 	SET(bp->b_flags, B_WRITEINPROG);
+	splx(s);
 	VOP_STRATEGY(bp->b_vp, bp);
 
 	/*
@@ -880,13 +877,6 @@ brelse(struct buf *bp)
 		KASSERT(bp->b_bufsize > 0);
 
 	/*
-	 * softdep is basically incompatible with not caching buffers
-	 * that have dependencies, so this buffer must be cached
-	 */
-	if (LIST_FIRST(&bp->b_dep) != NULL)
-		CLR(bp->b_flags, B_NOCACHE);
-
-	/*
 	 * Determine which queue the buffer should be on, then put it there.
 	 */
 
@@ -904,9 +894,6 @@ brelse(struct buf *bp)
 		 * If the buffer is invalid, free it now rather than leaving
 		 * it in a queue and wasting memory.
 		 */
-		if (LIST_FIRST(&bp->b_dep) != NULL)
-			buf_deallocate(bp);
-
 		if (ISSET(bp->b_flags, B_DELWRI)) {
 			CLR(bp->b_flags, B_DELWRI);
 		}
@@ -973,14 +960,13 @@ brelse(struct buf *bp)
  * Determine if a block is in the cache. Just look on what would be its hash
  * chain. If it's there, return a pointer to it, unless it's marked invalid.
  */
-struct buf *
-incore(struct vnode *vp, daddr_t blkno)
+static struct buf *
+incore_locked(struct vnode *vp, daddr_t blkno)
 {
 	struct buf *bp;
 	struct buf b;
-	int s;
 
-	s = splbio();
+	splassert(IPL_BIO);
 
 	/* Search buf lookup tree */
 	b.b_lblkno = blkno;
@@ -988,7 +974,18 @@ incore(struct vnode *vp, daddr_t blkno)
 	if (bp != NULL && ISSET(bp->b_flags, B_INVAL))
 		bp = NULL;
 
+	return (bp);
+}
+struct buf *
+incore(struct vnode *vp, daddr_t blkno)
+{
+	struct buf *bp;
+	int s;
+
+	s = splbio();
+	bp = incore_locked(vp, blkno);
 	splx(s);
+
 	return (bp);
 }
 
@@ -1140,7 +1137,6 @@ buf_get(struct vnode *vp, daddr_t blkno, size_t size)
 
 	bp->b_freelist.tqe_next = NOLIST;
 	bp->b_dev = NODEV;
-	LIST_INIT(&bp->b_dep);
 	bp->b_bcount = size;
 
 	buf_acquire_nomap(bp);
@@ -1154,7 +1150,7 @@ buf_get(struct vnode *vp, daddr_t blkno, size_t size)
 		 *
 		 * But first, we check if someone beat us to it.
 		 */
-		if (incore(vp, blkno)) {
+		if (incore_locked(vp, blkno)) {
 			pool_put(&bufpool, bp);
 			splx(s);
 			return (NULL);
@@ -1233,16 +1229,6 @@ buf_daemon(void *arg)
 			if (!ISSET(bp->b_flags, B_DELWRI))
 				panic("Clean buffer on dirty queue");
 #endif
-			if (LIST_FIRST(&bp->b_dep) != NULL &&
-			    !ISSET(bp->b_flags, B_DEFERRED) &&
-			    buf_countdeps(bp, 0, 0)) {
-				SET(bp->b_flags, B_DEFERRED);
-				s = splbio();
-				bufcache_release(bp);
-				buf_release(bp);
-				continue;
-			}
-
 			bawrite(bp);
 			pushed++;
 
@@ -1310,9 +1296,6 @@ biodone(struct buf *bp)
 
 	if (bp->b_bq)
 		bufq_done(bp->b_bq, bp);
-
-	if (LIST_FIRST(&bp->b_dep) != NULL)
-		buf_complete(bp);
 
 	if (!ISSET(bp->b_flags, B_READ)) {
 		CLR(bp->b_flags, B_WRITEINPROG);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_decide.c,v 1.98 2022/09/23 15:49:20 claudio Exp $ */
+/*	$OpenBSD: rde_decide.c,v 1.102 2023/10/12 14:22:08 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org>
@@ -487,7 +487,8 @@ prefix_eligible(struct prefix *p)
 	struct rde_aspath *asp = prefix_aspath(p);
 
 	/* The aspath needs to be loop and error free */
-	if (asp == NULL || asp->flags & (F_ATTR_LOOP|F_ATTR_PARSE_ERR))
+	if (asp == NULL ||
+	    asp->flags & (F_ATTR_LOOP|F_ATTR_OTC_LEAK|F_ATTR_PARSE_ERR))
 		return 0;
 
 	/* The nexthop must be valid. */
@@ -556,10 +557,9 @@ prefix_evaluate(struct rib_entry *re, struct prefix *new, struct prefix *old)
 		 * but remember that newbest may be NULL aka ineligible.
 		 * Additional decision may be made by the called functions.
 		 */
-		rde_generate_updates(rib, newbest, oldbest, new, old,
-		    EVAL_DEFAULT);
 		if ((rib->flags & F_RIB_NOFIB) == 0)
 			rde_send_kroute(rib, newbest, oldbest);
+		rde_generate_updates(re, new, old, EVAL_DEFAULT);
 		return;
 	}
 
@@ -568,10 +568,12 @@ prefix_evaluate(struct rib_entry *re, struct prefix *new, struct prefix *old)
 	 * to be passed on (not only a change of the best prefix).
 	 * rde_generate_updates() will then take care of distribution.
 	 */
-	if (rde_evaluate_all())
-		if ((new != NULL && prefix_eligible(new)) || old != NULL)
-			rde_generate_updates(rib, newbest, NULL, new, old,
-			    EVAL_ALL);
+	if (rde_evaluate_all()) {
+		if (new != NULL && !prefix_eligible(new))
+			new = NULL;
+		if (new != NULL || old != NULL)
+			rde_generate_updates(re, new, old, EVAL_ALL);
+	}
 }
 
 void
@@ -579,7 +581,7 @@ prefix_evaluate_nexthop(struct prefix *p, enum nexthop_state state,
     enum nexthop_state oldstate)
 {
 	struct rib_entry *re = prefix_re(p);
-	struct prefix	*newbest, *oldbest;
+	struct prefix	*newbest, *oldbest, *new, *old;
 	struct rib	*rib;
 
 	/* Skip non local-RIBs or RIBs that are flagged as noeval. */
@@ -609,6 +611,7 @@ prefix_evaluate_nexthop(struct prefix *p, enum nexthop_state state,
 	 * Re-evaluate the prefix by removing the prefix then updating the
 	 * nexthop state and reinserting the prefix again.
 	 */
+	old = p;
 	oldbest = prefix_best(re);
 	prefix_remove(p, re);
 
@@ -619,6 +622,9 @@ prefix_evaluate_nexthop(struct prefix *p, enum nexthop_state state,
 
 	prefix_insert(p, NULL, re);
 	newbest = prefix_best(re);
+	new = p;
+	if (!prefix_eligible(new))
+		new = NULL;
 
 	/*
 	 * If the active prefix changed or the active prefix was removed
@@ -630,9 +636,9 @@ prefix_evaluate_nexthop(struct prefix *p, enum nexthop_state state,
 		 * but remember that newbest may be NULL aka ineligible.
 		 * Additional decision may be made by the called functions.
 		 */
-		rde_generate_updates(rib, newbest, oldbest, p, p, EVAL_DEFAULT);
 		if ((rib->flags & F_RIB_NOFIB) == 0)
 			rde_send_kroute(rib, newbest, oldbest);
+		rde_generate_updates(re, new, old, EVAL_DEFAULT);
 		return;
 	}
 
@@ -642,5 +648,5 @@ prefix_evaluate_nexthop(struct prefix *p, enum nexthop_state state,
 	 * rde_generate_updates() will then take care of distribution.
 	 */
 	if (rde_evaluate_all())
-		rde_generate_updates(rib, newbest, NULL, p, p, EVAL_ALL);
+		rde_generate_updates(re, new, old, EVAL_ALL);
 }

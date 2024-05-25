@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_veb.c,v 1.29 2022/06/01 17:34:13 sashan Exp $ */
+/*	$OpenBSD: if_veb.c,v 1.35 2024/02/13 12:22:09 bluhm Exp $ */
 
 /*
  * Copyright (c) 2021 David Gwynne <dlg@openbsd.org>
@@ -46,7 +46,6 @@
 #ifdef INET6
 #include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
-#include <netinet6/ip6_var.h>
 #endif
 
 #if 0 && defined(IPSEC)
@@ -612,6 +611,7 @@ veb_pf(struct ifnet *ifp0, int dir, struct mbuf *m)
 {
 	struct ether_header *eh, copy;
 	const struct veb_pf_ip_family *fam;
+	int hlen;
 
 	/*
 	 * pf runs on vport interfaces when they enter or leave the
@@ -640,11 +640,9 @@ veb_pf(struct ifnet *ifp0, int dir, struct mbuf *m)
 	copy = *eh;
 	m_adj(m, sizeof(*eh));
 
-	if (dir == PF_IN) {
-		m = (*fam->ip_check)(ifp0, m);
-		if (m == NULL)
-			return (NULL);
-	}
+	m = (*fam->ip_check)(ifp0, m);
+	if (m == NULL)
+		return (NULL);
 
 	if (pf_test(fam->af, dir, ifp0, &m) != PF_PASS) {
 		m_freem(m);
@@ -660,12 +658,14 @@ veb_pf(struct ifnet *ifp0, int dir, struct mbuf *m)
 		return (NULL);
 	}
 
-	m = m_prepend(m, sizeof(*eh), M_DONTWAIT);
+	hlen = roundup(sizeof(*eh), sizeof(long));
+	m = m_prepend(m, hlen, M_DONTWAIT);
 	if (m == NULL)
 		return (NULL);
 
 	/* checksum? */
 
+	m_adj(m, hlen - sizeof(*eh));
 	eh = mtod(m, struct ether_header *);
 	*eh = copy;
 
@@ -1464,6 +1464,8 @@ veb_add_port(struct veb_softc *sc, const struct ifbreq *req, unsigned int span)
 		error = ENOMEM;
 		goto put;
 	}
+
+	ifsetlro(ifp0, 0);
 
 	p->p_ifp0 = ifp0;
 	p->p_veb = sc;

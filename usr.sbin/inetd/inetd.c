@@ -1,4 +1,4 @@
-/*	$OpenBSD: inetd.c,v 1.163 2022/12/04 23:50:50 cheloha Exp $	*/
+/*	$OpenBSD: inetd.c,v 1.165 2023/09/03 22:01:00 bluhm Exp $	*/
 
 /*
  * Copyright (c) 1983,1991 The Regents of the University of California.
@@ -444,7 +444,7 @@ dg_badinput(struct sockaddr *sa)
 		if (IN_MULTICAST(in.s_addr))
 			goto bad;
 		switch ((in.s_addr & 0xff000000) >> 24) {
-		case 0: case 127: case 255:
+		case 0: case 255:
 			goto bad;
 		}
 		if (dg_broadcast(&in))
@@ -1489,7 +1489,6 @@ discard_dg(int s, struct servtab *sep)
 	(void) read(s, buffer, sizeof(buffer));
 }
 
-#include <ctype.h>
 #define LINESIZ 72
 char ring[128];
 char *endring;

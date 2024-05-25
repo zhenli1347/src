@@ -1,4 +1,4 @@
-/*	$OpenBSD: stdlib.h,v 1.16 2019/05/10 15:03:24 otto Exp $	*/
+/*	$OpenBSD: stdlib.h,v 1.20 2024/03/01 21:30:40 millert Exp $	*/
 /*	$NetBSD: stdlib.h,v 1.25 1995/12/27 21:19:08 jtc Exp $	*/
 
 /*-
@@ -38,6 +38,7 @@
 #include_next <stdlib.h>
 
 __BEGIN_HIDDEN_DECLS
+int	__mktemp4(char *, int, int, int (*)(const char *, int));
 char	*__findenv(const char *, int, int *);
 void	__atexit_register_cleanup(void (*)(void));
 __END_HIDDEN_DECLS
@@ -45,16 +46,19 @@ __END_HIDDEN_DECLS
 extern char **environ;
 extern char *__progname;
 
+int __realpath(const char *pathname, char *resolved);
+
 #if 0
 /*extern PROTO_NORMAL(suboptarg);*/
 #endif
 
 PROTO_NORMAL(__mb_cur_max);
+PROTO_NORMAL(__realpath);
 PROTO_STD_DEPRECATED(_Exit);
 PROTO_DEPRECATED(a64l);
 PROTO_NORMAL(abort);
 PROTO_NORMAL(abs);
-/* PROTO_NORMAL(aligned_alloc)		not yet, breaks emacs */
+PROTO_NORMAL(aligned_alloc);
 PROTO_NORMAL(arc4random);
 PROTO_NORMAL(arc4random_buf);
 PROTO_NORMAL(arc4random_uniform);
@@ -64,7 +68,7 @@ PROTO_NORMAL(atoi);
 PROTO_STD_DEPRECATED(atol);
 PROTO_STD_DEPRECATED(atoll);
 PROTO_STD_DEPRECATED(bsearch);
-/*PROTO_NORMAL(calloc);			not yet, breaks emacs */
+PROTO_NORMAL(calloc);
 PROTO_NORMAL(calloc_conceal);
 PROTO_NORMAL(cgetcap);
 PROTO_NORMAL(cgetclose);
@@ -85,7 +89,7 @@ PROTO_DEPRECATED(ecvt);
 PROTO_NORMAL(erand48);
 PROTO_NORMAL(exit);
 PROTO_DEPRECATED(fcvt);
-/*PROTO_NORMAL(free);			not yet, breaks emacs */
+PROTO_NORMAL(free);
 PROTO_NORMAL(freezero);
 PROTO_DEPRECATED(gcvt);
 PROTO_DEPRECATED(getbsize);
@@ -105,13 +109,14 @@ PROTO_DEPRECATED(ldiv);
 PROTO_STD_DEPRECATED(llabs);
 PROTO_STD_DEPRECATED(lldiv);
 PROTO_DEPRECATED(lrand48);
-/*PROTO_NORMAL(malloc);			not yet, breaks emacs */
+PROTO_NORMAL(malloc);
 PROTO_NORMAL(malloc_conceal);
 PROTO_STD_DEPRECATED(mblen);
 PROTO_STD_DEPRECATED(mbstowcs);
 PROTO_STD_DEPRECATED(mbtowc);
 PROTO_DEPRECATED(mergesort);
 PROTO_DEPRECATED(mkdtemp);
+PROTO_DEPRECATED(mkdtemps);
 PROTO_NORMAL(mkostemp);
 PROTO_DEPRECATED(mkostemps);
 PROTO_NORMAL(mkstemp);
@@ -119,7 +124,7 @@ PROTO_DEPRECATED(mkstemps);
 PROTO_DEPRECATED(mktemp);
 PROTO_DEPRECATED(mrand48);
 PROTO_DEPRECATED(nrand48);
-/*PROTO_NORMAL(posix_memalign);		not yet, breaks emacs */
+PROTO_NORMAL(posix_memalign);
 PROTO_DEPRECATED(posix_openpt);
 PROTO_DEPRECATED(ptsname);
 PROTO_NORMAL(putenv);
@@ -130,7 +135,7 @@ PROTO_DEPRECATED(radixsort);
 PROTO_STD_DEPRECATED(rand);
 PROTO_NORMAL(rand_r);
 PROTO_DEPRECATED(random);
-/*PROTO_NORMAL(realloc);		not yet, breaks emacs */
+PROTO_NORMAL(realloc);
 PROTO_NORMAL(reallocarray);
 PROTO_NORMAL(recallocarray);
 PROTO_DEPRECATED(realpath);

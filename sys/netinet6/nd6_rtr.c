@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6_rtr.c,v 1.168 2022/12/09 17:32:53 claudio Exp $	*/
+/*	$OpenBSD: nd6_rtr.c,v 1.170 2023/03/31 19:43:33 bluhm Exp $	*/
 /*	$KAME: nd6_rtr.c,v 1.97 2001/02/07 11:09:13 itojun Exp $	*/
 
 /*
@@ -60,7 +60,7 @@
 int rt6_deleteroute(struct rtentry *, void *, unsigned int);
 
 /*
- * Process Source Link-layer Address Options from 
+ * Process Source Link-layer Address Options from
  * Router Solicitation / Advertisement Messages.
  */
 void
@@ -107,7 +107,12 @@ nd6_rtr_cache(struct mbuf *m, int off, int icmp6len, int icmp6_type)
 		}
 
 		icmp6len -= sizeof(*nd_rs);
-		nd6_option_init(nd_rs + 1, icmp6len, &ndopts);
+		if (nd6_options(nd_rs + 1, icmp6len, &ndopts) < 0) {
+			nd6log((LOG_INFO,
+			    "%s: invalid ND option, ignored\n", __func__));
+			/* nd6_options have incremented stats */
+			goto freeit;
+		}
 		break;
 	case ND_ROUTER_ADVERT:
 		if (!IN6_IS_ADDR_LINKLOCAL(&saddr6)) {
@@ -125,15 +130,13 @@ nd6_rtr_cache(struct mbuf *m, int off, int icmp6len, int icmp6_type)
 		}
 
 		icmp6len -= sizeof(*nd_ra);
-		nd6_option_init(nd_ra + 1, icmp6len, &ndopts);
+		if (nd6_options(nd_ra + 1, icmp6len, &ndopts) < 0) {
+			nd6log((LOG_INFO,
+			    "%s: invalid ND option, ignored\n", __func__));
+			/* nd6_options have incremented stats */
+			goto freeit;
+		}
 		break;
-	}
-
-	if (nd6_options(&ndopts) < 0) {
-		nd6log((LOG_INFO,
-		    "%s: invalid ND option, ignored\n", __func__));
-		/* nd6_options have incremented stats */
-		goto freeit;
 	}
 
 	if (ndopts.nd_opts_src_lladdr) {

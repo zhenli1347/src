@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.h,v 1.81 2022/11/17 23:26:07 deraadt Exp $	*/
+/*	$OpenBSD: uvm_map.h,v 1.89 2024/04/02 08:39:17 deraadt Exp $	*/
 /*	$NetBSD: uvm_map.h,v 1.24 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
@@ -189,20 +189,15 @@ RBT_PROTOTYPE(uvm_map_addr, vm_map_entry, daddrs.addr_entry,
  *
  *	VM map locking is a little complicated.  There are both shared
  *	and exclusive locks on maps.  However, it is sometimes required
- *	to downgrade an exclusive lock to a shared lock, and upgrade to
- *	an exclusive lock again (to perform error recovery).  However,
- *	another thread *must not* queue itself to receive an exclusive
- *	lock while before we upgrade back to exclusive, otherwise the
- *	error recovery becomes extremely difficult, if not impossible.
+ *	to unlock a VM map (to prevent lock ordering issues) without
+ *	allowing any other thread to modify it.
  *
  *	In order to prevent this scenario, we introduce the notion of
- *	a `busy' map.  A `busy' map is read-locked, but other threads
+ *	a `busy' map.  A `busy' map is unlocked, but other threads
  *	attempting to write-lock wait for this flag to clear before
  *	entering the lock manager.  A map may only be marked busy
- *	when the map is write-locked (and then the map must be downgraded
- *	to read-locked), and may only be marked unbusy by the thread
- *	which marked it busy (holding *either* a read-lock or a
- *	write-lock, the latter being gained by an upgrade).
+ *	when the map is write-locked and may only be marked unbusy by
+ *	the thread which marked it busy.
  *
  *	Access to the map `flags' member is controlled by the `flags_lock'
  *	simple lock.  Note that some flags are static (set once at map
@@ -266,7 +261,6 @@ RBT_PROTOTYPE(uvm_map_addr, vm_map_entry, daddrs.addr_entry,
 struct vm_map {
 	struct pmap		*pmap;		/* [I] Physical map */
 	u_long			sserial;	/* [v] # stack changes */
-	u_long			wserial;	/* [v] # PROT_WRITE increases */
 
 	struct uvm_map_addr	addr;		/* [v] Entry tree, by addr */
 
@@ -274,6 +268,7 @@ struct vm_map {
 	int			ref_count;	/* [a] Reference count */
 	int			flags;		/* flags */
 	unsigned int		timestamp;	/* Version number */
+	struct proc		*busy;		/* [v] thread holding map busy*/
 
 	vaddr_t			min_offset;	/* [I] First address in map. */
 	vaddr_t			max_offset;	/* [I] Last address in map. */
@@ -309,8 +304,14 @@ struct vm_map {
 	struct uvm_addr_state	*uaddr_any[4];	/* More selectors. */
 	struct uvm_addr_state	*uaddr_brk_stack; /* Brk/stack selector. */
 
+#define UVM_MAP_CHECK_COPYIN_MAX 4	/* main, sigtramp, ld.so, libc.so */
+	struct uvm_check_copyin {
+		vaddr_t		start, end;
+	}			check_copyin[UVM_MAP_CHECK_COPYIN_MAX];
+	int			check_copyin_count;
+
 	/*
-	 * XXX struct mutex changes size because of compile options, so place
+	 * XXX struct mutex changes size because of compile options, so
 	 * place after fields which are inspected by libkvm / procmap(8)
 	 */
 	struct rwlock		lock;		/* Non-intrsafe lock */
@@ -326,7 +327,7 @@ struct vm_map {
 #define	VM_MAP_WANTLOCK		0x10		/* rw: want to write-lock */
 #define	VM_MAP_GUARDPAGES	0x20		/* rw: add guard pgs to map */
 #define	VM_MAP_ISVMSPACE	0x40		/* ro: map is a vmspace */
-#define	VM_MAP_SYSCALL_ONCE	0x80		/* rw: libc syscall registered */
+#define	VM_MAP_PINSYSCALL_ONCE	0x100		/* rw: pinsyscall done */
 
 /* Number of kernel maps and entries to statically allocate */
 #define	MAX_KMAPENT	1024	/* Sufficient to make it to the scheduler. */
@@ -354,7 +355,7 @@ int		uvm_map_extract(struct vm_map *, vaddr_t, vsize_t,
 struct vm_map *	uvm_map_create(pmap_t, vaddr_t, vaddr_t, int);
 vaddr_t		uvm_map_pie(vaddr_t);
 vaddr_t		uvm_map_hint(struct vmspace *, vm_prot_t, vaddr_t, vaddr_t);
-int		uvm_map_syscall(struct vm_map *, vaddr_t, vaddr_t);
+int		uvm_map_check_copyin_add(struct vm_map *, vaddr_t, vaddr_t);
 int		uvm_map_immutable(struct vm_map *, vaddr_t, vaddr_t, int);
 int		uvm_map_inherit(struct vm_map *, vaddr_t, vaddr_t, vm_inherit_t);
 int		uvm_map_advice(struct vm_map *, vaddr_t, vaddr_t, int);
@@ -381,7 +382,6 @@ int		uvm_map_mquery(struct vm_map*, vaddr_t*, vsize_t, voff_t, int);
 struct p_inentry;
 
 int		uvm_map_inentry_sp(vm_map_entry_t);
-int		uvm_map_inentry_pc(vm_map_entry_t);
 boolean_t	uvm_map_inentry(struct proc *, struct p_inentry *, vaddr_t addr,
 		    const char *fmt, int (*fn)(vm_map_entry_t), u_long serial);
 
@@ -406,10 +406,6 @@ int		uvm_map_fill_vmmap(struct vm_map *, struct kinfo_vmentry *,
  *
  *	vm_map_unlock_read: release a shared lock on a map.
  *
- *	vm_map_downgrade: downgrade an exclusive lock to a shared lock.
- *
- *	vm_map_upgrade: upgrade a shared lock to an exclusive lock.
- *
  *	vm_map_busy: mark a map as busy.
  *
  *	vm_map_unbusy: clear busy status on a map.
@@ -421,8 +417,6 @@ void		vm_map_lock_ln(struct vm_map*, char*, int);
 void		vm_map_lock_read_ln(struct vm_map*, char*, int);
 void		vm_map_unlock_ln(struct vm_map*, char*, int);
 void		vm_map_unlock_read_ln(struct vm_map*, char*, int);
-void		vm_map_downgrade_ln(struct vm_map*, char*, int);
-void		vm_map_upgrade_ln(struct vm_map*, char*, int);
 void		vm_map_busy_ln(struct vm_map*, char*, int);
 void		vm_map_unbusy_ln(struct vm_map*, char*, int);
 void		vm_map_assert_anylock_ln(struct vm_map*, char*, int);
@@ -434,8 +428,6 @@ void		vm_map_assert_wrlock_ln(struct vm_map*, char*, int);
 #define vm_map_lock_read(map)	vm_map_lock_read_ln(map, __FILE__, __LINE__)
 #define vm_map_unlock(map)	vm_map_unlock_ln(map, __FILE__, __LINE__)
 #define vm_map_unlock_read(map)	vm_map_unlock_read_ln(map, __FILE__, __LINE__)
-#define vm_map_downgrade(map)	vm_map_downgrade_ln(map, __FILE__, __LINE__)
-#define vm_map_upgrade(map)	vm_map_upgrade_ln(map, __FILE__, __LINE__)
 #define vm_map_busy(map)	vm_map_busy_ln(map, __FILE__, __LINE__)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, __FILE__, __LINE__)
 #define vm_map_assert_anylock(map)	\
@@ -448,8 +440,6 @@ void		vm_map_assert_wrlock_ln(struct vm_map*, char*, int);
 #define vm_map_lock_read(map)	vm_map_lock_read_ln(map, NULL, 0)
 #define vm_map_unlock(map)	vm_map_unlock_ln(map, NULL, 0)
 #define vm_map_unlock_read(map)	vm_map_unlock_read_ln(map, NULL, 0)
-#define vm_map_downgrade(map)	vm_map_downgrade_ln(map, NULL, 0)
-#define vm_map_upgrade(map)	vm_map_upgrade_ln(map, NULL, 0)
 #define vm_map_busy(map)	vm_map_busy_ln(map, NULL, 0)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, NULL, 0)
 #define vm_map_assert_anylock(map)	vm_map_assert_anylock_ln(map, NULL, 0)

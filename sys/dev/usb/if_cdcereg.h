@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_cdcereg.h,v 1.7 2016/10/12 21:51:11 fcambus Exp $ */
+/*	$OpenBSD: if_cdcereg.h,v 1.9 2024/01/04 08:41:59 kevlo Exp $ */
 
 /*
  * Copyright (c) 1997, 1998, 1999, 2000-2003 Bill Paul <wpaul@windriver.com>

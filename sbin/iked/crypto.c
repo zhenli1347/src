@@ -1,4 +1,4 @@
-/*	$OpenBSD: crypto.c,v 1.41 2022/11/30 12:42:24 tb Exp $	*/
+/*	$OpenBSD: crypto.c,v 1.46 2023/08/04 19:06:25 claudio Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -306,7 +306,7 @@ hash_new(uint8_t type, uint16_t id)
 struct ibuf *
 hash_setkey(struct iked_hash *hash, void *key, size_t keylen)
 {
-	ibuf_release(hash->hash_key);
+	ibuf_free(hash->hash_key);
 	if ((hash->hash_key = ibuf_new(key, keylen)) == NULL) {
 		log_debug("%s: alloc hash key", __func__);
 		return (NULL);
@@ -320,15 +320,15 @@ hash_free(struct iked_hash *hash)
 	if (hash == NULL)
 		return;
 	HMAC_CTX_free(hash->hash_ctx);
-	ibuf_release(hash->hash_key);
+	ibuf_free(hash->hash_key);
 	free(hash);
 }
 
 void
 hash_init(struct iked_hash *hash)
 {
-	HMAC_Init_ex(hash->hash_ctx, hash->hash_key->buf,
-	    ibuf_length(hash->hash_key), hash->hash_priv, NULL);
+	HMAC_Init_ex(hash->hash_ctx, ibuf_data(hash->hash_key),
+	    ibuf_size(hash->hash_key), hash->hash_priv, NULL);
 }
 
 void
@@ -487,7 +487,7 @@ cipher_new(uint8_t type, uint16_t id, uint16_t id_length)
 struct ibuf *
 cipher_setkey(struct iked_cipher *encr, const void *key, size_t keylen)
 {
-	ibuf_release(encr->encr_key);
+	ibuf_free(encr->encr_key);
 	if ((encr->encr_key = ibuf_new(key, keylen)) == NULL) {
 		log_debug("%s: alloc cipher key", __func__);
 		return (NULL);
@@ -498,7 +498,7 @@ cipher_setkey(struct iked_cipher *encr, const void *key, size_t keylen)
 struct ibuf *
 cipher_setiv(struct iked_cipher *encr, const void *iv, size_t len)
 {
-	ibuf_release(encr->encr_iv);
+	ibuf_free(encr->encr_iv);
 	encr->encr_iv = NULL;
 	if (iv != NULL) {
 		if (len < encr->encr_ivlength) {
@@ -551,8 +551,8 @@ cipher_free(struct iked_cipher *encr)
 	if (encr == NULL)
 		return;
 	EVP_CIPHER_CTX_free(encr->encr_ctx);
-	ibuf_release(encr->encr_iv);
-	ibuf_release(encr->encr_key);
+	ibuf_free(encr->encr_iv);
+	ibuf_free(encr->encr_key);
 	free(encr);
 }
 
@@ -567,12 +567,12 @@ cipher_init(struct iked_cipher *encr, int enc)
 		return (-1);
 	if (encr->encr_saltlength > 0) {
 		/* For AEADs the nonce is salt + IV  (see RFC5282) */
-		nonce = ibuf_new(ibuf_data(encr->encr_key) +
+		nonce = ibuf_new(ibuf_seek(encr->encr_key,
 		    ibuf_size(encr->encr_key) - encr->encr_saltlength,
-		    encr->encr_saltlength);
+		    encr->encr_saltlength), encr->encr_saltlength);
 		if (nonce == NULL)
 			return (-1);
-		if (ibuf_add(nonce, ibuf_data(encr->encr_iv) , ibuf_size(encr->encr_iv)) != 0)
+		if (ibuf_add_buf(nonce, encr->encr_iv) != 0)
 			goto done;
 		if (EVP_CipherInit_ex(encr->encr_ctx, NULL, NULL,
 		    ibuf_data(encr->encr_key), ibuf_data(nonce), enc) != 1)
@@ -767,7 +767,7 @@ dsa_free(struct iked_dsa *dsa)
 		EVP_PKEY_free(dsa->dsa_key);
 	}
 
-	ibuf_release(dsa->dsa_keydata);
+	ibuf_free(dsa->dsa_keydata);
 	free(dsa);
 }
 
@@ -780,7 +780,7 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 	EC_KEY		*ec = NULL;
 	EVP_PKEY	*pkey = NULL;
 
-	ibuf_release(dsa->dsa_keydata);
+	ibuf_free(dsa->dsa_keydata);
 	if ((dsa->dsa_keydata = ibuf_new(key, keylen)) == NULL) {
 		log_debug("%s: alloc signature key", __func__);
 		return (NULL);
@@ -855,7 +855,7 @@ dsa_setkey(struct iked_dsa *dsa, void *key, size_t keylen, uint8_t type)
 	EVP_PKEY_free(pkey);
 	X509_free(cert);
 	BIO_free(rawcert);
-	ibuf_release(dsa->dsa_keydata);
+	ibuf_free(dsa->dsa_keydata);
 	dsa->dsa_keydata = NULL;
 	return (NULL);
 }
@@ -923,7 +923,7 @@ dsa_init(struct iked_dsa *dsa, const void *buf, size_t len)
 
 	if (dsa->dsa_hmac) {
 		if (!HMAC_Init_ex(dsa->dsa_ctx, ibuf_data(dsa->dsa_keydata),
-		    ibuf_length(dsa->dsa_keydata), dsa->dsa_priv, NULL))
+		    ibuf_size(dsa->dsa_keydata), dsa->dsa_priv, NULL))
 			return (-1);
 		return (0);
 	}
@@ -1120,7 +1120,8 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 {
 	ECDSA_SIG	*obj = NULL;
 	uint8_t		*ptr = NULL;
-	size_t		 bnlen, len, off;
+	size_t		 bnlen, off;
+	ssize_t		 len;
 	int		 ret = -1;
 	BIGNUM		*r = NULL, *s = NULL;
 
@@ -1156,7 +1157,7 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 		    (r = BN_bin2bn(*sigp, bnlen, NULL)) == NULL ||
 		    (s = BN_bin2bn(*sigp+bnlen, bnlen, NULL)) == NULL ||
 		    ECDSA_SIG_set0(obj, r, s) == 0 ||
-		    (len = i2d_ECDSA_SIG(obj, &ptr)) == 0)
+		    (len = i2d_ECDSA_SIG(obj, &ptr)) <= 0)
 			goto done;
 		r = s = NULL;
 		*lenp = len;

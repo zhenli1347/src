@@ -1,4 +1,4 @@
-/* $OpenBSD: bn_prime.c,v 1.28 2022/11/26 16:08:51 tb Exp $ */
+/* $OpenBSD: bn_prime.c,v 1.34 2023/07/20 06:26:27 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -116,11 +116,6 @@
 
 #include "bn_local.h"
 
-/* NB: these functions have been "upgraded", the deprecated versions (which are
- * compatibility wrappers using these functions) are in bn_depr.c.
- * - Geoff
- */
-
 /* The quick sieve algorithm approach to weeding out primes is
  * Philip Zimmermann's, as implemented in PGP.  I have had a read of
  * his comments and implemented my own version.
@@ -155,6 +150,7 @@ BN_GENCB_call(BN_GENCB *cb, int a, int b)
 	/* Unrecognised callback type */
 	return 0;
 }
+LCRYPTO_ALIAS(BN_GENCB_call);
 
 int
 BN_generate_prime_ex(BIGNUM *ret, int bits, int safe, const BIGNUM *add,
@@ -200,12 +196,12 @@ BN_generate_prime_ex(BIGNUM *ret, int bits, int safe, const BIGNUM *add,
 		goto err;
 
 	if (!safe) {
-		if (!bn_is_prime_bpsw(&is_prime, ret, ctx))
+		if (!bn_is_prime_bpsw(&is_prime, ret, ctx, 1))
 			goto err;
 		if (!is_prime)
 			goto loop;
 	} else {
-		if (!bn_is_prime_bpsw(&is_prime, ret, ctx))
+		if (!bn_is_prime_bpsw(&is_prime, ret, ctx, 1))
 			goto err;
 		if (!is_prime)
 			goto loop;
@@ -218,7 +214,7 @@ BN_generate_prime_ex(BIGNUM *ret, int bits, int safe, const BIGNUM *add,
 		if (!BN_rshift1(p, ret))
 			goto err;
 
-		if (!bn_is_prime_bpsw(&is_prime, p, ctx))
+		if (!bn_is_prime_bpsw(&is_prime, p, ctx, 1))
 			goto err;
 		if (!is_prime)
 			goto loop;
@@ -235,12 +231,16 @@ BN_generate_prime_ex(BIGNUM *ret, int bits, int safe, const BIGNUM *add,
 
 	return found;
 }
+LCRYPTO_ALIAS(BN_generate_prime_ex);
 
 int
 BN_is_prime_ex(const BIGNUM *a, int checks, BN_CTX *ctx_passed, BN_GENCB *cb)
 {
 	return BN_is_prime_fasttest_ex(a, checks, ctx_passed, 0, cb);
 }
+LCRYPTO_ALIAS(BN_is_prime_ex);
+
+#define BN_PRIME_MAXIMUM_BITS (32 * 1024)
 
 int
 BN_is_prime_fasttest_ex(const BIGNUM *a, int checks, BN_CTX *ctx_passed,
@@ -248,12 +248,28 @@ BN_is_prime_fasttest_ex(const BIGNUM *a, int checks, BN_CTX *ctx_passed,
 {
 	int is_prime;
 
+	if (checks < 0)
+		return -1;
+
+	/*
+	 * Prime numbers this large do not appear in everyday cryptography
+	 * and checking such numbers for primality is very expensive.
+	 */
+	if (BN_num_bits(a) > BN_PRIME_MAXIMUM_BITS) {
+		BNerror(BN_R_BIGNUM_TOO_LONG);
+		return -1;
+	}
+
+	if (checks == BN_prime_checks)
+		checks = BN_prime_checks_for_size(BN_num_bits(a));
+
 	/* XXX - tickle BN_GENCB in bn_is_prime_bpsw(). */
-	if (!bn_is_prime_bpsw(&is_prime, a, ctx_passed))
+	if (!bn_is_prime_bpsw(&is_prime, a, ctx_passed, checks))
 		return -1;
 
 	return is_prime;
 }
+LCRYPTO_ALIAS(BN_is_prime_fasttest_ex);
 
 static int
 probable_prime(BIGNUM *rnd, int bits)

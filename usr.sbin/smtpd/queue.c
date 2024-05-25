@@ -1,4 +1,4 @@
-/*	$OpenBSD: queue.c,v 1.194 2021/08/02 12:33:34 eric Exp $	*/
+/*	$OpenBSD: queue.c,v 1.196 2024/01/20 09:01:03 claudio Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -23,6 +23,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -125,7 +126,7 @@ queue_imsg(struct mproc *p, struct imsg *imsg)
 		return;
 
 	case IMSG_QUEUE_SMTP_SESSION:
-		bounce_fd(imsg->fd);
+		bounce_fd(imsg_get_fd(imsg));
 		return;
 
 	case IMSG_LKA_ENVELOPE_SUBMIT:

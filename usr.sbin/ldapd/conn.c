@@ -1,4 +1,4 @@
-/*	$OpenBSD: conn.c,v 1.18 2019/10/24 12:39:26 tb Exp $ */
+/*	$OpenBSD: conn.c,v 1.21 2023/06/26 10:28:12 claudio Exp $ */
 
 /*
  * Copyright (c) 2009, 2010 Martin Hedenfalk <martin@bzero.se>
@@ -242,7 +242,8 @@ conn_err(struct bufferevent *bev, short why, void *data)
 	else if ((why & EVBUFFER_TIMEOUT) == EVBUFFER_TIMEOUT)
 		log_debug("timeout on connection %d", conn->fd);
 	else
-		log_warnx("error 0x%02X on connection %d", why, conn->fd);
+		log_warn("%s error on connection %d",
+		    why & EVBUFFER_WRITE ? "write" : "read", conn->fd);
 
 	conn_close(conn);
 }
@@ -310,8 +311,10 @@ conn_accept(int fd, short event, void *data)
 	bufferevent_enable(conn->bev, EV_READ);
 	bufferevent_settimeout(conn->bev, 0, 60);
 	if (l->flags & F_LDAPS)
-		if (conn_tls_init(conn) == -1)
+		if (conn_tls_init(conn) == -1) {
 			conn_close(conn);
+			goto giveup;
+		}
 
 	TAILQ_INIT(&conn->searches);
 	TAILQ_INSERT_HEAD(&conn_list, conn, next);
@@ -343,7 +346,7 @@ conn_by_fd(int fd)
 }
 
 int
-conn_close_any()
+conn_close_any(void)
 {
 	struct conn		*conn;
 

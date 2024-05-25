@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ix.c,v 1.189 2022/09/02 14:08:09 jan Exp $	*/
+/*	$OpenBSD: if_ix.c,v 1.215 2024/05/21 11:19:39 bluhm Exp $	*/
 
 /******************************************************************************
 
@@ -36,6 +36,12 @@
 
 #include <dev/pci/if_ix.h>
 #include <dev/pci/ixgbe_type.h>
+
+/*
+ * Our TCP/IP Stack is unable to handle packets greater than MAXMCLBYTES.
+ * This interface is unable to handle packets greater than IXGBE_TSO_SIZE.
+ */
+CTASSERT(MAXMCLBYTES <= IXGBE_TSO_SIZE);
 
 /*********************************************************************
  *  Driver version
@@ -119,46 +125,45 @@ int	ixgbe_allocate_msix(struct ix_softc *);
 void	ixgbe_setup_msix(struct ix_softc *);
 int	ixgbe_allocate_queues(struct ix_softc *);
 void	ixgbe_free_pci_resources(struct ix_softc *);
-void	ixgbe_local_timer(void *);
 void	ixgbe_setup_interface(struct ix_softc *);
 void	ixgbe_config_gpie(struct ix_softc *);
 void	ixgbe_config_delay_values(struct ix_softc *);
 void	ixgbe_add_media_types(struct ix_softc *);
 void	ixgbe_config_link(struct ix_softc *);
 
-int	ixgbe_allocate_transmit_buffers(struct tx_ring *);
+int	ixgbe_allocate_transmit_buffers(struct ix_txring *);
 int	ixgbe_setup_transmit_structures(struct ix_softc *);
-int	ixgbe_setup_transmit_ring(struct tx_ring *);
+int	ixgbe_setup_transmit_ring(struct ix_txring *);
 void	ixgbe_initialize_transmit_units(struct ix_softc *);
 void	ixgbe_free_transmit_structures(struct ix_softc *);
-void	ixgbe_free_transmit_buffers(struct tx_ring *);
+void	ixgbe_free_transmit_buffers(struct ix_txring *);
 
-int	ixgbe_allocate_receive_buffers(struct rx_ring *);
+int	ixgbe_allocate_receive_buffers(struct ix_rxring *);
 int	ixgbe_setup_receive_structures(struct ix_softc *);
-int	ixgbe_setup_receive_ring(struct rx_ring *);
+int	ixgbe_setup_receive_ring(struct ix_rxring *);
 void	ixgbe_initialize_receive_units(struct ix_softc *);
 void	ixgbe_free_receive_structures(struct ix_softc *);
-void	ixgbe_free_receive_buffers(struct rx_ring *);
+void	ixgbe_free_receive_buffers(struct ix_rxring *);
 void	ixgbe_initialize_rss_mapping(struct ix_softc *);
-int	ixgbe_rxfill(struct rx_ring *);
+int	ixgbe_rxfill(struct ix_rxring *);
 void	ixgbe_rxrefill(void *);
 
 int	ixgbe_intr(struct ix_softc *sc);
 void	ixgbe_enable_intr(struct ix_softc *);
 void	ixgbe_disable_intr(struct ix_softc *);
-int	ixgbe_txeof(struct tx_ring *);
-int	ixgbe_rxeof(struct rx_ring *);
-void	ixgbe_rx_checksum(uint32_t, struct mbuf *);
+int	ixgbe_txeof(struct ix_txring *);
+int	ixgbe_rxeof(struct ix_rxring *);
+void	ixgbe_rx_offload(uint32_t, uint16_t, struct mbuf *);
 void	ixgbe_iff(struct ix_softc *);
 void	ixgbe_map_queue_statistics(struct ix_softc *);
 void	ixgbe_update_link_status(struct ix_softc *);
-int	ixgbe_get_buf(struct rx_ring *, int);
-int	ixgbe_encap(struct tx_ring *, struct mbuf *);
+int	ixgbe_get_buf(struct ix_rxring *, int);
+int	ixgbe_encap(struct ix_txring *, struct mbuf *);
 int	ixgbe_dma_malloc(struct ix_softc *, bus_size_t,
 		    struct ixgbe_dma_alloc *, int);
 void	ixgbe_dma_free(struct ix_softc *, struct ixgbe_dma_alloc *);
 static int
-	ixgbe_tx_ctx_setup(struct tx_ring *, struct mbuf *, uint32_t *,
+	ixgbe_tx_ctx_setup(struct ix_txring *, struct mbuf *, uint32_t *,
 	    uint32_t *);
 void	ixgbe_set_ivar(struct ix_softc *, uint8_t, uint8_t, int8_t);
 void	ixgbe_configure_ivars(struct ix_softc *);
@@ -176,7 +181,6 @@ int	ixgbe_legacy_intr(void *);
 void	ixgbe_enable_queue(struct ix_softc *, uint32_t);
 void	ixgbe_enable_queues(struct ix_softc *);
 void	ixgbe_disable_queue(struct ix_softc *, uint32_t);
-void	ixgbe_rearm_queue(struct ix_softc *, uint32_t);
 
 /* MSI-X (multiple vectors interrupt handlers)  */
 int	ixgbe_link_intr(void *);
@@ -184,8 +188,8 @@ int	ixgbe_queue_intr(void *);
 
 #if NKSTAT > 0
 static void	ix_kstats(struct ix_softc *);
-static void	ix_rxq_kstats(struct ix_softc *, struct rx_ring *);
-static void	ix_txq_kstats(struct ix_softc *, struct tx_ring *);
+static void	ix_rxq_kstats(struct ix_softc *, struct ix_rxring *);
+static void	ix_txq_kstats(struct ix_softc *, struct ix_txring *);
 static void	ix_kstats_tick(void *);
 #endif
 
@@ -447,7 +451,7 @@ ixgbe_start(struct ifqueue *ifq)
 {
 	struct ifnet		*ifp = ifq->ifq_if;
 	struct ix_softc		*sc = ifp->if_softc;
-	struct tx_ring		*txr = ifq->ifq_softc;
+	struct ix_txring	*txr = ifq->ifq_softc;
 	struct mbuf  		*m_head;
 	unsigned int		 head, free, used;
 	int			 post = 0;
@@ -635,14 +639,13 @@ int
 ixgbe_rxrinfo(struct ix_softc *sc, struct if_rxrinfo *ifri)
 {
 	struct if_rxring_info *ifr, ifr1;
-	struct rx_ring *rxr;
+	struct ix_rxring *rxr;
 	int error, i;
 	u_int n = 0;
 
 	if (sc->num_queues > 1) {
-		if ((ifr = mallocarray(sc->num_queues, sizeof(*ifr), M_DEVBUF,
-		    M_WAITOK | M_ZERO)) == NULL)
-			return (ENOMEM);
+		ifr = mallocarray(sc->num_queues, sizeof(*ifr), M_DEVBUF,
+		    M_WAITOK | M_ZERO);
 	} else
 		ifr = &ifr1;
 
@@ -670,7 +673,7 @@ void
 ixgbe_watchdog(struct ifnet * ifp)
 {
 	struct ix_softc *sc = (struct ix_softc *)ifp->if_softc;
-	struct tx_ring *txr = sc->tx_rings;
+	struct ix_txring *txr = sc->tx_rings;
 	struct ixgbe_hw *hw = &sc->hw;
 	int		tx_hang = FALSE;
 	int		i;
@@ -732,7 +735,7 @@ ixgbe_init(void *arg)
 {
 	struct ix_softc	*sc = (struct ix_softc *)arg;
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	struct rx_ring	*rxr = sc->rx_rings;
+	struct ix_rxring	*rxr = sc->rx_rings;
 	uint32_t	 k, txdctl, rxdctl, rxctrl, mhadd, itr;
 	int		 i, s, err;
 
@@ -1073,8 +1076,8 @@ ixgbe_queue_intr(void *vque)
 	struct ix_queue *que = vque;
 	struct ix_softc	*sc = que->sc;
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	struct rx_ring	*rxr = que->rxr;
-	struct tx_ring	*txr = que->txr;
+	struct ix_rxring	*rxr = que->rxr;
+	struct ix_txring	*txr = que->txr;
 
 	if (ISSET(ifp->if_flags, IFF_RUNNING)) {
 		ixgbe_rxeof(rxr);
@@ -1098,8 +1101,8 @@ ixgbe_legacy_intr(void *arg)
 {
 	struct ix_softc	*sc = (struct ix_softc *)arg;
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	struct rx_ring	*rxr = sc->rx_rings;
-	struct tx_ring	*txr = sc->tx_rings;
+	struct ix_rxring	*rxr = sc->rx_rings;
+	struct ix_txring	*txr = sc->tx_rings;
 	int rv;
 
 	rv = ixgbe_intr(sc);
@@ -1420,7 +1423,7 @@ ixgbe_media_change(struct ifnet *ifp)
  **********************************************************************/
 
 int
-ixgbe_encap(struct tx_ring *txr, struct mbuf *m_head)
+ixgbe_encap(struct ix_txring *txr, struct mbuf *m_head)
 {
 	struct ix_softc *sc = txr->sc;
 	uint32_t	olinfo_status = 0, cmd_type_len;
@@ -1913,7 +1916,7 @@ ixgbe_setup_interface(struct ix_softc *sc)
 	ifp->if_watchdog = ixgbe_watchdog;
 	ifp->if_hardmtu = IXGBE_MAX_FRAME_SIZE -
 	    ETHER_HDR_LEN - ETHER_CRC_LEN;
-	ifq_set_maxlen(&ifp->if_snd, sc->num_tx_desc - 1);
+	ifq_init_maxlen(&ifp->if_snd, sc->num_tx_desc - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 
@@ -1925,8 +1928,13 @@ ixgbe_setup_interface(struct ix_softc *sc)
 	ifp->if_capabilities |= IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
 	ifp->if_capabilities |= IFCAP_CSUM_IPv4;
 
-	if (sc->hw.mac.type != ixgbe_mac_82598EB)
-		ifp->if_capabilities |= IFCAP_TSO;
+	ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
+	if (sc->hw.mac.type != ixgbe_mac_82598EB) {
+#ifndef __sparc64__
+		ifp->if_xflags |= IFXF_LRO;
+#endif
+		ifp->if_capabilities |= IFCAP_LRO;
+	}
 
 	/*
 	 * Specify the media types supported by this sc and register
@@ -1945,8 +1953,8 @@ ixgbe_setup_interface(struct ix_softc *sc)
 	for (i = 0; i < sc->num_queues; i++) {
 		struct ifqueue *ifq = ifp->if_ifqs[i];
 		struct ifiqueue *ifiq = ifp->if_iqs[i];
-		struct tx_ring *txr = &sc->tx_rings[i];
-		struct rx_ring *rxr = &sc->rx_rings[i];
+		struct ix_txring *txr = &sc->tx_rings[i];
+		struct ix_rxring *rxr = &sc->rx_rings[i];
 
 		ifq->ifq_softc = txr;
 		txr->ifq = ifq;
@@ -2134,8 +2142,8 @@ ixgbe_allocate_queues(struct ix_softc *sc)
 {
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
 	struct ix_queue *que;
-	struct tx_ring *txr;
-	struct rx_ring *rxr;
+	struct ix_txring *txr;
+	struct ix_rxring *rxr;
 	int rsize, tsize;
 	int txconf = 0, rxconf = 0, i;
 
@@ -2148,14 +2156,14 @@ ixgbe_allocate_queues(struct ix_softc *sc)
 
 	/* Then allocate the TX ring struct memory */
 	if (!(sc->tx_rings = mallocarray(sc->num_queues,
-	    sizeof(struct tx_ring), M_DEVBUF, M_NOWAIT | M_ZERO))) {
+	    sizeof(struct ix_txring), M_DEVBUF, M_NOWAIT | M_ZERO))) {
 		printf("%s: Unable to allocate TX ring memory\n", ifp->if_xname);
 		goto fail;
 	}
 
 	/* Next allocate the RX */
 	if (!(sc->rx_rings = mallocarray(sc->num_queues,
-	    sizeof(struct rx_ring), M_DEVBUF, M_NOWAIT | M_ZERO))) {
+	    sizeof(struct ix_rxring), M_DEVBUF, M_NOWAIT | M_ZERO))) {
 		printf("%s: Unable to allocate RX ring memory\n", ifp->if_xname);
 		goto rx_fail;
 	}
@@ -2227,10 +2235,10 @@ err_rx_desc:
 err_tx_desc:
 	for (txr = sc->tx_rings; txconf > 0; txr++, txconf--)
 		ixgbe_dma_free(sc, &txr->txdma);
-	free(sc->rx_rings, M_DEVBUF, sc->num_queues * sizeof(struct rx_ring));
+	free(sc->rx_rings, M_DEVBUF, sc->num_queues * sizeof(struct ix_rxring));
 	sc->rx_rings = NULL;
 rx_fail:
-	free(sc->tx_rings, M_DEVBUF, sc->num_queues * sizeof(struct tx_ring));
+	free(sc->tx_rings, M_DEVBUF, sc->num_queues * sizeof(struct ix_txring));
 	sc->tx_rings = NULL;
 fail:
 	return (ENOMEM);
@@ -2244,7 +2252,7 @@ fail:
  *
  **********************************************************************/
 int
-ixgbe_allocate_transmit_buffers(struct tx_ring *txr)
+ixgbe_allocate_transmit_buffers(struct ix_txring *txr)
 {
 	struct ix_softc 	*sc = txr->sc;
 	struct ifnet		*ifp = &sc->arpcom.ac_if;
@@ -2263,7 +2271,7 @@ ixgbe_allocate_transmit_buffers(struct tx_ring *txr)
 	/* Create the descriptor buffer dma maps */
 	for (i = 0; i < sc->num_tx_desc; i++) {
 		txbuf = &txr->tx_buffers[i];
-		error = bus_dmamap_create(txr->txdma.dma_tag, IXGBE_TSO_SIZE,
+		error = bus_dmamap_create(txr->txdma.dma_tag, MAXMCLBYTES,
 			    sc->num_segs, PAGE_SIZE, 0,
 			    BUS_DMA_NOWAIT, &txbuf->map);
 
@@ -2285,7 +2293,7 @@ fail:
  *
  **********************************************************************/
 int
-ixgbe_setup_transmit_ring(struct tx_ring *txr)
+ixgbe_setup_transmit_ring(struct ix_txring *txr)
 {
 	struct ix_softc		*sc = txr->sc;
 	int			 error;
@@ -2317,7 +2325,7 @@ ixgbe_setup_transmit_ring(struct tx_ring *txr)
 int
 ixgbe_setup_transmit_structures(struct ix_softc *sc)
 {
-	struct tx_ring *txr = sc->tx_rings;
+	struct ix_txring *txr = sc->tx_rings;
 	int		i, error;
 
 	for (i = 0; i < sc->num_queues; i++, txr++) {
@@ -2340,11 +2348,12 @@ void
 ixgbe_initialize_transmit_units(struct ix_softc *sc)
 {
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	struct tx_ring	*txr;
+	struct ix_txring	*txr;
 	struct ixgbe_hw	*hw = &sc->hw;
 	int		 i;
 	uint64_t	 tdba;
 	uint32_t	 txctrl;
+	uint32_t	 hlreg;
 
 	/* Setup the Base and Length of the Tx Descriptor Ring */
 
@@ -2406,6 +2415,11 @@ ixgbe_initialize_transmit_units(struct ix_softc *sc)
 		rttdcs &= ~IXGBE_RTTDCS_ARBDIS;
 		IXGBE_WRITE_REG(hw, IXGBE_RTTDCS, rttdcs);
 	}
+
+	/* Enable TCP/UDP padding when using TSO */
+	hlreg = IXGBE_READ_REG(hw, IXGBE_HLREG0);
+	hlreg |= IXGBE_HLREG0_TXPADEN;
+	IXGBE_WRITE_REG(hw, IXGBE_HLREG0, hlreg);
 }
 
 /*********************************************************************
@@ -2416,7 +2430,7 @@ ixgbe_initialize_transmit_units(struct ix_softc *sc)
 void
 ixgbe_free_transmit_structures(struct ix_softc *sc)
 {
-	struct tx_ring *txr = sc->tx_rings;
+	struct ix_txring *txr = sc->tx_rings;
 	int		i;
 
 	for (i = 0; i < sc->num_queues; i++, txr++)
@@ -2429,7 +2443,7 @@ ixgbe_free_transmit_structures(struct ix_softc *sc)
  *
  **********************************************************************/
 void
-ixgbe_free_transmit_buffers(struct tx_ring *txr)
+ixgbe_free_transmit_buffers(struct ix_txring *txr)
 {
 	struct ix_softc *sc = txr->sc;
 	struct ixgbe_tx_buf *tx_buffer;
@@ -2474,87 +2488,86 @@ ixgbe_free_transmit_buffers(struct tx_ring *txr)
  **********************************************************************/
 
 static inline int
-ixgbe_csum_offload(struct mbuf *mp, uint32_t *vlan_macip_lens,
-    uint32_t *type_tucmd_mlhl, uint32_t *olinfo_status)
+ixgbe_tx_offload(struct mbuf *mp, uint32_t *vlan_macip_lens,
+    uint32_t *type_tucmd_mlhl, uint32_t *olinfo_status, uint32_t *cmd_type_len,
+    uint32_t *mss_l4len_idx)
 {
-	struct ether_header *eh = mtod(mp, struct ether_header *);
-	struct mbuf *m;
-	int hoff;
+	struct ether_extracted ext;
 	int offload = 0;
-	uint32_t iphlen;
-	uint8_t ipproto;
 
-	*vlan_macip_lens |= (sizeof(*eh) << IXGBE_ADVTXD_MACLEN_SHIFT);
+	ether_extract_headers(mp, &ext);
 
-	switch (ntohs(eh->ether_type)) {
-	case ETHERTYPE_IP: {
-		struct ip *ip;
+	*vlan_macip_lens |= (sizeof(*ext.eh) << IXGBE_ADVTXD_MACLEN_SHIFT);
 
-		m = m_getptr(mp, sizeof(*eh), &hoff);
-		KASSERT(m != NULL && m->m_len - hoff >= sizeof(*ip));
-		ip = (struct ip *)(mtod(m, caddr_t) + hoff);
-
-		iphlen = ip->ip_hl << 2;
-		ipproto = ip->ip_p;
-
+	if (ext.ip4) {
 		if (ISSET(mp->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT)) {
 			*olinfo_status |= IXGBE_TXD_POPTS_IXSM << 8;
 			offload = 1;
 		}
 
 		*type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_IPV4;
-		break;
-	}
-
 #ifdef INET6
-	case ETHERTYPE_IPV6: {
-		struct ip6_hdr *ip6;
-
-		m = m_getptr(mp, sizeof(*eh), &hoff);
-		KASSERT(m != NULL && m->m_len - hoff >= sizeof(*ip6));
-		ip6 = (struct ip6_hdr *)(mtod(m, caddr_t) + hoff);
-
-		iphlen = sizeof(*ip6);
-		ipproto = ip6->ip6_nxt;
-
+	} else if (ext.ip6) {
 		*type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_IPV6;
-		break;
-	}
 #endif
-
-	default:
+	} else {
+		if (mp->m_pkthdr.csum_flags & M_TCP_TSO)
+			tcpstat_inc(tcps_outbadtso);
 		return offload;
 	}
 
-	*vlan_macip_lens |= iphlen;
+	*vlan_macip_lens |= ext.iphlen;
 
-	switch (ipproto) {
-	case IPPROTO_TCP:
+	if (ext.tcp) {
 		*type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_L4T_TCP;
 		if (ISSET(mp->m_pkthdr.csum_flags, M_TCP_CSUM_OUT)) {
 			*olinfo_status |= IXGBE_TXD_POPTS_TXSM << 8;
 			offload = 1;
 		}
-		break;
-	case IPPROTO_UDP:
+	} else if (ext.udp) {
 		*type_tucmd_mlhl |= IXGBE_ADVTXD_TUCMD_L4T_UDP;
 		if (ISSET(mp->m_pkthdr.csum_flags, M_UDP_CSUM_OUT)) {
 			*olinfo_status |= IXGBE_TXD_POPTS_TXSM << 8;
 			offload = 1;
 		}
-		break;
+	}
+
+	if (mp->m_pkthdr.csum_flags & M_TCP_TSO) {
+		if (ext.tcp && mp->m_pkthdr.ph_mss > 0) {
+			uint32_t hdrlen, thlen, paylen, outlen;
+
+			thlen = ext.tcphlen;
+
+			outlen = mp->m_pkthdr.ph_mss;
+			*mss_l4len_idx |= outlen << IXGBE_ADVTXD_MSS_SHIFT;
+			*mss_l4len_idx |= thlen << IXGBE_ADVTXD_L4LEN_SHIFT;
+
+			hdrlen = sizeof(*ext.eh) + ext.iphlen + thlen;
+			paylen = mp->m_pkthdr.len - hdrlen;
+			CLR(*olinfo_status, IXGBE_ADVTXD_PAYLEN_MASK
+			    << IXGBE_ADVTXD_PAYLEN_SHIFT);
+			*olinfo_status |= paylen << IXGBE_ADVTXD_PAYLEN_SHIFT;
+
+			*cmd_type_len |= IXGBE_ADVTXD_DCMD_TSE;
+			offload = 1;
+
+			tcpstat_add(tcps_outpkttso,
+			    (paylen + outlen - 1) / outlen);
+		} else
+			tcpstat_inc(tcps_outbadtso);
 	}
 
 	return offload;
 }
 
 static int
-ixgbe_tx_ctx_setup(struct tx_ring *txr, struct mbuf *mp,
+ixgbe_tx_ctx_setup(struct ix_txring *txr, struct mbuf *mp,
     uint32_t *cmd_type_len, uint32_t *olinfo_status)
 {
 	struct ixgbe_adv_tx_context_desc *TXD;
 	struct ixgbe_tx_buf *tx_buffer;
 	uint32_t vlan_macip_lens = 0, type_tucmd_mlhl = 0;
+	uint32_t mss_l4len_idx = 0;
 	int	ctxd = txr->next_avail_desc;
 	int	offload = 0;
 
@@ -2570,8 +2583,8 @@ ixgbe_tx_ctx_setup(struct tx_ring *txr, struct mbuf *mp,
 	}
 #endif
 
-	offload |= ixgbe_csum_offload(mp, &vlan_macip_lens, &type_tucmd_mlhl,
-	    olinfo_status);
+	offload |= ixgbe_tx_offload(mp, &vlan_macip_lens, &type_tucmd_mlhl,
+	    olinfo_status, cmd_type_len, &mss_l4len_idx);
 
 	if (!offload)
 		return (0);
@@ -2585,7 +2598,7 @@ ixgbe_tx_ctx_setup(struct tx_ring *txr, struct mbuf *mp,
 	TXD->vlan_macip_lens = htole32(vlan_macip_lens);
 	TXD->type_tucmd_mlhl = htole32(type_tucmd_mlhl);
 	TXD->seqnum_seed = htole32(0);
-	TXD->mss_l4len_idx = htole32(0);
+	TXD->mss_l4len_idx = htole32(mss_l4len_idx);
 
 	tx_buffer->m_head = NULL;
 	tx_buffer->eop_index = -1;
@@ -2601,7 +2614,7 @@ ixgbe_tx_ctx_setup(struct tx_ring *txr, struct mbuf *mp,
  *
  **********************************************************************/
 int
-ixgbe_txeof(struct tx_ring *txr)
+ixgbe_txeof(struct ix_txring *txr)
 {
 	struct ix_softc			*sc = txr->sc;
 	struct ifqueue			*ifq = txr->ifq;
@@ -2671,7 +2684,7 @@ ixgbe_txeof(struct tx_ring *txr)
  *
  **********************************************************************/
 int
-ixgbe_get_buf(struct rx_ring *rxr, int i)
+ixgbe_get_buf(struct ix_rxring *rxr, int i)
 {
 	struct ix_softc		*sc = rxr->sc;
 	struct ixgbe_rx_buf	*rxbuf;
@@ -2720,7 +2733,7 @@ ixgbe_get_buf(struct rx_ring *rxr, int i)
  *
  **********************************************************************/
 int
-ixgbe_allocate_receive_buffers(struct rx_ring *rxr)
+ixgbe_allocate_receive_buffers(struct ix_rxring *rxr)
 {
 	struct ix_softc		*sc = rxr->sc;
 	struct ifnet		*ifp = &sc->arpcom.ac_if;
@@ -2761,7 +2774,7 @@ fail:
  *
  **********************************************************************/
 int
-ixgbe_setup_receive_ring(struct rx_ring *rxr)
+ixgbe_setup_receive_ring(struct ix_rxring *rxr)
 {
 	struct ix_softc		*sc = rxr->sc;
 	struct ifnet		*ifp = &sc->arpcom.ac_if;
@@ -2793,7 +2806,7 @@ ixgbe_setup_receive_ring(struct rx_ring *rxr)
 }
 
 int
-ixgbe_rxfill(struct rx_ring *rxr)
+ixgbe_rxfill(struct ix_rxring *rxr)
 {
 	struct ix_softc *sc = rxr->sc;
 	int		 post = 0;
@@ -2829,7 +2842,7 @@ ixgbe_rxfill(struct rx_ring *rxr)
 void
 ixgbe_rxrefill(void *xrxr)
 {
-	struct rx_ring *rxr = xrxr;
+	struct ix_rxring *rxr = xrxr;
 	struct ix_softc *sc = rxr->sc;
 
 	if (ixgbe_rxfill(rxr)) {
@@ -2849,7 +2862,7 @@ ixgbe_rxrefill(void *xrxr)
 int
 ixgbe_setup_receive_structures(struct ix_softc *sc)
 {
-	struct rx_ring *rxr = sc->rx_rings;
+	struct ix_rxring *rxr = sc->rx_rings;
 	int i;
 
 	for (i = 0; i < sc->num_queues; i++, rxr++)
@@ -2873,7 +2886,7 @@ void
 ixgbe_initialize_receive_units(struct ix_softc *sc)
 {
 	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	struct rx_ring	*rxr = sc->rx_rings;
+	struct ix_rxring	*rxr = sc->rx_rings;
 	struct ixgbe_hw	*hw = &sc->hw;
 	uint32_t	bufsz, fctrl, srrctl, rxcsum, rdrxctl;
 	uint32_t	hlreg;
@@ -2894,18 +2907,20 @@ ixgbe_initialize_receive_units(struct ix_softc *sc)
 	}
 	IXGBE_WRITE_REG(hw, IXGBE_FCTRL, fctrl);
 
-	/* Always enable jumbo frame reception */
 	hlreg = IXGBE_READ_REG(hw, IXGBE_HLREG0);
+	/* Always enable jumbo frame reception */
 	hlreg |= IXGBE_HLREG0_JUMBOEN;
+	/* Always enable CRC stripping */
+	hlreg |= IXGBE_HLREG0_RXCRCSTRP;
 	IXGBE_WRITE_REG(hw, IXGBE_HLREG0, hlreg);
 
-	if (ISSET(ifp->if_xflags, IFXF_TSO)) {
+	if (ISSET(ifp->if_xflags, IFXF_LRO)) {
 		rdrxctl = IXGBE_READ_REG(hw, IXGBE_RDRXCTL);
 
 		/* This field has to be set to zero. */
 		rdrxctl &= ~IXGBE_RDRXCTL_RSCFRSTSIZE;
 
-		/* Enable TSO Receive Offloading */
+		/* RSC Coalescing on ACK Change */
 		rdrxctl |= IXGBE_RDRXCTL_RSCACKC;
 		rdrxctl |= IXGBE_RDRXCTL_FCOE_WRFIX;
 
@@ -2928,10 +2943,10 @@ ixgbe_initialize_receive_units(struct ix_softc *sc)
 		srrctl = bufsz | IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 		IXGBE_WRITE_REG(hw, IXGBE_SRRCTL(i), srrctl);
 
-		if (ISSET(ifp->if_xflags, IFXF_TSO)) {
+		if (ISSET(ifp->if_xflags, IFXF_LRO)) {
 			rdrxctl = IXGBE_READ_REG(&sc->hw, IXGBE_RSCCTL(i));
 
-			/* Enable TSO Receive Side Coalescing */
+			/* Enable Receive Side Coalescing */
 			rdrxctl |= IXGBE_RSCCTL_RSCEN;
 			rdrxctl |= IXGBE_RSCCTL_MAXDESC_16;
 
@@ -3046,7 +3061,7 @@ ixgbe_initialize_rss_mapping(struct ix_softc *sc)
 void
 ixgbe_free_receive_structures(struct ix_softc *sc)
 {
-	struct rx_ring *rxr;
+	struct ix_rxring *rxr;
 	int		i;
 
 	for (i = 0, rxr = sc->rx_rings; i < sc->num_queues; i++, rxr++)
@@ -3062,7 +3077,7 @@ ixgbe_free_receive_structures(struct ix_softc *sc)
  *
  **********************************************************************/
 void
-ixgbe_free_receive_buffers(struct rx_ring *rxr)
+ixgbe_free_receive_buffers(struct ix_rxring *rxr)
 {
 	struct ix_softc		*sc;
 	struct ixgbe_rx_buf	*rxbuf;
@@ -3081,8 +3096,11 @@ ixgbe_free_receive_buffers(struct rx_ring *rxr)
 				m_freem(rxbuf->buf);
 				rxbuf->buf = NULL;
 			}
-			bus_dmamap_destroy(rxr->rxdma.dma_tag, rxbuf->map);
-			rxbuf->map = NULL;
+			if (rxbuf->map != NULL) {
+				bus_dmamap_destroy(rxr->rxdma.dma_tag,
+				    rxbuf->map);
+				rxbuf->map = NULL;
+			}
 		}
 		free(rxr->rx_buffers, M_DEVBUF,
 		    sc->num_rx_desc * sizeof(struct ixgbe_rx_buf));
@@ -3098,7 +3116,7 @@ ixgbe_free_receive_buffers(struct rx_ring *rxr)
  *
  *********************************************************************/
 int
-ixgbe_rxeof(struct rx_ring *rxr)
+ixgbe_rxeof(struct ix_rxring *rxr)
 {
 	struct ix_softc 	*sc = rxr->sc;
 	struct ifnet   		*ifp = &sc->arpcom.ac_if;
@@ -3156,10 +3174,10 @@ ixgbe_rxeof(struct rx_ring *rxr)
 		if (staterr & IXGBE_RXDADV_ERR_FRAME_ERR_MASK) {
 			if (rxbuf->fmp) {
 				m_freem(rxbuf->fmp);
-				rxbuf->fmp = NULL;
+			} else {
+				m_freem(mp);
 			}
-
-			m_freem(mp);
+			rxbuf->fmp = NULL;
 			rxbuf->buf = NULL;
 			goto next_desc;
 		}
@@ -3201,19 +3219,23 @@ ixgbe_rxeof(struct rx_ring *rxr)
 		sendmp = rxbuf->fmp;
 		rxbuf->buf = rxbuf->fmp = NULL;
 
-		if (sendmp != NULL) /* secondary frag */
-			sendmp->m_pkthdr.len += mp->m_len;
-		else {
+		if (sendmp == NULL) {
 			/* first desc of a non-ps chain */
 			sendmp = mp;
-			sendmp->m_pkthdr.len = mp->m_len;
-#if NVLAN > 0
-			if (sc->vlan_stripping && staterr & IXGBE_RXD_STAT_VP) {
-				sendmp->m_pkthdr.ether_vtag = vtag;
-				sendmp->m_flags |= M_VLANTAG;
-			}
-#endif
+			sendmp->m_pkthdr.len = 0;
+			sendmp->m_pkthdr.ph_mss = 0;
+		} else {
+			mp->m_flags &= ~M_PKTHDR;
 		}
+		sendmp->m_pkthdr.len += mp->m_len;
+		/*
+		 * This function iterates over interleaved descriptors.
+		 * Thus, we reuse ph_mss as global segment counter per
+		 * TCP connection, instead of introducing a new variable
+		 * in m_pkthdr.
+		 */
+		if (rsccnt)
+			sendmp->m_pkthdr.ph_mss += rsccnt - 1;
 
 		/* Pass the head pointer on */
 		if (eop == 0) {
@@ -3221,7 +3243,7 @@ ixgbe_rxeof(struct rx_ring *rxr)
 			sendmp = NULL;
 			mp->m_next = nxbuf->buf;
 		} else { /* Sending this frame? */
-			ixgbe_rx_checksum(staterr, sendmp);
+			ixgbe_rx_offload(staterr, vtag, sendmp);
 
 			if (hashtype != IXGBE_RXDADV_RSSTYPE_NONE) {
 				sendmp->m_pkthdr.ph_flowid = hash;
@@ -3253,48 +3275,110 @@ next_desc:
 
 /*********************************************************************
  *
+ *  Check VLAN indication from hardware and inform the stack about the
+ *  annotated TAG.
+ *
  *  Verify that the hardware indicated that the checksum is valid.
  *  Inform the stack about the status of checksum so that stack
  *  doesn't spend time verifying the checksum.
  *
+ *  Propagate TCP LRO packet from hardware to the stack with MSS annotation.
+ *
  *********************************************************************/
 void
-ixgbe_rx_checksum(uint32_t staterr, struct mbuf * mp)
+ixgbe_rx_offload(uint32_t staterr, uint16_t vtag, struct mbuf *m)
 {
 	uint16_t status = (uint16_t) staterr;
 	uint8_t  errors = (uint8_t) (staterr >> 24);
+	int16_t  pkts;
 
-	if (status & IXGBE_RXD_STAT_IPCS) {
-		if (!(errors & IXGBE_RXD_ERR_IPE)) {
-			/* IP Checksum Good */
-			mp->m_pkthdr.csum_flags = M_IPV4_CSUM_IN_OK;
-		} else
-			mp->m_pkthdr.csum_flags = 0;
+	/*
+	 * VLAN Offload
+	 */
+
+#if NVLAN > 0
+	if (ISSET(staterr, IXGBE_RXD_STAT_VP)) {
+		m->m_pkthdr.ether_vtag = vtag;
+		SET(m->m_flags, M_VLANTAG);
 	}
-	if (status & IXGBE_RXD_STAT_L4CS) {
-		if (!(errors & IXGBE_RXD_ERR_TCPE))
-			mp->m_pkthdr.csum_flags |=
-				M_TCP_CSUM_IN_OK | M_UDP_CSUM_IN_OK;
+#endif
+
+	/*
+	 * Checksum Offload
+	 */
+
+	if (ISSET(status, IXGBE_RXD_STAT_IPCS)) {
+		if (ISSET(errors, IXGBE_RXD_ERR_IPE))
+			SET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_BAD);
+		else
+			SET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_OK);
+	}
+	if (ISSET(status, IXGBE_RXD_STAT_L4CS) &&
+	    !ISSET(status, IXGBE_RXD_STAT_UDPCS)) {
+		if (ISSET(errors, IXGBE_RXD_ERR_TCPE)) {
+			/* on some hardware IPv6 + TCP + Bad is broken */
+			if (ISSET(status, IXGBE_RXD_STAT_IPCS))
+				SET(m->m_pkthdr.csum_flags, M_TCP_CSUM_IN_BAD);
+		} else
+			SET(m->m_pkthdr.csum_flags, M_TCP_CSUM_IN_OK);
+	}
+	if (ISSET(status, IXGBE_RXD_STAT_L4CS) &&
+	    ISSET(status, IXGBE_RXD_STAT_UDPCS)) {
+		if (ISSET(errors, IXGBE_RXD_ERR_TCPE))
+			SET(m->m_pkthdr.csum_flags, M_UDP_CSUM_IN_BAD);
+		else
+			SET(m->m_pkthdr.csum_flags, M_UDP_CSUM_IN_OK);
+	}
+
+	/*
+	 * TCP Large Receive Offload
+	 */
+
+	pkts = m->m_pkthdr.ph_mss;
+	m->m_pkthdr.ph_mss = 0;
+
+	if (pkts > 1) {
+		struct ether_extracted ext;
+		uint32_t paylen;
+
+		/*
+		 * Calculate the payload size:
+		 *
+		 * The packet length returned by the NIC (m->m_pkthdr.len)
+		 * can contain padding, which we don't want to count in to the
+		 * payload size.  Therefore, we calculate the real payload size
+		 * based on the total ip length field (ext.iplen).
+		 */
+		ether_extract_headers(m, &ext);
+		paylen = ext.iplen;
+		if (ext.ip4 || ext.ip6)
+			paylen -= ext.iphlen;
+		if (ext.tcp) {
+			paylen -= ext.tcphlen;
+			tcpstat_inc(tcps_inhwlro);
+			tcpstat_add(tcps_inpktlro, pkts);
+		} else {
+			tcpstat_inc(tcps_inbadlro);
+		}
+
+		/*
+		 * If we gonna forward this packet, we have to mark it as TSO,
+		 * set a correct mss, and recalculate the TCP checksum.
+		 */
+		if (ext.tcp && paylen >= pkts) {
+			SET(m->m_pkthdr.csum_flags, M_TCP_TSO);
+			m->m_pkthdr.ph_mss = paylen / pkts;
+		}
+		if (ext.tcp && ISSET(m->m_pkthdr.csum_flags, M_TCP_CSUM_IN_OK))
+			SET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT);
 	}
 }
 
 void
 ixgbe_setup_vlan_hw_support(struct ix_softc *sc)
 {
-	struct ifnet	*ifp = &sc->arpcom.ac_if;
-	uint32_t	 ctrl;
-	int		 i;
-
-	/*
-	 * We have to disable VLAN striping when using TCP offloading, due to a
-	 * firmware bug.
-	 */
-	if (ISSET(ifp->if_xflags, IFXF_TSO)) {
-		sc->vlan_stripping = 0;
-		return;
-	}
-
-	sc->vlan_stripping = 1;
+	uint32_t	ctrl;
+	int		i;
 
 	/*
 	 * A soft reset zero's out the VFTA, so
@@ -3766,7 +3850,7 @@ ix_kstats(struct ix_softc *sc)
 }
 
 static void
-ix_rxq_kstats(struct ix_softc *sc, struct rx_ring *rxr)
+ix_rxq_kstats(struct ix_softc *sc, struct ix_rxring *rxr)
 {
 	struct ix_rxq_kstats *stats;
 	struct kstat *ks;
@@ -3790,7 +3874,7 @@ ix_rxq_kstats(struct ix_softc *sc, struct rx_ring *rxr)
 }
 
 static void
-ix_txq_kstats(struct ix_softc *sc, struct tx_ring *txr)
+ix_txq_kstats(struct ix_softc *sc, struct ix_txring *txr)
 {
 	struct ix_txq_kstats *stats;
 	struct kstat *ks;
@@ -3896,7 +3980,7 @@ int
 ix_rxq_kstats_read(struct kstat *ks)
 {
 	struct ix_rxq_kstats *stats = ks->ks_data;
-	struct rx_ring *rxr = ks->ks_softc;
+	struct ix_rxring *rxr = ks->ks_softc;
 	struct ix_softc *sc = rxr->sc;
 	struct ixgbe_hw	*hw = &sc->hw;
 	uint32_t i = rxr->me;
@@ -3923,7 +4007,7 @@ int
 ix_txq_kstats_read(struct kstat *ks)
 {
 	struct ix_txq_kstats *stats = ks->ks_data;
-	struct tx_ring *txr = ks->ks_softc;
+	struct ix_txring *txr = ks->ks_softc;
 	struct ix_softc *sc = txr->sc;
 	struct ixgbe_hw	*hw = &sc->hw;
 	uint32_t i = txr->me;

@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.6 2022/02/06 11:29:18 visa Exp $
+#	$OpenBSD: install.md,v 1.10 2023/10/11 17:53:52 kn Exp $
 #
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
@@ -32,6 +32,7 @@
 # machine dependent section of installation/upgrade script.
 #
 
+MDBOOTSR=y
 NCPU=$(sysctl -n hw.ncpufound)
 
 md_installboot() {
@@ -54,6 +55,7 @@ md_prep_fdisk() {
 	while :; do
 		_d=whole
 		if disk_has $_disk gpt; then
+			# Is this a boot disk?
 			[[ $_disk == $ROOTDISK ]] && bootpart="-b ${bootsectorsize}"
 			_type=GPT
 			fdisk $_disk
@@ -120,7 +122,7 @@ __EOT
 				disk_has $_disk mbr openbsd && return
 				echo -n "No OpenBSD partition in MBR,"
 			fi
-			echo "try again." ;;
+			echo " try again." ;;
 		esac
 	done
 }

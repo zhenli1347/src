@@ -3,6 +3,7 @@ package ExtUtils::MM_Unix;
 require 5.006;
 
 use strict;
+use warnings;
 
 use Carp;
 use ExtUtils::MakeMaker::Config;
@@ -12,10 +13,11 @@ our %Config_Override;
 
 use ExtUtils::MakeMaker qw($Verbose neatvalue _sprintf562);
 
-# If we make $VERSION an our variable parse_version() breaks
-use vars qw($VERSION);
-$VERSION = '7.44';
+# If $VERSION is in scope, parse_version() breaks
+{
+our $VERSION = '7.70';
 $VERSION =~ tr/_//d;
+}
 
 require ExtUtils::MM_Any;
 our @ISA = qw(ExtUtils::MM_Any);
@@ -33,13 +35,16 @@ BEGIN {
     $Is{SunOS4}  = $^O eq 'sunos';
     $Is{Solaris} = $^O eq 'solaris';
     $Is{SunOS}   = $Is{SunOS4} || $Is{Solaris};
-    $Is{BSD}     = ($^O =~ /^(?:free|net|open)bsd$/ or
+    $Is{BSD}     = ($^O =~ /^(?:free|midnight|net|open)bsd$/ or
                    grep( $^O eq $_, qw(bsdos interix dragonfly) )
                   );
     $Is{Android} = $^O =~ /android/;
-    if ( $^O eq 'darwin' && $^X eq '/usr/bin/perl' ) {
+    if ( $^O eq 'darwin' ) {
       my @osvers = split /\./, $Config{osvers};
-      $Is{ApplCor} = ( $osvers[0] >= 18 );
+      if ( $^X eq '/usr/bin/perl' ) {
+        $Is{ApplCor} = ( $osvers[0] >= 18 );
+      }
+      $Is{AppleRPath} = ( $osvers[0] >= 9 );
     }
 }
 
@@ -140,9 +145,9 @@ sub c_o {
         $flags =~ s/"-I(\$\(PERL_INC\))"/-iwithsysroot "$1"/;
     }
 
-    if (my $cpp = $Config{cpprun}) {
+    if (my $cpp = $self->{CPPRUN}) {
         my $cpp_cmd = $self->const_cccmd;
-        $cpp_cmd =~ s/^CCCMD\s*=\s*\$\(CC\)/$cpp/;
+        $cpp_cmd =~ s/^CCCMD\s*=\s*\$\(CC\)/\$(CPPRUN)/;
         push @m, qq{
 .c.i:
 	$cpp_cmd $flags \$*.c > \$*.i
@@ -1047,9 +1052,19 @@ sub xs_make_dynamic_lib {
     }
     $ldfrom = "-all $ldfrom -none" if $Is{OSF};
 
+    my $ldrun = '';
     # The IRIX linker doesn't use LD_RUN_PATH
-    my $ldrun = $Is{IRIX} && $self->{LD_RUN_PATH} ?
-                       qq{-rpath "$self->{LD_RUN_PATH}"} : '';
+    if ( $self->{LD_RUN_PATH} ) {
+        if ( $Is{IRIX} ) {
+            $ldrun = qq{-rpath "$self->{LD_RUN_PATH}"};
+        }
+        elsif ( $^O eq 'darwin' && $Is{AppleRPath} ) {
+            # both clang and gcc support -Wl,-rpath, but only clang supports
+            # -rpath so by using -Wl,-rpath we avoid having to check for the
+            # type of compiler
+            $ldrun = qq{-Wl,-rpath,"$self->{LD_RUN_PATH}"};
+        }
+    }
 
     # For example in AIX the shared objects/libraries from previous builds
     # linger quite a while in the shared dynalinker cache even when nobody
@@ -1314,7 +1329,7 @@ sub _fixin_replace_shebang {
             if ($self->maybe_command($origcmd) && grep { $_ eq $origdir } @absdirs) {
                 my ($odev, $oino) = stat $origcmd;
                 my ($idev, $iino) = stat $interpreter;
-                if ($odev == $idev && $oino == $iino) {
+                if ($odev == $idev && $oino eq $iino) {
                     warn "$origcmd is the same as $interpreter, leaving alone"
                         if $Verbose;
                     $interpreter = $origcmd;
@@ -2182,7 +2197,7 @@ Add MM_Unix_VERSION.
 sub init_platform {
     my($self) = shift;
 
-    $self->{MM_Unix_VERSION} = $VERSION;
+    $self->{MM_Unix_VERSION} = our $VERSION;
     $self->{PERL_MALLOC_DEF} = '-DPERL_EXTMALLOC_DEF -Dmalloc=Perl_malloc '.
                                '-Dfree=Perl_mfree -Drealloc=Perl_realloc '.
                                '-Dcalloc=Perl_calloc';
@@ -3001,7 +3016,7 @@ sub parse_version {
         chop;
         next if /^\s*(if|unless|elsif)/;
         if ( m{^ \s* package \s+ \w[\w\:\']* \s+ (v?[0-9._]+) \s* (;|\{)  }x ) {
-            local $^W = 0;
+            no warnings;
             $result = $1;
         }
         elsif ( m{(?<!\\) ([\$*]) (([\w\:\']*) \bVERSION)\b .* (?<![<>=!])\=[^=]}x ) {
@@ -3019,6 +3034,10 @@ sub parse_version {
       my $normal = eval { version->new( $result ) };
       $result = $normal if defined $normal;
     }
+    if ( defined $result ) {
+      $result = "undef" unless $result =~ m!^v?[\d_\.]+$!
+                        or eval { version->parse( $result ) };
+    }
     $result = "undef" unless defined $result;
     return $result;
 }
@@ -3034,8 +3053,8 @@ sub get_version {
             version::->import;
         };
         no strict;
+        no warnings;
         local *{$name};
-        local $^W = 0;
         $line = $1 if $line =~ m{^(.+)}s;
         eval($line); ## no critic
         return ${$name};
@@ -3233,11 +3252,12 @@ PPD_PERLVERS
     }
 
     my $archname = $Config{archname};
+
+    # archname did not change from 5.6 to 5.8, but those versions may
+    # not be not binary compatible so now we append the part of the
+    # version that changes when binary compatibility may change
     if ("$]" >= 5.008) {
-        # archname did not change from 5.6 to 5.8, but those versions may
-        # not be not binary compatible so now we append the part of the
-        # version that changes when binary compatibility may change
-        $archname .= "-$Config{PERL_REVISION}.$Config{PERL_VERSION}";
+        $archname .= "-$Config{api_revision}.$Config{api_version}";
     }
     push @ppd_chunks, sprintf <<'PPD_OUT', $archname;
         <ARCHITECTURE NAME="%s" />
@@ -3972,8 +3992,6 @@ sub top_targets {
 
     push @m, sprintf <<'EOF';
 pure_all :: config pm_to_blib subdirs linkext
-	$(NOECHO) $(NOOP)
-
 	$(NOECHO) $(NOOP)
 
 subdirs :: $(MYEXTLIB)

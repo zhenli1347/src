@@ -13,6 +13,9 @@
 #include "perl.h"
 #include "XSUB.h"
 
+/* #include "invlist_inline.h" */
+#define FROM_INTERNAL_SIZE(x) ((x)/ sizeof(UV))
+
 #ifdef PerlIO
 typedef PerlIO * InputStream;
 #else
@@ -37,6 +40,7 @@ static const char* const svclassnames[] = {
     "B::CV",
     "B::FM",
     "B::IO",
+    "B::OBJ",
 };
 
 
@@ -185,7 +189,7 @@ make_temp_object(pTHX_ SV *temp)
 static SV *
 make_warnings_object(pTHX_ const COP *const cop)
 {
-    const STRLEN *const warnings = cop->cop_warnings;
+    const char *const warnings = cop->cop_warnings;
     const char *type = 0;
     dMY_CXT;
     IV iv = sizeof(specialsv_list)/sizeof(SV*);
@@ -207,7 +211,7 @@ make_warnings_object(pTHX_ const COP *const cop)
     } else {
 	/* B assumes that warnings are a regular SV. Seems easier to keep it
 	   happy by making them into a regular SV.  */
-	return make_temp_object(aTHX_ newSVpvn((char *)(warnings + 1), *warnings));
+        return make_temp_object(aTHX_ newSVpvn(warnings, RCPV_LEN(warnings)));
     }
 }
 
@@ -472,6 +476,7 @@ typedef PADLIST	*B__PADLIST;
 typedef PADNAMELIST *B__PADNAMELIST;
 typedef PADNAME	*B__PADNAME;
 
+typedef INVLIST  *B__INVLIST;
 
 #ifdef MULTIPLICITY
 #  define ASSIGN_COMMON_ALIAS(prefix, var) \
@@ -486,7 +491,6 @@ typedef PADNAME	*B__PADNAME;
 static XSPROTO(intrpvar_sv_common); /* prototype to pass -Wmissing-prototypes */
 static XSPROTO(intrpvar_sv_common)
 {
-    dVAR;
     dXSARGS;
     SV *ret;
     if (items != 0)
@@ -544,7 +548,7 @@ static const struct OP_methods {
 #ifdef USE_ITHREADS
   { STR_WITH_LEN("pmoffset"),IVp,     STRUCT_OFFSET(struct pmop, op_pmoffset),},/*20*/
   { STR_WITH_LEN("filegv"),  op_offset_special, 0,                     },/*21*/
-  { STR_WITH_LEN("file"),    char_pp, STRUCT_OFFSET(struct cop, cop_file),  },/*22*/
+  { STR_WITH_LEN("file"),    char_pp, STRUCT_OFFSET(struct cop, cop_file),  }, /*22*/
   { STR_WITH_LEN("stash"),   op_offset_special, 0,                     },/*23*/
   { STR_WITH_LEN("stashpv"), op_offset_special, 0,                     },/*24*/
   { STR_WITH_LEN("stashoff"),PADOFFSETp,STRUCT_OFFSET(struct cop,cop_stashoff),},/*25*/
@@ -635,7 +639,7 @@ BOOT:
     cv = newXS("B::diehook", intrpvar_sv_common, file);
     ASSIGN_COMMON_ALIAS(I, diehook);
     sv = get_sv("B::OP::does_parent", GV_ADDMULTI);
-    sv_setsv(sv, &PL_sv_yes);
+    sv_setbool(sv, TRUE);
 }
 
 void
@@ -700,8 +704,8 @@ walkoptree_debug(...)
     CODE:
 	dMY_CXT;
 	RETVAL = walkoptree_debug;
-	if (items > 0 && SvTRUE(ST(1)))
-	    walkoptree_debug = 1;
+	if (items > 0)
+	    walkoptree_debug = SvTRUE(ST(0));
     OUTPUT:
 	RETVAL
 
@@ -899,11 +903,9 @@ next(o)
 		ret = make_sv_object(aTHX_ (SV *)CopFILEGV((COP*)o));
 		break;
 #endif
-#ifndef USE_ITHREADS
 	    case 22: /* B::COP::file */
 		ret = sv_2mortal(newSVpv(CopFILE((COP*)o), 0));
 		break;
-#endif
 #ifdef USE_ITHREADS
 	    case 23: /* B::COP::stash */
 		ret = make_sv_object(aTHX_ (SV *)CopSTASH((COP*)o));
@@ -1069,13 +1071,13 @@ next(o)
                  */
 		ret = make_op_object(aTHX_
                             o->op_type == OP_METHOD
-                                ? cMETHOPx(o)->op_u.op_first : NULL);
+                                ? cMETHOPo->op_u.op_first : NULL);
 		break;
 	    case 54: /* B::METHOP::meth_sv */
                 /* see comment above about METHOP */
 		ret = make_sv_object(aTHX_
                             o->op_type == OP_METHOD
-                                ? NULL : cMETHOPx(o)->op_u.op_meth_sv);
+                                ? NULL : cMETHOPo->op_u.op_meth_sv);
 		break;
 	    case 55: /* B::PMOP::pmregexp */
 		ret = make_sv_object(aTHX_ (SV *)PM_GETRE(cPMOPo));
@@ -1085,13 +1087,13 @@ next(o)
 		ret = sv_2mortal(newSVuv(
 		    (o->op_type == OP_METHOD_REDIR ||
 		     o->op_type == OP_METHOD_REDIR_SUPER) ?
-		      cMETHOPx(o)->op_rclass_targ : 0
+		      cMETHOPo->op_rclass_targ : 0
 		));
 #else
 		ret = make_sv_object(aTHX_
 		    (o->op_type == OP_METHOD_REDIR ||
 		     o->op_type == OP_METHOD_REDIR_SUPER) ?
-		      cMETHOPx(o)->op_rclass_sv : NULL
+		      cMETHOPo->op_rclass_sv : NULL
 		);
 #endif
 		break;
@@ -1395,12 +1397,12 @@ aux_list(o, cv)
 
 
 
-MODULE = B	PACKAGE = B::SV
+MODULE = B	PACKAGE = B::SV         PREFIX = Sv
 
 #define MAGICAL_FLAG_BITS (SVs_GMG|SVs_SMG|SVs_RMG)
 
 U32
-REFCNT(sv)
+SvREFCNT(sv)
 	B::SV	sv
     ALIAS:
 	FLAGS = 0xFFFFFFFF
@@ -1414,11 +1416,23 @@ REFCNT(sv)
 	RETVAL
 
 void
-object_2svref(sv)
+Svobject_2svref(sv)
 	B::SV	sv
     PPCODE:
 	ST(0) = sv_2mortal(newRV(sv));
 	XSRETURN(1);
+
+bool
+SvIsBOOL(sv)
+    B::SV   sv
+
+bool
+SvTRUE(sv)
+    B::SV   sv
+
+bool
+SvTRUE_nomg(sv)
+    B::SV   sv
 	
 MODULE = B	PACKAGE = B::IV		PREFIX = Sv
 
@@ -1631,6 +1645,71 @@ REGEX(sv)
 	    /* FIXME - can we code this method more efficiently?  */
 		PUSHi(PTR2IV(sv));
 	}
+
+MODULE = B  PACKAGE = B::INVLIST    PREFIX = Invlist
+
+int
+prev_index(invlist)
+       B::INVLIST      invlist
+    CODE:
+        RETVAL = ((XINVLIST*) SvANY(invlist))->prev_index;
+    OUTPUT:
+       RETVAL
+
+int
+is_offset(invlist)
+       B::INVLIST      invlist
+    CODE:
+        RETVAL = ((XINVLIST*) SvANY(invlist))->is_offset == TRUE ? 1 : 0;
+    OUTPUT:
+       RETVAL
+
+unsigned int
+array_len(invlist)
+       B::INVLIST      invlist
+    CODE:
+    {
+        if (SvCUR(invlist) > 0)
+            RETVAL = FROM_INTERNAL_SIZE(SvCUR(invlist)); /* - ((XINVLIST*) SvANY(invlist))->is_offset; */ /* <- for iteration */
+        else
+            RETVAL = 0;
+    }
+    OUTPUT:
+       RETVAL
+
+void
+get_invlist_array(invlist)
+    B::INVLIST      invlist
+PPCODE:
+  {
+    /* should use invlist_is_iterating but not public for now */
+    bool is_iterating = ( (XINVLIST*) SvANY(invlist) )->iterator < (STRLEN) UV_MAX;
+
+    if (is_iterating) {
+        croak( "Can't access inversion list: in middle of iterating" );
+    }
+
+    {
+        UV pos;
+        UV len;
+
+        len = 0;
+        /* should use _invlist_len (or not) */
+        if (SvCUR(invlist) > 0)
+            len = FROM_INTERNAL_SIZE(SvCUR(invlist)); /* - ((XINVLIST*) SvANY(invlist))->is_offset; */ /* <- for iteration */
+
+        if ( len > 0 ) {
+            UV *array = (UV*) SvPVX( invlist ); /* invlist_array */
+
+            EXTEND(SP, (int) len);
+
+            for ( pos = 0; pos < len; ++pos ) {
+                PUSHs( sv_2mortal( newSVuv(array[pos]) ) );
+            }
+        }
+    }
+
+  }
 
 MODULE = B	PACKAGE = B::PV
 
@@ -2184,13 +2263,14 @@ MODULE = B	PACKAGE = B::PADNAME	PREFIX = Padname
 	sv_U32p | STRUCT_OFFSET(struct padname, xpadn_low)
 #define PN_cop_seq_range_high_ix \
 	sv_U32p | STRUCT_OFFSET(struct padname, xpadn_high)
+#define PN_xpadn_gen_ix \
+	sv_I32p | STRUCT_OFFSET(struct padname, xpadn_gen)
 #define PNL_refcnt_ix \
 	sv_U32p | STRUCT_OFFSET(struct padnamelist, xpadnl_refcnt)
 #define PL_id_ix \
 	sv_U32p | STRUCT_OFFSET(struct padlist, xpadl_id)
 #define PL_outid_ix \
 	sv_U32p | STRUCT_OFFSET(struct padlist, xpadl_outid)
-
 
 void
 PadnameTYPE(pn)
@@ -2202,12 +2282,13 @@ PadnameTYPE(pn)
 	B::PADNAME::REFCNT	= PN_refcnt_ix
 	B::PADNAME::COP_SEQ_RANGE_LOW	 = PN_cop_seq_range_low_ix
 	B::PADNAME::COP_SEQ_RANGE_HIGH	 = PN_cop_seq_range_high_ix
+	B::PADNAME::GEN		= PN_xpadn_gen_ix
 	B::PADNAMELIST::REFCNT	= PNL_refcnt_ix
 	B::PADLIST::id		= PL_id_ix
 	B::PADLIST::outid	= PL_outid_ix
     PREINIT:
 	char *ptr;
-	SV *ret;
+	SV *ret = NULL;
     PPCODE:
 	ptr = (ix & 0xFFFF) + (char *)pn;
 	switch ((U8)(ix >> 16)) {
@@ -2237,6 +2318,14 @@ PadnamePV(pn)
 	SvUTF8_on(TARG);
 	XPUSHTARG;
 
+bool
+PadnameIsUndef(padn)
+       B::PADNAME      padn
+    CODE:
+        RETVAL = padn == &PL_padname_undef;
+    OUTPUT:
+       RETVAL
+
 BOOT:
 {
     /* Uses less memory than an ALIAS.  */
@@ -2261,7 +2350,7 @@ PadnameFLAGS(pn)
 	RETVAL = PadnameFLAGS(pn);
 	/* backward-compatibility hack, which should be removed if the
 	   flags field becomes large enough to hold SVf_FAKE (and
-	   PADNAMEt_OUTER should be renumbered to match SVf_FAKE) */
+	   PADNAMEf_OUTER should be renumbered to match SVf_FAKE) */
 	STATIC_ASSERT_STMT(SVf_FAKE >= 1<<(sizeof(PadnameFLAGS((B__PADNAME)NULL)) * 8));
 	if (PadnameOUTER(pn))
 	    RETVAL |= SVf_FAKE;

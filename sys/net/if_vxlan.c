@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vxlan.c,v 1.91 2022/06/06 14:45:41 claudio Exp $ */
+/*	$OpenBSD: if_vxlan.c,v 1.99 2023/12/23 10:52:54 bluhm Exp $ */
 
 /*
  * Copyright (c) 2021 David Gwynne <dlg@openbsd.org>
@@ -31,7 +31,6 @@
 #include <sys/refcnt.h>
 #include <sys/smr.h>
 
-#include <sys/socket.h>
 #include <sys/socketvar.h>
 
 #include <net/if.h>
@@ -68,7 +67,6 @@
  * The protocol.
  */
 
-#define VXLANMTU		1492
 #define VXLAN_PORT		4789
 
 struct vxlan_header {
@@ -935,9 +933,9 @@ vxlan_tep_add_addr(struct vxlan_softc *sc, const union vxlan_addr *addr,
 		goto free;
 
 	solock(so);
-
 	sotoinpcb(so)->inp_upcall = vxlan_input;
 	sotoinpcb(so)->inp_upcall_arg = vt;
+	sounlock(so);
 
 	m_inithdr(&m);
 	m.m_len = sizeof(vt->vt_rdomain);
@@ -974,11 +972,11 @@ vxlan_tep_add_addr(struct vxlan_softc *sc, const union vxlan_addr *addr,
 		unhandled_af(vt->vt_af);
 	}
 
+	solock(so);
 	error = sobind(so, &m, curproc);
+	sounlock(so);
 	if (error != 0)
 		goto close;
-
-	sounlock(so);
 
 	rw_assert_wrlock(&vxlan_lock);
 	TAILQ_INSERT_TAIL(&vxlan_teps, vt, vt_entry);
@@ -988,7 +986,6 @@ vxlan_tep_add_addr(struct vxlan_softc *sc, const union vxlan_addr *addr,
 	return (0);
 
 close:
-	sounlock(so);
 	soclose(so, MSG_DONTWAIT);
 free:
 	free(vt, M_DEVBUF, sizeof(*vt));
@@ -1348,6 +1345,9 @@ vxlan_set_tunnel(struct vxlan_softc *sc, const struct if_laddrreq *req)
 			if (in_nullhost(dst4->sin_addr))
 				return (EINVAL);
 
+			if (dst4->sin_port != htons(0))
+				return (EINVAL);
+
 			/* all good */
 			mode = IN_MULTICAST(dst4->sin_addr.s_addr) ?
 			    VXLAN_TMODE_LEARNING : VXLAN_TMODE_P2P;
@@ -1378,15 +1378,18 @@ vxlan_set_tunnel(struct vxlan_softc *sc, const struct if_laddrreq *req)
 			if (src6->sin6_scope_id != dst6->sin6_scope_id)
 				return (EINVAL);
 
+			if (dst6->sin6_port != htons(0))
+				return (EINVAL);
+
 			/* all good */
 			mode = IN6_IS_ADDR_MULTICAST(&dst6->sin6_addr) ?
 			    VXLAN_TMODE_LEARNING : VXLAN_TMODE_P2P;
-			error = in6_embedscope(&daddr.in6, dst6, NULL);
+			error = in6_embedscope(&daddr.in6, dst6, NULL, NULL);
 			if (error != 0)
 				return (error);
 		}
 
-		error = in6_embedscope(&saddr.in6, src6, NULL);
+		error = in6_embedscope(&saddr.in6, src6, NULL, NULL);
 		if (error != 0)
 			return (error);
 
@@ -1584,6 +1587,8 @@ vxlan_set_parent(struct vxlan_softc *sc, const struct if_parent *p)
 		goto put;
 	}
 
+	ifsetlro(ifp0, 0);
+
 	/* commit */
 	sc->sc_if_index0 = ifp0->if_index;
 	etherbridge_flush(&sc->sc_eb, IFBF_FLUSHALL);
@@ -1697,7 +1702,7 @@ vxlan_add_addr(struct vxlan_softc *sc, const struct ifbareq *ifba)
 		if (sin6->sin6_port != htons(0))
 			return (EADDRNOTAVAIL);
 
-		error = in6_embedscope(&endpoint.in6, sin6, NULL);
+		error = in6_embedscope(&endpoint.in6, sin6, NULL, NULL);
 		if (error != 0)
 			return (error);
 

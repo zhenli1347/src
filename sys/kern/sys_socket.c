@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_socket.c,v 1.56 2022/11/19 14:26:39 kn Exp $	*/
+/*	$OpenBSD: sys_socket.c,v 1.65 2024/04/30 17:59:15 mvs Exp $	*/
 /*	$NetBSD: sys_socket.c,v 1.13 1995/08/12 23:59:09 mycroft Exp $	*/
 
 /*
@@ -83,7 +83,6 @@ int
 soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 {
 	struct socket *so = (struct socket *)fp->f_data;
-	int error = 0;
 
 	switch (cmd) {
 
@@ -92,6 +91,8 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 
 	case FIOASYNC:
 		solock(so);
+		mtx_enter(&so->so_rcv.sb_mtx);
+		mtx_enter(&so->so_snd.sb_mtx);
 		if (*(int *)data) {
 			so->so_rcv.sb_flags |= SB_ASYNC;
 			so->so_snd.sb_flags |= SB_ASYNC;
@@ -99,6 +100,8 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 			so->so_rcv.sb_flags &= ~SB_ASYNC;
 			so->so_snd.sb_flags &= ~SB_ASYNC;
 		}
+		mtx_leave(&so->so_snd.sb_mtx);
+		mtx_leave(&so->so_rcv.sb_mtx);
 		sounlock(so);
 		break;
 
@@ -109,8 +112,7 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 	case FIOSETOWN:
 	case SIOCSPGRP:
 	case TIOCSPGRP:
-		error = sigio_setown(&so->so_sigio, cmd, data);
-		break;
+		return sigio_setown(&so->so_sigio, cmd, data);
 
 	case FIOGETOWN:
 	case SIOCGPGRP:
@@ -119,7 +121,7 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 		break;
 
 	case SIOCATMARK:
-		*(int *)data = (so->so_state&SS_RCVATMARK) != 0;
+		*(int *)data = (so->so_rcv.sb_state & SS_RCVATMARK) != 0;
 		break;
 
 	default:
@@ -128,17 +130,14 @@ soo_ioctl(struct file *fp, u_long cmd, caddr_t data, struct proc *p)
 		 * interface and routing ioctls should have a
 		 * different entry since a socket's unnecessary
 		 */
-		if (IOCGROUP(cmd) == 'i') {
-			error = ifioctl(so, cmd, data, p);
-			return (error);
-		}
+		if (IOCGROUP(cmd) == 'i')
+			return ifioctl(so, cmd, data, p);
 		if (IOCGROUP(cmd) == 'r')
 			return (EOPNOTSUPP);
-		error = pru_control(so, cmd, data, NULL);
-		break;
+		return pru_control(so, cmd, data, NULL);
 	}
 
-	return (error);
+	return (0);
 }
 
 int
@@ -148,15 +147,18 @@ soo_stat(struct file *fp, struct stat *ub, struct proc *p)
 
 	memset(ub, 0, sizeof (*ub));
 	ub->st_mode = S_IFSOCK;
-	solock(so);
-	if ((so->so_state & SS_CANTRCVMORE) == 0 || so->so_rcv.sb_cc != 0)
+	solock_shared(so);
+	mtx_enter(&so->so_rcv.sb_mtx);
+	if ((so->so_rcv.sb_state & SS_CANTRCVMORE) == 0 ||
+	    so->so_rcv.sb_cc != 0)
 		ub->st_mode |= S_IRUSR | S_IRGRP | S_IROTH;
-	if ((so->so_state & SS_CANTSENDMORE) == 0)
+	mtx_leave(&so->so_rcv.sb_mtx);
+	if ((so->so_snd.sb_state & SS_CANTSENDMORE) == 0)
 		ub->st_mode |= S_IWUSR | S_IWGRP | S_IWOTH;
 	ub->st_uid = so->so_euid;
 	ub->st_gid = so->so_egid;
 	(void)pru_sense(so, ub);
-	sounlock(so);
+	sounlock_shared(so);
 	return (0);
 }
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmparam.h,v 1.29 2016/12/23 12:38:16 visa Exp $	*/
+/*	$OpenBSD: vmparam.h,v 1.31 2023/11/16 13:47:22 deraadt Exp $	*/
 /*	$NetBSD: vmparam.h,v 1.5 1994/10/26 21:10:10 cgd Exp $	*/
 
 /*
@@ -51,7 +51,7 @@
  * Virtual memory related constants, all in bytes
  */
 #ifndef MAXTSIZ
-#define	MAXTSIZ		(64*1024*1024)		/* max text size */
+#define	MAXTSIZ		(128*1024*1024)		/* max text size */
 #endif
 #ifndef DFLDSIZ
 #define	DFLDSIZ		(128*1024*1024)		/* initial data size limit */
@@ -99,6 +99,9 @@
 #define VM_MIN_ADDRESS		((vaddr_t)0x0000000000004000L)
 #define VM_MAXUSER_ADDRESS	((vaddr_t)0x0000010000000000L)
 #define VM_MAX_ADDRESS		VM_MAXUSER_ADDRESS
+#ifdef _KERNEL
+#define VM_MIN_STACK_ADDRESS	((vaddr_t)0x000000c000000000L)
+#endif
 #define	VM_MIN_KERNEL_ADDRESS	((vaddr_t)0xc000000000000000L)
 #define	VM_MAX_KERNEL_ADDRESS	((vaddr_t)0xc000000040000000L)
 

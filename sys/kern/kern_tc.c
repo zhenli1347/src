@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_tc.c,v 1.80 2022/12/05 23:18:37 deraadt Exp $ */
+/*	$OpenBSD: kern_tc.c,v 1.83 2024/02/23 23:01:15 cheloha Exp $ */
 
 /*
  * Copyright (c) 2000 Poul-Henning Kamp <phk@FreeBSD.org>
@@ -56,7 +56,6 @@ dummy_get_timecount(struct timecounter *tc)
 
 static struct timecounter dummy_timecounter = {
 	.tc_get_timecount = dummy_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 1000000,
 	.tc_name = "dummy",
@@ -97,7 +96,7 @@ static struct timehands th1 = {
 static struct timehands th0 = {
 	.th_counter = &dummy_timecounter,
 	.th_scale = UINT64_MAX / 1000000,
-	.th_offset = { .sec = 1, .frac = 0 },
+	.th_offset = { .sec = 0, .frac = 0 },
 	.th_generation = 1,
 	.th_next = &th1
 };
@@ -118,7 +117,7 @@ static SLIST_HEAD(, timecounter) tc_list = SLIST_HEAD_INITIALIZER(tc_list);
  * examining kernel core dumps.
  */
 volatile time_t naptime = 0;
-volatile time_t time_second = 1;
+volatile time_t time_second = 0;
 volatile time_t time_uptime = 0;
 
 static int timestepwarnings;
@@ -292,6 +291,30 @@ nanoruntime(struct timespec *ts)
 
 	binruntime(&bt);
 	BINTIME_TO_TIMESPEC(&bt, ts);
+}
+
+void
+getbinruntime(struct bintime *bt)
+{
+	struct timehands *th;
+	u_int gen;
+
+	do {
+		th = timehands;
+		gen = th->th_generation;
+		membar_consumer();
+		bintimesub(&th->th_offset, &th->th_naptime, bt);
+		membar_consumer();
+	} while (gen == 0 || gen != th->th_generation);
+}
+
+uint64_t
+getnsecruntime(void)
+{
+	struct bintime bt;
+
+	getbinruntime(&bt);
+	return BINTIME_TO_NSEC(&bt);
 }
 
 void
@@ -683,19 +706,6 @@ tc_windup(struct bintime *new_boottime, struct bintime *new_offset,
 		naptime = th->th_naptime.sec;
 		th->th_offset = *new_offset;
 	}
-
-#ifdef notyet
-	/*
-	 * Hardware latching timecounters may not generate interrupts on
-	 * PPS events, so instead we poll them.  There is a finite risk that
-	 * the hardware might capture a count which is later than the one we
-	 * got above, and therefore possibly in the next NTP second which might
-	 * have a different rate than the current NTP second.  It doesn't
-	 * matter in practice.
-	 */
-	if (tho->th_counter->tc_poll_pps)
-		tho->th_counter->tc_poll_pps(tho->th_counter);
-#endif
 
 	/*
 	 * If changing the boot time or clock adjustment, do so before

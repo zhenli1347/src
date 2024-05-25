@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.23 2021/04/11 17:18:16 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.25 2023/04/28 12:26:43 krw Exp $
 
 FS=		install${OSrev}.img
 FSSIZE=		1032192
@@ -21,9 +21,9 @@ all: ${FS} ${CDROM}
 
 ${FS}: ${BASE} ${XBASE}
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
-	vnconfig -v ${FS} > vnd
-	disklabel -w `cat vnd` ${FSDISKTYPE}
-	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	vnconfig -v -t ${FSDISKTYPE} ${FS} > vnd
+	echo '/ *' | disklabel -wAT- `cat vnd`
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} -b 8192 -f 4096 /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	install -c -m 555 -o root -g wheel \
 	    ${DESTDIR}/usr/mdec/ofwboot ${MOUNT_POINT}/ofwboot

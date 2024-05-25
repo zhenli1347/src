@@ -1,4 +1,4 @@
-/*	$OpenBSD: protosw.h,v 1.59 2022/11/26 17:52:35 mvs Exp $	*/
+/*	$OpenBSD: protosw.h,v 1.66 2024/04/14 20:46:27 bluhm Exp $	*/
 /*	$NetBSD: protosw.h,v 1.10 1996/04/09 20:55:32 cgd Exp $	*/
 
 /*-
@@ -69,6 +69,7 @@ struct pr_usrreqs {
 	int	(*pru_detach)(struct socket *);
 	void	(*pru_lock)(struct socket *);
 	void	(*pru_unlock)(struct socket *);
+	int	(*pru_locked)(struct socket *so);
 	int	(*pru_bind)(struct socket *, struct mbuf *, struct proc *);
 	int	(*pru_listen)(struct socket *);
 	int	(*pru_connect)(struct socket *, struct mbuf *);
@@ -115,22 +116,23 @@ struct protosw {
 	int	(*pr_sysctl)(int *, u_int, void *, size_t *, void *, size_t);
 };
 
-#define	PR_SLOWHZ	2		/* 2 slow timeouts per second */
-#define	PR_FASTHZ	5		/* 5 fast timeouts per second */
+#define PR_SLOWHZ	2		/* 2 slow timeouts per second */
+#define PR_FASTHZ	5		/* 5 fast timeouts per second */
 
 /*
  * Values for pr_flags.
  * PR_ADDR requires PR_ATOMIC;
  * PR_ADDR and PR_CONNREQUIRED are mutually exclusive.
  */
-#define	PR_ATOMIC	0x01		/* exchange atomic messages only */
-#define	PR_ADDR		0x02		/* addresses given with messages */
-#define	PR_CONNREQUIRED	0x04		/* connection required by protocol */
-#define	PR_WANTRCVD	0x08		/* want PRU_RCVD calls */
-#define	PR_RIGHTS	0x10		/* passes capabilities */
-#define	PR_ABRTACPTDIS	0x20		/* abort on accept(2) to disconnected
+#define PR_ATOMIC	0x0001		/* exchange atomic messages only */
+#define PR_ADDR		0x0002		/* addresses given with messages */
+#define PR_CONNREQUIRED	0x0004		/* connection required by protocol */
+#define PR_WANTRCVD	0x0008		/* want PRU_RCVD calls */
+#define PR_RIGHTS	0x0010		/* passes capabilities */
+#define PR_ABRTACPTDIS	0x0020		/* abort on accept(2) to disconnected
 					   socket */
-#define	PR_SPLICE	0x40		/* socket splicing is possible */
+#define PR_SPLICE	0x0040		/* socket splicing is possible */
+#define PR_MPINPUT	0x0080		/* input runs with shared netlock */
 
 /*
  * The arguments to usrreq are:
@@ -259,6 +261,7 @@ struct ifnet;
 struct sockaddr;
 const struct protosw *pffindproto(int, int, int);
 const struct protosw *pffindtype(int, int);
+const struct domain *pffinddomain(int);
 void pfctlinput(int, struct sockaddr *);
 
 extern u_char ip_protox[];
@@ -284,13 +287,23 @@ pru_detach(struct socket *so)
 static inline void
 pru_lock(struct socket *so)
 {
-	(*so->so_proto->pr_usrreqs->pru_lock)(so);
+	if (so->so_proto->pr_usrreqs->pru_lock)
+		(*so->so_proto->pr_usrreqs->pru_lock)(so);
 }
 
 static inline void
 pru_unlock(struct socket *so)
 {
-	(*so->so_proto->pr_usrreqs->pru_unlock)(so);
+	if (so->so_proto->pr_usrreqs->pru_unlock)
+		(*so->so_proto->pr_usrreqs->pru_unlock)(so);
+}
+
+static inline int
+pru_locked(struct socket *so)
+{
+	if (so->so_proto->pr_usrreqs->pru_locked)
+		return (*so->so_proto->pr_usrreqs->pru_locked)(so);
+	return (0);
 }
 
 static inline int

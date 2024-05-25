@@ -1,4 +1,4 @@
-/*	$OpenBSD: device.h,v 1.64 2022/09/03 18:05:10 kettenis Exp $	*/
+/*	$OpenBSD: device.h,v 1.66 2023/07/08 14:44:43 tobhe Exp $	*/
 /*	$NetBSD: device.h,v 1.15 1996/04/09 20:55:24 cgd Exp $	*/
 
 /*
@@ -199,6 +199,7 @@ void config_pending_decr(void);
 void config_mountroot(struct device *, void (*)(struct device *));
 void config_process_deferred_mountroot(void);
 
+int	request_sleep(int);
 int	sleep_state(void *, int);
 #define SLEEP_SUSPEND	0x01
 #define SLEEP_HIBERNATE	0x02
@@ -231,7 +232,7 @@ void	device_register(struct device *, void *);
 void	device_register_wakeup(struct device *);
 
 int loadfirmware(const char *name, u_char **bufp, size_t *buflen);
-#define FIRMWARE_MAX	5*1024*1024
+#define FIRMWARE_MAX	15*1024*1024
 
 /* compatibility definitions */
 #define config_found(d, a, p)	config_found_sm((d), (a), (p), NULL)

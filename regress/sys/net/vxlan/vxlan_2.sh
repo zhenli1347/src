@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$Id: vxlan_2.sh,v 1.3 2022/02/21 00:36:22 dlg Exp $
+#	$Id: vxlan_2.sh,v 1.5 2024/02/29 06:54:29 anton Exp $
 
 
 CAPFILE=$(mktemp -t regress_vxlan.XXXXXXX)
@@ -104,10 +104,12 @@ vstack_add() {
 
 . ${CURDIR}/vxlan_subr
 
-VNETID=0
+# Use the first rdomain as the vnetid.
+VNETID="$(set -- $RDOMAINS; echo $1)"
+RDOMAINS="$(set -- $RDOMAINS; shift 1; echo $@)"
+
 for rdom in $RDOMAINS; do
 	rdomain_is_used $rdom || abort_test "rdomain $rdom already in use"
-	[[ $rdom -ge $VNETID ]] && VNETID=$(( rdom + 1 ))
 done
 
 rdomain_is_used $VNETID || abort_test "rdomain $rdom already in use"
@@ -142,6 +144,11 @@ for id in $RDOMAINS; do
 done
 
 CLEANUP_IFS="bridge$VNETID $CLEANUP_IFS"
+
+for id in $RDOMAINS; do
+	CLEANUP_IFS="$CLEANUP_IFS lo${id}"
+done
+CLEANUP_IFS="$CLEANUP_IFS lo${VNETID}"
 
 STATUS=0
 

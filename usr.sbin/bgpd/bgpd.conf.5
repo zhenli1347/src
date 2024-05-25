@@ -1,4 +1,4 @@
-.\" $OpenBSD: bgpd.conf.5,v 1.226 2022/07/21 12:34:19 claudio Exp $
+.\" $OpenBSD: bgpd.conf.5,v 1.240 2024/04/24 10:41:34 claudio Exp $
 .\"
 .\" Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
 .\" Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -16,12 +16,12 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 21 2022 $
+.Dd $Mdocdate: April 24 2024 $
 .Dt BGPD.CONF 5
 .Os
 .Sh NAME
 .Nm bgpd.conf
-.Nd Border Gateway Protocol daemon configuration file
+.Nd BGP routing daemon configuration file
 .Sh DESCRIPTION
 The
 .Xr bgpd 8
@@ -40,7 +40,7 @@ Global settings for
 .Xr bgpd 8 .
 .It Sx SET CONFIGURATION
 Various lookup tables are defined in this section.
-.It Sx NETWORK ANNOUNCEMENTS
+.It Sx NETWORK AND FLOWSPEC ANNOUNCEMENTS
 Networks which should be announced by
 .Xr bgpd 8
 are set in this section.
@@ -426,12 +426,16 @@ may be defined, against which
 will validate the origin of each prefix.
 The
 .Ic roa-set
-is merged with the tables received via
+and the
+.Ic aspa-set
+are merged with the corresponding tables received via
 .Ic rtr
 sessions.
 .Pp
 A set definition can span multiple lines, and an optional comma is allowed
 between elements.
+The same set can be defined more than once, in this case the definitions are
+merged into one common set.
 .Pp
 .Bl -tag -width Ds -compact
 .It Xo
@@ -445,8 +449,33 @@ stores AS numbers, and can be used with the AS specific parameter in
 rules.
 .Pp
 .It Xo
+.Ic aspa-set
+.Ic { Ic customer-as Ar as-number
+.Op Ic expires Ar seconds
+.Ic provider-as Ic { Ar as-number
+.Ic ... Ic } ... Ic }
+.Xc
+The
+.Ic aspa-set
+holds a collection of
+.Em Validated ASPA Payloads Pq VAPs .
+Each as AS_PATH received from an eBGP peer is checked against the
+.Ic aspa-set ,
+and the ASPA Validation State (AVS) is set.
+.Ic expires
+can be set to the seconds since Epoch until when this VAP is valid.
+.Bd -literal -offset indent
+aspa-set {
+	customer-as 64511 provider-as { 64496 65496 }
+	customer-as 64496 provider-as { 65496 64544 }
+}
+.Ed
+.Pp
+.It Xo
 .Ic origin-set Ar name
-.Ic { Ar address Ns Li / Ns Ar len Ic maxlen Ar mlen Ic source-as Ar asn ... Ic }
+.Ic { Ar address Ns Li / Ns Ar len
+.Op Ic maxlen Ar mlen
+.Ic source-as Ar asn ... Ic }
 .Xc
 An
 .Ic origin-set
@@ -560,7 +589,7 @@ is
 .Em 323 .
 .El
 .El
-.Sh NETWORK ANNOUNCEMENTS
+.Sh NETWORK AND FLOWSPEC ANNOUNCEMENTS
 .Ic network
 statements specify the networks that
 .Xr bgpd 8
@@ -576,21 +605,21 @@ announces no networks.
 .It Xo
 .Ic network
 .Ar address Ns Li / Ns Ar prefix
-.Op Ic set ...\&
+.Op Ic set ...
 .Xc
 Announce the specified prefix as belonging to our AS.
 .Pp
 .It Xo
 .Ic network
 .Pq Ic inet Ns | Ns Ic inet6
-.Ic connected Op Ic set ...\&
+.Ic connected Op Ic set ...
 .Xc
 Announce routes to directly attached networks.
 .Pp
 .It Xo
 .Ic network prefix-set
 .Ar name
-.Op Ic set ...\&
+.Op Ic set ...
 .Xc
 Announce all networks in the prefix-set
 .Ar name .
@@ -598,7 +627,7 @@ Announce all networks in the prefix-set
 .It Xo
 .Ic network
 .Pq Ic inet Ns | Ns Ic inet6
-.Ic priority Ar number Op Ic set ...\&
+.Ic priority Ar number Op Ic set ...
 .Xc
 Announce routes having the specified
 .Ar priority .
@@ -606,7 +635,7 @@ Announce routes having the specified
 .It Xo
 .Ic network
 .Pq Ic inet Ns | Ns Ic inet6
-.Ic rtlabel Ar label Op Ic set ...\&
+.Ic rtlabel Ar label Op Ic set ...
 .Xc
 Announce routes having the specified
 .Ar label .
@@ -614,7 +643,7 @@ Announce routes having the specified
 .It Xo
 .Ic network
 .Pq Ic inet Ns | Ns Ic inet6
-.Ic static Op Ic set ...\&
+.Ic static Op Ic set ...
 .Xc
 Announce all static routes.
 .El
@@ -630,6 +659,121 @@ network 192.168.7.0/24 set localpref 220
 See also the
 .Sx ATTRIBUTE SET
 section.
+.Pp
+.Ic flowspec
+statements specify the flowspec rules that
+.Xr bgpd 8
+will announce as its own.
+.\"An announcement must also be permitted by the
+.\".Sx FILTER
+.\"rules.
+By default
+.Xr bgpd 8
+announces no flowspec rules.
+.Pp
+.Bl -tag -width Ds -compact
+.It Xo
+.Ic flowspec
+.Pq Ic inet Ns | Ns Ic inet6
+.Ar rule Op Ic set ...
+.Xc
+Announce an IPv4 or IPv6 specific flowspec
+.Ar rule
+including the
+.Em AS path attributes
+specified by
+.Ar set .
+.El
+.Pp
+The following rule parameters can be set.
+Most number arguments in the below rules can be specified as a
+list of ranges enclosed in curly brackets using these operators:
+.Bd -literal -offset indent
+=       (equal, default)
+!=      (unequal)
+<       (less than)
+<=      (less than or equal)
+>       (greater than)
+>=      (greater than or equal)
+-       (range including boundaries)
+><      (except range)
+.Ed
+.Pp
+.Sq >< ,
+and
+.Sq -
+are binary operators (they take two arguments).
+.Pp
+.Bl -tag -width Ds -compact
+.It Ic from Ar source Op Ic port Ar list
+.It Ic to Ar dest Op Ic port Ar list
+This rule applies only to packets with the specified source or
+destination addresses and ports.
+Addresses can be specified in CIDR notation (matching netblocks) or using
+.Cm any
+to match any address.
+In most cases a
+.Ic to
+address must be specified and be part of the announced networks.
+.Pp
+Ports can be specified either by number or by name.
+For example, port 80 can be specified as
+.Cm www .
+For a list of all port name to number mappings see the file
+.Pa /etc/services .
+.It Ic flags Ar a Ns / Ns Ar b
+This rule only applies to TCP packets that have the flags
+.Ar a
+set out of set
+.Ar b .
+Flags not specified in
+.Ar b
+are ignored.
+The flags are: (F)IN, (S)YN, (R)ST, (P)USH, (A)CK, (U)RG, (E)CE, and C(W)R.
+.It Ic fragment Ar a Ns / Ns Ar b
+This rule only applies to fragmented packets which match the specified flags.
+The flags are: (D)on't fragment, (I)s fragment, (F)irst fragment, and (L)ast
+fragment.
+.It Ic icmp-type Ar type Op Ic code Ar code
+.It Ic icmp6-type Ar type Op Ic code Ar code
+This rule only applies to ICMP or ICMP6 packets with the specified type
+and code.
+Text names for ICMP types and codes are listed in
+.Xr icmp 4
+and
+.Xr icmp6 4 .
+.It Ic length Ar pktlen
+This rule applies only to packets matching the specified
+.Ar pktlen .
+.It Ic proto Ar protocol
+This rule applies only to packets of this protocol.
+Common protocols are ICMP, ICMP6, TCP, and UDP.
+For a list of all the protocol name to number mappings see the file
+.Pa /etc/protocols .
+.It Ic tos Ar string Ns | Ns Ar number
+This rule applies to packets with the specified TOS bits set.
+.Ar string
+may be one of
+.Cm critical ,
+.Cm inetcontrol ,
+.Cm lowdelay ,
+.Cm netcontrol ,
+.Cm throughput ,
+.Cm reliability ,
+or one of the DiffServ Code Points:
+.Cm ef ,
+.Cm af11 No ... Cm af43 ,
+.Cm cs0 No ... Cm cs7 ;
+.Ar number
+may be either a hex or decimal number.
+.El
+.Pp
+The action taken when a flowspec rules matches depends on extended communities.
+For example to block all traffic either
+.Ic ext-community Ic flow-rate Ar as-number : Ns 0
+or
+.Ic ext-community Ic flow-pps Ar as-number : Ns 0
+need to be set.
 .Sh MPLS VPN CONFIGURATION
 A
 .Ic vpn
@@ -730,7 +874,7 @@ More than one
 .Ic import-target
 can be specified.
 .Pp
-.It Ic network Ar arguments ...
+.It Ic network Ar argument ...
 Announce the given networks within this VPN;
 see the
 .Sx NETWORK ANNOUNCEMENTS
@@ -811,7 +955,8 @@ The neighbor properties are as follows:
 .It Xo
 .Ic announce
 .Pq Ic IPv4 Ns | Ns Ic IPv6
-.Pq Ic none Ns | Ns Ic unicast Ns | Ns Ic vpn
+.Pq Ic none Ns | Ns Ic unicast Ns | Ns Ic vpn Ns | Ns Ic flowspec
+.Op Ic enforce
 .Xc
 For the given address family, control which
 .Em subsequent address families
@@ -823,9 +968,11 @@ At the moment, only
 .Ic none ,
 which disables the announcement of that address family,
 .Ic unicast ,
-and
 .Ic vpn ,
-which allows the distribution of BGP MPLS VPNs, are supported.
+which allows the distribution of BGP MPLS VPNs, and
+.Ic flowspec ,
+which allows the distribution of Flow Specification Rules,
+are supported.
 .Pp
 The default is
 .Ic unicast
@@ -833,7 +980,7 @@ for the same address family of the session.
 .Pp
 .It Xo
 .Ic announce add-path recv
-.Pq Ic yes Ns | Ns Ic no
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
 .Ic yes ,
@@ -845,12 +992,14 @@ The default is
 .It Xo
 .Ic announce add-path send
 .Pq Ic no Ns | Ns Ic all
+.Op Ic enforce
 .Xc
 .It Xo
 .Ic announce add-path send
-.Pq Ic best Ns | Ns Ic ecmp | Ns Ic as-wide-best
+.Pq Ic best Ns | Ns Ic ecmp Ns | Ns Ic as-wide-best
 .Op Ic plus Ar num
 .Op Ic max Ar num
+.Op Ic enforce
 .Xc
 If set to
 .Ic all ,
@@ -901,73 +1050,66 @@ is ignored.
 .Pp
 .It Xo
 .Ic announce as-4byte
-.Pq Ic yes Ns | Ns Ic no
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
 .Ic no ,
 the 4-byte AS capability is not announced and so native 4-byte AS support is
 disabled.
-The default is
-.Ic yes .
-.Pp
-.It Xo
-.Ic announce capabilities
-.Pq Ic yes Ns | Ns Ic no
-.Xc
-If set to
-.Ic no ,
-capability negotiation is disabled during the establishment of the session.
-This can be helpful to connect to old or broken BGP implementations.
+If
+.Ic enforce
+is set, the session will only be established if the neighbor also announces
+the capability.
 The default is
 .Ic yes .
 .Pp
 .It Xo
 .Ic announce enhanced refresh
-.Pq Ic yes Ns | Ns Ic no
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
 .Ic yes ,
 the enhanced route refresh capability is announced.
+If
+.Ic enforce
+is set, the session will only be established if the neighbor also announces
+the capability.
 The default is
 .Ic no .
 .Pp
 .It Xo
 .Ic announce policy
-.Pq Ic no Ns | Ns Ar role
-.Op Ic enforce
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
-.Ic no ,
-do not add the open policy role capability.
-The role can be one of
-.Ar provider ,
-.Ar customer ,
-.Ar rs ,
-.Ar rs-client ,
-or
-.Ar peer .
+.Ic yes ,
+add the open policy role capability.
 If the role of the neighbor does not correspond to the expected role then
 the session will be closed.
 If
 .Ic enforce
-is set the session will only establish if the neighbor also announces
-the open policy capability.
+is set, the session will only be established if the neighbor also announces
+the capability.
 The default is
 .Ic no .
 .Pp
 .It Xo
 .Ic announce refresh
-.Pq Ic yes Ns | Ns Ic no
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
 .Ic no ,
 the route refresh capability is not announced.
+If
+.Ic enforce
+is set, the session will only be established if the neighbor also announces
+the capability.
 The default is
 .Ic yes .
 .Pp
 .It Xo
 .Ic announce restart
-.Pq Ic yes Ns | Ns Ic no
+.Pq Ic yes Ns | Ns Ic no Ns | Ns Ic enforce
 .Xc
 If set to
 .Ic no ,
@@ -975,6 +1117,10 @@ the graceful restart capability is not announced.
 Currently only the End-of-RIB marker is supported and announced by the
 .Ic restart
 capability.
+If
+.Ic enforce
+is set, the session will only be established if the neighbor also announces
+the capability.
 The default is
 .Ic yes .
 .Pp
@@ -1311,6 +1457,26 @@ setting.
 .It Ic rib Ar name
 Bind the neighbor to the specified RIB.
 .Pp
+.It Ic role Ar role
+Set the local role for this eBGP session.
+Setting a role is required for ASPA verification, the open policy role
+capability and Only-To-Customer (OTC) attribute of RFC 9234.
+The role can be one of
+.Ar none ,
+.Ar provider ,
+.Ar customer ,
+.Ar rs ,
+.Ar rs-client ,
+or
+.Ar peer .
+If the role is set to
+.Ar none
+the
+.Ic announce Ic policy
+will also be disabled.
+On iBGP session the role setting is ignored and forced to
+.Ar none .
+.Pp
 .It Ic route-reflector Op Ar address
 Act as an RFC 4456
 .Em route-reflector
@@ -1500,6 +1666,14 @@ deny from any AS { 1, 2, 3 }
 deny from any { AS 1, source-as 2, transit-as 3 }
 deny from any { AS { 1, 2, 3 }, source-as 4, transit-as 5 }
 .Ed
+.Pp
+.It Xo
+.Ic avs
+.Pq Ic valid | unknown | invalid
+.Xc
+This rule applies only to
+.Em UPDATES
+where the ASPA Validation State (AVS) matches.
 .Pp
 .It Xo
 .Ic community

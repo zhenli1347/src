@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_err.c,v 1.45 2022/11/26 16:08:55 tb Exp $ */
+/* $OpenBSD: ssl_err.c,v 1.47 2024/02/03 15:58:33 beck Exp $ */
 /* ====================================================================
  * Copyright (c) 1999-2011 The OpenSSL Project.  All rights reserved.
  *
@@ -306,7 +306,6 @@ static ERR_STRING_DATA SSL_str_reasons[]= {
 	{ERR_REASON(SSL_R_NO_CLIENT_CERT_METHOD) , "no client cert method"},
 	{ERR_REASON(SSL_R_NO_CLIENT_CERT_RECEIVED), "no client cert received"},
 	{ERR_REASON(SSL_R_NO_COMPRESSION_SPECIFIED), "no compression specified"},
-	{ERR_REASON(SSL_R_NO_GOST_CERTIFICATE_SENT_BY_PEER), "Peer haven't sent GOST certificate, required for selected ciphersuite"},
 	{ERR_REASON(SSL_R_NO_METHOD_SPECIFIED)   , "no method specified"},
 	{ERR_REASON(SSL_R_NO_PRIVATEKEY)         , "no privatekey"},
 	{ERR_REASON(SSL_R_NO_PRIVATE_KEY_ASSIGNED), "no private key assigned"},
@@ -482,6 +481,7 @@ ERR_load_SSL_strings(void)
 	}
 #endif
 }
+LSSL_ALIAS(ERR_load_SSL_strings);
 
 void
 SSL_load_error_strings(void)
@@ -491,6 +491,7 @@ SSL_load_error_strings(void)
 	ERR_load_SSL_strings();
 #endif
 }
+LSSL_ALIAS(SSL_load_error_strings);
 
 int
 SSL_state_func_code(int state) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.24 2022/04/06 18:59:27 naddy Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.28 2023/10/24 13:20:10 claudio Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -189,22 +189,27 @@ cpu_attach(struct device *parent, struct device *dev, void *aux)
 	if (dev->dv_unit != 0) {
 		int timeout = 10000;
 
+		clockqueue_init(&ci->ci_queue);
 		sched_init_cpu(ci);
 		ncpus++;
 
 		ci->ci_initstack_end = km_alloc(PAGE_SIZE, &kv_any, &kp_zero,
 		    &kd_waitok) + PAGE_SIZE;
 
-		opal_start_cpu(ci->ci_pir, (vaddr_t)cpu_hatch);
+		if (opal_start_cpu(ci->ci_pir, (vaddr_t)cpu_hatch) ==
+		    OPAL_SUCCESS) {
+			atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFY);
+			membar_sync();
 
-		atomic_setbits_int(&ci->ci_flags, CPUF_IDENTIFY);
-		membar_sync();
-
-		while ((ci->ci_flags & CPUF_IDENTIFIED) == 0 &&
-		    --timeout)
-			delay(1000);
-		if (timeout == 0) {
-			printf(" failed to identify");
+			while ((ci->ci_flags & CPUF_IDENTIFIED) == 0 &&
+			    --timeout)
+				delay(1000);
+			if (timeout == 0) {
+				printf(" failed to identify");
+				ci->ci_flags = 0;
+			}
+		} else {
+			printf(" failed to start");
 			ci->ci_flags = 0;
 		}
 	}
@@ -242,6 +247,23 @@ cpu_init(void)
 	isync();
 
 	mtfscr(0);
+	isync();
+
+	/*
+	 * Set AMR to inhibit loads and stores for all virtual page
+	 * class keys, except for Key0 which is used for normal kernel
+	 * access.  This means we can pick any other key to implement
+	 * execute-only mappings.  But we pick Key1 since that allows
+	 * us to use the same bit in the PTE as was used to enable the
+	 * Data Access Compare mechanism on CPUs based on older
+	 * versions of the architecture (such as the PowerPC 970).
+	 *
+	 * Set UAMOR (and AMOR just to be safe) to zero to prevent
+	 * userland from modifying any bits in AMR.
+	 */
+	mtamr(0x3fffffffffffffff);
+	mtuamor(0);
+	mtamor(0);
 	isync();
 }
 
@@ -333,15 +355,12 @@ cpu_start_secondary(void)
 	s = splhigh();
 	cpu_startclock();
 
-	nanouptime(&ci->ci_schedstate.spc_runtime);
-
 	atomic_setbits_int(&ci->ci_flags, CPUF_RUNNING);
 	membar_sync();
 
 	spllower(IPL_NONE);
 
-	SCHED_LOCK(s);
-	cpu_switchto(NULL, sched_chooseproc());
+	sched_toidle();
 }
 
 void
@@ -366,6 +385,8 @@ cpu_boot_secondary_processors(void)
 		    IPL_IPI, ci, cpu_intr, ci, ci->ci_dev->dv_xname);
 
 		if (CPU_IS_PRIMARY(ci))
+			continue;
+		if ((ci->ci_flags & CPUF_PRESENT) == 0)
 			continue;
 
 		ci->ci_randseed = (arc4random() & 0x7fffffff) + 1;

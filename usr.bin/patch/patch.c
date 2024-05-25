@@ -1,4 +1,4 @@
-/*	$OpenBSD: patch.c,v 1.71 2022/08/03 07:30:37 op Exp $	*/
+/*	$OpenBSD: patch.c,v 1.76 2024/03/22 19:22:23 jcs Exp $	*/
 
 /*
  * patch - a program to apply diffs to original files
@@ -32,6 +32,7 @@
 
 #include <ctype.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <limits.h>
 #include <paths.h>
 #include <stdio.h>
@@ -99,7 +100,7 @@ static void	copy_till(LINENUM, bool);
 static void	spew_output(void);
 static void	dump_line(LINENUM, bool);
 static bool	patch_match(LINENUM, LINENUM, LINENUM);
-static bool	similar(const char *, const char *, int);
+static bool	similar(const char *, const char *, ssize_t);
 static __dead void usage(void);
 
 /* true if -E was specified on command line.  */
@@ -107,6 +108,8 @@ static bool	remove_empty_files = false;
 
 /* true if -R was specified on command line.  */
 static bool	reverse_flag_specified = false;
+
+static bool	Vflag = false;
 
 /* buffer holding the name of the rejected patch file. */
 static char	rejname[PATH_MAX];
@@ -149,7 +152,7 @@ main(int argc, char *argv[])
 	const	char *tmpdir;
 	char	*v;
 
-	if (pledge("stdio rpath wpath cpath tmppath fattr", NULL) == -1) {
+	if (pledge("stdio rpath wpath cpath tmppath fattr unveil", NULL) == -1) {
 		perror("pledge");
 		my_exit(2);
 	}
@@ -204,8 +207,57 @@ main(int argc, char *argv[])
 	Argc = argc;
 	Argv = argv;
 	get_some_switches();
+	if (unveil(tmpdir, "rwc") == -1) {
+		perror("unveil");
+		my_exit(2);
+	}
+	if (outname != NULL)
+		if (unveil(outname, "rwc") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	if (filearg[0] != NULL) {
+		char *origdir;
 
-	if (backup_type == none) {
+		if (unveil(filearg[0], "rwc") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+		if ((origdir = dirname(filearg[0])) == NULL) {
+			perror("dirname");
+			my_exit(2);
+		}
+		if (unveil(origdir, "rwc") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	} else {
+		if (unveil(".", "rwc") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	}
+	if (filearg[1] != NULL)
+		if (unveil(filearg[1], "r") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	if (!force && !batch)
+		if (unveil(_PATH_TTY, "r") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	if (*rejname != '\0')
+		if (unveil(rejname, "rwc") == -1) {
+			perror("unveil");
+			my_exit(2);
+		}
+	if (pledge("stdio rpath wpath cpath tmppath fattr", NULL) == -1) {
+		perror("pledge");
+		my_exit(2);
+	}
+
+	if (!Vflag) {
 		if ((v = getenv("PATCH_VERSION_CONTROL")) == NULL)
 			v = getenv("VERSION_CONTROL");
 		if (v != NULL || !posix)
@@ -591,6 +643,7 @@ get_some_switches(void)
 			break;
 		case 'V':
 			backup_type = get_version(optarg);
+			Vflag = true;
 			break;
 #ifdef DEBUGGING
 		case 'x':
@@ -627,8 +680,8 @@ usage(void)
 	fprintf(stderr,
 "usage: patch [-bCcEeflNnRstuv] [-B backup-prefix] [-D symbol] [-d directory]\n"
 "             [-F max-fuzz] [-i patchfile] [-o out-file] [-p strip-count]\n"
-"             [-r rej-name] [-V t | nil | never] [-x number] [-z backup-ext]\n"
-"             [--posix] [origfile [patchfile]]\n"
+"             [-r rej-name] [-V t | nil | never | none] [-x number]\n"
+"             [-z backup-ext] [--posix] [origfile [patchfile]]\n"
 "       patch <patchfile\n");
 	my_exit(2);
 }
@@ -1012,7 +1065,7 @@ patch_match(LINENUM base, LINENUM offset, LINENUM fuzz)
 	LINENUM		pat_lines = pch_ptrn_lines() - fuzz;
 	const char	*ilineptr;
 	const char	*plineptr;
-	short		plinelen;
+	ssize_t		plinelen;
 
 	for (iline = base + offset + fuzz; pline <= pat_lines; pline++, iline++) {
 		ilineptr = ifetch(iline, offset >= 0);
@@ -1048,7 +1101,7 @@ patch_match(LINENUM base, LINENUM offset, LINENUM fuzz)
  * Do two lines match with canonicalized white space?
  */
 static bool
-similar(const char *a, const char *b, int len)
+similar(const char *a, const char *b, ssize_t len)
 {
 	while (len) {
 		if (isspace((unsigned char)*b)) { /* whitespace (or \n) to match? */

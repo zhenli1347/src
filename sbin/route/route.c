@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.260 2021/11/10 20:24:22 bket Exp $	*/
+/*	$OpenBSD: route.c,v 1.267 2024/05/09 08:35:40 florian Exp $	*/
 /*	$NetBSD: route.c,v 1.16 1996/04/15 18:27:05 cgd Exp $	*/
 
 /*
@@ -135,9 +135,9 @@ usage(char *cp)
 		warnx("botched keyword: %s", cp);
 	fprintf(stderr,
 #ifndef SMALL
-	    "usage: %s [-dnqtv] [-T rtable] command [[modifiers] args]\n",
+	    "usage: %s [-dnqtv] [-T rtable] command [[modifier ...] arg ...]\n",
 #else
-	    "usage: %s [-dnqtv] command [[modifiers] args]\n",
+	    "usage: %s [-dnqtv] command [[modifier ...] arg ...]\n",
 #endif
 	    __progname);
 	exit(1);
@@ -220,6 +220,9 @@ main(int argc, char **argv)
 					break;
 				case K_INET6:
 					af = AF_INET6;
+					break;
+				case K_MPLS:
+					af = AF_MPLS;
 					break;
 				case K_IFACE:
 				case K_INTERFACE:
@@ -484,6 +487,10 @@ setsource(int argc, char **argv)
 	unsigned int ifindex = 0;
 
 	cmd = argv[0];
+
+	if (argc == 1)
+		printsource(AF_UNSPEC, tableid);
+
 	while (--argc > 0) {
 		if (**(++argv)== '-') {
 			switch (key = keyword(1 + *argv)) {
@@ -502,14 +509,14 @@ setsource(int argc, char **argv)
 				if (ifindex == 0)
 					errx(1, "no such interface %s", *argv);
 				break;
+			default:
+				usage(NULL);
 			}
 		} else
 			break;
 	}
 
-	if (argc <= 0 && ifindex == 0)
-		printsource(af, tableid);
-	if (argc > 1 && ifindex == 0)
+	if (!(argc == 1 && ifindex == 0) && !(argc == 0 && ifindex != 0))
 		usage(NULL);
 
 	if (uid)
@@ -578,7 +585,7 @@ newroute(int argc, char **argv)
 	if (*cmd != 'g')
 		shutdown(s, SHUT_RD); /* Don't want to read back our messages */
 	while (--argc > 0) {
-		if (**(++argv)== '-') {
+		if (**(++argv) == '-') {
 			switch (key = keyword(1 + *argv)) {
 			case K_LINK:
 				af = AF_LINK;
@@ -1133,6 +1140,7 @@ monitor(int argc, char *argv[])
 	int n;
 	char msg[2048];
 	time_t now;
+	char *ct;
 
 	verbose = 1;
 	for (;;) {
@@ -1142,7 +1150,11 @@ monitor(int argc, char *argv[])
 			err(1, "read");
 		}
 		now = time(NULL);
-		printf("got message of size %d on %s", n, ctime(&now));
+		ct = ctime(&now);
+		if (ct)
+			printf("got message of size %d on %s", n, ct);
+		else
+			printf("got message of size %d on %lld\n", n, now);
 		print_rtmsg((struct rt_msghdr *)msg, n);
 	}
 }
@@ -1871,7 +1883,10 @@ bfd_calc_uptime(time_t time)
 		fmt = "%Ss";
 
 	tp = localtime(&time);
-	(void)strftime(buf, sizeof(buf), fmt, tp);
+	if (tp)
+		(void)strftime(buf, sizeof(buf), fmt, tp);
+	else
+		buf[0] = '\0';
 	return (buf);
 }
 

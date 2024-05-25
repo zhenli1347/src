@@ -1,4 +1,4 @@
-/*	$OpenBSD: inode.c,v 1.50 2020/07/13 06:52:53 otto Exp $	*/
+/*	$OpenBSD: inode.c,v 1.52 2024/05/09 08:35:40 florian Exp $	*/
 /*	$NetBSD: inode.c,v 1.23 1996/10/11 20:15:47 thorpej Exp $	*/
 
 /*
@@ -71,8 +71,7 @@ ckinode(union dinode *dp, struct inodesc *idesc)
 	idesc->id_filesize = DIP(dp, di_size);
 	mode = DIP(dp, di_mode) & IFMT;
 	if (mode == IFBLK || mode == IFCHR || (mode == IFLNK &&
-	    (DIP(dp, di_size) < sblock.fs_maxsymlinklen ||
-	     (sblock.fs_maxsymlinklen == 0 && DIP(dp, di_blocks) == 0))))
+	    DIP(dp, di_size) < sblock.fs_maxsymlinklen))
 		return (KEEPON);
 	if (sblock.fs_magic == FS_UFS1_MAGIC)
 		dino.dp1 = dp->dp1;
@@ -545,7 +544,10 @@ pinode(ino_t ino)
 	printf("SIZE=%llu ", (unsigned long long)DIP(dp, di_size));
 	t = DIP(dp, di_mtime);
 	p = ctime(&t);
-	printf("MTIME=%12.12s %4.4s ", &p[4], &p[20]);
+	if (p)
+		printf("MTIME=%12.12s %4.4s ", &p[4], &p[20]);
+	else
+		printf("MTIME=%lld ", t);
 }
 
 void

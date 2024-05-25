@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.5 2022/02/04 18:12:47 krw Exp $
+#	$OpenBSD: Makefile,v 1.8 2023/04/28 08:45:25 krw Exp $
 
 FS=		miniroot${OSrev}.img
 FSSIZE=		67584
@@ -16,8 +16,8 @@ MOUNT_ARGS_msdos=-o-l
 LISTS=		${.CURDIR}/list
 UTILS=		${.CURDIR}/../../miniroot
 
-MRFSDISKTYPE=	rdroot
-MRMAKEFSARGS=	-o disklabel=${MRFSDISKTYPE},minfree=0,density=8192
+MRDISKTYPE=	rdroot
+MRMAKEFSARGS=	-o disklabel=${MRDISKTYPE},minfree=0,density=8192
 
 all: ${FS}
 
@@ -25,7 +25,7 @@ ${FS}: bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v -t ${FSDISKTYPE} ${FS} > vnd
 	fdisk -iy -b "${MSDOSSIZE}@${MSDOSSTART}:c" `cat vnd` >/dev/null
-	echo 'a a\n\n\n\nw\nq\n' | disklabel -E `cat vnd` >/dev/null
+	echo '/ *' | disklabel -wAT- `cat vnd`
 	newfs -t msdos ${NEWFS_ARGS_msdos} /dev/r`cat vnd`i
 	mount ${MOUNT_ARGS_msdos} /dev/`cat vnd`i ${MOUNT_POINT}
 	mkdir -p ${MOUNT_POINT}/efi/boot
@@ -41,7 +41,7 @@ ${FS}: bsd.rd
 	vnconfig -u `cat vnd`
 	rm -f vnd
 
-bsd.rd: mr.fs bsd
+bsd.rd: mr.fs
 	cp bsd bsd.rd
 	rdsetroot bsd.rd mr.fs
 
@@ -50,7 +50,7 @@ bsd:
 	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && exec ${MAKE} ${MFLAGS}'
 	cp -p ${.CURDIR}/../../../sys/arch/${MACHINE}/compile/${RAMDISK}/obj/bsd bsd
 
-mr.fs: instbin
+mr.fs: instbin bsd
 	rm -rf $@.d
 	install -d -o root -g wheel $@.d
 .for DIR in ${DIRS}

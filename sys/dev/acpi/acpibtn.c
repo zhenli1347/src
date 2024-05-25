@@ -1,4 +1,4 @@
-/* $OpenBSD: acpibtn.c,v 1.49 2022/04/06 18:59:27 naddy Exp $ */
+/* $OpenBSD: acpibtn.c,v 1.52 2024/05/13 19:56:37 kettenis Exp $ */
 /*
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
  *
@@ -168,7 +168,7 @@ acpibtn_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_devnode = aa->aaa_node;
 
-	printf(": %s\n", sc->sc_devnode->name);
+	printf(": %s", sc->sc_devnode->name);
 
 	if (aml_evalinteger(sc->sc_acpi, sc->sc_devnode, "_STA", 0, NULL, &st))
 		st = STA_PRESENT | STA_ENABLED | STA_DEV_OK;
@@ -203,6 +203,15 @@ acpibtn_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_sens.value = lid_open;
 	}
 
+	/* Enable any related GPEs for wake. */
+	if (acpi_toggle_wakedev(sc->sc_acpi, sc->sc_devnode, 1) == 0) {
+#ifdef SUSPEND
+		device_register_wakeup(self);
+		printf("(wakeup)");
+#endif /* SUSPEND */
+	}
+
+	printf("\n");
 	aml_register_notify(sc->sc_devnode, aa->aaa_dev, acpibtn_notify,
 	    sc, ACPIDEV_NOPOLL);
 }
@@ -220,6 +229,10 @@ acpibtn_notify(struct aml_node *node, int notify_type, void *arg)
 	dnprintf(10, "acpibtn_notify: %.2x %s\n", notify_type,
 	    sc->sc_devnode->name);
 
+	/* Ignore button events if we're resuming. */
+	if (acpi_resuming(sc->sc_acpi))
+		return (0);
+
 	switch (sc->sc_btn_type) {
 	case ACPIBTN_LID:
 #ifndef SMALL_KERNEL
@@ -232,6 +245,8 @@ acpibtn_notify(struct aml_node *node, int notify_type, void *arg)
 		if (aml_evalinteger(sc->sc_acpi, sc->sc_devnode,
 		    "_LID", 0, NULL, &lid))
 			return (0);
+		if (sc->sc_sens.value == lid)
+			break;
 		sc->sc_sens.value = lid;
 
 		if (lid != 0)

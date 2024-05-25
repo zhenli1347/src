@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vr.c,v 1.159 2022/03/11 18:00:50 mpi Exp $	*/
+/*	$OpenBSD: if_vr.c,v 1.161 2024/05/24 06:02:57 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998
@@ -68,9 +68,7 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
 #include <sys/timeout.h>
-#include <sys/socket.h>
 
 #include <net/if.h>
 #include <sys/device.h>
@@ -1603,6 +1601,7 @@ vr_stop(struct vr_softc *sc)
 	ifp->if_timer = 0;
 
 	timeout_del(&sc->sc_to);
+	timeout_del(&sc->sc_rxto);
 
 	ifp->if_flags &= ~IFF_RUNNING;
 	ifq_clr_oactive(&ifp->if_snd);

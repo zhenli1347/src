@@ -1,7 +1,7 @@
 #!/bin/ksh
-#	$OpenBSD: fw_update.sh,v 1.43 2022/08/05 18:01:40 afresh1 Exp $
+#	$OpenBSD: fw_update.sh,v 1.56 2024/03/21 01:02:29 afresh1 Exp $
 #
-# Copyright (c) 2021 Andrew Hewus Fresh <afresh1@openbsd.org>
+# Copyright (c) 2021,2023 Andrew Hewus Fresh <afresh1@openbsd.org>
 #
 # Permission to use, copy, modify, and distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -40,18 +40,40 @@ DELETE=false
 DOWNLOAD=true
 INSTALL=true
 LOCALSRC=
+ENABLE_SPINNER=false
+[ -t 1 ] && ENABLE_SPINNER=true
+
+integer STATUS_FD=1
+integer WARN_FD=2
+FD_DIR=
 
 unset FTPPID
 unset LOCKPID
 unset FWPKGTMP
 REMOVE_LOCALSRC=false
+
+status() { echo -n "$*" >&"$STATUS_FD"; }
+warn()   { echo    "$*" >&"$WARN_FD"; }
+
 cleanup() {
 	set +o errexit # ignore errors from killing ftp
+
+	if [ -d "$FD_DIR" ]; then
+		echo "" >&"$STATUS_FD"
+		((STATUS_FD == 3)) && exec 3>&-
+		((WARN_FD   == 4)) && exec 4>&-
+
+		[ -s "$FD_DIR/status" ] && cat "$FD_DIR/status"
+		[ -s "$FD_DIR/warn"   ] && cat "$FD_DIR/warn" >&2
+
+		rm -rf "$FD_DIR"
+	fi
+
 	[ "${FTPPID:-}" ] && kill -TERM -"$FTPPID" 2>/dev/null
 	[ "${LOCKPID:-}" ] && kill -TERM -"$LOCKPID" 2>/dev/null
 	[ "${FWPKGTMP:-}" ] && rm -rf "$FWPKGTMP"
 	"$REMOVE_LOCALSRC" && rm -rf "$LOCALSRC"
-	[ -e "${CFILE}" ] && [ ! -s "$CFILE" ] && rm -f "$CFILE"
+	[ -e "$CFILE" ] && [ ! -s "$CFILE" ] && rm -f "$CFILE"
 }
 trap cleanup EXIT
 
@@ -70,23 +92,41 @@ tmpdir() {
 	echo "$_dir"
 }
 
+spin() {
+	if ! "$ENABLE_SPINNER"; then
+		sleep 1
+		return 0
+	fi
+
+	{
+		for p in '/' '-' '\\' '|' '/' '-' '\\' '|'; do
+			echo -n "$p"'\b'
+			sleep 0.125
+		done
+		echo -n " "'\b' 
+	}>/dev/tty
+}
+
 fetch() {
 	local _src="${FWURL}/${1##*/}" _dst=$1 _user=_file _exit _error=''
+	local _ftp_errors="$FD_DIR/ftp_errors"
+	rm -f "$_ftp_errors"
 
 	# The installer uses a limited doas(1) as a tiny su(1)
 	set -o monitor # make sure ftp gets its own process group
 	(
 	_flags=-vm
 	case "$VERBOSE" in
-		0|1) _flags=-VM ;;
+		0|1) _flags=-VM ; exec 2>"$_ftp_errors" ;;
 		  2) _flags=-Vm ;;
 	esac
+
 	if [ -x /usr/bin/su ]; then
 		exec /usr/bin/su -s /bin/ksh "$_user" -c \
-		    "/usr/bin/ftp -N '${0##/}' -D 'Get/Verify' $_flags -o- '$_src'" > "$_dst"
+		    "/usr/bin/ftp -N error -D 'Get/Verify' $_flags -o- '$_src'" > "$_dst"
 	else
 		exec /usr/bin/doas -u "$_user" \
-		    /usr/bin/ftp -N "${0##/}" -D 'Get/Verify' $_flags -o- "$_src" > "$_dst"
+		    /usr/bin/ftp -N error -D 'Get/Verify' $_flags -o- "$_src" > "$_dst"
 	fi
 	) & FTPPID=$!
 	set +o monitor
@@ -99,13 +139,13 @@ fetch() {
 			if [[ $_last -ne $5 ]]; then
 				_last=$5
 				SECONDS=0
-				sleep 1
+				spin
 			else
 				kill -INT -"$FTPPID" 2>/dev/null
 				_error=" (timed out)"
 			fi
 		else
-			sleep 1
+			spin
 		fi
 	done
 
@@ -116,13 +156,34 @@ fetch() {
 
 	unset FTPPID
 
-	if [ "$_exit" -ne 0 ]; then
+	if ((_exit != 0)); then
 		rm -f "$_dst"
-		echo "Cannot fetch $_src$_error" >&2
-		return 1
+
+		# ftp doesn't provide useful exit codes
+		# so we have to grep its STDERR.
+		# _exit=2 means don't keep trying
+		_exit=2
+
+		# If it was 404, we might succeed at another file
+		if [ -s "$_ftp_errors" ] && \
+		    grep -q "404 Not Found" "$_ftp_errors"; then
+			_exit=1
+			_error=" (404 Not Found)"
+			rm -f "$_ftp_errors"
+		fi
+
+		warn "Cannot fetch $_src$_error"
 	fi
 
-	return 0
+	# If we have ftp errors, print them out,
+	# removing any cntrl characters (like 0x0d),
+	# and any leading blank lines.
+	if [ -s "$_ftp_errors" ]; then
+		sed -e 's/[[:cntrl:]]//g' \
+		    -e '/./,$!d' "$_ftp_errors" >&"$WARN_FD"
+	fi
+
+	return "$_exit"
 }
 
 # If we fail to fetch the CFILE, we don't want to try again
@@ -130,12 +191,12 @@ fetch() {
 # a blank file indicating failure.
 check_cfile() {
 	if [ -e "$CFILE" ]; then
-		[ -s "$CFILE" ] || return 1
+		[ -s "$CFILE" ] || return 2
 		return 0
 	fi
-	if ! fetch_cfile "$@"; then
+	if ! fetch_cfile; then
 		echo -n > "$CFILE"
-		return 1
+		return 2
 	fi
 	return 0
 }
@@ -145,11 +206,14 @@ fetch_cfile() {
 		set +o noclobber # we want to get the latest CFILE
 		fetch "$CFILE" || return 1
 		set -o noclobber
-		! signify -qVep "$FWPUB_KEY" -x "$CFILE" -m "$CFILE" &&
-		    echo "Signature check of SHA256.sig failed" >&2 &&
-		    rm -f "$CFILE" && return 1
+		signify -qVep "$FWPUB_KEY" -x "$CFILE" -m /dev/null \
+		    2>&"$WARN_FD" || {
+		        warn "Signature check of SHA256.sig failed"
+		        rm -f "$CFILE"
+			return 1
+		    }
 	elif [ ! -e "$CFILE" ]; then
-		echo "${0##*/}: $CFILE: No such file or directory" >&2
+		warn "${0##*/}: $CFILE: No such file or directory"
 		return 1
 	fi
 
@@ -157,14 +221,25 @@ fetch_cfile() {
 }
 
 verify() {
-	check_cfile || return 1
+	check_cfile || return $?
 	# The installer sha256 lacks -C, do it by hand
-	if ! fgrep -qx "SHA256 (${1##*/}) = $( /bin/sha256 -qb "$1" )" "$CFILE"; then
-		((VERBOSE != 1)) && echo "Checksum test for ${1##*/} failed." >&2
+	if ! grep -Fqx "SHA256 (${1##*/}) = $( /bin/sha256 -qb "$1" )" "$CFILE"
+	then
+		((VERBOSE != 1)) && warn "Checksum test for ${1##*/} failed."
 		return 1
 	fi
 
 	return 0
+}
+
+# When verifying existing files that we are going to re-download
+# if VERBOSE is 0, don't show the checksum failure of an existing file.
+verify_existing() {
+	local _v=$VERBOSE
+	check_cfile || return $?
+
+	((_v == 0)) && "$DOWNLOAD" && _v=1
+	( VERBOSE=$_v verify "$@" )
 }
 
 firmware_in_dmesg() {
@@ -187,7 +262,7 @@ firmware_in_dmesg() {
 
 		case $# in
 		    1|2|3) [[ $_dmesgtail = *$1*([!$_nl])${2-}*([!$_nl])${3-}* ]] || continue;;
-		    *) echo "${0##*/}: Bad pattern '${_m#$_nl}' in $FWPATTERNS" >&2; exit 1 ;;
+		    *) warn "${0##*/}: Bad pattern '${_m#$_nl}' in $FWPATTERNS"; exit 1 ;;
 		esac
 
 		echo "$_d"
@@ -196,7 +271,7 @@ firmware_in_dmesg() {
 }
 
 firmware_filename() {
-	check_cfile || return 1
+	check_cfile || return $?
 	sed -n "s/.*(\($1-firmware-.*\.tgz\)).*/\1/p" "$CFILE" | sed '$!d'
 }
 
@@ -207,28 +282,51 @@ firmware_devicename() {
 }
 
 lock_db() {
+	local _waited
 	[ "${LOCKPID:-}" ] && return 0
 
 	# The installer doesn't have perl, so we can't lock there
 	[ -e /usr/bin/perl ] || return 0
 
 	set -o monitor
-	perl <<'EOL' |&
-		use v5.16;
-		use warnings;
+	perl <<-'EOL' |&
 		no lib ('/usr/local/libdata/perl5/site_perl');
+		use v5.36;
 		use OpenBSD::PackageInfo qw< lock_db >;
 
 		$|=1;
 
-		lock_db(0);
-	
-		say $$;
-		sleep;
+		$0 = "fw_update: lock_db";
+		my $waited = 0;
+		package OpenBSD::FwUpdateState {
+			use parent 'OpenBSD::BaseState';
+			sub errprint ($self, @p) {
+				if ($p[0] && $p[0] =~ /already locked/) {
+					$waited++;
+					$p[0] = " " . $p[0]
+					    if !$ENV{VERBOSE};
+				}
+				$self->SUPER::errprint(@p);
+			}
+
+		}
+		lock_db(0, 'OpenBSD::FwUpdateState');
+
+		say "$$ $waited";
+
+		# Wait for STDOUT to be readable, which won't happen
+		# but if our parent exits unexpectedly it will close.
+		my $rin = '';
+		vec($rin, fileno(STDOUT), 1) = 1;
+		select $rin, '', '', undef;
 EOL
 	set +o monitor
 
-	read -rp LOCKPID
+	read -rp LOCKPID _waited
+
+	if ((_waited)); then
+		! ((VERBOSE)) && status "${0##*/}:"
+	fi
 
 	return 0
 }
@@ -269,7 +367,8 @@ detect_firmware() {
 }
 
 add_firmware () {
-	local _f="${1##*/}" _m="${2:-Install}" _pkgname
+	local _f="${1##*/}" _m="${2:-Install}"
+	local _pkgdir="${DESTDIR}/var/db/pkg" _pkg
 	FWPKGTMP="$( tmpdir "${DESTDIR}/var/db/pkg/.firmware" )"
 	local _flags=-vm
 	case "$VERBOSE" in
@@ -282,9 +381,19 @@ add_firmware () {
 		    -s ",^firmware,${DESTDIR}/etc/firmware," \
 		    -C / -zxphf - "+*" "firmware/*"
 
-	_pkgname="$( sed -n '/^@name /{s///p;q;}' "${FWPKGTMP}/+CONTENTS" )"
-	if [ ! "$_pkgname" ]; then
-		echo "Failed to extract name from $1, partial install" 2>&1
+
+	[ -s "${FWPKGTMP}/+CONTENTS" ] &&
+	    _pkg="$( sed -n '/^@name /{s///p;q;}' "${FWPKGTMP}/+CONTENTS" )"
+
+	if [ ! "${_pkg:-}" ]; then
+		warn "Failed to extract name from $1, partial install"
+		rm -rf "$FWPKGTMP"
+		unset FWPKGTMP
+		return 1
+	fi
+
+	if [ -e "$_pkgdir/$_pkg" ]; then
+		warn "Failed to register: $_pkgdir/$_pkg is not firmware"
 		rm -rf "$FWPKGTMP"
 		unset FWPKGTMP
 		return 1
@@ -300,7 +409,7 @@ w
 EOL
 
 	chmod 755 "$FWPKGTMP"
-	mv "$FWPKGTMP" "${DESTDIR}/var/db/pkg/${_pkgname}"
+	mv "$FWPKGTMP" "$_pkgdir/$_pkg"
 	unset FWPKGTMP
 }
 
@@ -329,7 +438,7 @@ delete_firmware() {
 
 	if [ ! -e "$_cwd/+CONTENTS" ] ||
 	    ! grep -Fxq '@option firmware' "$_cwd/+CONTENTS"; then
-		echo "${0##*/}: $_pkg does not appear to be firmware" >&2
+		warn "${0##*/}: $_pkg does not appear to be firmware"
 		return 2
 	fi
 
@@ -389,25 +498,28 @@ do
 	p) LOCALSRC="$OPTARG" ;;
 	v) ((++VERBOSE)) ;;
 	:)
-	    echo "${0##*/}: option requires an argument -- -$OPTARG" >&2
+	    warn "${0##*/}: option requires an argument -- -$OPTARG"
 	    usage
 	    ;;
 	?)
-	    echo "${0##*/}: unknown option -- -$OPTARG" >&2
+	    warn "${0##*/}: unknown option -- -$OPTARG"
 	    usage
 	    ;;
 	esac
 done
 shift $((OPTIND - 1))
 
+# Progress bars, not spinner When VERBOSE > 1
+((VERBOSE > 1)) && ENABLE_SPINNER=false
+
 if [ "$LOCALSRC" ]; then
 	if [[ $LOCALSRC = @(ftp|http?(s))://* ]]; then
 		FWURL="${LOCALSRC}"
 		LOCALSRC=
 	else
-		LOCALSRC="${LOCALSRC:#file:}"
+		LOCALSRC="${LOCALSRC#file:}"
 		! [ -d "$LOCALSRC" ] &&
-		    echo "The path must be a URL or an existing directory" >&2 &&
+		    warn "The path must be a URL or an existing directory" &&
 		    exit 1
 	fi
 fi
@@ -424,7 +536,7 @@ if [ "$OPT_F" ]; then
 			rm -f "$LOCALSRC/$CFILE-OLD"
 		else
 			mv "$LOCALSRC/$CFILE-OLD" "$LOCALSRC/$CFILE"
-			echo "Using existing $CFILE" >&2
+			warn "Using existing $CFILE"
 		fi
 	fi
 elif [ "$LOCALSRC" ]; then
@@ -432,14 +544,28 @@ elif [ "$LOCALSRC" ]; then
 fi
 
 if [ -x /usr/bin/id ] && [ "$(/usr/bin/id -u)" != 0 ]; then
-	echo "need root privileges" >&2
+	warn "need root privileges"
 	exit 1
 fi
 
 set -sA devices -- "$@"
 
+FD_DIR="$( tmpdir "${DESTDIR}/tmp/${0##*/}-fd" )"
+# When being verbose, save the status line for the end.
+if ((VERBOSE)); then
+	exec 3>"${FD_DIR}/status"
+	STATUS_FD=3
+fi
+# Control "warning" messages to avoid the middle of a line.
+# Things that we don't expect to send to STDERR
+# still go there so the output, while it may be ugly, isn't lost
+exec 4>"${FD_DIR}/warn"
+WARN_FD=4
+
+status "${0##*/}:"
+
 if "$DELETE"; then
-	[ "$OPT_F" ] && echo "Cannot use -F and -d" >&2 && usage
+	[ "$OPT_F" ] && warn "Cannot use -F and -d" && usage
 	lock_db
 
 	# Show the "Uninstall" message when just deleting not upgrading
@@ -447,7 +573,7 @@ if "$DELETE"; then
 
 	set -A installed
 	if [ "${devices[*]:-}" ]; then
-		"$ALL" && echo "Cannot use -a and devices/files" >&2 && usage
+		"$ALL" && warn "Cannot use -a and devices/files" && usage
 
 		set -A installed -- $(
 		    for d in "${devices[@]}"; do
@@ -460,7 +586,7 @@ if "$DELETE"; then
 			if [ "${i[*]:-}" ]; then
 				echo "${i[@]}"
 			else
-				echo "No firmware found for '$d'" >&2
+				warn "No firmware found for '$d'"
 			fi
 		    done
 		)
@@ -468,20 +594,25 @@ if "$DELETE"; then
 		set -A installed -- $( installed_firmware '*' '-firmware-' '*' )
 	fi
 
-	deleted=''
+	status " delete "
+
+	comma=''
 	if [ "${installed:-}" ]; then
 		for fw in "${installed[@]}"; do
+			status "$comma$( firmware_devicename "$fw" )"
+			comma=,
 			if "$DRYRUN"; then
 				((VERBOSE)) && echo "Delete $fw"
 			else
-				delete_firmware "$fw" || continue
+				delete_firmware "$fw" || {
+					status " ($fw failed)"
+					continue
+				}
 			fi
-			deleted="$deleted,$( firmware_devicename "$fw" )"
 		done
 	fi
 
-	deleted="${deleted#,}"
-	echo "${0:##*/}: deleted ${deleted:-none}";
+	[ "$comma" ] || status none
 
 	exit
 fi
@@ -494,7 +625,7 @@ fi
 CFILE="$LOCALSRC/$CFILE"
 
 if [ "${devices[*]:-}" ]; then
-	"$ALL" && echo "Cannot use -a and devices/files" >&2 && usage
+	"$ALL" && warn "Cannot use -a and devices/files" && usage
 else
 	((VERBOSE > 1)) && echo -n "Detect firmware ..."
 	set -sA devices -- $( detect_firmware )
@@ -503,10 +634,11 @@ else
 fi
 
 
-added=''
-updated=''
+set -A add ''
+set -A update ''
 kept=''
 unregister=''
+
 if [ "${devices[*]:-}" ]; then
 	lock_db
 	for f in "${devices[@]}"; do
@@ -514,49 +646,74 @@ if [ "${devices[*]:-}" ]; then
 
 		verify_existing=true
 		if [ "$f" = "$d" ]; then
-			f=$( firmware_filename "$d" ) || continue
+			f=$( firmware_filename "$d" ) || {
+				# Fetching the CFILE here is often the
+				# first attempt to talk to FWURL
+				# If it fails, no point in continuing.
+				if (($? > 1)); then
+					status " failed."
+					exit 1
+				fi
+
+				# otherwise we can try the next firmware
+				continue
+			}
 			if [ ! "$f" ]; then
 				if "$INSTALL" && unregister_firmware "$d"; then
 					unregister="$unregister,$d"
 				else
-					echo "Unable to find firmware for $d" >&2
+					warn "Unable to find firmware for $d"
 				fi
 				continue
 			fi
-			f="$LOCALSRC/$f"
 		elif ! "$INSTALL" && ! grep -Fq "($f)" "$CFILE" ; then
-			echo "Cannot download local file $f" >&2
+			warn "Cannot download local file $f"
 			exit 1
 		else
 			# Don't verify files specified on the command-line
 			verify_existing=false
 		fi
 
-		set -A installed -- $( installed_firmware '' "$d-firmware-" '*' )
+		set -A installed
+		if "$INSTALL"; then
+			set -A installed -- \
+			    $( installed_firmware '' "$d-firmware-" '*' )
 
-		if "$INSTALL" && [ "${installed[*]:-}" ]; then
-			for i in "${installed[@]}"; do
-				if [ "${f##*/}" = "$i.tgz" ]; then
-					((VERBOSE > 2)) && echo "Keep $i"
-					kept="$kept,$d"
-					continue 2
-				fi
-			done
+			if [ "${installed[*]:-}" ]; then
+				for i in "${installed[@]}"; do
+					if [ "${f##*/}" = "$i.tgz" ]; then
+						((VERBOSE > 2)) \
+						    && echo "Keep $i"
+						kept="$kept,$d"
+						continue 2
+					fi
+				done
+			fi
 		fi
 
-		pending_status=false
+		# Fetch an unqualified file into LOCALSRC
+		# if it doesn't exist in the current directory.
+		if [ "$f" = "${f##/}" ] && [ ! -e "$f" ]; then
+			f="$LOCALSRC/$f"
+		fi
+
 		if "$verify_existing" && [ -e "$f" ]; then
+			pending_status=false
 			if ((VERBOSE == 1)); then
 				echo -n "Verify ${f##*/} ..."
 				pending_status=true
 			elif ((VERBOSE > 1)) && ! "$INSTALL"; then
-			    echo "Keep/Verify ${f##*/}"
+				echo "Keep/Verify ${f##*/}"
 			fi
 
-			if "$DRYRUN" || verify "$f"; then
-				"$INSTALL" || kept="$kept,$d"
+			if "$DRYRUN" || verify_existing "$f"; then
+				"$pending_status" && echo " done."
+				if ! "$INSTALL"; then
+					kept="$kept,$d"
+					continue
+				fi
 			elif "$DOWNLOAD"; then
-				((VERBOSE == 1)) && echo " failed."
+				"$pending_status" && echo " failed."
 				((VERBOSE > 1)) && echo "Refetching $f"
 				rm -f "$f"
 			else
@@ -565,67 +722,118 @@ if [ "${devices[*]:-}" ]; then
 			fi
 		fi
 
-		if [ -e "$f" ]; then
-			"$pending_status" && ! "$INSTALL" && echo " done."
-		elif "$DOWNLOAD"; then
-			if "$DRYRUN"; then
-				((VERBOSE)) && echo "Get/Verify ${f##*/}"
-			else
-				if ((VERBOSE == 1)); then
-					echo -n "Get/Verify ${f##*/} ..."
-					pending_status=true
-				fi
-				fetch  "$f" &&
-				verify "$f" || {
-					"$pending_status" && echo " failed."
-					continue
-				}
-				"$pending_status" && ! "$INSTALL" && echo " done."
-			fi
-			"$INSTALL" || added="$added,$d"
-		elif "$INSTALL"; then
-			echo "Cannot install ${f##*/}, not found" >&2
-			continue
-		fi
-
-		"$INSTALL" || continue
-
-		update="Install"
 		if [ "${installed[*]:-}" ]; then
-			update="Update"
-			for i in "${installed[@]}"; do
-				"$DRYRUN" || delete_firmware "$i"
-			done
+			set -A update -- "${update[@]}" "$f"
+		else
+			set -A add -- "${add[@]}" "$f"
 		fi
 
-		if "$DRYRUN"; then
-			((VERBOSE)) && echo "$update $f"
-		else
-			if ((VERBOSE == 1)) && ! "$pending_status"; then
-				echo -n "Install ${f##*/} ..."
-				pending_status=true
-			fi
-			add_firmware "$f" "$update"
-		fi
-
-		f="${f##*/}"
-		f="${f%.tgz}"
-		if [ "$update" = Install ]; then
-			"$pending_status" && echo " installed."
-			added="$added,$d"
-		else
-			"$pending_status" && echo " updated."
-			updated="$updated,$d"
-		fi
 	done
 fi
 
-added="${added:#,}"
-updated="${updated:#,}"
-kept="${kept:#,}"
-[ "${unregister:-}" ] && unregister="; unregistered ${unregister:#,}"
 if "$INSTALL"; then
-	echo  "${0##*/}: added ${added:-none}; updated ${updated:-none}; kept ${kept:-none}${unregister}"
+	status " add "
+	action=Install
 else
-	echo  "${0##*/}: downloaded ${added:-none}; kept ${kept:-none}${unregister}"
+	status " download "
+	action=Download
 fi
+
+comma=''
+[ "${add[*]}" ] || status none
+for f in "${add[@]}" _update_ "${update[@]}"; do
+	[ "$f" ] || continue
+	if [ "$f" = _update_ ]; then
+		comma=''
+		"$INSTALL" || continue
+		action=Update
+		status "; update "
+		[ "${update[*]}" ] || status none
+		continue
+	fi
+	d="$( firmware_devicename "$f" )"
+	status "$comma$d"
+	comma=,
+
+	pending_status=false
+	if [ -e "$f" ]; then
+		if "$DRYRUN"; then
+			((VERBOSE)) && echo "$action ${f##*/}"
+		else
+			if ((VERBOSE == 1)); then
+				echo -n "Install ${f##*/} ..."
+				pending_status=true
+			fi
+		fi
+	elif "$DOWNLOAD"; then
+		if "$DRYRUN"; then
+			((VERBOSE)) && echo "Get/Verify ${f##*/}"
+		else
+			if ((VERBOSE == 1)); then
+				echo -n "Get/Verify ${f##*/} ..."
+				pending_status=true
+			fi
+			fetch  "$f" &&
+			verify "$f" || {
+				integer e=$?
+
+				"$pending_status" && echo " failed."
+				status " failed (${f##*/})"
+
+				if ((VERBOSE)) && [ -s "$FD_DIR/warn" ]; then
+					cat "$FD_DIR/warn" >&2
+					rm -f "$FD_DIR/warn"
+				fi
+
+				# Fetch or verify exited > 1
+				# which means we don't keep trying.
+				((e > 1)) && exit 1
+
+				continue
+			}
+		fi
+	elif "$INSTALL"; then
+		warn "Cannot install ${f##*/}, not found"
+		continue
+	fi
+
+	if ! "$INSTALL"; then
+		"$pending_status" && echo " done."
+		continue
+	fi
+
+	if ! "$DRYRUN"; then
+		if [ "$action" = Update ]; then
+			for i in $( installed_firmware '' "$d-firmware-" '*' )
+			do
+				delete_firmware "$i" || {
+					"$pending_status" &&
+					    echo -n " (remove $i failed)"
+					status " (remove $i failed)"
+
+					continue
+				}
+				#status " (removed $i)"
+			done
+		fi
+
+		add_firmware "$f" "$action" || {
+			"$pending_status" && echo " failed."
+			status " failed (${f##*/})"
+			continue
+		}
+	fi
+
+	if "$pending_status"; then
+		if [ "$action" = Install ]; then
+			echo " installed."
+		else
+			echo " updated."
+		fi
+	fi
+done
+
+[ "$unregister" ] && status "; unregister ${unregister:#,}"
+[ "$kept"       ] && status "; keep ${kept:#,}"
+
+exit 0

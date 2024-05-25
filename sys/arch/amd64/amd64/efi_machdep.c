@@ -1,4 +1,4 @@
-/*	$OpenBSD: efi_machdep.c,v 1.4 2022/11/07 01:41:57 guenther Exp $	*/
+/*	$OpenBSD: efi_machdep.c,v 1.7 2023/07/08 07:18:39 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
@@ -28,20 +28,9 @@
 extern paddr_t cr3_reuse_pcid;
 
 #include <dev/efi/efi.h>
-
-#include <dev/clock_subr.h>
+#include <machine/efivar.h>
 
 extern EFI_MEMORY_DESCRIPTOR *mmap;
-
-struct efi_softc {
-	struct device	sc_dev;
-	struct pmap	*sc_pm;
-	EFI_RUNTIME_SERVICES *sc_rs;
-	u_long		sc_psw;
-	uint64_t	sc_cr3;
-
-	struct todr_chip_handle sc_todr;
-};
 
 int	efi_match(struct device *, void *, void *);
 void	efi_attach(struct device *, struct device *, void *);
@@ -50,20 +39,9 @@ const struct cfattach efi_ca = {
 	sizeof(struct efi_softc), efi_match, efi_attach
 };
 
-struct cfdriver efi_cd = {
-	NULL, "efi", DV_DULL
-};
-
 void	efi_map_runtime(struct efi_softc *);
-void	efi_enter(struct efi_softc *);
-void	efi_leave(struct efi_softc *);
-int	efi_gettime(struct todr_chip_handle *, struct timeval *);
-int	efi_settime(struct todr_chip_handle *, struct timeval *);
 
 label_t efi_jmpbuf;
-
-#define efi_enter_check(sc) (setjmp(&efi_jmpbuf) ? \
-    (efi_leave(sc), EFAULT) : (efi_enter(sc), 0))
 
 int
 efi_match(struct device *parent, void *match, void *aux)
@@ -87,8 +65,6 @@ efi_attach(struct device *parent, struct device *self, void *aux)
 	uint64_t system_table;
 	bus_space_handle_t memh;
 	EFI_SYSTEM_TABLE *st;
-	EFI_TIME time;
-	EFI_STATUS status;
 	uint16_t major, minor;
 	int i;
 
@@ -124,6 +100,9 @@ efi_attach(struct device *parent, struct device *self, void *aux)
 	if ((bios_efiinfo->flags & BEI_64BIT) == 0)
 		return;
 
+	if (bios_efiinfo->flags & BEI_ESRT)
+		sc->sc_esrt = (void *)bios_efiinfo->config_esrt;
+
 	efi_map_runtime(sc);
 
 	/*
@@ -138,25 +117,6 @@ efi_attach(struct device *parent, struct device *self, void *aux)
 		printf(" rev 0x%x\n", st->FirmwareRevision);
 	}
 	efi_leave(sc);
-
-	if (efi_enter_check(sc))
-		return;
-	status = sc->sc_rs->GetTime(&time, NULL);
-	efi_leave(sc);
-	if (status != EFI_SUCCESS)
-		return;
-
-	/*
-	 * EDK II implementations provide an implementation of
-	 * GetTime() that returns a fixed compiled-in time on hardware
-	 * without a (supported) RTC.  So only use this interface as a
-	 * last resort.
-	 */
-	sc->sc_todr.cookie = sc;
-	sc->sc_todr.todr_gettime = efi_gettime;
-	sc->sc_todr.todr_settime = efi_settime;
-	sc->sc_todr.todr_quality = -1000;
-	todr_attach(&sc->sc_todr);
 }
 
 void
@@ -248,77 +208,19 @@ efi_enter(struct efi_softc *sc)
 	fpu_kernel_enter();
 
 	curpcb->pcb_onfault = (void *)efi_fault;
+	if (curcpu()->ci_feature_sefflags_edx & SEFF0EDX_IBT)
+		lcr4(rcr4() & ~CR4_CET);
 }
 
 void
 efi_leave(struct efi_softc *sc)
 {
+	if (curcpu()->ci_feature_sefflags_edx & SEFF0EDX_IBT)
+		lcr4(rcr4() | CR4_CET);
 	curpcb->pcb_onfault = NULL;
 
 	fpu_kernel_exit();
 
 	lcr3(sc->sc_cr3);
 	intr_restore(sc->sc_psw);
-}
-
-int
-efi_gettime(struct todr_chip_handle *handle, struct timeval *tv)
-{
-	struct efi_softc *sc = handle->cookie;
-	struct clock_ymdhms dt;
-	EFI_TIME time;
-	EFI_STATUS status;
-
-	if (efi_enter_check(sc))
-		return EFAULT;
-	status = sc->sc_rs->GetTime(&time, NULL);
-	efi_leave(sc);
-	if (status != EFI_SUCCESS)
-		return EIO;
-
-	dt.dt_year = time.Year;
-	dt.dt_mon = time.Month;
-	dt.dt_day = time.Day;
-	dt.dt_hour = time.Hour;
-	dt.dt_min = time.Minute;
-	dt.dt_sec = time.Second;
-
-	if (dt.dt_sec > 59 || dt.dt_min > 59 || dt.dt_hour > 23 ||
-	    dt.dt_day > 31 || dt.dt_day == 0 ||
-	    dt.dt_mon > 12 || dt.dt_mon == 0 ||
-	    dt.dt_year < POSIX_BASE_YEAR)
-		return EINVAL;
-
-	tv->tv_sec = clock_ymdhms_to_secs(&dt);
-	tv->tv_usec = 0;
-	return 0;
-}
-
-int
-efi_settime(struct todr_chip_handle *handle, struct timeval *tv)
-{
-	struct efi_softc *sc = handle->cookie;
-	struct clock_ymdhms dt;
-	EFI_TIME time;
-	EFI_STATUS status;
-
-	clock_secs_to_ymdhms(tv->tv_sec, &dt);
-
-	time.Year = dt.dt_year;
-	time.Month = dt.dt_mon;
-	time.Day = dt.dt_day;
-	time.Hour = dt.dt_hour;
-	time.Minute = dt.dt_min;
-	time.Second = dt.dt_sec;
-	time.Nanosecond = 0;
-	time.TimeZone = 0;
-	time.Daylight = 0;
-
-	if (efi_enter_check(sc))
-		return EFAULT;
-	status = sc->sc_rs->SetTime(&time);
-	efi_leave(sc);
-	if (status != EFI_SUCCESS)
-		return EIO;
-	return 0;
 }

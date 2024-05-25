@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpi_machdep.c,v 1.106 2022/11/08 17:34:12 cheloha Exp $	*/
+/*	$OpenBSD: acpi_machdep.c,v 1.108 2023/06/07 04:46:09 deraadt Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -434,7 +434,8 @@ acpi_sleep_cpu(struct acpi_softc *sc, int state)
 		return (ECANCELED);
 	}
 	/* Resume path */
-	fpureset();
+	if (curcpu()->ci_feature_sefflags_edx & SEFF0EDX_IBT)
+		lcr4(rcr4() | CR4_CET);
 
 	/* Reset the vectors */
 	sc->sc_facs->wakeup_vector = 0;

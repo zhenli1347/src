@@ -1,4 +1,4 @@
-.\"	$OpenBSD: make.1,v 1.137 2022/10/14 11:26:19 kn Exp $
+.\"	$OpenBSD: make.1,v 1.141 2023/08/10 10:56:34 espie Exp $
 .\"	$NetBSD: make.1,v 1.18 1997/03/10 21:19:53 christos Exp $
 .\"
 .\" Copyright (c) 1990, 1993
@@ -30,7 +30,7 @@
 .\"
 .\"	from: @(#)make.1	8.4 (Berkeley) 3/19/94
 .\"
-.Dd $Mdocdate: October 14 2022 $
+.Dd $Mdocdate: August 10 2023 $
 .Dt MAKE 1
 .Os
 .Sh NAME
@@ -44,10 +44,10 @@
 .Op Fl d Ar flags
 .Op Fl f Ar mk
 .Op Fl I Ar directory
-.Op Fl j Ar max_processes
+.Op Fl j Ar max_jobs
 .Op Fl m Ar directory
 .Op Fl V Ar variable
-.Op Ar NAME Ns = Ns Ar value
+.Op Ar NAME Ns = Ns Ar value ...
 .Bk -words
 .Op Ar target ...
 .Ek
@@ -154,7 +154,7 @@ Extended options are as follows:
 Try to be backwards compatible by executing the commands to make
 the prerequisites in a target rule in sequence.
 This is the default, in the absence of
-.Fl j Ar max_processes .
+.Fl j Ar max_jobs .
 .It Fl C Ar directory
 Enter
 .Ar directory
@@ -241,10 +241,12 @@ Multiple directories can be added to form a search path.
 Furthermore, the system include path (see the
 .Fl m
 option) will be used after this search path.
-.It Fl j Ar max_processes
-Specify the maximum number of processes that
+.It Fl j Ar max_jobs
+Specify the maximum number of jobs that
 .Nm
 may have running at any one time.
+See the discussion about recursive invocations under
+.Sx BUGS .
 .It Fl m Ar directory
 Specify a directory in which to search for system include files:
 .Pa sys.mk
@@ -828,6 +830,8 @@ Possibly the file name of the last makefile that has been read.
 It should not be used; see the
 .Sx BUGS
 section below.
+.It Va .VARIABLES
+List of all the names of global variables that have been set.
 .El
 .Pp
 Variable expansion may be modified to select or modify each word of the
@@ -1604,7 +1608,7 @@ It was replaced in
 .Sh AUTHORS
 .An Stuart Feldman
 wrote the original implementation at the
-Bell Labs Computing Sciences Research Center.
+Bell Labs Computing Science Research Center.
 .Pp
 This implementation is a distant derivative of
 .Nm pmake ,

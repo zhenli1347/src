@@ -1,4 +1,4 @@
-/*	$OpenBSD: sbrk.S,v 1.8 2022/12/08 01:25:44 guenther Exp $	*/
+/*	$OpenBSD: sbrk.S,v 1.10 2023/12/10 16:45:52 deraadt Exp $	*/
 /*	$NetBSD: sbrk.S,v 1.7 2000/07/25 15:14:46 mycroft Exp $	*/
 
 /*
@@ -52,14 +52,15 @@ __curbrk:
 
 ENTRY_NB(sbrk)
 #ifdef __PIC__
-	PIC_PROLOGUE(%o5,%o4)
+	PIC_PROLOGUE(%o5, %o4)
 	set	__curbrk, %o3
 	ldx	[%o5 + %o3], %o2
 	ldx	[%o2], %o3			/* %o3 = old break */
 	add	%o3, %o0, %o4			/* %o4 = new break */
 	mov	%o4, %o0			/* copy for syscall */
 	mov	SYS_break, %g1
-	t	ST_SYSCALL			/* break(new_break) */
+99:	t	ST_SYSCALL			/* break(new_break) */
+	PINSYSCALL(SYS_break, 99b)
 	bcc,a	1f				/* if success, */
 	 mov	%o3, %o0			/*    set return value */
 	ERROR()
@@ -72,7 +73,8 @@ ENTRY_NB(sbrk)
 	add	%o3, %o0, %o4			/* %o4 = new break */
 	mov	%o4, %o0			/* copy for syscall */
 	mov	SYS_break, %g1
-	t	ST_SYSCALL			/* break(new_break) */
+98:	t	ST_SYSCALL			/* break(new_break) */
+	PINSYSCALL(SYS_break, 98b)
 	bcc,a	1f				/* if success, */
 	 mov	%o3, %o0			/*    set return value */
 	ERROR()

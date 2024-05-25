@@ -1,4 +1,4 @@
-/*	$OpenBSD: ugen.c,v 1.116 2022/07/02 08:50:42 visa Exp $ */
+/*	$OpenBSD: ugen.c,v 1.118 2024/05/23 03:21:09 jsg Exp $ */
 /*	$NetBSD: ugen.c,v 1.63 2002/11/26 18:49:48 christos Exp $	*/
 /*	$FreeBSD: src/sys/dev/usb/ugen.c,v 1.26 1999/11/17 22:33:41 n_hibma Exp $	*/
 
@@ -35,7 +35,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/ioctl.h>
@@ -50,7 +49,6 @@
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdi_util.h>
-#include <dev/usb/usbdivar.h>
 
 #ifdef UGEN_DEBUG
 #define DPRINTF(x)	do { if (ugendebug) printf x; } while (0)
@@ -798,6 +796,10 @@ ugen_detach(struct device *self, int flags)
 	for (endptno = 0; endptno < USB_MAX_ENDPOINTS; endptno++) {
 		if (sc->sc_is_open[endptno])
 			ugen_do_close(sc, endptno, FREAD|FWRITE);
+
+		/* ugenkqfilter() always uses IN. */
+		sce = &sc->sc_endpoints[endptno][IN];
+		klist_invalidate(&sce->rsel.si_note);
 	}
 	return (0);
 }

@@ -5,9 +5,6 @@
 #define OPENSSLDIR "/etc/ssl"
 #endif
 
-#undef OPENSSL_UNISTD
-#define OPENSSL_UNISTD <unistd.h>
-
 #undef OPENSSL_EXPORT_VAR_AS_FUNCTION
 
 #if defined(HEADER_IDEA_H) && !defined(IDEA_INT)
@@ -85,7 +82,7 @@
 #endif
 
 /* This helps C compiler generate the correct code for multiple functional
- * units.  It reduces register dependancies at the expense of 2 more
+ * units.  It reduces register dependencies at the expense of 2 more
  * registers */
 #ifndef DES_RISC1
 #undef DES_RISC1
@@ -100,7 +97,7 @@ YOU SHOULD NOT HAVE BOTH DES_RISC1 AND DES_RISC2 DEFINED!!!!!
 #endif
 
 /* Unroll the inner loop, this sometimes helps, sometimes hinders.
- * Very mucy CPU dependant */
+ * Very much CPU dependent */
 #ifndef DES_UNROLL
 #define DES_UNROLL
 #endif

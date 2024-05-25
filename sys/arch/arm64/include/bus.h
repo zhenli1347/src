@@ -1,4 +1,4 @@
-/* $OpenBSD: bus.h,v 1.8 2021/02/16 12:33:22 kettenis Exp $ */
+/* $OpenBSD: bus.h,v 1.10 2024/01/20 11:22:46 kettenis Exp $ */
 /*
  * Copyright (c) 2003-2004 Opsycon AB Sweden.  All rights reserved.
  *
@@ -335,6 +335,7 @@ bus_space_barrier(bus_space_tag_t t, bus_space_handle_t h, bus_size_t offset,
 #define	BUS_DMA_ZERO		0x0800	/* zero memory in dmamem_alloc */
 #define	BUS_DMA_NOCACHE		0x1000
 #define	BUS_DMA_64BIT		0x2000	/* device handles 64bit dva */
+#define	BUS_DMA_FIXED		0x4000	/* place mapping at specified dva */
 
 /* Forwards needed by prototypes below. */
 struct mbuf;
@@ -400,6 +401,9 @@ struct machine_bus_dma_tag {
 	 */
 	int	(*_dmamem_alloc)(bus_dma_tag_t, bus_size_t, bus_size_t,
 		    bus_size_t, bus_dma_segment_t *, int, int *, int);
+	int	(*_dmamem_alloc_range)(bus_dma_tag_t, bus_size_t, bus_size_t,
+		    bus_size_t, bus_dma_segment_t *, int, int *, int,
+		    bus_addr_t, bus_addr_t);
 	void	(*_dmamem_free)(bus_dma_tag_t, bus_dma_segment_t *, int);
 	int	(*_dmamem_map)(bus_dma_tag_t, bus_dma_segment_t *,
 		    int, size_t, caddr_t *, int);
@@ -433,6 +437,9 @@ struct machine_bus_dma_tag {
 
 #define	bus_dmamem_alloc(t, s, a, b, sg, n, r, f)		\
 	(*(t)->_dmamem_alloc)((t), (s), (a), (b), (sg), (n), (r), (f))
+#define	bus_dmamem_alloc_range(t, s, a, b, sg, n, r, f, l, h)	\
+	(*(t)->_dmamem_alloc_range)((t), (s), (a), (b), (sg),	\
+		(n), (r), (f), (l), (h))
 #define	bus_dmamem_free(t, sg, n)				\
 	(*(t)->_dmamem_free)((t), (sg), (n))
 #define	bus_dmamem_map(t, sg, n, s, k, f)			\

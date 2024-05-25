@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.h,v 1.106 2022/10/06 14:41:08 martijn Exp $	*/
+/*	$OpenBSD: snmpd.h,v 1.120 2024/05/21 05:00:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -20,24 +20,23 @@
 #ifndef SNMPD_H
 #define SNMPD_H
 
+#include <sys/queue.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/tree.h>
+#include <sys/types.h>
 #include <sys/un.h>
 
-#include <net/if.h>
-#include <net/if_dl.h>
 #include <netinet/in.h>
-#include <netinet/if_ether.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/pfvar.h>
-#include <net/route.h>
 
 #include <ber.h>
-#include <stdio.h>
+#include <event.h>
+#include <limits.h>
 #include <imsg.h>
+#include <stddef.h>
+#include <stdint.h>
 
-#include "log.h"
-#include "smi.h"
+#include "mib.h"
 #include "snmp.h"
 
 #ifndef nitems
@@ -174,51 +173,8 @@ struct privsep_fd {
 #define DPRINTF(x...)	do {} while(0)
 #endif
 
-/*
- * Message Processing Subsystem (mps)
- */
-
-struct oid {
-	struct ber_oid		 o_id;
-#define o_oid			 o_id.bo_id
-#define o_oidlen		 o_id.bo_n
-
-	char			*o_name;
-
-	u_int			 o_flags;
-
-	int			 (*o_get)(struct oid *, struct ber_oid *,
-				    struct ber_element **);
-	struct ber_oid		*(*o_table)(struct oid *, struct ber_oid *,
-				    struct ber_oid *);
-
-	long long		 o_val;
-	void			*o_data;
-
-	RB_ENTRY(oid)		 o_element;
-	RB_ENTRY(oid)		 o_keyword;
-};
-
-#define OID_RD			0x01
-#define OID_WR			0x02
-#define OID_IFSET		0x04	/* only if user-specified value */
-#define OID_DYNAMIC		0x08	/* free allocated data */
-#define OID_TABLE		0x10	/* dynamic sub-elements */
-#define OID_MIB			0x20	/* root-OID of a supported MIB */
-#define OID_KEY			0x40	/* lookup tables */
-
-#define OID_RS			(OID_RD|OID_IFSET)
-
-#define OID_TRD			(OID_RD|OID_TABLE)
-
-#define OID_NOTSET(_oid)						\
-	(((_oid)->o_flags & OID_IFSET) &&				\
-	((_oid)->o_data == NULL) && ((_oid)->o_val == 0))
-
-#define OID(...)		{ { __VA_ARGS__ } }
-#define MIBDECL(...)		{ { MIB_##__VA_ARGS__ } }, #__VA_ARGS__
-#define MIB(...)		{ { MIB_##__VA_ARGS__ } }, NULL
-#define MIBEND			{ { 0 } }, NULL
+#define OID(...)		(struct ber_oid){ { __VA_ARGS__ },	\
+    (sizeof((uint32_t []) { __VA_ARGS__ }) / sizeof(uint32_t)) }
 
 /*
  * daemon structures
@@ -385,7 +341,7 @@ struct trap_address {
 			int		 ta_seclevel;
 		};
 	};
-	struct ber_oid		*ta_oid;
+	struct ber_oid		 ta_oid;
 
 	TAILQ_ENTRY(trap_address) entry;
 };
@@ -427,11 +383,21 @@ struct usmuser {
 	SLIST_ENTRY(usmuser)	 uu_next;
 };
 
+struct snmp_system {
+	char			 sys_descr[256];
+	struct ber_oid		 sys_oid;
+	char			 sys_contact[256];
+	char			 sys_name[256];
+	char			 sys_location[256];
+	int8_t			 sys_services;
+};
+
 struct snmpd {
 	u_int8_t		 sc_flags;
 #define SNMPD_F_VERBOSE		 0x01
 #define SNMPD_F_DEBUG		 0x02
 #define SNMPD_F_NONAMES		 0x04
+	enum mib_oidfmt		 sc_oidfmt;
 
 	const char		*sc_confpath;
 	struct addresslist	 sc_addresses;
@@ -447,6 +413,7 @@ struct snmpd {
 	size_t			 sc_engineid_len;
 
 	struct snmp_stats	 sc_stats;
+	struct snmp_system	 sc_system;
 
 	struct trap_addresslist	 sc_trapreceivers;
 
@@ -461,7 +428,7 @@ struct snmpd {
 };
 
 struct trapcmd {
-	struct ber_oid		*cmd_oid;
+	struct ber_oid		 cmd_oid;
 		/* sideways return for intermediate lookups */
 	struct trapcmd		*cmd_maybe;
 
@@ -489,39 +456,12 @@ RB_PROTOTYPE(snmp_messages, snmp_message, sm_entry, snmp_messagecmp)
 
 /* trap.c */
 void		 trap_init(void);
-int		 trap_imsg(struct imsgev *, pid_t);
 int		 trap_send(struct ber_oid *, struct ber_element *);
-
-/* mps.c */
-int		 mps_getreq(struct snmp_message *, struct ber_element *,
-		    struct ber_oid *, u_int);
-int		 mps_getnextreq(struct snmp_message *, struct ber_element *,
-		    struct ber_oid *);
-int		 mps_getbulkreq(struct snmp_message *, struct ber_element **,
-		    struct ber_element **, struct ber_oid *, int);
-int		 mps_set(struct ber_oid *, void *, long long);
-int		 mps_getstr(struct oid *, struct ber_oid *,
-		    struct ber_element **);
-int		 mps_getint(struct oid *, struct ber_oid *,
-		    struct ber_element **);
-int		 mps_getts(struct oid *, struct ber_oid *,
-		    struct ber_element **);
 
 /* smi.c */
 int		 smi_init(void);
-void		 smi_mibtree(struct oid *);
-struct oid	*smi_find(struct oid *);
-struct oid	*smi_nfind(struct oid *);
-struct oid	*smi_findkey(char *);
-struct oid	*smi_next(struct oid *);
-struct oid	*smi_foreach(struct oid *, u_int);
-void		 smi_oidlen(struct ber_oid *);
-void		 smi_scalar_oidlen(struct ber_oid *);
 int		 smi_string2oid(const char *, struct ber_oid *);
-void		 smi_delete(struct oid *);
-int		 smi_insert(struct oid *);
-int		 smi_oid_cmp(struct oid *, struct oid *);
-int		 smi_key_cmp(struct oid *, struct oid *);
+const char	*smi_insert(struct ber_oid *, const char *);
 unsigned int	 smi_application(struct ber_element *);
 void		 smi_debug_elements(struct ber_element *);
 
@@ -567,8 +507,6 @@ int	 proc_composev_imsg(struct privsep *, enum privsep_procid, int,
 	    u_int16_t, u_int32_t, int, const struct iovec *, int);
 int	 proc_composev(struct privsep *, enum privsep_procid,
 	    uint16_t, const struct iovec *, int);
-int	 proc_forward_imsg(struct privsep *, struct imsg *,
-	    enum privsep_procid, int);
 struct imsgbuf *
 	 proc_ibuf(struct privsep *, enum privsep_procid, int);
 struct imsgev *

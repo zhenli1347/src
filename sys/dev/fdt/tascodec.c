@@ -1,4 +1,4 @@
-/*	$OpenBSD: tascodec.c,v 1.5 2022/09/02 16:53:28 kettenis Exp $	*/
+/*	$OpenBSD: tascodec.c,v 1.8 2023/12/26 09:25:15 kettenis Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -26,6 +26,7 @@
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_gpio.h>
 #include <dev/ofw/ofw_misc.h>
+#include <dev/ofw/ofw_regulator.h>
 #include <dev/ofw/fdt.h>
 
 #include <dev/i2c/i2cvar.h>
@@ -35,11 +36,13 @@
 #define PWR_CTL				0x02
 #define  PWR_CTL_ISNS_PD		(1 << 3)
 #define  PWR_CTL_VSNS_PD		(1 << 2)
+#define  PWR_CTL_MODE_MASK		(3 << 0)
 #define  PWR_CTL_MODE_ACTIVE		(0 << 0)
 #define  PWR_CTL_MODE_MUTE		(1 << 0)
 #define  PWR_CTL_MODE_SHUTDOWN		(2 << 0)
 #define PB_CFG2				0x05
 #define  PB_CFG2_DVC_PCM_MIN		0xc9
+#define  PB_CFG2_DVC_PCM_30DB		0x3c
 #define TDM_CFG0			0x0a
 #define  TDM_CFG0_FRAME_START		(1 << 0)
 #define TDM_CFG1			0x0b
@@ -65,6 +68,7 @@ struct tascodec_softc {
 
 	struct dai_device	sc_dai;
 	uint8_t			sc_dvc;
+	uint8_t			sc_mute;
 };
 
 int	tascodec_match(struct device *, void *, void *);
@@ -124,6 +128,8 @@ tascodec_attach(struct device *parent, struct device *self, void *aux)
 
 	printf("\n");
 
+	regulator_enable(OF_getpropint(node, "SDZ-supply", 0));
+
 	sdz_gpiolen = OF_getproplen(node, "shutdown-gpios");
 	if (sdz_gpiolen > 0) {
 		sdz_gpio = malloc(sdz_gpiolen, M_TEMP, M_WAITOK);
@@ -135,9 +141,10 @@ tascodec_attach(struct device *parent, struct device *self, void *aux)
 		delay(1000);
 	}
 
-	sc->sc_dvc = tascodec_read(sc, PB_CFG2);
-	if (sc->sc_dvc > PB_CFG2_DVC_PCM_MIN)
-		sc->sc_dvc = PB_CFG2_DVC_PCM_MIN;
+	/* Set volume to a reasonable level. */
+	sc->sc_dvc = PB_CFG2_DVC_PCM_30DB;
+	sc->sc_mute = PWR_CTL_MODE_ACTIVE;
+	tascodec_write(sc, PB_CFG2, sc->sc_dvc);
 
 	/* Default to stereo downmix mode for now. */
 	cfg2 = tascodec_read(sc, TDM_CFG2);
@@ -243,6 +250,7 @@ tascodec_set_tdm_slot(void *cookie, int slot)
  */
 enum {
 	TASCODEC_MASTER_VOL,
+	TASCODEC_MASTER_MUTE,
 	TASCODEC_OUTPUT_CLASS
 };
 
@@ -251,6 +259,7 @@ tascodec_set_port(void *priv, mixer_ctrl_t *mc)
 {
 	struct tascodec_softc *sc = priv;
 	u_char level;
+	uint8_t mode;
 
 	switch (mc->dev) {
 	case TASCODEC_MASTER_VOL:
@@ -258,6 +267,19 @@ tascodec_set_port(void *priv, mixer_ctrl_t *mc)
 		sc->sc_dvc = (PB_CFG2_DVC_PCM_MIN * (255 - level)) / 255;
 		tascodec_write(sc, PB_CFG2, sc->sc_dvc);
 		return 0;
+
+	case TASCODEC_MASTER_MUTE:
+		sc->sc_mute = mc->un.ord ?
+		    PWR_CTL_MODE_MUTE : PWR_CTL_MODE_ACTIVE;
+		mode = tascodec_read(sc, PWR_CTL);
+		if ((mode & PWR_CTL_MODE_MASK) == PWR_CTL_MODE_ACTIVE ||
+		    (mode & PWR_CTL_MODE_MASK) == PWR_CTL_MODE_MUTE) {
+			mode &= ~PWR_CTL_MODE_MASK;
+			mode |= sc->sc_mute;
+			tascodec_write(sc, PWR_CTL, mode);
+		}
+		return 0;
+		
 	}
 
 	return EINVAL;
@@ -275,6 +297,10 @@ tascodec_get_port(void *priv, mixer_ctrl_t *mc)
 		level = 255 - ((255 * sc->sc_dvc) / PB_CFG2_DVC_PCM_MIN);
 		mc->un.value.level[AUDIO_MIXER_LEVEL_MONO] = level;
 		return 0;
+
+	case TASCODEC_MASTER_MUTE:
+		mc->un.ord = (sc->sc_mute == PWR_CTL_MODE_MUTE);
+		return 0;
 	}
 
 	return EINVAL;
@@ -286,12 +312,28 @@ tascodec_query_devinfo(void *priv, mixer_devinfo_t *di)
 	switch (di->index) {
 	case TASCODEC_MASTER_VOL:
 		di->mixer_class = TASCODEC_OUTPUT_CLASS;
-		di->next = di->prev = AUDIO_MIXER_LAST;
+		di->prev = AUDIO_MIXER_LAST;
+		di->next = TASCODEC_MASTER_MUTE;
 		strlcpy(di->label.name, AudioNmaster, sizeof(di->label.name));
 		di->type = AUDIO_MIXER_VALUE;
 		di->un.v.num_channels = 1;
 		strlcpy(di->un.v.units.name, AudioNvolume,
 		    sizeof(di->un.v.units.name));
+		return 0;
+
+	case TASCODEC_MASTER_MUTE:
+		di->mixer_class = TASCODEC_OUTPUT_CLASS;
+		di->prev = TASCODEC_MASTER_VOL;
+		di->next = AUDIO_MIXER_LAST;
+		strlcpy(di->label.name, AudioNmute, sizeof(di->label.name));
+		di->type = AUDIO_MIXER_ENUM;
+		di->un.e.num_mem = 2;
+		di->un.e.member[0].ord = 0;
+		strlcpy(di->un.e.member[0].label.name, AudioNoff,
+		    MAX_AUDIO_DEV_LEN);
+		di->un.e.member[1].ord = 1;
+		strlcpy(di->un.e.member[1].label.name, AudioNon,
+		    MAX_AUDIO_DEV_LEN);
 		return 0;
 
 	case TASCODEC_OUTPUT_CLASS:
@@ -312,7 +354,7 @@ tascodec_trigger_output(void *cookie, void *start, void *end, int blksize,
 	struct tascodec_softc *sc = cookie;
 
 	tascodec_write(sc, PWR_CTL,
-	    PWR_CTL_ISNS_PD | PWR_CTL_VSNS_PD | PWR_CTL_MODE_ACTIVE);
+	    PWR_CTL_ISNS_PD | PWR_CTL_VSNS_PD | sc->sc_mute);
 	return 0;
 }
 

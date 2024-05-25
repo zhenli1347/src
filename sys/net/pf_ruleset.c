@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_ruleset.c,v 1.19 2022/07/20 09:33:11 mbuhl Exp $ */
+/*	$OpenBSD: pf_ruleset.c,v 1.21 2023/06/30 09:58:30 mvs Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -57,8 +57,8 @@
 
 
 #ifdef _KERNEL
-#define rs_malloc(x)		malloc(x, M_TEMP, M_WAITOK|M_CANFAIL|M_ZERO)
-#define rs_free(x, siz)		free(x, M_TEMP, siz)
+#define rs_malloc(x)		malloc(x, M_PF, M_WAITOK|M_CANFAIL|M_ZERO)
+#define rs_free(x, siz)		free(x, M_PF, siz)
 #define rs_pool_get_anchor()	pool_get(&pf_anchor_pl, \
 				    PR_WAITOK|PR_LIMITFAIL|PR_ZERO)
 #define rs_pool_put_anchor(x)	pool_put(&pf_anchor_pl, x)
@@ -233,6 +233,9 @@ pf_create_anchor(struct pf_anchor *parent, const char *aname)
 
 	pf_init_ruleset(&anchor->ruleset);
 	anchor->ruleset.anchor = anchor;
+#ifdef	_KERNEL
+	refcnt_init(&anchor->ref);
+#endif
 
 	return (anchor);
 }
@@ -308,7 +311,7 @@ pf_remove_if_empty_ruleset(struct pf_ruleset *ruleset)
 		if ((parent = ruleset->anchor->parent) != NULL)
 			RB_REMOVE(pf_anchor_node, &parent->children,
 			    ruleset->anchor);
-		rs_pool_put_anchor(ruleset->anchor);
+		pf_anchor_rele(ruleset->anchor);
 		if (parent == NULL)
 			return;
 		ruleset = &parent->ruleset;
@@ -430,4 +433,28 @@ pf_remove_anchor(struct pf_rule *r)
 	else if (!--r->anchor->refcnt)
 		pf_remove_if_empty_ruleset(&r->anchor->ruleset);
 	r->anchor = NULL;
+}
+
+void
+pf_anchor_rele(struct pf_anchor *anchor)
+{
+	if ((anchor == NULL) || (anchor == &pf_main_anchor))
+		return;
+
+#ifdef	_KERNEL
+	if (refcnt_rele(&anchor->ref))
+		rs_pool_put_anchor(anchor);
+#else
+	rs_pool_put_anchor(anchor);
+#endif
+}
+
+struct pf_anchor *
+pf_anchor_take(struct pf_anchor *anchor)
+{
+#ifdef	_KERNEL
+	if (anchor != NULL && anchor != &pf_main_anchor)
+		refcnt_take(&anchor->ref);
+#endif
+	return (anchor);
 }

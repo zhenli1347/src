@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mvneta.c,v 1.27 2022/07/19 21:49:22 jmatthew Exp $	*/
+/*	$OpenBSD: if_mvneta.c,v 1.32 2024/03/21 23:12:33 patrick Exp $	*/
 /*	$NetBSD: if_mvneta.c,v 1.41 2015/04/15 10:15:40 hsuenaga Exp $	*/
 /*
  * Copyright (c) 2007, 2008, 2013 KIYOHARA Takashi
@@ -61,8 +61,6 @@
 #include <net/if.h>
 #include <net/if_media.h>
 #include <net/if_types.h>
-
-#include <net/bpf.h>
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
@@ -174,6 +172,8 @@ struct mvneta_softc {
 	int			 sc_link;
 	int			 sc_sfp;
 	int			 sc_node;
+
+	struct if_device	 sc_ifd;
 
 #if NKSTAT > 0
 	struct mutex		 sc_kstat_lock;
@@ -502,7 +502,9 @@ mvneta_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	if (!sc->sc_fixed_link) {
-		sc->sc_phy = OF_getpropint(faa->fa_node, "phy", 0);
+		sc->sc_phy = OF_getpropint(faa->fa_node, "phy-handle", 0);
+		if (!sc->sc_phy)
+			sc->sc_phy = OF_getpropint(faa->fa_node, "phy", 0);
 		node = OF_getnodebyphandle(sc->sc_phy);
 		if (!node) {
 			printf(": cannot find phy in fdt\n");
@@ -720,7 +722,7 @@ mvneta_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_capabilities &= ~IFCAP_CSUM_TCPv4;
 #endif
 
-	ifq_set_maxlen(&ifp->if_snd, max(MVNETA_TX_RING_CNT - 1, IFQ_MAXLEN));
+	ifq_init_maxlen(&ifp->if_snd, max(MVNETA_TX_RING_CNT - 1, IFQ_MAXLEN));
 	strlcpy(ifp->if_xname, sc->sc_dev.dv_xname, sizeof(ifp->if_xname));
 
 	/*
@@ -742,6 +744,7 @@ mvneta_attach_deferred(struct device *self)
 {
 	struct mvneta_softc *sc = (struct mvneta_softc *) self;
 	struct ifnet *ifp = &sc->sc_ac.ac_if;
+	int mii_flags = 0;
 
 	if (!sc->sc_fixed_link) {
 		sc->sc_mdio = mii_byphandle(sc->sc_phy);
@@ -750,8 +753,22 @@ mvneta_attach_deferred(struct device *self)
 			return;
 		}
 
+		switch (sc->sc_phy_mode) {
+		case PHY_MODE_1000BASEX:
+			mii_flags |= MIIF_IS_1000X;
+			break;
+		case PHY_MODE_SGMII:
+			mii_flags |= MIIF_SGMII;
+			break;
+		case PHY_MODE_RGMII_ID:
+			mii_flags |= MIIF_RXID | MIIF_TXID;
+			break;
+		default:
+			break;
+		}
+
 		mii_attach(self, &sc->sc_mii, 0xffffffff, sc->sc_phyloc,
-		    MII_OFFSET_ANY, 0);
+		    MII_OFFSET_ANY, mii_flags);
 		if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
 			printf("%s: no PHY found!\n", self->dv_xname);
 			ifmedia_add(&sc->sc_mii.mii_media,
@@ -792,6 +809,10 @@ mvneta_attach_deferred(struct device *self)
 	 */
 	if_attach(ifp);
 	ether_ifattach(ifp);
+
+	sc->sc_ifd.if_node = sc->sc_node;
+	sc->sc_ifd.if_ifp = ifp;
+	if_register(&sc->sc_ifd);
 
 #if NKSTAT > 0
 	mvneta_kstat_attach(sc);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ext2fs_vnops.c,v 1.90 2022/06/26 05:20:42 visa Exp $	*/
+/*	$OpenBSD: ext2fs_vnops.c,v 1.94 2024/05/13 11:17:41 semarie Exp $	*/
 /*	$NetBSD: ext2fs_vnops.c,v 1.1 1997/06/11 09:34:09 bouyer Exp $	*/
 
 /*
@@ -88,7 +88,6 @@ ext2fs_create(void *v)
 /*
  * Mknod vnode call
  */
-/* ARGSUSED */
 int
 ext2fs_mknod(void *v)
 {
@@ -128,7 +127,6 @@ ext2fs_mknod(void *v)
  *
  * Just check the APPEND flag.
  */
-/* ARGSUSED */
 int
 ext2fs_open(void *v)
 {
@@ -159,7 +157,6 @@ ext2fs_access(void *v)
 			ip->i_e2fs_gid, mode, ap->a_cred));
 }
 
-/* ARGSUSED */
 int
 ext2fs_getattr(void *v)
 {
@@ -413,11 +410,6 @@ ext2fs_remove(void *v)
 		ip->i_flag |= IN_CHANGE;
 	}
 out:
-	if (dvp == vp)
-		vrele(vp);
-	else
-		vput(vp);
-	vput(dvp);
 	return (error);
 }
 
@@ -438,16 +430,6 @@ ext2fs_link(void *v)
 	if ((cnp->cn_flags & HASBUF) == 0)
 		panic("ext2fs_link: no name");
 #endif
-	if (vp->v_type == VDIR) {
-		VOP_ABORTOP(dvp, cnp);
-		error = EISDIR;
-		goto out2;
-	}
-	if (dvp->v_mount != vp->v_mount) {
-		VOP_ABORTOP(dvp, cnp);
-		error = EXDEV;
-		goto out2;
-	}
 	if (dvp != vp && (error = vn_lock(vp, LK_EXCLUSIVE))) {
 		VOP_ABORTOP(dvp, cnp);
 		goto out2;
@@ -832,7 +814,7 @@ abortit:
 				UIO_SYSSPACE, IO_NODELOCKED,
 				tcnp->cn_cred, NULL, curproc);
 			if (error == 0) {
-					namlen = dirbuf.dotdot_namlen;
+				namlen = dirbuf.dotdot_namlen;
 				if (namlen != 2 ||
 				    dirbuf.dotdot_name[0] != '.' ||
 				    dirbuf.dotdot_name[1] != '.') {
@@ -1215,7 +1197,6 @@ bad:
 /*
  * Synch an open file.
  */
-/* ARGSUSED */
 int
 ext2fs_fsync(void *v)
 {

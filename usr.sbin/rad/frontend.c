@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.41 2022/10/15 13:26:15 florian Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.46 2024/05/17 06:50:14 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -56,6 +56,7 @@
 #include <sys/uio.h>
 
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <net/if_types.h>
 #include <net/route.h>
 
@@ -66,7 +67,6 @@
 #include <netinet6/nd6.h>
 #include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
-#include <netinet6/ip6_var.h>
 #include <netinet/icmp6.h>
 
 #include <ctype.h>
@@ -119,6 +119,12 @@ struct nd_opt_pref64 {
 	u_int8_t	nd_opt_pref64_len;
 	u_int16_t	nd_opt_pref64_sltime_plc;
 	u_int8_t	nd_opt_pref64[12];
+};
+
+struct nd_opt_source_link_addr {
+	u_int8_t		nd_opt_source_link_addr_type;
+	u_int8_t		nd_opt_source_link_addr_len;
+	struct ether_addr	nd_opt_source_link_addr_hw_addr;
 };
 
 TAILQ_HEAD(, ra_iface)	ra_interfaces;
@@ -339,7 +345,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (iev_engine)
 				fatalx("%s: received unexpected imsg fd to "
 				    "frontend", __func__);
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg fd to "
 				   "frontend but didn't receive any",
 				   __func__);
@@ -465,7 +471,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			nconf = NULL;
 			break;
 		case IMSG_ICMP6SOCK:
-			if ((icmp6sock = imsg.fd) == -1)
+			if ((icmp6sock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "ICMPv6 fd but didn't receive any",
 				    __func__);
@@ -479,7 +485,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (routesock != -1)
 				fatalx("%s: received unexpected routesock fd",
 				    __func__);
-			if ((routesock = imsg.fd) == -1)
+			if ((routesock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "routesocket fd but didn't receive any",
 				    __func__);
@@ -490,7 +496,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			frontend_startup();
 			break;
 		case IMSG_CONTROLFD:
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "control fd but didn't receive any",
 				    __func__);
@@ -1100,6 +1106,7 @@ void
 build_packet(struct ra_iface *ra_iface)
 {
 	struct nd_router_advert		*ra;
+	struct nd_opt_source_link_addr	*ndopt_source_link_addr;
 	struct nd_opt_mtu		*ndopt_mtu;
 	struct nd_opt_prefix_info	*ndopt_pi;
 	struct ra_iface_conf		*ra_iface_conf;
@@ -1111,6 +1118,8 @@ build_packet(struct ra_iface *ra_iface)
 	struct ra_rdnss_conf		*ra_rdnss;
 	struct ra_dnssl_conf		*ra_dnssl;
 	struct ra_pref64_conf		*pref64;
+	struct ifaddrs			*ifap, *ifa;
+	struct sockaddr_dl		*sdl;
 	size_t				 len, label_len;
 	uint8_t				*p, buf[RA_MAX_SIZE];
 	char				*label_start, *label_end;
@@ -1120,6 +1129,8 @@ build_packet(struct ra_iface *ra_iface)
 	ra_options_conf = &ra_iface_conf->ra_options;
 
 	len = sizeof(*ra);
+	if (ra_iface_conf->ra_options.source_link_addr)
+		len += sizeof(*ndopt_source_link_addr);
 	if (ra_options_conf->mtu > 0)
 		len += sizeof(*ndopt_mtu);
 	len += sizeof(*ndopt_pi) * ra_iface->prefix_count;
@@ -1158,10 +1169,49 @@ build_packet(struct ra_iface *ra_iface)
 	else if (ra_options_conf->dfr) {
 		ra->nd_ra_router_lifetime =
 		    htons(ra_options_conf->router_lifetime);
+		/*
+		 * RFC 4191
+		 * If the Router Lifetime is zero, the preference value MUST be
+		 * set to (00) by the sender and MUST be ignored by the
+		 * receiver.
+		 */
+		if (ra_options_conf->router_lifetime > 0)
+			ra->nd_ra_flags_reserved |= ra_options_conf->rtpref;
 	}
 	ra->nd_ra_reachable = htonl(ra_options_conf->reachable_time);
 	ra->nd_ra_retransmit = htonl(ra_options_conf->retrans_timer);
 	p += sizeof(*ra);
+
+	if (ra_iface_conf->ra_options.source_link_addr) {
+		ndopt_source_link_addr = (struct nd_opt_source_link_addr *)p;
+		ndopt_source_link_addr->nd_opt_source_link_addr_type =
+		    ND_OPT_SOURCE_LINKADDR;
+		ndopt_source_link_addr->nd_opt_source_link_addr_len = 1;
+		if (getifaddrs(&ifap) != 0) {
+			ifap = NULL;
+			log_warn("getifaddrs");
+		}
+		for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+			if (ifa->ifa_addr == NULL ||
+			    ifa->ifa_addr->sa_family != AF_LINK)
+				continue;
+			if (strcmp(ra_iface->name, ifa->ifa_name) != 0)
+				continue;
+			sdl = (struct sockaddr_dl *)ifa->ifa_addr;
+			if (sdl->sdl_type != IFT_ETHER ||
+			    sdl->sdl_alen != ETHER_ADDR_LEN)
+				continue;
+			memcpy(&ndopt_source_link_addr->
+			    nd_opt_source_link_addr_hw_addr,
+			    LLADDR(sdl), ETHER_ADDR_LEN);
+			break;
+		}
+		if (ifap != NULL) {
+			freeifaddrs(ifap);
+			p += sizeof(*ndopt_source_link_addr);
+		} else
+			len -= sizeof(*ndopt_source_link_addr);
+	}
 
 	if (ra_options_conf->mtu > 0) {
 		ndopt_mtu = (struct nd_opt_mtu *)p;
@@ -1243,7 +1293,7 @@ build_packet(struct ra_iface *ra_iface)
 		/* scaled lifetime in units of 8 seconds */
 		sltime_plc = pref64->ltime / 8;
 		sltime_plc = sltime_plc << 3;
-		/* encode prefix lenght in lower 3 bits */
+		/* encode prefix length in lower 3 bits */
 		switch (pref64->prefixlen) {
 		case 96:
 			sltime_plc |= 0;
@@ -1280,7 +1330,7 @@ build_packet(struct ra_iface *ra_iface)
 	    != 0) {
 		memcpy(ra_iface->data, buf, len);
 		ra_iface->datalen = len;
-		/* packet changed; tell engine to send new advertisments */
+		/* packet changed; tell engine to send new advertisements */
 		if (event_initialized(&ra_iface->icmp6ev->ev))
 			frontend_imsg_compose_engine(IMSG_UPDATE_IF, 0,
 			    &ra_iface->if_index, sizeof(ra_iface->if_index));

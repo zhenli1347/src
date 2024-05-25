@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore_subr.S,v 1.14 2022/12/08 02:11:27 guenther Exp $	*/
+/*	$OpenBSD: locore_subr.S,v 1.19 2023/12/12 07:37:21 deraadt Exp $	*/
 /*	$NetBSD: locore_subr.S,v 1.28 2006/01/23 22:52:09 uwe Exp $	*/
 
 /*
@@ -45,7 +45,7 @@
 
 #include "assym.h"
 
-#include <sys/syscall.h>	/* SYS_sigreturn, SYS_exit */
+#include <sys/syscall.h>	/* SYS_sigreturn */
 #include <sh/asm.h>
 #include <sh/locore.h>
 #include <sh/param.h>		/* UPAGES */
@@ -471,10 +471,15 @@ NENTRY(_cpu_spin)
  *	respectively. set by cpu_fork().
  */
 NENTRY(proc_trampoline)
+	mov.l	.L_proc_trampoline_mi, r1
+	jsr	@r1			/* proc_trampoline_mi() */
+	 nop
 	jsr	@r12
 	 mov	r11,	r4
 	__EXCEPTION_RETURN
 	/* NOTREACHED */
+.L_proc_trampoline_mi:
+	.long	proc_trampoline_mi
 	SET_ENTRY_SIZE(proc_trampoline)
 
 
@@ -492,16 +497,16 @@ NENTRY(proc_trampoline)
 NENTRY(sigcode)
 	mov	r15, r4			/* get pointer to sigcontext */
 	mov.l	.L_SYS_sigreturn, r0
+	.globl	sigcodecall
+sigcodecall:
 	trapa	#0x80			/* and call sigreturn() */
 	.globl	sigcoderet
 sigcoderet:
-	mov.l	.L_SYS_exit, r0
-	trapa	#0x80			/* exit if sigreturn fails */
+	sleep		/* privileged -> illegal? */
 	/* NOTREACHED */
 
 	.align	2
 .L_SYS_sigreturn:	.long	SYS_sigreturn
-.L_SYS_exit:		.long	SYS_exit
 
 /* LINTSTUB: Var: char esigcode[1] */
 .globl	esigcode
@@ -611,10 +616,10 @@ ENTRY(copyout)
 
 
 /*
- * LINTSTUB: Func: int copyin(const void *usrc, void *kdst, size_t len)
+ * LINTSTUB: Func: int _copyin(const void *usrc, void *kdst, size_t len)
  *	Copy len bytes from the user address space.
  */
-ENTRY(copyin)
+ENTRY(_copyin)
 	mov.l	r14,	@-r15
 	sts.l	pr,	@-r15
 	mov	r15,	r14
@@ -663,8 +668,58 @@ ENTRY(copyin)
 	.long	curpcb
 .L_copyin_memcpy:
 	.long	memcpy
-	SET_ENTRY_SIZE(copyin)
+	SET_ENTRY_SIZE(_copyin)
 
+/*
+ * int copyin32(const void *usrc, void *kdst)
+ */
+ENTRY(copyin32)
+	mov.l	r14,	@-r15
+	sts.l	pr,	@-r15
+	mov	r15,	r14
+
+	mov	#3,	r3
+	mov	#EFAULT, r0		/* assume there was a problem */
+	and	r4,	r3
+	tst	r3,	r3
+	bf	2f			/* punt if not aligned */
+
+	mov.l	.L_copyin32_VM_MAXUSER_ADDRESS, r1
+	cmp/hi	r1,	r4		/* bomb if uaddr isn't in user space */
+	bt	2f
+
+	mov.l	.L_copyin32_curpcb, r1	/* set fault handler */
+	mov.l	@r1,	r2
+	mov.l	.L_copyin32_onfault, r3
+	mov.l	r3,	@(PCB_ONFAULT,r2)
+
+	mov.l	@r4,	r1
+	mov	#0,	r0
+	mov.l	r1,	@r5
+	mov.l	r0,	@(PCB_ONFAULT,r2)
+2:
+	mov	r14,	r15
+	lds.l	@r15+,	pr
+	rts
+	 mov.l	@r15+,	r14
+
+3:
+	mov.l	.L_copyin32_curpcb, r1	/* clear fault handler */
+	mov.l	@r1,	r2
+	mov	#0,	r1
+	mov.l	r1,	@(PCB_ONFAULT,r2)
+
+	bra	2b
+	 mov	#EFAULT, r0
+
+	.align 2
+.L_copyin32_onfault:
+	.long	3b
+.L_copyin32_VM_MAXUSER_ADDRESS:
+	.long	VM_MAXUSER_ADDRESS - 4	/* sizeof(uint32_t) */
+.L_copyin32_curpcb:
+	.long	curpcb
+	SET_ENTRY_SIZE(copyin32)
 
 /*
  * LINTSTUB: Func: int copyoutstr(const void *ksrc, void *udst, size_t maxlen, size_t *lencopied)
@@ -743,13 +798,13 @@ ENTRY(copyoutstr)
 
 
 /*
- * LINTSTUB: Func: int copyinstr(const void *src, void *dst, size_t maxlen, size_t *lencopied)
+ * LINTSTUB: Func: int _copyinstr(const void *src, void *dst, size_t maxlen, size_t *lencopied)
  *	Copy a NUL-terminated string, at most maxlen characters long,
  *	from the user address space.  Return the number of characters
  *	copied (including the NUL) in *lencopied.  If the string is
  *	too long, return ENAMETOOLONG; else return 0 or EFAULT.
  */
-ENTRY(copyinstr)
+ENTRY(_copyinstr)
 	mov.l	r8,	@-r15
 	mov	#EFAULT, r3		/* assume there was a problem */
 	mov	r4,	r8
@@ -815,7 +870,7 @@ ENTRY(copyinstr)
 	.long	VM_MAXUSER_ADDRESS
 .L_copyinstr_curpcb:
 	.long	curpcb
-	SET_ENTRY_SIZE(copyinstr)
+	SET_ENTRY_SIZE(_copyinstr)
 
 /*
  * LINTSTUB: Func: int kcopy(const void *src, void *dst, size_t len)

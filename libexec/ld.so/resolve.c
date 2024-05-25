@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolve.c,v 1.97 2022/01/08 06:49:41 guenther Exp $ */
+/*	$OpenBSD: resolve.c,v 1.102 2024/01/22 02:08:31 deraadt Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -29,6 +29,8 @@
 #define _DYN_LOADER
 
 #include <sys/types.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 
 #include <limits.h>
 #include <link.h>
@@ -36,6 +38,7 @@
 #include "util.h"
 #include "path.h"
 #include "resolve.h"
+#include "syscall.h"
 
 /* substitution types */
 typedef enum {
@@ -227,14 +230,17 @@ _dl_origin_subst_path(elf_object_t *object, const char *origin_path,
 static int
 _dl_origin_path(elf_object_t *object, char *origin_path)
 {
-	const char *dirname_path = _dl_dirname(object->load_name);
+	const char *dirname_path;
 
+	/* syscall in ld.so returns 0/-errno, where libc returns char* */
+	if (_dl___realpath(object->load_name, origin_path) < 0)
+		return -1;
+
+	dirname_path = _dl_dirname(origin_path);
 	if (dirname_path == NULL)
 		return -1;
 
-	/* syscall in ld.so returns 0/-errno, where libc returns char* */
-	if (_dl___realpath(dirname_path, origin_path) < 0)
-		return -1;
+	_dl_strlcpy(origin_path, dirname_path, PATH_MAX);
 
 	return 0;
 }
@@ -272,10 +278,9 @@ _dl_finalize_object(const char *objname, Elf_Dyn *dynp, Elf_Phdr *phdrp,
 	elf_object_t *object;
 	Elf_Addr gnu_hash = 0;
 
-#if 0
-	_dl_printf("objname [%s], dynp %p, objtype %x lbase %lx, obase %lx\n",
-	    objname, dynp, objtype, lbase, obase);
-#endif
+	DL_DEB(("objname [%s], dynp %p, objtype %x lbase %lx, obase %lx\n",
+	    objname, dynp, objtype, lbase, obase));
+
 	object = _dl_calloc(1, sizeof(elf_object_t));
 	if (object == NULL)
 		_dl_oom();
@@ -316,7 +321,7 @@ _dl_finalize_object(const char *objname, Elf_Dyn *dynp, Elf_Phdr *phdrp,
 			gnu_hash = dynp->d_un.d_val;
 		dynp++;
 	}
-	DL_DEB((" flags %s = 0x%x\n", objname, object->obj_flags ));
+	DL_DEB((" flags %s = 0x%x\n", objname, object->obj_flags));
 	object->obj_type = objtype;
 
 	if (_dl_loading_object == NULL) {
@@ -436,7 +441,7 @@ _dl_finalize_object(const char *objname, Elf_Dyn *dynp, Elf_Phdr *phdrp,
 	if (object->load_object == object)
 		DL_DEB(("head %s\n", object->load_name));
 	DL_DEB(("obj %s has %s as head\n", object->load_name,
-	    _dl_loading_object->load_name ));
+	    _dl_loading_object->load_name));
 	object->refcount = 0;
 	object->opencount = 0;	/* # dlopen() & exe */
 	object->grprefcount = 0;
@@ -609,7 +614,7 @@ _dl_find_symbol_obj(elf_object_t *obj, struct symlookup *sl)
 			if (((*hashval ^ hash) >> 1) == 0) {
 				const Elf_Sym *sym = symt +
 				    (hashval - obj->chains_gnu);
-				
+
 				int r = matched_symbol(obj, sym, sl);
 				if (r)
 					return r > 0;
@@ -647,13 +652,11 @@ _dl_find_symbol(const char *name, int flags, const Elf_Sym *ref_sym,
 
 	/* Calculate both hashes in one pass */
 	for (p = (const unsigned char *)name; (c = *p) != '\0'; p++) {
-		unsigned long g;
 		sl.sl_elf_hash = (sl.sl_elf_hash << 4) + c;
-		if ((g = sl.sl_elf_hash & 0xf0000000))
-			sl.sl_elf_hash ^= g >> 24;
-		sl.sl_elf_hash &= ~g;
+		sl.sl_elf_hash ^= (sl.sl_elf_hash >> 24) & 0xf0;
 		sl.sl_gnu_hash = sl.sl_gnu_hash * 33 + c;
 	}
+	sl.sl_elf_hash &= 0x0fffffff;
 
 	if (req_obj->dyn.symbolic)
 		if (_dl_find_symbol_obj(req_obj, &sl))
@@ -730,7 +733,7 @@ found:
 
 	if (ref_sym != NULL && ref_sym->st_size != 0 &&
 	    (ref_sym->st_size != sl.sl_out.sym->st_size) &&
-	    (ELF_ST_TYPE(sl.sl_out.sym->st_info) != STT_FUNC) ) {
+	    (ELF_ST_TYPE(sl.sl_out.sym->st_info) != STT_FUNC)) {
 		_dl_printf("%s:%s: %s : WARNING: "
 		    "symbol(%s) size mismatch, relink your program\n",
 		    __progname, req_obj->load_name, sl.sl_out.obj->load_name,
@@ -744,4 +747,83 @@ void
 _dl_debug_state(void)
 {
 	/* Debugger stub */
+}
+
+/*
+ * Search for DT_SONAME, and check if this is libc
+ */
+int
+_dl_islibc(Elf_Dyn *_dynp, Elf_Addr loff)
+{
+	Elf_Dyn *d, *dynp = (Elf_Dyn *)((unsigned long)_dynp + loff);
+	long base = 0;
+
+	for (d = dynp; d->d_tag != DT_NULL; d++)
+		if (d->d_tag == DT_STRTAB) {
+			base = d->d_un.d_ptr + loff;
+			break;
+		}
+	if (base == 0)
+		return 0;
+	for (d = dynp; d->d_tag != DT_NULL; d++)
+		if (d->d_tag == DT_SONAME) {
+			if (_dl_strncmp((char *)(base + d->d_un.d_ptr),
+			    "libc.so.", 8) == 0)
+				return 1;
+			break;
+		}
+	return 0;
+}
+
+void
+_dl_pin(int file, Elf_Phdr *phdp, void *base, size_t len,
+    void *exec_base, size_t exec_size)
+{
+	struct pinsyscalls {
+		u_int offset;
+		u_int sysno;
+	} *syscalls;
+	int npins = 0, nsyscalls, i;
+	u_int *pins = NULL;
+	vaddr_t offset;
+
+	if (phdp->p_filesz > SYS_MAXSYSCALL * 2 * sizeof(*syscalls) ||
+	    phdp->p_filesz % sizeof(*syscalls) != 0 ||
+	    phdp->p_offset & 0x3)
+		return;
+	syscalls = _dl_mmap(NULL, phdp->p_filesz, PROT_READ,
+	    MAP_PRIVATE|MAP_FILE, file, phdp->p_offset);
+	if (syscalls == MAP_FAILED)
+		return;
+
+	/* Validate, and calculate pintable size */
+	nsyscalls = phdp->p_filesz / sizeof(*syscalls);
+	for (i = 0; i < nsyscalls; i++) {
+		if (syscalls[i].sysno < 0 ||
+		    syscalls[i].sysno >= SYS_MAXSYSCALL ||
+		    syscalls[i].offset >= len)
+			goto bad;
+		npins = MAXIMUM(npins, syscalls[i].sysno);
+	}
+	npins++;
+
+	/*
+	 * Fill pintable: 0 = invalid, -1 = accept, else offset
+	 * from base, rebase to text_start while at it
+	 */
+	pins = _dl_calloc(npins, sizeof(u_int));
+	offset = exec_base - base;
+	for (i = 0; i < nsyscalls; i++) {
+		if (pins[syscalls[i].sysno])
+			pins[syscalls[i].sysno] = (u_int)-1; /* duplicated */
+		else
+			pins[syscalls[i].sysno] = syscalls[i].offset - offset;
+	}
+	base += offset;
+	len = len - offset;
+bad:
+	_dl_munmap(syscalls, phdp->p_filesz);
+	if (pins)
+		_dl_pinsyscalls(base, len, pins, npins);
+	_dl_free(pins);
 }

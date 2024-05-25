@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6_proto.c,v 1.112 2022/11/23 14:48:28 kn Exp $	*/
+/*	$OpenBSD: in6_proto.c,v 1.114 2024/04/16 12:40:40 bluhm Exp $	*/
 /*	$KAME: in6_proto.c,v 1.66 2000/10/10 15:35:47 itojun Exp $	*/
 
 /*
@@ -158,7 +158,7 @@ const struct protosw inet6sw[] = {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_RAW,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= rip6_input,
   .pr_ctlinput	= rip6_ctlinput,
   .pr_ctloutput	= rip6_ctloutput,
@@ -322,7 +322,7 @@ const struct protosw inet6sw[] = {
   /* raw wildcard */
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= rip6_input,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreqs	= &rip6_usrreqs,
@@ -332,7 +332,7 @@ const struct protosw inet6sw[] = {
 
 const struct domain inet6domain = {
   .dom_family = AF_INET6,
-  .dom_name = "internet6",
+  .dom_name = "inet6",
   .dom_protosw = inet6sw,
   .dom_protoswNPROTOSW = &inet6sw[nitems(inet6sw)],
   .dom_sasize = sizeof(struct sockaddr_in6),

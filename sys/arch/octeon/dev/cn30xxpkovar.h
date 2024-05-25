@@ -1,4 +1,4 @@
-/*	$OpenBSD: cn30xxpkovar.h,v 1.5 2014/08/11 18:29:56 miod Exp $	*/
+/*	$OpenBSD: cn30xxpkovar.h,v 1.7 2024/05/20 23:13:33 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007 Internet Initiative Japan, Inc.
@@ -13,10 +13,10 @@
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -82,8 +82,6 @@ int			cn30xxpko_reset(struct cn30xxpko_softc *);
 void			cn30xxpko_config(struct cn30xxpko_softc *);
 int			cn30xxpko_port_enable(struct cn30xxpko_softc *, int);
 int			cn30xxpko_port_config(struct cn30xxpko_softc *);
-void			cn30xxpko_int_enable(struct cn30xxpko_softc *, int);
-uint64_t		cn30xxpko_int_summary(struct cn30xxpko_softc *);
 static inline uint64_t	cn30xxpko_cmd_word0(int, int, int, int, int, int,
 			    int, int, int, int, int, int, int, int, int, int);
 static inline uint64_t	cn30xxpko_cmd_word1(int, int, int, int, paddr_t);

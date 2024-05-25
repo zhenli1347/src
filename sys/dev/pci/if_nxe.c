@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_nxe.c,v 1.79 2022/03/11 18:00:48 mpi Exp $ */
+/*	$OpenBSD: if_nxe.c,v 1.81 2024/05/24 06:02:56 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 David Gwynne <dlg@openbsd.org>
@@ -22,11 +22,9 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
-#include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/timeout.h>
 #include <sys/sensors.h>
@@ -39,7 +37,6 @@
 #include <dev/pci/pcidevs.h>
 
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_media.h>
 
 #if NBPFILTER > 0
@@ -919,7 +916,7 @@ nxe_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_watchdog = nxe_watchdog;
 	ifp->if_hardmtu = MCLBYTES - ETHER_HDR_LEN - ETHER_CRC_LEN;
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
-	ifq_set_maxlen(&ifp->if_snd, 512); /* XXX */
+	ifq_init_maxlen(&ifp->if_snd, 512); /* XXX */
 
 	ifmedia_init(&sc->sc_media, 0, nxe_media_change, nxe_media_status);
 	ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_AUTO, 0, NULL);

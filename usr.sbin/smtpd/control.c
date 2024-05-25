@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.128 2021/06/14 17:58:15 eric Exp $	*/
+/*	$OpenBSD: control.c,v 1.131 2024/01/20 09:01:03 claudio Exp $	*/
 
 /*
  * Copyright (c) 2012 Gilles Chehade <gilles@poolp.org>
@@ -26,6 +26,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -106,7 +107,8 @@ control_imsg(struct mproc *p, struct imsg *imsg)
 		c = tree_get(&ctl_conns, imsg->hdr.peerid);
 		if (c == NULL)
 			return;
-		m_compose(&c->mproc, IMSG_CTL_OK, 0, 0, imsg->fd, NULL, 0);
+		m_compose(&c->mproc, IMSG_CTL_OK, 0, 0, imsg_get_fd(imsg),
+		    NULL, 0);
 		return;
 
 	case IMSG_STAT_INCREMENT:
@@ -269,7 +271,6 @@ control_listen(void)
 	event_add(&control_state.ev, NULL);
 }
 
-/* ARGSUSED */
 static void
 control_accept(int listenfd, short event, void *arg)
 {
@@ -407,7 +408,6 @@ control_digest_update(const char *key, size_t value, int incr)
 	}
 }
 
-/* ARGSUSED */
 static void
 control_dispatch_ext(struct mproc *p, struct imsg *imsg)
 {

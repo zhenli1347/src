@@ -72,6 +72,8 @@ struct xfrd_state {
 	size_t zonestat_clear_num;
 	/* array of malloced entries with cumulative cleared stat values */
 	struct nsdst** zonestat_clear;
+	/* array of child_count size with cumulative cleared stat values */
+	struct nsdst* stat_clear;
 
 	/* timer for NSD reload */
 	struct timeval reload_timeout;
@@ -117,6 +119,12 @@ struct xfrd_state {
 	int notify_udp_num;
 	/* first and last notify_zone* entries waiting for a UDP socket */
 	struct notify_zone *notify_waiting_first, *notify_waiting_last;
+
+	/* tree of catalog consumer zones. Processing is disabled if > 1. */
+	rbtree_type *catalog_consumer_zones;
+
+	/* tree of updated catalog producer zones for which the content to serve */
+	rbtree_type *catalog_producer_zones;
 };
 
 /*

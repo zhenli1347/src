@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# $OpenBSD: snmpd.sh,v 1.18 2022/01/19 11:02:38 martijn Exp $
+# $OpenBSD: snmpd.sh,v 1.20 2024/02/08 17:09:51 martijn Exp $
 #/*
 # * Copyright (c) Rob Pierce <rob@openbsd.org>
 # *
@@ -26,6 +26,8 @@ SLEEP=1
 PF[0]="disabled"
 PF[1]="enabled"
 
+STARTSOCK="/tmp/agentx"
+
 # This file will be creatred by traphandler.c as user _snmpd
 TMPFILE=$(mktemp -q /tmp/_snmpd_traptest.XXXXXX)
 
@@ -38,7 +40,30 @@ then
 	exit 0
 fi
 
+snmpdstart() {
+	rm "${STARTSOCK}" >/dev/null 2>&1
+	(cd ${OBJDIR} && nohup snmpd -dvf ./snmpd.conf > snmpd.log 2>&1) &
+	i=0
+	# wait max ~10s
+	while [ ! -S "$STARTSOCK" ]; do
+		i=$((i + 1))
+		if [ $i -eq 100 ]; then
+			echo "Failed to start snmpd" >&2
+			snmpdstop
+			fail
+		fi
+		sleep 0.1
+	done
+}
+
+snmpdstop() {
+	pkill snmpd
+	wait
+	rm -f "${STARTSOCK}" >/dev/null 2>&1
+}
+
 cleanup() {
+	rm ${STARTSOCK} >/dev/null 2>&1
 	rm ${TMPFILE} >/dev/null 2>&1
 	rm ${OBJDIR}/nohup.out >/dev/null 2>&1
 	rm ${OBJDIR}/snmpd.log >/dev/null 2>&1
@@ -69,6 +94,8 @@ listen on 127.0.0.1 snmpv2c notify
 listen on ::1 snmpv1 snmpv2c snmpv3
 listen on ::1 snmpv2c notify
 
+agentx path "${STARTSOCK}"
+
 # Specify communities
 read-only community public
 read-write community private
@@ -77,11 +104,7 @@ trap community public
 trap handle 1.2.3.4 "/usr/bin/touch ${TMPFILE}"
 EOF
 
-(cd ${OBJDIR} && nohup snmpd -dvf ./snmpd.conf > snmpd.log 2>&1) &
-
-sleep ${SLEEP}
-
-[ ! -n "$(pgrep snmpd)" ] && echo "Failed to start snmpd." && fail
+snmpdstart
 
 # pf (also checks "oid all" which obtains privileged kernel data
 
@@ -166,8 +189,7 @@ fi
 #	FAILED=1
 #fi
 
-kill $(pgrep snmpd) >/dev/null 2>&1
-wait
+snmpdstop
 
 # # # # # CONFIG TWO # # # # #
 echo "\nConfiguration: seclevel auth\n"
@@ -178,16 +200,14 @@ cat > ${OBJDIR}/snmpd.conf <<EOF
 listen on 127.0.0.1
 listen on ::1
 
+agentx path "${STARTSOCK}"
+
 seclevel auth
 
 user "hans" authkey "password123" auth hmac-sha1
 EOF
 
-(cd ${OBJDIR} && nohup snmpd -dvf ./snmpd.conf > snmpd.log 2>&1) &
-
-sleep ${SLEEP}
-
-[ ! -n "$(pgrep snmpd)" ] && echo "Failed to start snmpd." && fail
+snmpdstart
 
 # make sure we can't get an oid with deault community string
 
@@ -213,8 +233,7 @@ then
 	FAILED=1
 fi
 
-kill $(pgrep snmpd) >/dev/null 2>&1
-wait
+snmpdstop
 
 # # # # # CONFIG THREE # # # # #
 echo "\nConfiguration: seclevel enc\n"
@@ -225,16 +244,14 @@ cat > ${OBJDIR}/snmpd.conf <<EOF
 listen on 127.0.0.1
 listen on ::1
 
+agentx path "${STARTSOCK}"
+
 seclevel enc
 
 user "hans" authkey "password123" auth hmac-sha1 enc aes enckey "321drowssap"
 EOF
 
-(cd ${OBJDIR} && nohup snmpd -dvf ./snmpd.conf > snmpd.log 2>&1) &
-
-sleep ${SLEEP}
-
-[ ! -n "$(pgrep snmpd)" ] && echo "Failed to start snmpd." && fail
+snmpdstart
 
 # get with SHA authentication and AES encryption
 
@@ -249,8 +266,7 @@ then
 	FAILED=1
 fi
 
-kill $(pgrep snmpd) >/dev/null 2>&1
-wait
+snmpdstop
 
 # # # # # CONFIG FOUR # # # # #
 echo "\nConfiguration: non-default community strings, custom oids\n"
@@ -264,6 +280,8 @@ cat > ${OBJDIR}/snmpd.conf <<EOF
 listen on 127.0.0.1 snmpv1 snmpv2c
 listen on ::1 snmpv1 snmpv2c
 
+agentx path "${STARTSOCK}"
+
 read-only community non-default-ro
 
 read-write community non-default-rw
@@ -271,15 +289,9 @@ read-write community non-default-rw
 oid 1.3.6.1.4.1.30155.42.1 name myName read-only string "humppa"
 oid 1.3.6.1.4.1.30155.42.2 name myStatus read-only integer 1
 # No need to place a full index, we just need the object
-oid 1.3.6.1.6.3.15.1.2.2.1.3.1 name Reyk read-only string "Reyk Fl${oe}ter"
-oid 1.3.6.1.6.3.15.1.2.2.1.3.2 name broken read-only string "br${boe}ken"
 EOF
 
-(cd ${OBJDIR} && nohup snmpd -dvf ./snmpd.conf > snmpd.log 2>&1) &
-
-sleep ${SLEEP}
-
-[ ! -n "$(pgrep snmpd)" ] && echo "Failed to start snmpd." && fail
+snmpdstart
 
 # carp allow with non-default ro community string
 
@@ -345,39 +357,7 @@ fi
 #	FAILED=1
 #fi
 
-snmp_command="snmp get -Oqv -v2c -c non-default-rw localhost \
-    usmUserSecurityName.1.0"
-echo ======= $snmp_command
-reyk="$(eval LC_ALL=en_US.UTF-8 $snmp_command)"
-if [ "$reyk" != "Reyk Fl${oe}ter" ]
-then
-	echo "Printing of UTF-8 string in UTF-8 locale failed"
-	FAILED=1
-fi
-reyk="$(eval LC_ALL=C $snmp_command)"
-if [ "$reyk" != "Reyk Fl.ter" ]
-then
-	echo "Printing of UTF-8 string in C locale failed"
-	FAILED=1
-fi
-
-snmp_command="snmp get -Oqv -v2c -c non-default-rw localhost \
-    usmUserSecurityName.2.0"
-echo ======= $snmp_command
-broken="$(eval LC_ALL=en_US.UTF-8 $snmp_command)"
-if [ "$broken" != "br${replacement}ken" ]
-then
-	echo "Printing of UTF-8 replacement character failed"
-	FAILED=1
-fi
-broken="$(eval LC_ALL=C $snmp_command)"
-if [ "$broken" != "br?ken" ]
-then
-	echo "Printing of question mark in C locale failed"
-	FAILED=1
-fi
-
-kill $(pgrep snmpd) >/dev/null 2>&1
+snmpdstop
 
 case $FAILED in
 0)	echo

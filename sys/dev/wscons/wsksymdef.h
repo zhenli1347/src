@@ -1,4 +1,4 @@
-/*	$OpenBSD: wsksymdef.h,v 1.39 2021/09/20 17:32:39 anton Exp $	*/
+/*	$OpenBSD: wsksymdef.h,v 1.42 2023/11/22 18:19:25 tobhe Exp $	*/
 /*	$NetBSD: wsksymdef.h,v 1.34.4.1 2000/07/07 09:49:54 hannken Exp $ */
 
 /*-
@@ -626,6 +626,7 @@
 #define KS_Open			0xf393
 #define KS_Paste		0xf394
 #define KS_Cut			0xf395
+#define KS_Backtab		0xf396
 
 #define KS_Menu			0xf3c0
 #define KS_Pause		0xf3c1
@@ -666,6 +667,10 @@
 #define KS_Cmd_ScrollBack	0xf42c
 #define KS_Cmd_ScrollFwd	0xf42d
 #define KS_Cmd_KbdReset		0xf42e
+#define KS_Cmd_Sleep		0xf42f
+#define KS_Cmd_KbdBacklightToggle		0xf430
+#define KS_Cmd_KbdBacklightUp		0xf431
+#define KS_Cmd_KbdBacklightDown		0xf432
 
 /*
  * Group 5 (internal)

@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.57 2022/11/14 14:04:25 deraadt Exp $
+#	$OpenBSD: install.md,v 1.62 2023/10/11 17:53:52 kn Exp $
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -31,6 +31,7 @@
 # machine dependent section of installation/upgrade script.
 #
 
+MDBOOTSR=y
 MDXAPERTURE=2
 MDXDM=y
 NCPU=$(sysctl -n hw.ncpufound)
@@ -76,8 +77,7 @@ md_prep_fdisk() {
 			return ;;
 		[gG]*)
 			if [[ $MDEFI != y ]]; then
-				ask_yn "An EFI/GPT disk may not boot. Proceed?"
-				[[ $resp == n ]] && continue
+				ask_yn "An EFI/GPT disk may not boot. Proceed?" || continue
 			fi
 
 			echo -n "Setting OpenBSD GPT partition to whole $_disk..."
@@ -122,11 +122,12 @@ __EOT
 				disk_has $_disk mbr openbsd && return
 				echo -n "No OpenBSD partition in MBR,"
 			fi
-			echo "try again." ;;
+			echo " try again." ;;
 		[oO]*)
 			[[ $_d == OpenBSD ]] || continue
-			if [[ $_disk == $ROOTDISK ]] && disk_has $_disk gpt &&
-				! disk_has $_disk gpt efisys; then
+			# Is this a boot disk?
+			if [[ $_disk == $ROOTDISK ]] &&
+			    disk_has $_disk gpt && ! disk_has $_disk gpt efisys; then
 				echo "No EFI Sys partition in GPT, try again."
 				$AUTO && exit 1
 				continue

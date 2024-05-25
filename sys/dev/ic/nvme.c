@@ -1,4 +1,4 @@
-/*	$OpenBSD: nvme.c,v 1.106 2022/11/25 03:20:09 dlg Exp $ */
+/*	$OpenBSD: nvme.c,v 1.112 2024/05/24 12:04:07 krw Exp $ */
 
 /*
  * Copyright (c) 2014 David Gwynne <dlg@openbsd.org>
@@ -16,7 +16,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "bio.h"
+
 #include <sys/param.h>
+#include <sys/ioctl.h>
 #include <sys/systm.h>
 #include <sys/buf.h>
 #include <sys/kernel.h>
@@ -25,6 +28,7 @@
 #include <sys/queue.h>
 #include <sys/mutex.h>
 #include <sys/pool.h>
+#include <sys/disk.h>
 
 #include <sys/atomic.h>
 
@@ -33,9 +37,12 @@
 #include <scsi/scsi_all.h>
 #include <scsi/scsi_disk.h>
 #include <scsi/scsiconf.h>
+#include <scsi/sdvar.h>
 
+#include <dev/biovar.h>
 #include <dev/ic/nvmereg.h>
 #include <dev/ic/nvmevar.h>
+#include <dev/ic/nvmeio.h>
 
 struct cfdriver nvme_cd = {
 	NULL,
@@ -60,7 +67,7 @@ void *	nvme_ccb_get(void *);
 void	nvme_ccb_put(void *, void *);
 
 int	nvme_poll(struct nvme_softc *, struct nvme_queue *, struct nvme_ccb *,
-	    void (*)(struct nvme_softc *, struct nvme_ccb *, void *));
+	    void (*)(struct nvme_softc *, struct nvme_ccb *, void *), u_int32_t);
 void	nvme_poll_fill(struct nvme_softc *, struct nvme_ccb *, void *);
 void	nvme_poll_done(struct nvme_softc *, struct nvme_ccb *,
 	    struct nvme_cqe *);
@@ -83,18 +90,33 @@ void	nvme_scsi_cmd(struct scsi_xfer *);
 void	nvme_minphys(struct buf *, struct scsi_link *);
 int	nvme_scsi_probe(struct scsi_link *);
 void	nvme_scsi_free(struct scsi_link *);
+uint64_t nvme_scsi_size(const struct nvm_identify_namespace *);
+int	nvme_scsi_ioctl(struct scsi_link *, u_long, caddr_t, int);
+int	nvme_passthrough_cmd(struct nvme_softc *, struct nvme_pt_cmd *,
+	int, int);
 
 #ifdef HIBERNATE
 #include <uvm/uvm_extern.h>
 #include <sys/hibernate.h>
-#include <sys/disk.h>
 #include <sys/disklabel.h>
 
 int	nvme_hibernate_io(dev_t, daddr_t, vaddr_t, size_t, int, void *);
 #endif
 
+#if NBIO > 0
+void	nvme_bio_status(struct bio_status *, const char *, ...);
+
+const char *nvme_bioctl_sdname(const struct nvme_softc *, int);
+
+int	nvme_bioctl(struct device *, u_long, caddr_t);
+int	nvme_bioctl_inq(struct nvme_softc *, struct bioc_inq *);
+int	nvme_bioctl_vol(struct nvme_softc *, struct bioc_vol *);
+int	nvme_bioctl_disk(struct nvme_softc *, struct bioc_disk *);
+#endif	/* NBIO > 0 */
+
 const struct scsi_adapter nvme_switch = {
-	nvme_scsi_cmd, nvme_minphys, nvme_scsi_probe, nvme_scsi_free, NULL
+	nvme_scsi_cmd, nvme_minphys, nvme_scsi_probe, nvme_scsi_free,
+	nvme_scsi_ioctl
 };
 
 void	nvme_scsi_io(struct scsi_xfer *, int);
@@ -132,6 +154,10 @@ static const struct nvme_ops nvme_ops = {
 
 	.op_cq_done		= nvme_op_cq_done,
 };
+
+#define NVME_TIMO_QOP			5000	/* ms to create/delete queue */
+#define NVME_TIMO_IDENT			10000	/* ms to probe/identify */
+#define NVME_TIMO_DELAYNS		10	/* ns to delay() in poll loop */
 
 /*
  * Some controllers, at least Apple NVMe, always require split
@@ -278,6 +304,7 @@ nvme_attach(struct nvme_softc *sc)
 	u_int nccbs = 0;
 
 	mtx_init(&sc->sc_ccb_mtx, IPL_BIO);
+	rw_init(&sc->sc_lock, "nvme_lock");
 	SIMPLEQ_INIT(&sc->sc_ccb_list);
 	scsi_iopool_init(&sc->sc_iopool, sc, nvme_ccb_get, nvme_ccb_put);
 	if (sc->sc_ops == NULL)
@@ -379,7 +406,12 @@ nvme_attach(struct nvme_softc *sc)
 	saa.saa_quirks = saa.saa_flags = 0;
 	saa.saa_wwpn = saa.saa_wwnn = 0;
 
-	config_found(&sc->sc_dev, &saa, scsiprint);
+	sc->sc_scsibus = (struct scsibus_softc *)config_found(&sc->sc_dev,
+	    &saa, scsiprint);
+#if NBIO > 0
+	if (bio_register(&sc->sc_dev, nvme_bioctl) != 0)
+		printf("%s: unable to register bioctl\n", DEVNAME(sc));
+#endif	/* NBIO > 0 */
 
 	return (0);
 
@@ -463,14 +495,14 @@ nvme_scsi_probe(struct scsi_link *link)
 	ccb->ccb_cookie = &sqe;
 
 	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_IDENT);
 	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
 
 	scsi_io_put(&sc->sc_iopool, ccb);
 
 	identify = NVME_DMA_KVA(mem);
 	if (rv == 0) {
-		if (lemtoh64(&identify->nsze) > 0) {
+		if (nvme_scsi_size(identify) > 0) {
 			/* Commit namespace if it has a size greater than zero. */
 			identify = malloc(sizeof(*identify), M_DEVBUF, M_WAITOK);
 			memcpy(identify, NVME_DMA_KVA(mem), sizeof(*identify));
@@ -636,7 +668,7 @@ nvme_scsi_io(struct scsi_xfer *xs, int dir)
 	}
 
 	if (ISSET(xs->flags, SCSI_POLL)) {
-		nvme_poll(sc, sc->sc_q, ccb, nvme_scsi_io_fill);
+		nvme_poll(sc, sc->sc_q, ccb, nvme_scsi_io_fill, xs->timeout);
 		return;
 	}
 
@@ -723,7 +755,7 @@ nvme_scsi_sync(struct scsi_xfer *xs)
 	ccb->ccb_cookie = xs;
 
 	if (ISSET(xs->flags, SCSI_POLL)) {
-		nvme_poll(sc, sc->sc_q, ccb, nvme_scsi_sync_fill);
+		nvme_poll(sc, sc->sc_q, ccb, nvme_scsi_sync_fill, xs->timeout);
 		return;
 	}
 
@@ -812,7 +844,7 @@ nvme_scsi_capacity16(struct scsi_xfer *xs)
 	struct nvme_softc *sc = link->bus->sb_adapter_softc;
 	struct nvm_identify_namespace *ns;
 	struct nvm_namespace_format *f;
-	u_int64_t nsze;
+	u_int64_t addr;
 	u_int16_t tpe = READ_CAP_16_TPE;
 
 	ns = sc->sc_namespaces[link->target].ident;
@@ -823,12 +855,11 @@ nvme_scsi_capacity16(struct scsi_xfer *xs)
 		return;
 	}
 
-	/* sd_read_cap_16() will add one */
-	nsze = lemtoh64(&ns->nsze) - 1;
+	addr = nvme_scsi_size(ns) - 1;
 	f = &ns->lbaf[NVME_ID_NS_FLBAS(ns->flbas)];
 
 	memset(&rcd, 0, sizeof(rcd));
-	_lto8b(nsze, rcd.addr);
+	_lto8b(addr, rcd.addr);
 	_lto4b(1 << f->lbads, rcd.length);
 	_lto2b(tpe, rcd.lowest_aligned);
 
@@ -846,7 +877,7 @@ nvme_scsi_capacity(struct scsi_xfer *xs)
 	struct nvme_softc *sc = link->bus->sb_adapter_softc;
 	struct nvm_identify_namespace *ns;
 	struct nvm_namespace_format *f;
-	u_int64_t nsze;
+	u_int64_t addr;
 
 	ns = sc->sc_namespaces[link->target].ident;
 
@@ -856,15 +887,14 @@ nvme_scsi_capacity(struct scsi_xfer *xs)
 		return;
 	}
 
-	/* sd_read_cap_10() will add one */
-	nsze = lemtoh64(&ns->nsze) - 1;
-	if (nsze > 0xffffffff)
-		nsze = 0xffffffff;
+	addr = nvme_scsi_size(ns) - 1;
+	if (addr > 0xffffffff)
+		addr = 0xffffffff;
 
 	f = &ns->lbaf[NVME_ID_NS_FLBAS(ns->flbas)];
 
 	memset(&rcd, 0, sizeof(rcd));
-	_lto4b(nsze, rcd.addr);
+	_lto4b(addr, rcd.addr);
 	_lto4b(1 << f->lbads, rcd.length);
 
 	memcpy(xs->data, &rcd, MIN(sizeof(rcd), xs->datalen));
@@ -883,6 +913,121 @@ nvme_scsi_free(struct scsi_link *link)
 	sc->sc_namespaces[link->target].ident = NULL;
 
 	free(identify, M_DEVBUF, sizeof(*identify));
+}
+
+uint64_t
+nvme_scsi_size(const struct nvm_identify_namespace *ns)
+{
+	uint64_t		ncap, nsze;
+
+	ncap = lemtoh64(&ns->ncap); /* Max allowed allocation. */
+	nsze = lemtoh64(&ns->nsze);
+
+	if ((ns->nsfeat & NVME_ID_NS_NSFEAT_THIN_PROV) && ncap < nsze)
+		return ncap;
+	else
+		return nsze;
+}
+
+int
+nvme_passthrough_cmd(struct nvme_softc *sc, struct nvme_pt_cmd *pt, int dv_unit,
+    int nsid)
+{
+	struct nvme_pt_status		 pt_status;
+	struct nvme_sqe			 sqe;
+	struct nvme_dmamem		*mem = NULL;
+	struct nvme_ccb			*ccb = NULL;
+	int				 flags;
+	int				 rv = 0;
+
+	ccb = nvme_ccb_get(sc);
+	if (ccb == NULL)
+		panic("nvme_passthrough_cmd: nvme_ccb_get returned NULL");
+
+	memset(&sqe, 0, sizeof(sqe));
+	sqe.opcode = pt->pt_opcode;
+	htolem32(&sqe.nsid, pt->pt_nsid);
+	htolem32(&sqe.cdw10, pt->pt_cdw10);
+	htolem32(&sqe.cdw11, pt->pt_cdw11);
+	htolem32(&sqe.cdw12, pt->pt_cdw12);
+	htolem32(&sqe.cdw13, pt->pt_cdw13);
+	htolem32(&sqe.cdw14, pt->pt_cdw14);
+	htolem32(&sqe.cdw15, pt->pt_cdw15);
+
+	ccb->ccb_done = nvme_empty_done;
+	ccb->ccb_cookie = &sqe;
+
+	switch (pt->pt_opcode) {
+	case NVM_ADMIN_IDENTIFY:
+	case NVM_ADMIN_GET_LOG_PG:
+	case NVM_ADMIN_SELFTEST:
+		break;
+
+	default:
+		rv = ENOTTY;
+		goto done;
+	}
+
+	if (pt->pt_databuflen > 0) {
+		mem = nvme_dmamem_alloc(sc, pt->pt_databuflen);
+		if (mem == NULL) {
+			rv = ENOMEM;
+			goto done;
+		}
+		htolem64(&sqe.entry.prp[0], NVME_DMA_DVA(mem));
+		nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
+	}
+
+	flags = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
+
+	if (pt->pt_databuflen > 0) {
+		nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
+		if (flags == 0)
+			rv = copyout(NVME_DMA_KVA(mem), pt->pt_databuf,
+			    pt->pt_databuflen);
+	}
+
+	if (rv == 0 && pt->pt_statuslen > 0) {
+		pt_status.ps_dv_unit = dv_unit;
+		pt_status.ps_nsid = nsid;
+		pt_status.ps_flags = flags;
+		pt_status.ps_cc = nvme_read4(sc, NVME_CC);
+		pt_status.ps_csts = nvme_read4(sc, NVME_CSTS);
+		rv = copyout(&pt_status, pt->pt_status, pt->pt_statuslen);
+	}
+
+ done:
+	if (mem)
+		nvme_dmamem_free(sc, mem);
+	if (ccb)
+		nvme_ccb_put(sc, ccb);
+
+	return rv;
+}
+
+int
+nvme_scsi_ioctl(struct scsi_link *link, u_long cmd, caddr_t addr, int flag)
+{
+	struct nvme_softc		*sc = link->bus->sb_adapter_softc;
+	struct nvme_pt_cmd		*pt = (struct nvme_pt_cmd *)addr;
+	int				 rv;
+
+	switch (cmd) {
+	case NVME_PASSTHROUGH_CMD:
+		break;
+	default:
+		return ENOTTY;
+	}
+
+	if ((pt->pt_cdw10 & 0xff) == 0)
+		pt->pt_nsid = link->target;
+
+	rv = nvme_passthrough_cmd(sc, pt, sc->sc_dev.dv_unit, link->target);
+	if (rv)
+		goto done;
+
+ done:
+	return rv;
 }
 
 uint32_t
@@ -950,11 +1095,12 @@ struct nvme_poll_state {
 
 int
 nvme_poll(struct nvme_softc *sc, struct nvme_queue *q, struct nvme_ccb *ccb,
-    void (*fill)(struct nvme_softc *, struct nvme_ccb *, void *))
+    void (*fill)(struct nvme_softc *, struct nvme_ccb *, void *), u_int32_t ms)
 {
 	struct nvme_poll_state state;
 	void (*done)(struct nvme_softc *, struct nvme_ccb *, struct nvme_cqe *);
 	void *cookie;
+	int64_t us;
 	u_int16_t flags;
 
 	memset(&state, 0, sizeof(state));
@@ -967,11 +1113,12 @@ nvme_poll(struct nvme_softc *sc, struct nvme_queue *q, struct nvme_ccb *ccb,
 	ccb->ccb_cookie = &state;
 
 	nvme_q_submit(sc, q, ccb, nvme_poll_fill);
-	while (!ISSET(state.c.flags, htole16(NVME_CQE_PHASE))) {
+	for (us = ms * 1000; ms == 0 || us > 0; us -= NVME_TIMO_DELAYNS) {
+		if (ISSET(state.c.flags, htole16(NVME_CQE_PHASE)))
+			break;
 		if (nvme_q_complete(sc, q) == 0)
-			delay(10);
-
-		/* XXX no timeout? */
+			delay(NVME_TIMO_DELAYNS);
+		nvme_barrier(sc, NVME_CSTS, 4, BUS_SPACE_BARRIER_READ);
 	}
 
 	ccb->ccb_cookie = cookie;
@@ -1087,7 +1234,8 @@ nvme_identify(struct nvme_softc *sc, u_int mpsmin)
 	ccb->ccb_cookie = mem;
 
 	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_fill_identify);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_fill_identify,
+	    NVME_TIMO_IDENT);
 	nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
 
 	nvme_ccb_put(sc, ccb);
@@ -1152,7 +1300,7 @@ nvme_q_create(struct nvme_softc *sc, struct nvme_queue *q)
 	htolem16(&sqe.qid, q->q_id);
 	sqe.qflags = NVM_SQE_CQ_IEN | NVM_SQE_Q_PC;
 
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
 	if (rv != 0)
 		goto fail;
 
@@ -1167,7 +1315,7 @@ nvme_q_create(struct nvme_softc *sc, struct nvme_queue *q)
 	htolem16(&sqe.cqid, q->q_id);
 	sqe.qflags = NVM_SQE_Q_PC;
 
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
 	if (rv != 0)
 		goto fail;
 
@@ -1193,7 +1341,7 @@ nvme_q_delete(struct nvme_softc *sc, struct nvme_queue *q)
 	sqe.opcode = NVM_ADMIN_DEL_IOSQ;
 	htolem16(&sqe.qid, q->q_id);
 
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
 	if (rv != 0)
 		goto fail;
 
@@ -1204,7 +1352,7 @@ nvme_q_delete(struct nvme_softc *sc, struct nvme_queue *q)
 	sqe.opcode = NVM_ADMIN_DEL_IOCQ;
 	htolem16(&sqe.qid, q->q_id);
 
-	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill);
+	rv = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
 	if (rv != 0)
 		goto fail;
 
@@ -1696,3 +1844,279 @@ nvme_hibernate_io(dev_t dev, daddr_t blkno, vaddr_t addr, size_t size,
 }
 
 #endif
+
+#if NBIO > 0
+int
+nvme_bioctl(struct device *self, u_long cmd, caddr_t data)
+{
+	struct nvme_softc	*sc = (struct nvme_softc *)self;
+	struct nvme_pt_cmd	*pt;
+	int			 error = 0;
+
+	rw_enter_write(&sc->sc_lock);
+
+	switch (cmd) {
+	case BIOCINQ:
+		error = nvme_bioctl_inq(sc, (struct bioc_inq *)data);
+		break;
+	case BIOCVOL:
+		error = nvme_bioctl_vol(sc, (struct bioc_vol *)data);
+		break;
+	case BIOCDISK:
+		error = nvme_bioctl_disk(sc, (struct bioc_disk *)data);
+		break;
+	case NVME_PASSTHROUGH_CMD:
+		pt = (struct nvme_pt_cmd *)data;
+		error = nvme_passthrough_cmd(sc, pt, sc->sc_dev.dv_unit, -1);
+		break;
+	default:
+		printf("nvme_bioctl() Unknown command (%lu)\n", cmd);
+		error = ENOTTY;
+	}
+
+	rw_exit_write(&sc->sc_lock);
+
+	return error;
+}
+
+void
+nvme_bio_status(struct bio_status *bs, const char *fmt, ...)
+{
+	va_list			ap;
+
+	va_start(ap, fmt);
+	bio_status(bs, 0, BIO_MSG_INFO, fmt, &ap);
+	va_end(ap);
+}
+
+const char *
+nvme_bioctl_sdname(const struct nvme_softc *sc, int target)
+{
+	const struct scsi_link		*link;
+	const struct sd_softc		*sd;
+
+	link = scsi_get_link(sc->sc_scsibus, target, 0);
+	if (link) {
+		sd = (struct sd_softc *)(link->device_softc);
+		if (ISSET(link->state, SDEV_S_DYING) || sd == NULL ||
+		    ISSET(sd->flags, SDF_DYING))
+			return NULL;
+	}
+
+	if (nvme_read4(sc, NVME_VS) == 0xffffffff)
+		return NULL;
+
+	return DEVNAME(sd);
+}
+
+int
+nvme_bioctl_inq(struct nvme_softc *sc, struct bioc_inq *bi)
+{
+	char				 sn[41], mn[81], fr[17];
+	struct nvm_identify_controller	*idctrl = &sc->sc_identify;
+	struct bio_status		*bs;
+	unsigned int			 nn;
+	uint32_t			 cc, csts, vs;
+
+	/* Don't tell bioctl about namespaces > last configured namespace. */
+	for (nn = sc->sc_nn; nn > 0; nn--) {
+		if (sc->sc_namespaces[nn].ident)
+			break;
+	}
+	bi->bi_novol = bi->bi_nodisk = nn;
+	strlcpy(bi->bi_dev, DEVNAME(sc), sizeof(bi->bi_dev));
+
+	bs = &bi->bi_bio.bio_status;
+	bio_status_init(bs, &sc->sc_dev);
+	bs->bs_status = BIO_STATUS_SUCCESS;
+
+	scsi_strvis(sn, idctrl->sn, sizeof(idctrl->sn));
+	scsi_strvis(mn, idctrl->mn, sizeof(idctrl->mn));
+	scsi_strvis(fr, idctrl->fr, sizeof(idctrl->fr));
+
+	nvme_bio_status(bs, "%s, %s, %s", mn, fr, sn);
+	nvme_bio_status(bs, "Max i/o %zu bytes%s%s%s, Sanitize 0x%b",
+	    sc->sc_mdts,
+	    ISSET(idctrl->lpa, NVM_ID_CTRL_LPA_PE) ?
+	    ", Persisent Event Log" : "",
+	    ISSET(idctrl->fna, NVM_ID_CTRL_FNA_CRYPTOFORMAT) ?
+	    ", CryptoFormat" : "",
+	    ISSET(idctrl->vwc, NVM_ID_CTRL_VWC_PRESENT) ?
+	    ", Volatile Write Cache" : "",
+	    lemtoh32(&idctrl->sanicap), NVM_ID_CTRL_SANICAP_FMT
+	);
+
+	if (idctrl->ctratt != 0)
+		nvme_bio_status(bs, "Features 0x%b", lemtoh32(&idctrl->ctratt),
+		    NVM_ID_CTRL_CTRATT_FMT);
+
+	if (idctrl->oacs || idctrl->oncs) {
+		nvme_bio_status(bs, "Admin commands 0x%b, NVM commands 0x%b",
+		    lemtoh16(&idctrl->oacs), NVM_ID_CTRL_OACS_FMT,
+		    lemtoh16(&idctrl->oncs), NVM_ID_CTRL_ONCS_FMT);
+	}
+
+	cc = nvme_read4(sc, NVME_CC);
+	csts = nvme_read4(sc, NVME_CSTS);
+	vs = nvme_read4(sc, NVME_VS);
+
+	if (vs == 0xffffffff) {
+		nvme_bio_status(bs, "Invalid PCIe register mapping");
+		return 0;
+	}
+
+	nvme_bio_status(bs, "NVMe %u.%u%s%s%sabled, %sReady%s%s%s%s",
+	    NVME_VS_MJR(vs), NVME_VS_MNR(vs),
+	    (NVME_CC_CSS_R(cc) == NVME_CC_CSS_NVM) ? ", NVM I/O command set" : "",
+	    (NVME_CC_CSS_R(cc) == 0x7) ? ", Admin command set only" : "",
+	    ISSET(cc, NVME_CC_EN) ? ", En" : "Dis",
+	    ISSET(csts, NVME_CSTS_RDY) ? "" : "Not ",
+	    ISSET(csts, NVME_CSTS_CFS) ? ", Fatal Error, " : "",
+	    (NVME_CC_SHN_R(cc) == NVME_CC_SHN_NORMAL) ? ", Normal shutdown" : "",
+	    (NVME_CC_SHN_R(cc) == NVME_CC_SHN_ABRUPT) ? ", Abrupt shutdown" : "",
+	    ISSET(csts, NVME_CSTS_SHST_DONE) ? " complete" : "");
+
+	return 0;
+}
+
+int
+nvme_bioctl_vol(struct nvme_softc *sc, struct bioc_vol *bv)
+{
+	const struct nvm_identify_namespace	*idns;
+	const char				*sd;
+	int					 target;
+	unsigned int 				 lbaf;
+
+	target = bv->bv_volid + 1;
+	if (target > sc->sc_nn) {
+		bv->bv_status = BIOC_SVINVALID;
+		return 0;
+	}
+
+	bv->bv_level = 'c';
+	bv->bv_nodisk = 1;
+
+	idns = sc->sc_namespaces[target].ident;
+	if (idns == NULL) {
+		bv->bv_status = BIOC_SVINVALID;
+		return 0;
+	}
+
+	lbaf = NVME_ID_NS_FLBAS(idns->flbas);
+	if (idns->nlbaf > 16)
+		lbaf |= (idns->flbas >> 1) & 0x3f;
+	bv->bv_size = nvme_scsi_size(idns) << idns->lbaf[lbaf].lbads;
+
+	sd = nvme_bioctl_sdname(sc, target);
+	if (sd) {
+		strlcpy(bv->bv_dev, sd, sizeof(bv->bv_dev));
+		bv->bv_status = BIOC_SVONLINE;
+	} else
+		bv->bv_status = BIOC_SVOFFLINE;
+
+	return 0;
+}
+
+int
+nvme_bioctl_disk(struct nvme_softc *sc, struct bioc_disk *bd)
+{
+	const char 			*rpdesc[4] = {
+		" (Best)",
+		" (Better)",
+		" (Good)",
+		" (Degraded)"
+	};
+	const char			*protection[4] = {
+		"not enabled",
+		"Type 1",
+		"Type 2",
+		"Type 3",
+	};
+	char				 buf[32], msg[BIO_MSG_LEN];
+	struct nvm_identify_namespace	*idns;
+	struct bio_status		*bs;
+	uint64_t			 id1, id2;
+	unsigned int			 i, lbaf, target;
+	uint16_t			 ms;
+	uint8_t				 dps;
+
+	target = bd->bd_volid + 1;
+	if (target > sc->sc_nn)
+		return EINVAL;
+	bd->bd_channel = sc->sc_scsibus->sc_dev.dv_unit;
+	bd->bd_target = target;
+	bd->bd_lun = 0;
+	snprintf(bd->bd_procdev, sizeof(bd->bd_procdev), "Namespace %u", target);
+
+	bs = &bd->bd_bio.bio_status;
+	bs->bs_status = BIO_STATUS_SUCCESS;
+	snprintf(bs->bs_controller, sizeof(bs->bs_controller), "%11u",
+	    bd->bd_diskid);
+
+	idns = sc->sc_namespaces[target].ident;
+	if (idns == NULL) {
+		bd->bd_status = BIOC_SDUNUSED;
+		return 0;
+	}
+
+	lbaf = NVME_ID_NS_FLBAS(idns->flbas);
+	if (idns->nlbaf > nitems(idns->lbaf))
+		lbaf |= (idns->flbas >> 1) & 0x3f;
+	bd->bd_size = lemtoh64(&idns->nsze) << idns->lbaf[lbaf].lbads;
+
+	if (memcmp(idns->nguid, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16)) {
+		memcpy(&id1, idns->nguid, sizeof(uint64_t));
+		memcpy(&id2, idns->nguid + sizeof(uint64_t), sizeof(uint64_t));
+		snprintf(bd->bd_serial, sizeof(bd->bd_serial), "%08llx%08llx",
+		    id1, id2);
+	} else if (memcmp(idns->eui64, "\0\0\0\0\0\0\0\0", 8)) {
+		memcpy(&id1, idns->eui64, sizeof(uint64_t));
+		snprintf(bd->bd_serial, sizeof(bd->bd_serial), "%08llx", id1);
+	}
+
+	msg[0] = '\0';
+	for (i = 0; i <= idns->nlbaf; i++) {
+		if (idns->lbaf[i].lbads == 0)
+			continue;
+		snprintf(buf, sizeof(buf), "%s%s%u",
+		    strlen(msg) ? ", " : "", (i == lbaf) ? "*" : "",
+		    1 << idns->lbaf[i].lbads);
+		strlcat(msg, buf, sizeof(msg));
+		ms = lemtoh16(&idns->lbaf[i].ms);
+		if (ms) {
+			snprintf(buf, sizeof(buf), "+%u", ms);
+			strlcat(msg, buf, sizeof(msg));
+		}
+		strlcat(msg, rpdesc[idns->lbaf[i].rp], sizeof(msg));
+	}
+	nvme_bio_status(bs, "Formats %s", msg);
+
+	if (idns->nsfeat)
+		nvme_bio_status(bs, "Features 0x%b", idns->nsfeat,
+		    NVME_ID_NS_NSFEAT_FMT);
+
+	if (idns->dps) {
+		dps = idns->dps;
+		snprintf(msg, sizeof(msg), "Data Protection (0x%02x) "
+		    "Protection Data in ", dps);
+		if (ISSET(dps, NVME_ID_NS_DPS_PIP))
+			strlcat(msg, "first", sizeof(msg));
+		else
+			strlcat(msg, "last", sizeof(msg));
+		strlcat(msg, "bytes of metadata, Protection ", sizeof(msg));
+		if (NVME_ID_NS_DPS_TYPE(dps) >= nitems(protection))
+			strlcat(msg, "Type unknown", sizeof(msg));
+		else
+			strlcat(msg, protection[NVME_ID_NS_DPS_TYPE(dps)],
+			    sizeof(msg));
+		nvme_bio_status(bs, "%s", msg);
+	}
+
+	if (nvme_bioctl_sdname(sc, target) == NULL)
+		bd->bd_status = BIOC_SDOFFLINE;
+	else
+		bd->bd_status = BIOC_SDONLINE;
+
+	return 0;
+}
+#endif	/* NBIO > 0 */

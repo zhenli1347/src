@@ -1,4 +1,4 @@
-/*	$OpenBSD: print-stp.c,v 1.10 2021/12/01 18:28:46 deraadt Exp $	*/
+/*	$OpenBSD: print-stp.c,v 1.12 2023/09/06 05:54:07 jsg Exp $	*/
 
 /*
  * Copyright (c) 2000 Jason L. Wright (jason@thought.net)
@@ -85,9 +85,7 @@ static void stp_print_cbpdu(const u_char *, u_int, int);
 static void stp_print_tbpdu(const u_char *, u_int);
 
 void
-stp_print(p, len)
-	const u_char *p;
-	u_int len;
+stp_print(const u_char *p, u_int len)
 {
 	u_int16_t id;
 	int proto = STP_PROTO_STP;
@@ -99,6 +97,8 @@ stp_print(p, len)
 	else if (p[0] == LLCSAP_SNAP && p[1] == LLCSAP_SNAP && p[2] == LLC_UI) {
 		proto = STP_PROTO_SSTP;
 		printf("SSTP");
+		if (len < 8)
+			goto truncated;
 		p += 5;
 		len -= 5;
 	} else {
@@ -153,10 +153,7 @@ truncated:
 }
 
 static void
-stp_print_cbpdu(p, len, proto)
-	const u_char *p;
-	u_int len;
-	int proto;
+stp_print_cbpdu(const u_char *p, u_int len, int proto)
 {
 	u_int32_t cost;
 	u_int16_t t;
@@ -292,9 +289,7 @@ truncated:
 }
 
 static void
-stp_print_tbpdu(p, len)
-	const u_char *p;
-	u_int len;
+stp_print_tbpdu(const u_char *p, u_int len)
 {
 	printf(" tcn");
 }

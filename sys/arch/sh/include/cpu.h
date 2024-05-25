@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.34 2022/12/06 01:19:35 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.38 2024/03/31 07:23:29 miod Exp $	*/
 /*	$NetBSD: cpu.h,v 1.41 2006/01/21 04:24:12 uwe Exp $	*/
 
 /*-
@@ -68,11 +68,12 @@ struct cpu_info {
 #endif
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
+	struct clockintr ci_gmonclock;
 #endif
 
 	int	ci_want_resched;
 
-	struct clockintr_queue ci_queue;
+	struct clockqueue ci_queue;
 
 	char	ci_panicbuf[512];
 };
@@ -93,7 +94,7 @@ extern struct cpu_info cpu_info_store;
 
 
 /*
- * Arguments to hardclock and gatherstats encapsulate the previous
+ * Arguments to clockintr_dispatch encapsulate the previous
  * machine state in an opaque clockframe.
  */
 struct clockframe {

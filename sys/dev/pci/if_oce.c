@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_oce.c,v 1.106 2022/03/11 18:00:48 mpi Exp $	*/
+/*	$OpenBSD: if_oce.c,v 1.109 2024/05/24 06:02:56 jsg Exp $	*/
 
 /*
  * Copyright (c) 2012 Mike Belopuhov
@@ -62,7 +62,6 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/socket.h>
 #include <sys/queue.h>
@@ -74,10 +73,6 @@
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
-
-#ifdef INET6
-#include <netinet/ip6.h>
-#endif
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
@@ -823,7 +818,7 @@ oce_attach_ifp(struct oce_softc *sc)
 	ifp->if_watchdog = oce_watchdog;
 	ifp->if_hardmtu = OCE_MAX_MTU;
 	ifp->if_softc = sc;
-	ifq_set_maxlen(&ifp->if_snd, sc->sc_tx_ring_size - 1);
+	ifq_init_maxlen(&ifp->if_snd, sc->sc_tx_ring_size - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4;
@@ -902,9 +897,8 @@ oce_rxrinfo(struct oce_softc *sc, struct if_rxrinfo *ifri)
 	u_int n = 0;
 
 	if (sc->sc_nrq > 1) {
-		if ((ifr = mallocarray(sc->sc_nrq, sizeof(*ifr), M_DEVBUF,
-		    M_WAITOK | M_ZERO)) == NULL)
-			return (ENOMEM);
+		ifr = mallocarray(sc->sc_nrq, sizeof(*ifr), M_DEVBUF,
+		    M_WAITOK | M_ZERO);
 	} else
 		ifr = &ifr1;
 

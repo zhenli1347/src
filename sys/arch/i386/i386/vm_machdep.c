@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm_machdep.c,v 1.72 2022/02/21 19:18:52 kettenis Exp $	*/
+/*	$OpenBSD: vm_machdep.c,v 1.74 2023/04/11 00:45:07 jsg Exp $	*/
 /*	$NetBSD: vm_machdep.c,v 1.61 1996/05/03 19:42:35 christos Exp $	*/
 
 /*-
@@ -45,20 +45,10 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
-#include <sys/signalvar.h>
-#include <sys/malloc.h>
-#include <sys/vnode.h>
 #include <sys/buf.h>
 #include <sys/user.h>
-#include <sys/exec.h>
-#include <sys/ptrace.h>
 
 #include <uvm/uvm_extern.h>
-
-#include <machine/cpu.h>
-#include <machine/gdt.h>
-#include <machine/reg.h>
-#include <machine/specialreg.h>
 
 #include "npx.h"
 
@@ -172,7 +162,7 @@ vmapbuf(struct buf *bp, vsize_t len)
 	 * the pmap_extract().
 	 *
 	 * no need to flush TLB since we expect nothing to be mapped
-	 * where we we just allocated (TLB will be flushed when our
+	 * where we just allocated (TLB will be flushed when our
 	 * mapping is removed).
 	 */
 	while (len) {

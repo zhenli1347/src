@@ -1,4 +1,4 @@
-/*	$OpenBSD: geofeed.c,v 1.7 2022/11/28 15:22:13 tb Exp $ */
+/*	$OpenBSD: geofeed.c,v 1.16 2024/02/21 09:17:06 tb Exp $ */
 /*
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -16,22 +16,20 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/socket.h>
+
+#include <arpa/inet.h>
+
+#include <ctype.h>
 #include <err.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vis.h>
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <openssl/bio.h>
 #include <openssl/x509.h>
 
 #include "extern.h"
-
-struct	parse {
-	const char	*fn;
-	struct geofeed	*res;
-};
 
 extern ASN1_OBJECT	*geofeed_oid;
 
@@ -40,7 +38,7 @@ extern ASN1_OBJECT	*geofeed_oid;
  * Returns 1 on success, 0 on failure.
  */
 static int
-geofeed_parse_geoip(struct geofeed *res, char *cidr, char *loc)
+geofeed_parse_geoip(struct geofeed *geofeed, char *cidr, char *loc)
 {
 	struct geoip	*geoip;
 	struct ip_addr	*ipaddr;
@@ -70,11 +68,11 @@ geofeed_parse_geoip(struct geofeed *res, char *cidr, char *loc)
 
 	ipaddr->prefixlen = plen;
 
-	res->geoips = recallocarray(res->geoips, res->geoipsz,
-	    res->geoipsz + 1, sizeof(struct geoip));
-	if (res->geoips == NULL)
+	geofeed->geoips = recallocarray(geofeed->geoips, geofeed->geoipsz,
+	    geofeed->geoipsz + 1, sizeof(struct geoip));
+	if (geofeed->geoips == NULL)
 		err(1, NULL);
-	geoip = &res->geoips[res->geoipsz++];
+	geoip = &geofeed->geoips[geofeed->geoipsz++];
 
 	if ((geoip->ip = calloc(1, sizeof(struct cert_ip))) == NULL)
 		err(1, NULL);
@@ -97,17 +95,16 @@ geofeed_parse_geoip(struct geofeed *res, char *cidr, char *loc)
  * Returns the Geofeed, or NULL if the object was malformed.
  */
 struct geofeed *
-geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
+geofeed_parse(X509 **x509, const char *fn, int talid, char *buf, size_t len)
 {
-	struct parse	 p;
+	struct geofeed	*geofeed;
 	char		*delim, *line, *loc, *nl;
 	ssize_t		 linelen;
 	BIO		*bio;
 	char		*b64 = NULL;
-	size_t		 b64sz;
+	size_t		 b64sz = 0;
 	unsigned char	*der = NULL;
 	size_t		 dersz;
-	const ASN1_TIME	*at;
 	struct cert	*cert = NULL;
 	int		 rpki_signature_seen = 0, end_signature_seen = 0;
 	int		 rc = 0;
@@ -116,10 +113,7 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 	if (bio == NULL)
 		errx(1, "BIO_new");
 
-	memset(&p, 0, sizeof(struct parse));
-	p.fn = fn;
-
-	if ((p.res = calloc(1, sizeof(struct geofeed))) == NULL)
+	if ((geofeed = calloc(1, sizeof(*geofeed))) == NULL)
 		err(1, NULL);
 
 	while ((nl = memchr(buf, '\n', len)) != NULL) {
@@ -192,14 +186,19 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 			goto out;
 		}
 
-		/* Skip empty lines or commented lines. */
-		if (linelen == 0 || line[0] == '#')
-			continue;
-
-		/* zap comments */
+		/* Zap comments and whitespace before them. */
 		delim = memchr(line, '#', linelen);
-		if (delim != NULL)
+		if (delim != NULL) {
+			while (delim > line &&
+			    isspace((unsigned char)delim[-1]))
+				delim--;
 			*delim = '\0';
+			linelen = delim - line;
+		}
+
+		/* Skip empty lines. */
+		if (linelen == 0)
+			continue;
 
 		/* Split prefix and location info */
 		delim = memchr(line, ',', linelen);
@@ -210,7 +209,7 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 			loc = "";
 
 		/* read each prefix  */
-		if (!geofeed_parse_geoip(p.res, line, loc))
+		if (!geofeed_parse_geoip(geofeed, line, loc))
 			goto out;
 	}
 
@@ -225,32 +224,28 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 	}
 
 	if (!cms_parse_validate_detached(x509, fn, der, dersz, geofeed_oid,
-	    bio))
+	    bio, &geofeed->signtime))
 		goto out;
 
-	if (!x509_get_aia(*x509, fn, &p.res->aia))
+	if (!x509_get_aia(*x509, fn, &geofeed->aia))
 		goto out;
-	if (!x509_get_aki(*x509, fn, &p.res->aki))
+	if (!x509_get_aki(*x509, fn, &geofeed->aki))
 		goto out;
-	if (!x509_get_ski(*x509, fn, &p.res->ski))
+	if (!x509_get_ski(*x509, fn, &geofeed->ski))
 		goto out;
 
-	if (p.res->aia == NULL || p.res->aki == NULL || p.res->ski == NULL) {
+	if (geofeed->aia == NULL || geofeed->aki == NULL ||
+	    geofeed->ski == NULL) {
 		warnx("%s: missing AIA, AKI, or SKI X509 extension", fn);
 		goto out;
 	}
 
-	at = X509_get0_notAfter(*x509);
-	if (at == NULL) {
-		warnx("%s: X509_get0_notAfter failed", fn);
+	if (!x509_get_notbefore(*x509, fn, &geofeed->notbefore))
 		goto out;
-	}
-	if (!x509_get_time(at, &p.res->expires)) {
-		warnx("%s: ASN1_time_parse failed", fn);
+	if (!x509_get_notafter(*x509, fn, &geofeed->notafter))
 		goto out;
-	}
 
-	if ((cert = cert_parse_ee_cert(fn, *x509)) == NULL)
+	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
 		goto out;
 
 	if (x509_any_inherits(*x509)) {
@@ -263,13 +258,13 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 		goto out;
 	}
 
-	p.res->valid = valid_geofeed(fn, cert, p.res);
+	geofeed->valid = valid_geofeed(fn, cert, geofeed);
 
 	rc = 1;
  out:
 	if (rc == 0) {
-		geofeed_free(p.res);
-		p.res = NULL;
+		geofeed_free(geofeed);
+		geofeed = NULL;
 		X509_free(*x509);
 		*x509 = NULL;
 	}
@@ -278,7 +273,7 @@ geofeed_parse(X509 **x509, const char *fn, char *buf, size_t len)
 	free(b64);
 	free(der);
 
-	return p.res;
+	return geofeed;
 }
 
 /*

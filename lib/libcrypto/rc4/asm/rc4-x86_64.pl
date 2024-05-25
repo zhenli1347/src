@@ -50,7 +50,7 @@
 # As was shown by Zou Nanhai loop unrolling can improve Intel EM64T
 # performance by >30% [unlike P4 32-bit case that is]. But this is
 # provided that loads are reordered even more aggressively! Both code
-# pathes, AMD64 and EM64T, reorder loads in essentially same manner
+# paths, AMD64 and EM64T, reorder loads in essentially same manner
 # as my IA-64 implementation. On Opteron this resulted in modest 5%
 # improvement [I had to test it], while final Intel P4 performance
 # achieves respectful 432MBps on 2.8GHz processor now. For reference.
@@ -81,7 +81,7 @@
 # The only code path that was not modified is P4-specific one. Non-P4
 # Intel code path optimization is heavily based on submission by Maxim
 # Perminov, Maxim Locktyukhin and Jim Guilford of Intel. I've used
-# some of the ideas even in attempt to optmize the original RC4_INT
+# some of the ideas even in attempt to optimize the original RC4_INT
 # code path... Current performance in cycles per processed byte (less
 # is better) and improvement coefficients relative to previous
 # version of this module are:
@@ -124,10 +124,12 @@ $code=<<___;
 .extern	OPENSSL_ia32cap_P
 .hidden	OPENSSL_ia32cap_P
 
-.globl	RC4
-.type	RC4,\@function,4
+.globl	rc4_internal
+.type	rc4_internal,\@function,4
 .align	16
-RC4:	or	$len,$len
+rc4_internal:
+	_CET_ENDBR
+	or	$len,$len
 	jne	.Lentry
 	ret
 .Lentry:
@@ -421,7 +423,7 @@ $code.=<<___;
 	add	\$24,%rsp
 .Lepilogue:
 	ret
-.size	RC4,.-RC4
+.size	rc4_internal,.-rc4_internal
 ___
 }
 
@@ -429,10 +431,11 @@ $idx="%r8";
 $ido="%r9";
 
 $code.=<<___;
-.globl	RC4_set_key
-.type	RC4_set_key,\@function,3
+.globl	rc4_set_key_internal
+.type	rc4_set_key_internal,\@function,3
 .align	16
-RC4_set_key:
+rc4_set_key_internal:
+	_CET_ENDBR
 	lea	8($dat),$dat
 	lea	($inp,$len),$inp
 	neg	$len
@@ -499,32 +502,7 @@ RC4_set_key:
 	mov	%eax,-8($dat)
 	mov	%eax,-4($dat)
 	ret
-.size	RC4_set_key,.-RC4_set_key
-
-.globl	RC4_options
-.type	RC4_options,\@abi-omnipotent
-.align	16
-RC4_options:
-	lea	.Lopts(%rip),%rax
-	mov	OPENSSL_ia32cap_P(%rip),%edx
-	bt	\$IA32CAP_BIT0_INTELP4,%edx
-	jc	.L8xchar
-	bt	\$IA32CAP_BIT0_INTEL,%edx
-	jnc	.Ldone
-	add	\$25,%rax
-	ret
-.L8xchar:
-	add	\$12,%rax
-.Ldone:
-	ret
-.align	64
-.Lopts:
-.asciz	"rc4(8x,int)"
-.asciz	"rc4(8x,char)"
-.asciz	"rc4(16x,int)"
-.asciz	"RC4 for x86_64, CRYPTOGAMS by <appro\@openssl.org>"
-.align	64
-.size	RC4_options,.-RC4_options
+.size	rc4_set_key_internal,.-rc4_set_key_internal
 ___
 
 sub reg_part {

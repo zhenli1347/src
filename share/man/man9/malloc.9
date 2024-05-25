@@ -1,4 +1,4 @@
-.\"	$OpenBSD: malloc.9,v 1.68 2022/02/03 17:18:22 guenther Exp $
+.\"	$OpenBSD: malloc.9,v 1.72 2024/01/19 15:10:27 deraadt Exp $
 .\"	$NetBSD: malloc.9,v 1.2 1996/10/30 05:29:54 lukem Exp $
 .\"
 .\" Copyright (c) 1996 The NetBSD Foundation, Inc.
@@ -28,7 +28,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: February 3 2022 $
+.Dd $Mdocdate: January 19 2024 $
 .Dt MALLOC 9
 .Os
 .Sh NAME
@@ -148,20 +148,23 @@ are enabled.
 The following types are currently defined:
 .Pp
 .Bl -tag -offset indent -width XXXXXXXXXXXXXX -compact
-.It Dv M_FREE
-Should be on free list.
+.\"	START DEFINES	sys/malloc.h	(M_FREE,M_LAST)
 .It Dv M_DEVBUF
 Device driver memory.
 .It Dv M_PCB
 Protocol control blocks.
 .It Dv M_RTABLE
 Routing tables.
+.It Dv M_PF
+Packet filter structures.
 .It Dv M_IFADDR
 Interface addresses.
+.It Dv M_IFGROUP
+Interface groups.
 .It Dv M_SYSCTL
 Sysctl persistent buffers.
 .It Dv M_COUNTERS
-Per-CPU Counters for use via
+Per-CPU counters via
 .Xr counters_alloc 9 .
 .It Dv M_IOCTLOPS
 Ioctl data buffers.
@@ -173,6 +176,8 @@ VFS mount structs.
 NFS request headers.
 .It Dv M_NFSMNT
 NFS mount structures.
+.It Dv M_LOG
+Messages in kernel log stash.
 .It Dv M_VNODE
 Dynamically allocated vnodes.
 .It Dv M_DQUOT
@@ -233,6 +238,9 @@ Argument lists & other mem used by exec.
 Miscellaneous FS mount structures.
 .It Dv M_FUSEFS
 FUSE FS mount structures.
+.It Dv M_PINSYSCALL
+.Xr pinsyscalls 2
+related data.
 .It Dv M_PFKEY
 Pfkey data.
 .It Dv M_TDB
@@ -273,7 +281,7 @@ related credentials.
 .It Dv M_IP6OPT
 IPv6 options.
 .It Dv M_IP6NDP
-IPv6 neighbour discovery structures.
+IPv6 Neighbor Discovery structures.
 .It Dv M_TEMP
 Miscellaneous temporary data buffers.
 .It Dv M_NTFSMNT
@@ -304,11 +312,12 @@ UDF mount structures.
 .It Dv M_UDFFENTRY
 UDF file entries.
 .It Dv M_UDFFID
-UDF file ID.
+UDF file IDs.
 .It Dv M_AGP
 AGP memory.
 .It Dv M_DRM
 Direct Rendering Manager.
+.\"	END DEFINES
 .El
 .Sh CONTEXT
 .Fn malloc

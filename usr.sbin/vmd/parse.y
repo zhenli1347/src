@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.62 2022/09/13 10:28:19 martijn Exp $	*/
+/*	$OpenBSD: parse.y,v 1.68 2023/07/13 18:31:59 dv Exp $	*/
 
 /*
  * Copyright (c) 2007-2016 Reyk Floeter <reyk@openbsd.org>
@@ -30,6 +30,7 @@
 
 #include <machine/vmmvar.h>
 
+#include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
@@ -96,9 +97,10 @@ unsigned int	 parse_format(const char *);
 static struct vmop_create_params vmc;
 static struct vm_create_params	*vcp;
 static struct vmd_switch	*vsw;
+static char			*kernel = NULL;
 static char			 vsw_type[IF_NAMESIZE];
-static int			 vcp_disable;
-static size_t			 vcp_nnics;
+static int			 vmc_disable;
+static size_t			 vmc_nnics;
 static int			 errors;
 extern struct vmd		*env;
 extern const char		*vmd_descsw[];
@@ -188,32 +190,27 @@ main		: LOCAL INET6 {
 			env->vmd_cfg.cfg_flags |= VMD_CFG_INET6;
 		}
 		| LOCAL INET6 PREFIX STRING {
-			struct address	 h;
+			const char	*err;
 
-			if (host($4, &h) == -1 ||
-			    h.ss.ss_family != AF_INET6 ||
-			    h.prefixlen > 64 || h.prefixlen < 0) {
-				yyerror("invalid local inet6 prefix: %s", $4);
-				free($4);
+			if (parse_prefix6($4, &env->vmd_cfg.cfg_localprefix,
+			    &err)) {
+				yyerror("invalid local inet6 prefix: %s", err);
 				YYERROR;
+			} else {
+				env->vmd_cfg.cfg_flags |= VMD_CFG_INET6;
+				env->vmd_cfg.cfg_flags &= ~VMD_CFG_AUTOINET6;
 			}
-
-			env->vmd_cfg.cfg_flags |= VMD_CFG_INET6;
-			env->vmd_cfg.cfg_flags &= ~VMD_CFG_AUTOINET6;
-			memcpy(&env->vmd_cfg.cfg_localprefix6, &h, sizeof(h));
+			free($4);
 		}
 		| LOCAL PREFIX STRING {
-			struct address	 h;
+			const char	*err;
 
-			if (host($3, &h) == -1 ||
-			    h.ss.ss_family != AF_INET ||
-			    h.prefixlen > 32 || h.prefixlen < 0) {
-				yyerror("invalid local prefix: %s", $3);
-				free($3);
+			if (parse_prefix4($3, &env->vmd_cfg.cfg_localprefix,
+			    &err)) {
+				yyerror("invalid local prefix: %s", err);
 				YYERROR;
 			}
-
-			memcpy(&env->vmd_cfg.cfg_localprefix, &h, sizeof(h));
+			free($3);
 		}
 		| SOCKET OWNER owner_id {
 			env->vmd_ps.ps_csock.cs_uid = $3.uid;
@@ -246,7 +243,7 @@ switch		: SWITCH string			{
 			vsw->sw_name = $2;
 			vsw->sw_flags = VMIFF_UP;
 
-			vcp_disable = 0;
+			vmc_disable = 0;
 		} '{' optnl switch_opts_l '}'	{
 			if (strnlen(vsw->sw_ifname,
 			    sizeof(vsw->sw_ifname)) == 0) {
@@ -256,7 +253,7 @@ switch		: SWITCH string			{
 				YYERROR;
 			}
 
-			if (vcp_disable) {
+			if (vmc_disable) {
 				log_debug("%s:%d: switch \"%s\""
 				    " skipped (disabled)",
 				    file->name, yylval.lineno, vsw->sw_name);
@@ -275,7 +272,7 @@ switch_opts_l	: switch_opts_l switch_opts nl
 		;
 
 switch_opts	: disable			{
-			vcp_disable = $1;
+			vmc_disable = $1;
 		}
 		| GROUP string			{
 			if (priv_validgroup($2) == -1) {
@@ -325,9 +322,11 @@ vm		: VM string vm_instance		{
 			char		*name;
 
 			memset(&vmc, 0, sizeof(vmc));
+			vmc.vmc_kernel = -1;
+
 			vcp = &vmc.vmc_params;
-			vcp_disable = 0;
-			vcp_nnics = 0;
+			vmc_disable = 0;
+			vmc_nnics = 0;
 
 			if ($3 != NULL) {
 				/* This is an instance of a pre-configured VM */
@@ -346,7 +345,7 @@ vm		: VM string vm_instance		{
 			} else
 				name = $2;
 
-			for (i = 0; i < VMM_MAX_NICS_PER_VM; i++) {
+			for (i = 0; i < VM_MAX_NICS_PER_VM; i++) {
 				/* Set the interface to UP by default */
 				vmc.vmc_ifflags[i] |= IFF_UP;
 			}
@@ -367,8 +366,8 @@ vm		: VM string vm_instance		{
 			int		 ret;
 
 			/* configured interfaces vs. number of interfaces */
-			if (vcp_nnics > vcp->vcp_nnics)
-				vcp->vcp_nnics = vcp_nnics;
+			if (vmc_nnics > vmc.vmc_nnics)
+				vmc.vmc_nnics = vmc_nnics;
 
 			if (!env->vmd_noaction) {
 				ret = vm_register(&env->vmd_ps, &vmc,
@@ -385,7 +384,7 @@ vm		: VM string vm_instance		{
 					    vcp->vcp_name, strerror(errno));
 					YYERROR;
 				} else {
-					if (vcp_disable)
+					if (vmc_disable)
 						vm->vm_state |= VM_STATE_DISABLED;
 					else
 						vm->vm_state |= VM_STATE_WAITING;
@@ -393,11 +392,14 @@ vm		: VM string vm_instance		{
 					    "registered (%s)",
 					    file->name, yylval.lineno,
 					    vcp->vcp_name,
-					    vcp_disable ?
+					    vmc_disable ?
 					    "disabled" : "enabled");
 				}
+				vm->vm_kernel_path = kernel;
+				vm->vm_kernel = -1;
 				vm->vm_from_config = 1;
 			}
+			kernel = NULL;
 		}
 		;
 
@@ -410,7 +412,7 @@ vm_opts_l	: vm_opts_l vm_opts nl
 		;
 
 vm_opts		: disable			{
-			vcp_disable = $1;
+			vmc_disable = $1;
 		}
 		| DISK string image_format	{
 			if (parse_disk($2, $3) != 0) {
@@ -425,9 +427,9 @@ vm_opts		: disable			{
 			unsigned int	i;
 			char		type[IF_NAMESIZE];
 
-			i = vcp_nnics;
-			if (++vcp_nnics > VMM_MAX_NICS_PER_VM) {
-				yyerror("too many interfaces: %zu", vcp_nnics);
+			i = vmc_nnics;
+			if (++vmc_nnics > VM_MAX_NICS_PER_VM) {
+				yyerror("too many interfaces: %zu", vmc_nnics);
 				free($3);
 				YYERROR;
 			}
@@ -458,7 +460,7 @@ vm_opts		: disable			{
 		| BOOT string			{
 			char	 path[PATH_MAX];
 
-			if (vcp->vcp_kernel[0] != '\0') {
+			if (kernel != NULL) {
 				yyerror("kernel specified more than once");
 				free($2);
 				YYERROR;
@@ -471,27 +473,25 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			free($2);
-			if (strlcpy(vcp->vcp_kernel, path,
-			    sizeof(vcp->vcp_kernel)) >=
-			    sizeof(vcp->vcp_kernel)) {
-				yyerror("kernel name too long");
-				YYERROR;
-			}
+			kernel = malloc(sizeof(path));
+			if (kernel == NULL)
+				yyerror("malloc");
+			memcpy(kernel, &path, sizeof(path));
 			vmc.vmc_flags |= VMOP_CREATE_KERNEL;
 		}
 		| BOOT DEVICE bootdevice	{
 			vmc.vmc_bootdevice = $3;
 		}
 		| CDROM string			{
-			if (vcp->vcp_cdrom[0] != '\0') {
+			if (vmc.vmc_cdrom[0] != '\0') {
 				yyerror("cdrom specified more than once");
 				free($2);
 				YYERROR;
 
 			}
-			if (strlcpy(vcp->vcp_cdrom, $2,
-			    sizeof(vcp->vcp_cdrom)) >=
-			    sizeof(vcp->vcp_cdrom)) {
+			if (strlcpy(vmc.vmc_cdrom, $2,
+			    sizeof(vmc.vmc_cdrom)) >=
+			    sizeof(vmc.vmc_cdrom)) {
 				yyerror("cdrom name too long");
 				free($2);
 				YYERROR;
@@ -500,15 +500,15 @@ vm_opts		: disable			{
 			vmc.vmc_flags |= VMOP_CREATE_CDROM;
 		}
 		| NIFS NUMBER			{
-			if (vcp->vcp_nnics != 0) {
+			if (vmc.vmc_nnics != 0) {
 				yyerror("interfaces specified more than once");
 				YYERROR;
 			}
-			if ($2 < 0 || $2 > VMM_MAX_NICS_PER_VM) {
+			if ($2 < 0 || $2 > VM_MAX_NICS_PER_VM) {
 				yyerror("too many interfaces: %lld", $2);
 				YYERROR;
 			}
-			vcp->vcp_nnics = (size_t)$2;
+			vmc.vmc_nnics = (size_t)$2;
 			vmc.vmc_flags |= VMOP_CREATE_NETWORK;
 		}
 		| MEMORY NUMBER			{
@@ -664,7 +664,7 @@ iface_opts_c	: iface_opts_c iface_opts optcomma
 		;
 
 iface_opts	: SWITCH string			{
-			unsigned int	i = vcp_nnics;
+			unsigned int	i = vmc_nnics;
 
 			/* No need to check if the switch exists */
 			if (strlcpy(vmc.vmc_ifswitch[i], $2,
@@ -677,7 +677,7 @@ iface_opts	: SWITCH string			{
 			free($2);
 		}
 		| GROUP string			{
-			unsigned int	i = vcp_nnics;
+			unsigned int	i = vmc_nnics;
 
 			if (priv_validgroup($2) == -1) {
 				yyerror("invalid group name: %s", $2);
@@ -692,22 +692,22 @@ iface_opts	: SWITCH string			{
 		}
 		| locked LLADDR lladdr		{
 			if ($1)
-				vmc.vmc_ifflags[vcp_nnics] |= VMIFF_LOCKED;
-			memcpy(vcp->vcp_macs[vcp_nnics], $3, ETHER_ADDR_LEN);
+				vmc.vmc_ifflags[vmc_nnics] |= VMIFF_LOCKED;
+			memcpy(vmc.vmc_macs[vmc_nnics], $3, ETHER_ADDR_LEN);
 		}
 		| RDOMAIN NUMBER		{
 			if ($2 < 0 || $2 > RT_TABLEID_MAX) {
 				yyerror("invalid rdomain: %lld", $2);
 				YYERROR;
 			}
-			vmc.vmc_ifflags[vcp_nnics] |= VMIFF_RDOMAIN;
-			vmc.vmc_ifrdomain[vcp_nnics] = $2;
+			vmc.vmc_ifflags[vmc_nnics] |= VMIFF_RDOMAIN;
+			vmc.vmc_ifrdomain[vmc_nnics] = $2;
 		}
 		| updown			{
 			if ($1)
-				vmc.vmc_ifflags[vcp_nnics] |= VMIFF_UP;
+				vmc.vmc_ifflags[vmc_nnics] |= VMIFF_UP;
 			else
-				vmc.vmc_ifflags[vcp_nnics] &= ~VMIFF_UP;
+				vmc.vmc_ifflags[vmc_nnics] &= ~VMIFF_UP;
 		}
 		;
 
@@ -1181,9 +1181,15 @@ popfile(void)
 int
 parse_config(const char *filename)
 {
-	struct sym	*sym, *next;
+	extern const char	 default_conffile[];
+	struct sym		*sym, *next;
 
 	if ((file = pushfile(filename, 0)) == NULL) {
+		/* no default config file is fine */
+		if (errno == ENOENT && filename == default_conffile) {
+			log_debug("%s: missing", filename);
+			return (0);
+		}
 		log_warn("failed to open %s", filename);
 		if (errno == ENOENT)
 			return (0);
@@ -1344,7 +1350,7 @@ parse_disk(char *word, int type)
 	int	 fd;
 	ssize_t	 len;
 
-	if (vcp->vcp_ndisks >= VMM_MAX_DISKS_PER_VM) {
+	if (vmc.vmc_ndisks >= VM_MAX_DISKS_PER_VM) {
 		log_warnx("too many disks");
 		return (-1);
 	}
@@ -1371,14 +1377,15 @@ parse_disk(char *word, int type)
 		}
 	}
 
-	if (strlcpy(vcp->vcp_disks[vcp->vcp_ndisks], path,
-	    VMM_MAX_PATH_DISK) >= VMM_MAX_PATH_DISK) {
+	if (strlcpy(vmc.vmc_disks[vmc.vmc_ndisks], path,
+	    sizeof(vmc.vmc_disks[vmc.vmc_ndisks])) >=
+	    sizeof(vmc.vmc_disks[vmc.vmc_ndisks])) {
 		log_warnx("disk path too long");
 		return (-1);
 	}
-	vmc.vmc_disktypes[vcp->vcp_ndisks] = type;
+	vmc.vmc_disktypes[vmc.vmc_ndisks] = type;
 
-	vcp->vcp_ndisks++;
+	vmc.vmc_ndisks++;
 
 	return (0);
 }
@@ -1393,42 +1400,133 @@ parse_format(const char *word)
 	return (0);
 }
 
+/*
+ * Parse an ipv4 address and prefix for local interfaces and validate
+ * constraints for vmd networking.
+ */
 int
-host(const char *str, struct address *h)
+parse_prefix4(const char *str, struct local_prefix *out, const char **errstr)
 {
-	struct addrinfo		 hints, *res;
-	int			 prefixlen;
-	char			*s, *p;
-	const char		*errstr;
+	struct addrinfo		 hints, *res = NULL;
+	struct sockaddr_storage	 ss;
+	struct in_addr		 addr;
+	int			 mask = 16;
+	char			*p, *ps;
 
-	if ((s = strdup(str)) == NULL) {
-		log_warn("%s", __func__);
-		goto fail;
-	}
+	if ((ps = strdup(str)) == NULL)
+		fatal("%s: strdup", __func__);
 
-	if ((p = strrchr(s, '/')) != NULL) {
-		*p++ = '\0';
-		prefixlen = strtonum(p, 0, 128, &errstr);
-		if (errstr) {
-			log_warnx("prefixlen is %s: %s", errstr, p);
-			goto fail;
+	if ((p = strrchr(ps, '/')) != NULL) {
+		mask = strtonum(p + 1, 1, 16, errstr);
+		if (errstr != NULL && *errstr) {
+			free(ps);
+			return (1);
 		}
-	} else
-		prefixlen = 128;
-
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_flags = AI_NUMERICHOST;
-	if (getaddrinfo(s, NULL, &hints, &res) == 0) {
-		memset(h, 0, sizeof(*h));
-		memcpy(&h->ss, res->ai_addr, res->ai_addrlen);
-		h->prefixlen = prefixlen;
-		freeaddrinfo(res);
-		free(s);
-		return (0);
+		p[0] = '\0';
 	}
 
- fail:
-	free(s);
-	return (-1);
+	/* Attempt to construct an address from the user input. */
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_NUMERICHOST;
+
+	if (getaddrinfo(ps, NULL, &hints, &res) == 0) {
+		memset(&ss, 0, sizeof(ss));
+		memcpy(&ss, res->ai_addr, res->ai_addrlen);
+		addr.s_addr = ss2sin(&ss)->sin_addr.s_addr;
+		freeaddrinfo(res);
+	} else { /* try 10/8 parsing */
+		memset(&addr, 0, sizeof(addr));
+		if (inet_net_pton(AF_INET, ps, &addr, sizeof(addr)) == -1) {
+			if (errstr)
+				*errstr = "invalid format";
+			free(ps);
+			return (1);
+		}
+	}
+	free(ps);
+
+	/*
+	 * Validate the prefix by comparing it with the mask. Since we
+	 * constrain the mask length to 16 above, this also validates
+	 * we reserve the last 16 bits for use by vmd to assign vm id
+	 * and interface id.
+	 */
+	if ((addr.s_addr & prefixlen2mask(mask)) != addr.s_addr) {
+		if (errstr)
+			*errstr = "bad mask";
+		return (1);
+	}
+
+	/* Copy out the local prefix. */
+	out->lp_in.s_addr = addr.s_addr;
+	out->lp_mask.s_addr = prefixlen2mask(mask);
+	return (0);
+}
+
+/*
+ * Parse an ipv6 address and prefix for local interfaces and validate
+ * constraints for vmd networking.
+ */
+int
+parse_prefix6(const char *str, struct local_prefix *out, const char **errstr)
+{
+	struct addrinfo		 hints, *res = NULL;
+	struct sockaddr_storage	 ss;
+	struct in6_addr		 addr6, mask6;
+	size_t			 i;
+	int			 mask = 64, err;
+	char			*p, *ps;
+
+	if ((ps = strdup(str)) == NULL)
+		fatal("%s: strdup", __func__);
+
+	if ((p = strrchr(ps, '/')) != NULL) {
+		mask = strtonum(p + 1, 0, 64, errstr);
+		if (errstr != NULL && *errstr) {
+			free(ps);
+			return (1);
+		}
+		p[0] = '\0';
+	}
+
+	/* Attempt to construct an address from the user input. */
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET6;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_NUMERICHOST;
+
+	if ((err = getaddrinfo(ps, NULL, &hints, &res)) != 0) {
+		if (errstr)
+			*errstr = gai_strerror(err);
+		free(ps);
+		return (1);
+	}
+	free(ps);
+
+	memset(&ss, 0, sizeof(ss));
+	memcpy(&ss, res->ai_addr, res->ai_addrlen);
+	freeaddrinfo(res);
+
+	memcpy(&addr6, (void*)&ss2sin6(&ss)->sin6_addr, sizeof(addr6));
+	prefixlen2mask6(mask, &mask6);
+
+	/*
+	 * Validate the prefix by comparing it with the mask. Since we
+	 * constrain the mask length to 64 above, this also validates
+	 * that we're reserving bits for the encoding of the ipv4
+	 * address, the vm id, and interface id. */
+	for (i = 0; i < 16; i++) {
+		if ((addr6.s6_addr[i] & mask6.s6_addr[i]) != addr6.s6_addr[i]) {
+			if (errstr)
+				*errstr = "bad mask";
+			return (1);
+		}
+	}
+
+	/* Copy out the local prefix. */
+	memcpy(&out->lp_in6, &addr6, sizeof(out->lp_in6));
+	memcpy(&out->lp_mask6, &mask6, sizeof(out->lp_mask6));
+	return (0);
 }

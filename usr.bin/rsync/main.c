@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.65 2022/08/02 20:01:12 tb Exp $ */
+/*	$OpenBSD: main.c,v 1.71 2023/11/27 11:30:49 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -231,17 +231,21 @@ fargs_parse(size_t argc, char *argv[], struct opts *opts)
 		j = strlen(cp);
 		if (f->remote &&
 		    strncasecmp(cp, "rsync://", 8) == 0) {
-			/* rsync://path */
+			/* rsync://host[:port]/path */
+			size_t module_offset = len;
 			cp += 8;
-			if ((ccp = strchr(cp, ':')))	/* skip :port */
+			/* skip :port */
+			if ((ccp = strchr(cp, ':')) != NULL) {
 				*ccp = '\0';
+				module_offset += strcspn(ccp + 1, "/") + 1;
+			}
 			if (strncmp(cp, f->host, len) ||
 			    (cp[len] != '/' && cp[len] != '\0'))
 				errx(ERR_SYNTAX, "different remote host: %s",
 				    f->sources[i]);
 			memmove(f->sources[i],
-				f->sources[i] + len + 8 + 1,
-				j - len - 8);
+				f->sources[i] + module_offset + 8 + 1,
+				j - module_offset - 8);
 		} else if (f->remote && strncmp(cp, "::", 2) == 0) {
 			/* ::path */
 			memmove(f->sources[i],
@@ -277,7 +281,6 @@ static struct opts	 opts;
 #define OP_PORT		1001
 #define OP_RSYNCPATH	1002
 #define OP_TIMEOUT	1003
-#define OP_VERSION	1004
 #define OP_EXCLUDE	1005
 #define OP_INCLUDE	1006
 #define OP_EXCLUDE_FROM	1007
@@ -309,6 +312,7 @@ const struct option	 lopts[] = {
     { "group",		no_argument,	&opts.preserve_gids,	1 },
     { "no-group",	no_argument,	&opts.preserve_gids,	0 },
     { "help",		no_argument,	NULL,			'h' },
+    { "ignore-times",	no_argument,	NULL,			'I' },
     { "include",	required_argument, NULL,		OP_INCLUDE },
     { "include-from",	required_argument, NULL,		OP_INCLUDE_FROM },
     { "links",		no_argument,	&opts.preserve_links,	1 },
@@ -317,6 +321,12 @@ const struct option	 lopts[] = {
     { "no-links",	no_argument,	&opts.preserve_links,	0 },
     { "no-motd",	no_argument,	&opts.no_motd,		1 },
     { "numeric-ids",	no_argument,	&opts.numeric_ids,	1 },
+    { "omit-dir-times",	no_argument,	&opts.ignore_dir_times,	1 },
+    { "no-O",		no_argument,	&opts.ignore_dir_times,	0 },
+    { "no-omit-dir-times",	no_argument,	&opts.ignore_dir_times, 0 },
+    { "omit-link-times",	no_argument,	&opts.ignore_link_times, 1 },
+    { "no-J",		no_argument,	&opts.ignore_link_times, 0 },
+    { "no-omit-link-times",	no_argument,	&opts.ignore_link_times, 0 },
     { "owner",		no_argument,	&opts.preserve_uids,	1 },
     { "no-owner",	no_argument,	&opts.preserve_uids,	0 },
     { "perms",		no_argument,	&opts.preserve_perms,	1 },
@@ -328,6 +338,7 @@ const struct option	 lopts[] = {
     { "rsync-path",	required_argument, NULL,		OP_RSYNCPATH },
     { "sender",		no_argument,	&opts.sender,		1 },
     { "server",		no_argument,	&opts.server,		1 },
+    { "size-only",	no_argument,	&opts.size_only,	1 },
     { "specials",	no_argument,	&opts.specials,		1 },
     { "no-specials",	no_argument,	&opts.specials,		0 },
     { "timeout",	required_argument, NULL,		OP_TIMEOUT },
@@ -335,7 +346,7 @@ const struct option	 lopts[] = {
     { "no-times",	no_argument,	&opts.preserve_times,	0 },
     { "verbose",	no_argument,	&verbose,		1 },
     { "no-verbose",	no_argument,	&verbose,		0 },
-    { "version",	no_argument,	NULL,			OP_VERSION },
+    { "version",	no_argument,	NULL,			'V' },
     { NULL,		0,		NULL,			0 }
 };
 
@@ -358,8 +369,8 @@ main(int argc, char *argv[])
 
 	opts.max_size = opts.min_size = -1;
 
-	while ((c = getopt_long(argc, argv, "Dae:ghlnoprtvxz", lopts, &lidx))
-	    != -1) {
+	while ((c = getopt_long(argc, argv, "aDe:ghIJlnOoprtVvxz",
+	    lopts, &lidx)) != -1) {
 		switch (c) {
 		case 'D':
 			opts.devices = 1;
@@ -381,11 +392,20 @@ main(int argc, char *argv[])
 		case 'g':
 			opts.preserve_gids = 1;
 			break;
+		case 'I':
+			opts.ignore_times = 1;
+			break;
+		case 'J':
+			opts.ignore_link_times = 1;
+			break;
 		case 'l':
 			opts.preserve_links = 1;
 			break;
 		case 'n':
 			opts.dry_run = 1;
+			break;
+		case 'O':
+			opts.ignore_dir_times = 1;
 			break;
 		case 'o':
 			opts.preserve_uids = 1;
@@ -402,6 +422,10 @@ main(int argc, char *argv[])
 		case 'v':
 			verbose++;
 			break;
+		case 'V':
+			fprintf(stderr, "openrsync: protocol version %u\n",
+			    RSYNC_PROTOCOL);
+			exit(0);
 		case 'x':
 			opts.one_file_system++;
 			break;
@@ -491,10 +515,6 @@ basedir:
 			if (scan_scaled(optarg, &opts.min_size) == -1)
 				err(1, "bad min-size");
 			break;
-		case OP_VERSION:
-			fprintf(stderr, "openrsync: protocol version %u\n",
-			    RSYNC_PROTOCOL);
-			exit(0);
 		case 'h':
 		default:
 			goto usage;
@@ -629,11 +649,11 @@ basedir:
 	exit(rc);
 usage:
 	fprintf(stderr, "usage: %s"
-	    " [-aDglnoprtvx] [-e program] [--address=sourceaddr]\n"
+	    " [-aDgIJlnOoprtVvx] [-e program] [--address=sourceaddr]\n"
 	    "\t[--contimeout=seconds] [--compare-dest=dir] [--del] [--exclude]\n"
 	    "\t[--exclude-from=file] [--include] [--include-from=file]\n"
 	    "\t[--no-motd] [--numeric-ids] [--port=portnumber]\n"
-	    "\t[--rsync-path=program] [--timeout=seconds] [--version]\n"
+	    "\t[--rsync-path=program] [--size-only] [--timeout=seconds]\n"
 	    "\tsource ... directory\n",
 	    getprogname());
 	exit(ERR_SYNTAX);

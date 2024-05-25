@@ -1,4 +1,4 @@
-/* $OpenBSD: subr.S,v 1.28 2022/12/06 18:50:59 guenther Exp $	*/
+/* $OpenBSD: subr.S,v 1.32 2024/03/08 16:18:53 miod Exp $	*/
 /*
  * Mach Operating System
  * Copyright (c) 1993-1992 Carnegie Mellon University
@@ -185,7 +185,7 @@ ENTRY(do_xmem_byte)	/* do_xmem_byte(address, data, supervisor) */
 
 /*
  * Copy specified amount of data from user space into the kernel
- * copyin(from, to, len)
+ * _copyin(from, to, len)
  *	r2 == from (user source address)
  *	r3 == to (kernel destination address)
  *	r4 == length
@@ -195,7 +195,7 @@ ENTRY(do_xmem_byte)	/* do_xmem_byte(address, data, supervisor) */
 #define	DEST	%r3
 #define	LEN	%r4
 
-ENTRY(copyin)
+ENTRY(_copyin)
 	/* set up fault handler */
 	ldcr	%r5,  CPU
 	ld	%r6,  %r5,  CI_CURPCB
@@ -421,7 +421,7 @@ ASLOCAL(copyin32_misaligned)
  * Copy a null terminated string from the user space to the kernel
  * address space.
  *
- * copyinstr(from, to, maxlen, &lencopied)
+ * _copyinstr(from, to, maxlen, &lencopied)
  * r2 == from
  * r3 == to
  * r4 == maxlen
@@ -433,7 +433,7 @@ ASLOCAL(copyin32_misaligned)
 #define	CNT	%r4
 #define	LEN	%r5
 
-ENTRY(copyinstr)
+ENTRY(_copyinstr)
 
 	/* setup fault handler */
 	ldcr	%r6,  CPU
@@ -714,7 +714,7 @@ ENTRY(copyoutstr)
 	or	%r6,  %r6,  %lo16(Lcosflt)
 	st	%r6,  %r7,  PCB_ONFAULT
 	bcnd	lt0,  CNT,  Lcosflt
-	bcnd	eq0,  CNT,  Lcosdone
+	bcnd	eq0,  CNT,  2f
 	or	%r6,  %r0,  0
 1:
 	ld.bu	%r7,  SRC,  %r6
@@ -727,13 +727,14 @@ ENTRY(copyoutstr)
 #else
 	st.b.usr	%r7,  DEST,  %r6
 #endif
-	bcnd.n	eq0,  %r7, 2f		/* all done */
+	bcnd.n	eq0,  %r7, 3f		/* all done */
 	 addu	%r6,  %r6, 1
 	cmp	%r7,  %r6, CNT
 	bb1	lt,   %r7, 1b
+2:
 	br.n	Lcosdone
 	 or	%r2,  %r0, ENAMETOOLONG
-2:
+3:
 	br.n	Lcosdone
 	 or	%r2,  %r0, 0
 
@@ -1131,22 +1132,15 @@ ENTRY(longjmp)
 GLOBAL(sigcode)			/* r31 points to sigframe */
 	ld	%r2,  %r31, 0	/* pick sigcontext* */
 	or	%r13, %r0,  SYS_sigreturn
+GLOBAL(sigcodecall)
 GLOBAL(sigcoderet)
 	tb0	0,    %r0,  450	/* syscall trap, calling sigreturn */
 	NOP			| failure return
 #ifdef dontbother		/* sigreturn will not return unless it fails */
 	NOP			| success return
 #endif
-	or	%r13, %r0,  SYS_exit
-	tb0	0,    %r0,  450	/* syscall trap, exit */
-	/*
-	 * this never returns, but we need to provide fetchable instructions
-	 * for the 88100 pipeline.
-	 */
-	NOP
-	NOP
 GLOBAL(esigcode)
-
+	/* FALLTHROUGH */
 GLOBAL(sigfill)
 	tb0	0, %r0, 130	/* breakpoint */
 GLOBAL(sigfillsiz)

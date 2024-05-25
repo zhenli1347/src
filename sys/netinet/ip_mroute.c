@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_mroute.c,v 1.137 2022/09/08 10:22:06 kn Exp $	*/
+/*	$OpenBSD: ip_mroute.c,v 1.142 2024/04/06 14:23:27 bluhm Exp $	*/
 /*	$NetBSD: ip_mroute.c,v 1.85 2004/04/26 01:31:57 matt Exp $	*/
 
 /*
@@ -261,6 +261,8 @@ mrt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 	if (inp == NULL)
 		return (ENOTCONN);
 
+	KERNEL_LOCK();
+
 	if (so != ip_mrouter[inp->inp_rtableid])
 		error = EINVAL;
 	else
@@ -282,6 +284,7 @@ mrt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 			break;
 		}
 
+	KERNEL_UNLOCK();
 	return (error);
 }
 
@@ -427,8 +430,9 @@ mrt_rtwalk_mfcsysctl(struct rtentry *rt, void *arg, unsigned int rtableid)
 	}
 
 	for (minfo = msa->msa_minfos;
-	     (uint8_t *)minfo < ((uint8_t *)msa->msa_minfos + msa->msa_len);
-	     minfo++) {
+	    (uint8_t *)(minfo + 1) <=
+	    (uint8_t *)msa->msa_minfos + msa->msa_len;
+	    minfo++) {
 		/* Find a new entry or update old entry. */
 		if (minfo->mfc_origin.s_addr !=
 		    satosin(rt->rt_gateway)->sin_addr.s_addr ||
@@ -468,13 +472,11 @@ mrt_sysctl_mfc(void *oldp, size_t *oldlenp)
 	if (oldp != NULL && *oldlenp > MAXPHYS)
 		return (EINVAL);
 
-	if (oldp != NULL)
+	memset(&msa, 0, sizeof(msa));
+	if (oldp != NULL && *oldlenp > 0) {
 		msa.msa_minfos = malloc(*oldlenp, M_TEMP, M_WAITOK | M_ZERO);
-	else
-		msa.msa_minfos = NULL;
-
-	msa.msa_len = *oldlenp;
-	msa.msa_needed = 0;
+		msa.msa_len = *oldlenp;
+	}
 
 	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++) {
 		rtable_walk(rtableid, AF_INET, NULL, mrt_rtwalk_mfcsysctl,
@@ -483,11 +485,11 @@ mrt_sysctl_mfc(void *oldp, size_t *oldlenp)
 
 	if (msa.msa_minfos != NULL && msa.msa_needed > 0 &&
 	    (error = copyout(msa.msa_minfos, oldp, msa.msa_needed)) != 0) {
-		free(msa.msa_minfos, M_TEMP, *oldlenp);
+		free(msa.msa_minfos, M_TEMP, msa.msa_len);
 		return (error);
 	}
 
-	free(msa.msa_minfos, M_TEMP, *oldlenp);
+	free(msa.msa_minfos, M_TEMP, msa.msa_len);
 	*oldlenp = msa.msa_needed;
 
 	return (0);
@@ -715,7 +717,9 @@ add_vif(struct socket *so, struct mbuf *m)
 		satosin(&ifr.ifr_addr)->sin_len = sizeof(struct sockaddr_in);
 		satosin(&ifr.ifr_addr)->sin_family = AF_INET;
 		satosin(&ifr.ifr_addr)->sin_addr = zeroin_addr;
+		KERNEL_LOCK();
 		error = (*ifp->if_ioctl)(ifp, SIOCADDMULTI, (caddr_t)&ifr);
+		KERNEL_UNLOCK();
 		if (error)
 			return (error);
 	}
@@ -1043,11 +1047,17 @@ del_mfc(struct socket *so, struct mbuf *m)
 }
 
 int
-socket_send(struct socket *s, struct mbuf *mm, struct sockaddr_in *src)
+socket_send(struct socket *so, struct mbuf *mm, struct sockaddr_in *src)
 {
-	if (s != NULL) {
-		if (sbappendaddr(s, &s->so_rcv, sintosa(src), mm, NULL) != 0) {
-			sorwakeup(s);
+	if (so != NULL) {
+		int ret;
+
+		mtx_enter(&so->so_rcv.sb_mtx);
+		ret = sbappendaddr(so, &so->so_rcv, sintosa(src), mm, NULL);
+		mtx_leave(&so->so_rcv.sb_mtx);
+
+		if (ret != 0) {
+			sorwakeup(so);
 			return (0);
 		}
 	}

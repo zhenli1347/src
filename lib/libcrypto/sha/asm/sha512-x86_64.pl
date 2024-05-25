@@ -34,7 +34,7 @@
 # level parallelism, on a given CPU implementation in this case.
 #
 # Special note on Intel EM64T. While Opteron CPU exhibits perfect
-# perfromance ratio of 1.5 between 64- and 32-bit flavors [see above],
+# performance ratio of 1.5 between 64- and 32-bit flavors [see above],
 # [currently available] EM64T CPUs apparently are far from it. On the
 # contrary, 64-bit version, sha512_block, is ~30% *slower* than 32-bit
 # sha256_block:-( This is presumably because 64-bit shifts/rotates
@@ -175,6 +175,7 @@ $code=<<___;
 .type	$func,\@function,4
 .align	16
 $func:
+	_CET_ENDBR
 	push	%rbx
 	push	%rbp
 	push	%r12
@@ -269,6 +270,7 @@ ___
 
 if ($SZ==4) {
 $code.=<<___;
+.section .rodata
 .align	64
 .type	$TABLE,\@object
 $TABLE:
@@ -288,9 +290,11 @@ $TABLE:
 	.long	0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3
 	.long	0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208
 	.long	0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+.text
 ___
 } else {
 $code.=<<___;
+.section .rodata
 .align	64
 .type	$TABLE,\@object
 $TABLE:
@@ -334,6 +338,7 @@ $TABLE:
 	.quad	0x3c9ebe0a15c9bebc,0x431d67c49c100d4c
 	.quad	0x4cc5d4becb3e42b6,0x597f299cfc657e2a
 	.quad	0x5fcb6fab3ad6faec,0x6c44198c4a475817
+.text
 ___
 }
 

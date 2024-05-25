@@ -1,4 +1,4 @@
-/*	$OpenBSD: tfork_thread.S,v 1.10 2020/10/18 14:28:17 deraadt Exp $ */
+/*	$OpenBSD: tfork_thread.S,v 1.12 2023/12/10 16:45:51 deraadt Exp $ */
 /*-
  * Copyright (c) 2000 Peter Wemm <peter@FreeBSD.org>
  * Copyright (c) 2003 Alan L. Cox <alc@cs.rice.edu>
@@ -46,6 +46,8 @@
 
 ENTRY(__tfork_thread)
 	.cfi_startproc
+	RETGUARD_SETUP(__tfork_thread, r11);
+	RETGUARD_PUSH(r11);
 	movq	%rdx, %r8
 	movq	%rcx, %r9
 
@@ -54,7 +56,8 @@ ENTRY(__tfork_thread)
 	 */
 	movl	$SYS___tfork, %eax
 	.cfi_endproc
-	syscall
+99:	syscall
+	PINSYSCALL(SYS___tfork, 99b)
 	jb 	2f
 
 	/*
@@ -62,7 +65,7 @@ ENTRY(__tfork_thread)
 	 */
 	cmpl	$0, %eax
 	jz	1f
-	ret
+	jmp	3f
 
 	/* the retpoline we'll use to call the child's main */
 	_ALIGN_TRAPS
@@ -88,7 +91,8 @@ ENTRY(__tfork_thread)
 	 */
 	movl	$SYS___threxit, %eax
 	xorl	%edi, %edi
-	syscall
+98:	syscall
+	PINSYSCALL(SYS___threxit, 98b)
 	int3
 
 	/*
@@ -96,6 +100,9 @@ ENTRY(__tfork_thread)
 	 */
 2:
 	SET_ERRNO
+3:
+	RETGUARD_POP(r11);
+	RETGUARD_CHECK(__tfork_thread, r11);
 	ret
 	.cfi_endproc
 END(__tfork_thread)

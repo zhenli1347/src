@@ -1,4 +1,4 @@
-/*	$OpenBSD: mountd.c,v 1.89 2020/08/06 17:57:32 naddy Exp $	*/
+/*	$OpenBSD: mountd.c,v 1.92 2024/05/21 05:00:47 jsg Exp $	*/
 /*	$NetBSD: mountd.c,v 1.31 1996/02/18 11:57:53 fvdl Exp $	*/
 
 /*
@@ -181,7 +181,6 @@ void	free_host(struct hostlist *);
 void	new_exportlist(int signo);
 void	get_exportlist(void);
 int	get_host(char *, struct grouplist *, struct grouplist *);
-int	get_num(char *);
 struct hostlist *get_ht(void);
 int	get_line(void);
 void	get_mountlist(void);
@@ -736,7 +735,6 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 	char rpcpath[RPCMNT_PATHLEN+1], dirpath[PATH_MAX];
 	struct hostent *hp = NULL;
 	struct exportlist *ep;
-	sigset_t sighup_mask;
 	int defset, hostset;
 	struct fhreturn fhr;
 	struct dirlist *dp;
@@ -746,8 +744,6 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 	u_short sport;
 	long bad = 0;
 
-	sigemptyset(&sighup_mask);
-	sigaddset(&sighup_mask, SIGHUP);
 	saddr = transp->xp_raddr.sin_addr.s_addr;
 	sport = ntohs(transp->xp_raddr.sin_port);
 	switch (rqstp->rq_proc) {
@@ -792,8 +788,7 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 		}
 
 		/* Check in the exports list */
-		sigprocmask(SIG_BLOCK, &sighup_mask, NULL);
-		ep = ex_search(&fsb.f_fsid);
+		ep = bad ? NULL : ex_search(&fsb.f_fsid);
 		hostset = defset = 0;
 		if (ep && (chk_host(ep->ex_defdir, saddr, &defset, &hostset) ||
 		    ((dp = dirp_search(ep->ex_dirl, dirpath)) &&
@@ -804,7 +799,6 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 				if (!svc_sendreply(transp, xdr_long,
 				    (caddr_t)&bad))
 					syslog(LOG_ERR, "Can't send reply");
-				sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 				return;
 			}
 			if (hostset & DP_HOSTSET)
@@ -820,7 +814,6 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 				if (!svc_sendreply(transp, xdr_long,
 				    (caddr_t)&bad))
 					syslog(LOG_ERR, "Can't send reply");
-				sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 				return;
 			}
 			if (!svc_sendreply(transp, xdr_fhs, (caddr_t)&fhr))
@@ -844,7 +837,6 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 
 		if (bad && !svc_sendreply(transp, xdr_long, (caddr_t)&bad))
 			syslog(LOG_ERR, "Can't send reply");
-		sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 		return;
 	case RPCMNT_DUMP:
 		if (!svc_sendreply(transp, xdr_mlist, NULL))
@@ -958,11 +950,7 @@ xdr_explist(XDR *xdrsp, caddr_t cp)
 {
 	struct exportlist *ep;
 	int false = 0, putdef;
-	sigset_t sighup_mask;
 
-	sigemptyset(&sighup_mask);
-	sigaddset(&sighup_mask, SIGHUP);
-	sigprocmask(SIG_BLOCK, &sighup_mask, NULL);
 	ep = exphead;
 	while (ep) {
 		putdef = 0;
@@ -973,12 +961,10 @@ xdr_explist(XDR *xdrsp, caddr_t cp)
 			goto errout;
 		ep = ep->ex_next;
 	}
-	sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 	if (!xdr_bool(xdrsp, &false))
 		return (0);
 	return (1);
 errout:
-	sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 	return (0);
 }
 
@@ -1050,7 +1036,6 @@ void
 new_exportlist(int signo)
 {
 	gothup = 1;
-
 }
 
 /*

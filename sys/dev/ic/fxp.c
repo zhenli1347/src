@@ -1,4 +1,4 @@
-/*	$OpenBSD: fxp.c,v 1.132 2020/07/10 13:26:37 patrick Exp $	*/
+/*	$OpenBSD: fxp.c,v 1.134 2024/02/28 12:53:31 miod Exp $	*/
 /*	$NetBSD: if_fxp.c,v 1.2 1997/06/05 02:01:55 thorpej Exp $	*/
 
 /*
@@ -429,7 +429,7 @@ fxp_attach(struct fxp_softc *sc, const char *intrstr)
 	ifp->if_ioctl = fxp_ioctl;
 	ifp->if_start = fxp_start;
 	ifp->if_watchdog = fxp_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, FXP_NTXCB - 1);
+	ifq_init_maxlen(&ifp->if_snd, FXP_NTXCB - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 
@@ -1382,11 +1382,12 @@ fxp_init(void *xsc)
 	else
 		bufs = FXP_NRFABUFS_MIN;
 	if (sc->rx_bufs > bufs) {
-		while (sc->rfa_headm != NULL && sc->rx_bufs-- > bufs) {
+		while (sc->rfa_headm != NULL && sc->rx_bufs > bufs) {
 			rxmap = *((bus_dmamap_t *)sc->rfa_headm->m_ext.ext_buf);
 			bus_dmamap_unload(sc->sc_dmat, rxmap);
 			FXP_RXMAP_PUT(sc, rxmap);
 			sc->rfa_headm = m_free(sc->rfa_headm);
+			sc->rx_bufs--;
 		}
 	} else if (sc->rx_bufs < bufs) {
 		int err, tmp_rx_bufs = sc->rx_bufs;

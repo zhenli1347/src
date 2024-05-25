@@ -1,4 +1,4 @@
-/*	$OpenBSD: itime.c,v 1.25 2021/01/21 00:16:36 mortimer Exp $	*/
+/*	$OpenBSD: itime.c,v 1.27 2024/05/09 08:35:40 florian Exp $	*/
 /*	$NetBSD: itime.c,v 1.4 1997/04/15 01:09:50 lukem Exp $	*/
 
 /*-
@@ -99,6 +99,8 @@ readdumptimes(FILE *df)
 
 	for (;;) {
 		dtwalk = calloc(1, sizeof(struct dumptime));
+		if (dtwalk == NULL)
+			quit("allocation failed");
 		if (getrecord(df, &(dtwalk->dt_value)) < 0) {
 			free(dtwalk);
 			break;
@@ -114,6 +116,8 @@ readdumptimes(FILE *df)
 	 *	record that we may have to add to the ddate structure
 	 */
 	ddatev = calloc((unsigned) (nddates + 1), sizeof(struct dumpdates *));
+	if (ddatev == NULL)
+		quit("allocation failed");
 	dtwalk = dthead;
 	for (i = nddates - 1; i >= 0; i--, dtwalk = dtwalk->dt_next)
 		ddatev[i] = &dtwalk->dt_value;
@@ -158,7 +162,7 @@ putdumptime(void)
 	FILE *df;
 	struct dumpdates *dtwalk;
 	int fd, i;
-	char *fname;
+	char *fname, *ct;
 	time_t t;
 
 	if(uflag == 0)
@@ -192,6 +196,8 @@ putdumptime(void)
 	 *	Enough room has been allocated.
 	 */
 	dtwalk = ddatev[nddates] = calloc(1, sizeof(struct dumpdates));
+	if (dtwalk == NULL)
+		quit("allocation failed");
 	nddates += 1;
   found:
 	(void) strlcpy(dtwalk->dd_name, fname, sizeof(dtwalk->dd_name));
@@ -207,12 +213,21 @@ putdumptime(void)
 		quit("ftruncate (%s): %s\n", dumpdates, strerror(errno));
 	(void) fclose(df);
 	t = (time_t)spcl.c_date;
-	msg("level %c dump on %s", level, t == 0 ? "the epoch\n" : ctime(&t));
+	if (t == 0)
+		ct = "the epoch\n";
+	else if ((ct = ctime(&t)) == NULL)
+		ct = "?\n";
+	msg("level %c dump on %s", level, ct);
 }
 
 static void
 dumprecout(FILE *file, struct dumpdates *what)
 {
+	char *ct;
+
+	ct = ctime(&what->dd_ddate);
+	if (ct == NULL)
+		quit("Cannot convert date\n");
 
 	if (fprintf(file, DUMPOUTFMT,
 		    what->dd_name,
@@ -237,8 +252,22 @@ getrecord(FILE *df, struct dumpdates *ddatep)
 			dumpdates, recno);
 
 #ifdef FDEBUG
-	msg("getrecord: %s %c %s", ddatep->dd_name, ddatep->dd_level,
-	    ddatep->dd_ddate == 0 ? "the epoch\n" : ctime(&ddatep->dd_ddate));
+	{
+		char *ct;
+
+		if (ddatep->dd_ddate == 0)
+			ct = "the epoch\n";
+		else
+			ct = ctime(&ddatep->dd_ddate);
+
+		if (ct)
+			msg("getrecord: %s %c %s", ddatep->dd_name,
+			    ddatep->dd_level, ct);
+		else
+			msg("getrecord: %s %c %lld seconds after the epoch\n",
+			    ddatep->dd_name, ddatep->dd_level,
+			    ddatep->dd_ddate);
+	}
 #endif
 	return(0);
 }

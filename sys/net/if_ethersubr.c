@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ethersubr.c,v 1.284 2022/06/29 09:08:07 mvs Exp $	*/
+/*	$OpenBSD: if_ethersubr.c,v 1.293 2024/02/14 22:41:48 bluhm Exp $	*/
 /*	$NetBSD: if_ethersubr.c,v 1.19 1996/05/07 02:40:30 thorpej Exp $	*/
 
 /*
@@ -98,6 +98,10 @@ didn't get a copy, you may request one from <license@ipv6.nrl.navy.mil>.
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netinet/ip_ipsp.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
@@ -135,6 +139,20 @@ didn't get a copy, you may request one from <license@ipv6.nrl.navy.mil>.
 #ifdef MPLS
 #include <netmpls/mpls.h>
 #endif /* MPLS */
+
+/* #define ETHERDEBUG 1 */
+#ifdef ETHERDEBUG
+int etherdebug = ETHERDEBUG;
+#define DNPRINTF(level, fmt, args...)					\
+	do {								\
+		if (etherdebug >= level)				\
+			printf("%s: " fmt "\n", __func__, ## args);	\
+	} while (0)
+#else
+#define DNPRINTF(level, fmt, args...)					\
+	do { } while (0)
+#endif
+#define DPRINTF(fmt, args...)	DNPRINTF(1, fmt, args)
 
 u_int8_t etherbroadcastaddr[ETHER_ADDR_LEN] =
     { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
@@ -244,10 +262,7 @@ ether_resolve(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 		break;
 #ifdef INET6
 	case AF_INET6:
-		KERNEL_LOCK();
-		/* XXXSMP there is a MP race in nd6_resolve() */
 		error = nd6_resolve(ifp, rt, m, dst, eh->ether_dhost);
-		KERNEL_UNLOCK();
 		if (error)
 			return (error);
 		eh->ether_type = htons(ETHERTYPE_IPV6);
@@ -273,10 +288,7 @@ ether_resolve(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 			break;
 #ifdef INET6
 		case AF_INET6:
-			KERNEL_LOCK();
-			/* XXXSMP there is a MP race in nd6_resolve() */
 			error = nd6_resolve(ifp, rt, m, dst, eh->ether_dhost);
-			KERNEL_UNLOCK();
 			if (error)
 				return (error);
 			break;
@@ -711,9 +723,8 @@ ether_ifdetach(struct ifnet *ifp)
 	/* Undo pseudo-driver changes. */
 	if_deactivate(ifp);
 
-	for (enm = LIST_FIRST(&ac->ac_multiaddrs);
-	    enm != NULL;
-	    enm = LIST_FIRST(&ac->ac_multiaddrs)) {
+	while (!LIST_EMPTY(&ac->ac_multiaddrs)) {
+		enm = LIST_FIRST(&ac->ac_multiaddrs);
 		LIST_REMOVE(enm, enm_list);
 		free(enm, M_IFMADDR, sizeof *enm);
 	}
@@ -934,7 +945,7 @@ ether_addmulti(struct ifreq *ifr, struct arpcom *ac)
 		/*
 		 * Found it; just increment the reference count.
 		 */
-		++enm->enm_refcount;
+		refcnt_take(&enm->enm_refcnt);
 		splx(s);
 		return (0);
 	}
@@ -949,7 +960,7 @@ ether_addmulti(struct ifreq *ifr, struct arpcom *ac)
 	}
 	memcpy(enm->enm_addrlo, addrlo, ETHER_ADDR_LEN);
 	memcpy(enm->enm_addrhi, addrhi, ETHER_ADDR_LEN);
-	enm->enm_refcount = 1;
+	refcnt_init_trace(&enm->enm_refcnt, DT_REFCNT_IDX_ETHMULTI);
 	LIST_INSERT_HEAD(&ac->ac_multiaddrs, enm, enm_list);
 	ac->ac_multicnt++;
 	if (memcmp(addrlo, addrhi, ETHER_ADDR_LEN) != 0)
@@ -987,7 +998,7 @@ ether_delmulti(struct ifreq *ifr, struct arpcom *ac)
 		splx(s);
 		return (ENXIO);
 	}
-	if (--enm->enm_refcount != 0) {
+	if (refcnt_rele(&enm->enm_refcnt) == 0) {
 		/*
 		 * Still some claims to this record.
 		 */
@@ -1033,4 +1044,206 @@ ether_e64_to_addr(struct ether_addr *ea, uint64_t e64)
 		ea->ether_addr_octet[--i] = e64;
 		e64 >>= 8;
 	} while (i > 0);
+}
+
+/* Parse different TCP/IP protocol headers for a quick view inside an mbuf. */
+void
+ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
+{
+	struct mbuf	*m;
+	size_t		 hlen, iplen;
+	int		 hoff;
+	uint8_t		 ipproto;
+	uint16_t	 ether_type;
+	/* gcc 4.2.1 on sparc64 may create 32 bit loads on unaligned mbuf */
+	union {
+		u_char	hc_data;
+#if _BYTE_ORDER == _LITTLE_ENDIAN
+		struct {
+			u_int	hl:4,	/* header length */
+				v:4;	/* version */
+		} hc_ip;
+		struct {
+			u_int	x2:4,	/* (unused) */
+				off:4;	/* data offset */
+		} hc_th;
+#endif
+#if _BYTE_ORDER == _BIG_ENDIAN
+		struct {
+			u_int	v:4,	/* version */
+				hl:4;	/* header length */
+		} hc_ip;
+		struct {
+			u_int	off:4,	/* data offset */
+				x2:4;	/* (unused) */
+		} hc_th;
+#endif
+	} hdrcpy;
+
+	/* Return NULL if header was not recognized. */
+	memset(ext, 0, sizeof(*ext));
+
+	KASSERT(ISSET(m0->m_flags, M_PKTHDR));
+	ext->paylen = m0->m_pkthdr.len;
+
+	if (m0->m_len < sizeof(*ext->eh)) {
+		DPRINTF("m_len %d, eh %zu", m0->m_len, sizeof(*ext->eh));
+		return;
+	}
+	ext->eh = mtod(m0, struct ether_header *);
+	ether_type = ntohs(ext->eh->ether_type);
+	hlen = sizeof(*ext->eh);
+	if (ext->paylen < hlen) {
+		DPRINTF("paylen %u, ehlen %zu", ext->paylen, hlen);
+		ext->eh = NULL;
+		return;
+	}
+	ext->paylen -= hlen;
+
+#if NVLAN > 0
+	if (ether_type == ETHERTYPE_VLAN) {
+		if (m0->m_len < sizeof(*ext->evh)) {
+			DPRINTF("m_len %d, evh %zu",
+			    m0->m_len, sizeof(*ext->evh));
+			return;
+		}
+		ext->evh = mtod(m0, struct ether_vlan_header *);
+		ether_type = ntohs(ext->evh->evl_proto);
+		hlen = sizeof(*ext->evh);
+		if (sizeof(*ext->eh) + ext->paylen < hlen) {
+			DPRINTF("paylen %zu, evhlen %zu",
+			    sizeof(*ext->eh) + ext->paylen, hlen);
+			ext->evh = NULL;
+			return;
+		}
+		ext->paylen = sizeof(*ext->eh) + ext->paylen - hlen;
+	}
+#endif
+
+	switch (ether_type) {
+	case ETHERTYPE_IP:
+		m = m_getptr(m0, hlen, &hoff);
+		if (m == NULL || m->m_len - hoff < sizeof(*ext->ip4)) {
+			DPRINTF("m_len %d, hoff %d, ip4 %zu",
+			    m ? m->m_len : -1, hoff, sizeof(*ext->ip4));
+			return;
+		}
+		ext->ip4 = (struct ip *)(mtod(m, caddr_t) + hoff);
+
+		memcpy(&hdrcpy.hc_data, ext->ip4, 1);
+		hlen = hdrcpy.hc_ip.hl << 2;
+		if (m->m_len - hoff < hlen) {
+			DPRINTF("m_len %d, hoff %d, iphl %zu",
+			    m ? m->m_len : -1, hoff, hlen);
+			ext->ip4 = NULL;
+			return;
+		}
+		if (ext->paylen < hlen) {
+			DPRINTF("paylen %u, ip4hlen %zu", ext->paylen, hlen);
+			ext->ip4 = NULL;
+			return;
+		}
+		iplen = ntohs(ext->ip4->ip_len);
+		if (ext->paylen < iplen) {
+			DPRINTF("paylen %u, ip4len %zu", ext->paylen, iplen);
+			ext->ip4 = NULL;
+			return;
+		}
+		if (iplen < hlen) {
+			DPRINTF("ip4len %zu, ip4hlen %zu", iplen, hlen);
+			ext->ip4 = NULL;
+			return;
+		}
+		ext->iplen = iplen;
+		ext->iphlen = hlen;
+		ext->paylen -= hlen;
+		ipproto = ext->ip4->ip_p;
+
+		if (ISSET(ntohs(ext->ip4->ip_off), IP_MF|IP_OFFMASK))
+			return;
+		break;
+#ifdef INET6
+	case ETHERTYPE_IPV6:
+		m = m_getptr(m0, hlen, &hoff);
+		if (m == NULL || m->m_len - hoff < sizeof(*ext->ip6)) {
+			DPRINTF("m_len %d, hoff %d, ip6 %zu",
+			    m ? m->m_len : -1, hoff, sizeof(*ext->ip6));
+			return;
+		}
+		ext->ip6 = (struct ip6_hdr *)(mtod(m, caddr_t) + hoff);
+
+		hlen = sizeof(*ext->ip6);
+		if (ext->paylen < hlen) {
+			DPRINTF("paylen %u, ip6hlen %zu", ext->paylen, hlen);
+			ext->ip6 = NULL;
+			return;
+		}
+		iplen = hlen + ntohs(ext->ip6->ip6_plen);
+		if (ext->paylen < iplen) {
+			DPRINTF("paylen %u, ip6len %zu", ext->paylen, iplen);
+			ext->ip6 = NULL;
+			return;
+		}
+		ext->iplen = iplen;
+		ext->iphlen = hlen;
+		ext->paylen -= hlen;
+		ipproto = ext->ip6->ip6_nxt;
+		break;
+#endif
+	default:
+		return;
+	}
+
+	switch (ipproto) {
+	case IPPROTO_TCP:
+		m = m_getptr(m, hoff + hlen, &hoff);
+		if (m == NULL || m->m_len - hoff < sizeof(*ext->tcp)) {
+			DPRINTF("m_len %d, hoff %d, tcp %zu",
+			    m ? m->m_len : -1, hoff, sizeof(*ext->tcp));
+			return;
+		}
+		ext->tcp = (struct tcphdr *)(mtod(m, caddr_t) + hoff);
+
+		memcpy(&hdrcpy.hc_data, &ext->tcp->th_flags - 1, 1);
+		hlen = hdrcpy.hc_th.off << 2;
+		if (m->m_len - hoff < hlen) {
+			DPRINTF("m_len %d, hoff %d, thoff %zu",
+			    m ? m->m_len : -1, hoff, hlen);
+			ext->tcp = NULL;
+			return;
+		}
+		if (ext->iplen - ext->iphlen < hlen) {
+			DPRINTF("iplen %u, iphlen %u, tcphlen %zu",
+			    ext->iplen, ext->iphlen, hlen);
+			ext->tcp = NULL;
+			return;
+		}
+		ext->tcphlen = hlen;
+		ext->paylen -= hlen;
+		break;
+
+	case IPPROTO_UDP:
+		m = m_getptr(m, hoff + hlen, &hoff);
+		if (m == NULL || m->m_len - hoff < sizeof(*ext->udp)) {
+			DPRINTF("m_len %d, hoff %d, tcp %zu",
+			    m ? m->m_len : -1, hoff, sizeof(*ext->tcp));
+			return;
+		}
+		ext->udp = (struct udphdr *)(mtod(m, caddr_t) + hoff);
+
+		hlen = sizeof(*ext->udp);
+		if (ext->iplen - ext->iphlen < hlen) {
+			DPRINTF("iplen %u, iphlen %u, udphlen %zu",
+			    ext->iplen, ext->iphlen, hlen);
+			ext->udp = NULL;
+			return;
+		}
+		break;
+	}
+
+	DNPRINTF(2, "%s%s%s%s%s%s ip %u, iph %u, tcph %u, payl %u",
+	    ext->eh ? "eh," : "", ext->evh ? "evh," : "",
+	    ext->ip4 ? "ip4," : "", ext->ip6 ? "ip6," : "",
+	    ext->tcp ? "tcp," : "", ext->udp ? "udp," : "",
+	    ext->iplen, ext->iphlen, ext->tcphlen, ext->paylen);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolver.c,v 1.156 2022/11/29 11:56:32 florian Exp $	*/
+/*	$OpenBSD: resolver.c,v 1.166 2024/05/21 05:00:48 jsg Exp $	*/
 
 
 /*
@@ -181,8 +181,6 @@ void			 show_status(pid_t);
 void			 show_autoconf(pid_t);
 void			 show_mem(pid_t);
 void			 send_resolver_info(struct uw_resolver *, pid_t);
-void			 send_detailed_resolver_info(struct uw_resolver *,
-			     pid_t);
 void			 trust_anchor_resolve(void);
 void			 trust_anchor_timo(int, short, void *);
 void			 trust_anchor_resolve_done(struct uw_resolver *, void *,
@@ -232,10 +230,24 @@ struct val_neg_cache		*unified_neg_cache;
 int				 dns64_present;
 int				 available_afs = HAVE_IPV4 | HAVE_IPV6;
 
-static const char * const	 as112_zones[] = {
+static const char * const	 forward_transparent_zones[] = {
 	/* RFC1918 */
 	"10.in-addr.arpa. transparent",
 	"16.172.in-addr.arpa. transparent",
+	"17.172.in-addr.arpa. transparent",
+	"18.172.in-addr.arpa. transparent",
+	"19.172.in-addr.arpa. transparent",
+	"20.172.in-addr.arpa. transparent",
+	"21.172.in-addr.arpa. transparent",
+	"22.172.in-addr.arpa. transparent",
+	"23.172.in-addr.arpa. transparent",
+	"24.172.in-addr.arpa. transparent",
+	"25.172.in-addr.arpa. transparent",
+	"26.172.in-addr.arpa. transparent",
+	"27.172.in-addr.arpa. transparent",
+	"28.172.in-addr.arpa. transparent",
+	"29.172.in-addr.arpa. transparent",
+	"30.172.in-addr.arpa. transparent",
 	"31.172.in-addr.arpa. transparent",
 	"168.192.in-addr.arpa. transparent",
 
@@ -327,7 +339,10 @@ static const char * const	 as112_zones[] = {
 	"B.E.F.ip6.arpa. transparent",
 
 	/* RFC3849 */
-	"8.B.D.0.1.0.0.2.ip6.arpa. transparent"
+	"8.B.D.0.1.0.0.2.ip6.arpa. transparent",
+
+	/* RFC8375 */
+	"home.arpa. transparent",
 };
 
 const char	 bogus_past[]	= "validation failure <. NS IN>: signature "
@@ -638,7 +653,7 @@ resolver_dispatch_main(int fd, short event, void *bula)
 				fatalx("%s: received unexpected imsg fd "
 				    "to resolver", __func__);
 
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg fd to "
 				   "resolver but didn't receive any", __func__);
 
@@ -950,6 +965,12 @@ resolve_done(struct uw_resolver *res, void *arg, int rcode,
 
 	running_res = --rq->running;
 
+	if (rcode == LDNS_RCODE_SERVFAIL) {
+		if (res->stop != 1)
+			check_resolver(res);
+		goto servfail;
+	}
+
 	if (answer_len < LDNS_HEADER_SIZE) {
 		log_warnx("bad packet: too short");
 		goto servfail;
@@ -961,12 +982,6 @@ resolve_done(struct uw_resolver *res, void *arg, int rcode,
 		goto servfail;
 	}
 	answer_header->answer_len = answer_len;
-
-	if (rcode == LDNS_RCODE_SERVFAIL) {
-		if (res->stop != 1)
-			check_resolver(res);
-		goto servfail;
-	}
 
 	if ((result = calloc(1, sizeof(*result))) == NULL)
 		goto servfail;
@@ -1194,6 +1209,7 @@ static const struct {
 	{ "target-fetch-policy:", "0 0 0 0 0" },
 	{ "outgoing-range:", "64" },
 	{ "val-max-restart:", "0" },
+	{ "infra-keep-probing", "yes" },
 };
 
 struct uw_resolver *
@@ -1348,20 +1364,21 @@ create_resolver(enum uw_resolver_type type)
 		break;
 	}
 
-	/* for the forwarder cases allow AS112 zones */
+	/* for the forwarder cases allow AS112 and special-use zones */
 	switch(res->type) {
 	case UW_RES_AUTOCONF:
 	case UW_RES_ODOT_AUTOCONF:
 	case UW_RES_FORWARDER:
 	case UW_RES_ODOT_FORWARDER:
 	case UW_RES_DOT:
-		for (i = 0; i < nitems(as112_zones); i++) {
+		for (i = 0; i < nitems(forward_transparent_zones); i++) {
 			if((err = ub_ctx_set_option(res->ctx, "local-zone:",
-			    as112_zones[i])) != 0) {
+			    forward_transparent_zones[i])) != 0) {
 				ub_ctx_delete(res->ctx);
 				free(res);
 				log_warnx("error setting local-zone: %s: %s",
-				    as112_zones[i], ub_strerror(err));
+				    forward_transparent_zones[i],
+				    ub_strerror(err));
 				return (NULL);
 			}
 		}
@@ -1541,17 +1558,17 @@ check_resolver_done(struct uw_resolver *res, void *arg, int rcode,
 
 	prev_state = checked_resolver->state;
 
-	if (answer_len < LDNS_HEADER_SIZE) {
-		checked_resolver->state = DEAD;
-		log_warnx("%s: bad packet: too short", __func__);
-		goto out;
-	}
-
 	if (rcode == LDNS_RCODE_SERVFAIL) {
 		log_debug("%s: %s rcode: SERVFAIL", __func__,
 		    uw_resolver_type_str[checked_resolver->type]);
 
 		checked_resolver->state = DEAD;
+		goto out;
+	}
+
+	if (answer_len < LDNS_HEADER_SIZE) {
+		checked_resolver->state = DEAD;
+		log_warnx("%s: bad packet: too short", __func__);
 		goto out;
 	}
 
@@ -1619,8 +1636,9 @@ void
 asr_resolve_done(struct asr_result *ar, void *arg)
 {
 	struct resolver_cb_data	*cb_data = arg;
-	cb_data->cb(cb_data->res, cb_data->data, ar->ar_rcode, ar->ar_data,
-	    ar->ar_datalen, 0, NULL);
+	cb_data->cb(cb_data->res, cb_data->data, ar->ar_errno == 0 ?
+	    ar->ar_rcode : LDNS_RCODE_SERVFAIL, ar->ar_data, ar->ar_datalen, 0,
+	    NULL);
 	free(ar->ar_data);
 	resolver_unref(cb_data->res);
 	free(cb_data);
@@ -1896,6 +1914,11 @@ trust_anchor_resolve_done(struct uw_resolver *res, void *arg, int rcode,
 	int			 i, tas, n;
 	uint16_t		 dnskey_flags;
 	char			 rdata_buf[1024], *ta;
+
+	if (rcode == LDNS_RCODE_SERVFAIL) {
+		log_debug("%s: rcode: SERVFAIL", __func__);
+		goto out;
+	}
 
 	if (answer_len < LDNS_HEADER_SIZE) {
 		log_warnx("bad packet: too short");
@@ -2217,7 +2240,7 @@ query_imsg2str(struct query_imsg *query_imsg)
 }
 
 char *
-gen_resolv_conf()
+gen_resolv_conf(void)
 {
 	struct uw_forwarder	*uw_forwarder;
 	char			*resolv_conf = NULL, *tmp = NULL;
@@ -2284,6 +2307,9 @@ check_dns64_done(struct asr_result *ar, void *arg)
 	size_t				 i;
 	int				 preflen, count = 0;
 	void				*asr_ctx = arg;
+
+	if (ar->ar_errno != 0)
+		goto fail;
 
 	memset(&qinfo, 0, sizeof(qinfo));
 	alloc_init(&alloc, NULL, 0);
@@ -2386,6 +2412,7 @@ check_dns64_done(struct asr_result *ar, void *arg)
 	alloc_clear(&alloc);
 	regional_destroy(region);
 	sldns_buffer_free(buf);
+ fail:
 	free(ar->ar_data);
 	asr_resolver_free(asr_ctx);
 }

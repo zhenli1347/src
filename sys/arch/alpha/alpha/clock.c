@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.25 2021/02/23 04:44:30 cheloha Exp $	*/
+/*	$OpenBSD: clock.c,v 1.31 2023/09/17 14:50:50 cheloha Exp $	*/
 /*	$NetBSD: clock.c,v 1.29 2000/06/05 21:47:10 thorpej Exp $	*/
 
 /*
@@ -42,8 +42,10 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/evcount.h>
+#include <sys/sched.h>
 #include <sys/timetc.h>
 
 #include <dev/clock_subr.h>
@@ -54,8 +56,6 @@
 
 #include <alpha/alpha/clockvar.h>
 
-extern int schedhz;
-
 struct device *clockdev;
 const struct clockfns *clockfns;
 
@@ -65,7 +65,6 @@ int clk_irq = 0;
 u_int rpcc_get_timecount(struct timecounter *);
 struct timecounter rpcc_timecounter = {
 	.tc_get_timecount = rpcc_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 0,
 	.tc_name = "rpcc",
@@ -144,8 +143,7 @@ clockattach(dev, fns)
  */
 
 /*
- * Start the real-time and statistics clocks. Leave stathz 0 since there
- * are no other timers available.
+ * Start the real-time and statistics clocks.
  */
 void
 cpu_initclocks(void)
@@ -159,21 +157,7 @@ cpu_initclocks(void)
 		panic("cpu_initclocks: no clock attached");
 
 	tick = 1000000 / hz;	/* number of microseconds between interrupts */
-
-	/*
-	 * Establish the clock interrupt; it's a special case.
-	 *
-	 * We establish the clock interrupt this late because if
-	 * we do it at clock attach time, we may have never been at
-	 * spl0() since taking over the system.  Some versions of
-	 * PALcode save a clock interrupt, which would get delivered
-	 * when we spl0() in autoconf.c.  If established the clock
-	 * interrupt handler earlier, that interrupt would go to
-	 * hardclock, which would then fall over because the pointer
-	 * to the virtual timers wasn't set at that time.
-	 */
-	platform.clockintr = hardclock;
-	schedhz = 16;
+	tick_nsec = 1000000000 / hz;
 
 	evcount_attach(&clk_count, "clock", &clk_irq);
 
@@ -205,22 +189,37 @@ cpu_initclocks(void)
 	rpcc_timecounter.tc_frequency = cycles_per_sec;
 	tc_init(&rpcc_timecounter);
 
+	stathz = hz;
+	profhz = stathz;
+}
+
+void
+cpu_startclock(void)
+{
+	clockintr_cpu_init(NULL);
+
+	/*
+	 * Establish the clock interrupt; it's a special case.
+	 *
+	 * We establish the clock interrupt this late because if
+	 * we do it at clock attach time, we may have never been at
+	 * spl0() since taking over the system.  Some versions of
+	 * PALcode save a clock interrupt, which would get delivered
+	 * when we spl0() in autoconf.c.  If established the clock
+	 * interrupt handler earlier, that interrupt would go to
+	 * hardclock, which would then fall over because the pointer
+	 * to the virtual timers wasn't set at that time.
+	 */
+	platform.clockintr = clockintr_dispatch;
+
 	rtc_todr.todr_gettime = rtc_gettime;
 	rtc_todr.todr_settime = rtc_settime;
 	todr_handle = &rtc_todr;
 }
 
-/*
- * We assume newhz is either stathz or profhz, and that neither will
- * change after being set up above.  Could recalculate intervals here
- * but that would be a drag.
- */
 void
-setstatclockrate(newhz)
-	int newhz;
+setstatclockrate(int newhz)
 {
-
-	/* nothing we can do */
 }
 
 u_int

@@ -1,4 +1,4 @@
-#	$OpenBSD: files.pci,v 1.359 2022/03/31 21:41:17 jmatthew Exp $
+#	$OpenBSD: files.pci,v 1.365 2024/04/09 14:58:41 mglocker Exp $
 #	$NetBSD: files.pci,v 1.20 1996/09/24 17:47:15 christos Exp $
 #
 # Config file and device description for machine-independent PCI code.
@@ -363,6 +363,10 @@ device	ixl: ether, ifnet, ifmedia, intrmap, stoeplitz
 attach	ixl at pci
 file	dev/pci/if_ixl.c		ixl
 
+# Intel Elkhart Lake Ethernet
+attach	dwqe at pci with dwqe_pci
+file	dev/pci/if_dwqe_pci.c		dwqe_pci
+
 # Neterion Xframe 10 Gigabit ethernet
 device	xge: ether, ifnet, ifmedia
 attach	xge  at pci
@@ -550,6 +554,10 @@ file	dev/pci/if_iwm.c		iwm
 device	iwx: ifnet, wlan, firmload
 attach	iwx at pci
 file	dev/pci/if_iwx.c		iwx
+
+# Qualcomm 802.11ax
+attach	qwx at pci with qwx_pci
+file	dev/pci/if_qwx_pci.c		qwx_pci
 
 # C-Media CMI8x38 Audio Chip
 device	cmpci {}: audio
@@ -771,6 +779,10 @@ device	gcu
 attach	gcu at pci
 file	dev/pci/gcu.c			gcu		needs-flag
 
+# Intel OnChip System Fabric
+attach	iosf at pci with iosf_pci
+file	dev/pci/iosf_pci.c		iosf_pci
+
 # AMD Geode CS5536 Audio
 device	auglx: audio, ac97
 attach	auglx at pci
@@ -846,9 +858,23 @@ file	dev/pci/igc_mac.c		igc
 file	dev/pci/igc_nvm.c		igc
 file	dev/pci/igc_phy.c		igc
 
+# WangXun AX1860
+device	ngbe: ether, ifnet, ifmedia, intrmap, stoeplitz
+attach	ngbe at pci
+file	dev/pci/if_ngbe.c		ngbe
+
 # NS16550 compatible UART
 attach	com at pci with com_pci
 file	dev/pci/com_pci.c		com_pci
+
+# MediaTek MT7921 / MT7922 wifi
+device	mwx: ifnet, wlan, firmload
+attach	mwx at pci
+file	dev/pci/if_mwx.c		mwx
+
+# UFS HC
+attach	ufshci at pci with ufshci_pci
+file	dev/pci/ufshci_pci.c		ufshci_pci
 
 include "dev/pci/files.agp"
 include "dev/pci/drm/files.drm"

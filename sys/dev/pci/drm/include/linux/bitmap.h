@@ -1,4 +1,4 @@
-/*	$OpenBSD: bitmap.h,v 1.4 2022/06/15 07:04:09 jsg Exp $	*/
+/*	$OpenBSD: bitmap.h,v 1.8 2024/03/20 22:52:44 bluhm Exp $	*/
 /*
  * Copyright (c) 2013, 2014, 2015 Mark Kettenis
  *
@@ -18,6 +18,7 @@
 #ifndef _LINUX_BITMAP_H
 #define _LINUX_BITMAP_H
 
+#include <linux/align.h>
 #include <linux/bitops.h>
 #include <linux/string.h>
 
@@ -49,6 +50,16 @@ bitmap_zero(void *p, u_int n)
 
 	for (b = 0; b < n; b += 32)
 		ptr[b >> 5] = 0;
+}
+
+static inline void
+bitmap_fill(void *p, u_int n)
+{
+	u_int *ptr = p;
+	u_int b;
+
+	for (b = 0; b < n; b += 32)
+		ptr[b >> 5] = 0xffffffff;
 }
 
 static inline void
@@ -86,11 +97,28 @@ bitmap_complement(void *d, void *s, u_int n)
 		dst[b >> 5] = ~src[b >> 5];
 }
 
+static inline bool
+bitmap_intersects(const void *s1, const void *s2, u_int n)
+{
+	const u_int *b1 = s1;
+	const u_int *b2 = s2;
+	u_int b;
+
+	for (b = 0; b < n; b += 32)
+		if (b1[b >> 5] & b2[b >> 5])
+			return true;
+	if ((n % 32) != 0)
+		if ((b1[n >> 5] & b2[b >> 5]) & (0xffffffff >> (32 - (n % 32))))
+			return true;
+
+	return false;
+}
+
 static inline void
-bitmap_copy(void *d, void *s, u_int n)
+bitmap_copy(void *d, const void *s, u_int n)
 {
 	u_int *dst = d;
-	u_int *src = s;
+	const u_int *src = s;
 	u_int b;
 
 	for (b = 0; b < n; b += 32)
@@ -98,7 +126,7 @@ bitmap_copy(void *d, void *s, u_int n)
 }
 
 static inline void
-bitmap_to_arr32(void *d, unsigned long *src, u_int n)
+bitmap_to_arr32(void *d, const unsigned long *src, u_int n)
 {
 	u_int *dst = d;
 	u_int b;
@@ -117,17 +145,58 @@ bitmap_to_arr32(void *d, unsigned long *src, u_int n)
 		dst[n >> 5] &= (0xffffffff >> (32 - (n % 32)));
 }
 
+static inline void
+bitmap_from_arr32(unsigned long *dst, const void *s, u_int n)
+{
+	const u_int *src = s;
+	u_int b;
+
+#ifdef __LP64__
+	for (b = 0; b < n; b += 32) {
+		dst[b >> 6] = src[b >> 5];
+		b += 32;
+		if (b < n)
+			dst[b >> 6] |= ((unsigned long)src[b >> 5]) << 32;
+	}
+	if ((n % 64) != 0)
+		dst[n >> 6] &= (0xffffffffffffffffUL >> (64 - (n % 64)));
+#else
+	bitmap_copy(dst, s, n);
+	if ((n % 32) != 0)
+		dst[n >> 5] &=  (0xffffffff >> (32 - (n % 32)));
+#endif
+}
 
 static inline int
-bitmap_weight(void *p, u_int n)
+bitmap_weight(const void *p, u_int n)
 {
-	u_int *ptr = p;
+	const u_int *ptr = p;
 	u_int b;
 	int sum = 0;
 
 	for (b = 0; b < n; b += 32)
 		sum += hweight32(ptr[b >> 5]);
 	return sum;
+}
+
+static inline int
+bitmap_find_free_region(void *p, u_int n, int o)
+{
+	int b;
+
+	KASSERT(o == 0);
+	b = find_first_zero_bit(p, n);
+	if (b == n)
+		return -ENOMEM;
+	__set_bit(b, p);
+	return b;
+}
+
+static inline void
+bitmap_release_region(void *p, u_int b, int o)
+{
+	KASSERT(o == 0);
+	__clear_bit(b, p);
 }
 
 void *bitmap_zalloc(u_int, gfp_t);

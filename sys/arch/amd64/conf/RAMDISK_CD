@@ -1,4 +1,4 @@
-#	$OpenBSD: RAMDISK_CD,v 1.200 2022/04/06 13:23:58 krw Exp $
+#	$OpenBSD: RAMDISK_CD,v 1.206 2024/05/09 17:05:22 mglocker Exp $
 
 machine		amd64
 maxusers	4
@@ -149,7 +149,7 @@ pckbd*		at pckbc?		# PC keyboard
 wskbd*		at pckbd? mux 1
 vga0		at isa?
 vga*		at pci?
-wsdisplay*	at vga?
+wsdisplay0	at vga? console 1
 
 efifb0		at mainbus?		# EFI Framebuffer
 wsdisplay0	at efifb? console 1
@@ -184,6 +184,7 @@ adw*		at pci?			# AdvanSys ULTRA WIDE SCSI
 pcscp*		at pci?			# AMD 53c974 PCscsi-PCI SCSI
 vmwpvs*		at pci?			# VMware ParaVirtual SCSI
 nvme*		at pci?			# NVMe controllers
+ufshci*		at pci?			# UFSHCI controllers
 softraid0	at root
 
 scsibus*	at scsi?
@@ -263,6 +264,8 @@ mcx*		at pci?			# Mellanox ConnectX-4
 iavf*		at pci?			# Intel Ethernet Adaptive VF
 aq*		at pci?			# Aquantia aQtion Ethernet
 igc*		at pci?			# Intel I225 Ethernet
+ngbe*		at pci?			# WangXun WX1860 Ethernet
+dwqe*		at pci?			# Intel Elkhart Lake Ethernet
 
 acx*		at pci?			# TI ACX100/ACX111 (802.11b/g)
 acx*		at cardbus?		# TI ACX100/ACX111 (802.11b/g)
@@ -282,6 +285,7 @@ wpi*		at pci?			# Intel PRO/Wireless 3945ABG
 iwn*		at pci?			# Intel Wireless WiFi Link 4965AGN
 iwm*		at pci?			# Intel WiFi Link 7xxx
 iwx*		at pci?			# Intel WiFi Link 22xxx
+qwx*		at pci?			# Qualcomm 802.11ax
 ral*		at pci?			# Ralink RT2500/RT2501/RT2600
 ral*		at cardbus?		# Ralink RT2500/RT2501/RT2600
 rtw*		at pci?			# Realtek 8180

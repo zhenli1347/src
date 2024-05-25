@@ -10,7 +10,7 @@
 #include <linux/types.h>
 #include <linux/atomic.h>
 #include <linux/compiler.h>
-#include <linux/vmalloc.h>
+#include <linux/vmalloc.h> /* via asm/io.h */
 
 #define memcpy_toio(d, s, n)	memcpy(d, s, n)
 #define memcpy_fromio(d, s, n)	memcpy(d, s, n)
@@ -169,9 +169,23 @@ iowrite64(u64 val, volatile void __iomem *addr)
 #define readq(p) ioread64(p)
 #define writeq(v, p) iowrite64(v, p)
 
+#define readl_relaxed(p) readl(p)
+#define writel_relaxed(v, p) writel(v, p)
+
 int	drm_mtrr_add(unsigned long, size_t, int);
 int	drm_mtrr_del(int, unsigned long, size_t, int);
 
 #define DRM_MTRR_WC	MDF_WRITECOMBINE
+
+static inline void *
+IOMEM_ERR_PTR(long error)
+{
+	return (void *) error;
+}
+
+#define MEMREMAP_WB	(1 << 0)
+
+void	*memremap(phys_addr_t, size_t, int);
+void	memunmap(void *);
 
 #endif

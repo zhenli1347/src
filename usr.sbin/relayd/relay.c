@@ -1,4 +1,4 @@
-/*	$OpenBSD: relay.c,v 1.254 2021/03/24 20:59:53 benno Exp $	*/
+/*	$OpenBSD: relay.c,v 1.259 2024/01/17 10:01:24 claudio Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -1441,7 +1441,7 @@ relay_session(struct rsession *con)
 		 * Call the UDP protocol-specific handler
 		 */
 		if (rlay->rl_proto->request == NULL)
-			fatalx("invalide UDP session");
+			fatalx("invalid UDP session");
 		if ((*rlay->rl_proto->request)(con) == -1)
 			relay_close(con, "session failed", 1);
 		return;
@@ -1993,7 +1993,7 @@ relay_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 
 		/* Will validate the result later */
-		con->se_bnds = imsg->fd;
+		con->se_bnds = imsg_get_fd(imsg);
 
 		evtimer_del(&con->se_ev);
 		evtimer_set(&con->se_ev, relay_bindany, con);
@@ -2064,11 +2064,7 @@ relay_tls_ctx_create_proto(struct protocol *proto, struct tls_config *tls_cfg)
 {
 	uint32_t		 protocols = 0;
 
-	/* Set the allowed SSL protocols */
-	if (proto->tlsflags & TLSFLAG_TLSV1_0)
-		protocols |= TLS_PROTOCOL_TLSv1_0;
-	if (proto->tlsflags & TLSFLAG_TLSV1_1)
-		protocols |= TLS_PROTOCOL_TLSv1_1;
+	/* Set the allowed TLS protocols */
 	if (proto->tlsflags & TLSFLAG_TLSV1_2)
 		protocols |= TLS_PROTOCOL_TLSv1_2;
 	if (proto->tlsflags & TLSFLAG_TLSV1_3)
@@ -2090,7 +2086,7 @@ relay_tls_ctx_create_proto(struct protocol *proto, struct tls_config *tls_cfg)
 
 	/*
 	 * Set session ID context to a random value. It needs to be the
-	 * same accross all relay processes or session caching will fail.
+	 * same across all relay processes or session caching will fail.
 	 */
 	if (tls_config_set_session_id(tls_cfg, env->sc_conf.tls_sid,
 	    sizeof(env->sc_conf.tls_sid)) == -1) {
@@ -2190,7 +2186,7 @@ relay_tls_ctx_create(struct relay *rlay)
 		/*
 		 * Use the public key as the "private" key - the secret key
 		 * parameters are hidden in an extra process that will be
-		 * contacted by the RSA engine.  The SSL/TLS library needs at
+		 * contacted by the RSA engine.  The TLS library needs at
 		 * least the public key parameters in the current process.
 		 */
 		tls_config_use_fake_private_key(tls_cfg);
@@ -2633,7 +2629,7 @@ relay_bufferevent_write_chunk(struct ctl_relay_event *cre,
     struct evbuffer *buf, size_t size)
 {
 	int ret;
-	ret = relay_bufferevent_write(cre, buf->buffer, size);
+	ret = relay_bufferevent_write(cre, EVBUFFER_DATA(buf), size);
 	if (ret != -1)
 		evbuffer_drain(buf, size);
 	return (ret);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_mbuf.c,v 1.284 2022/08/14 01:58:28 jsg Exp $	*/
+/*	$OpenBSD: uipc_mbuf.c,v 1.290 2024/03/05 18:52:41 bluhm Exp $	*/
 /*	$NetBSD: uipc_mbuf.c,v 1.15.4.1 1996/06/13 17:11:44 cgd Exp $	*/
 
 /*
@@ -214,7 +214,7 @@ nmbclust_update(long newval)
 {
 	int i;
 
-	if (newval < 0 || newval > LONG_MAX / MCLBYTES)
+	if (newval <= 0 || newval > LONG_MAX / MCLBYTES)
 		return ERANGE;
 	/* update the global mbuf memory limit */
 	nmbclust = newval;
@@ -545,6 +545,7 @@ m_purge(struct mbuf *m)
  * mbuf chain defragmenter. This function uses some evil tricks to defragment
  * an mbuf chain into a single buffer without changing the mbuf pointer.
  * This needs to know a lot of the mbuf internals to make this work.
+ * The resulting mbuf is not aligned to IP header to assist DMA transfers.
  */
 int
 m_defrag(struct mbuf *m, int how)
@@ -1080,9 +1081,7 @@ m_split(struct mbuf *m0, int len0, int wait)
 			n->m_len = 0;
 			return (n);
 		}
-		if (m->m_flags & M_EXT)
-			goto extpacket;
-		if (remain > MHLEN) {
+		if ((m->m_flags & M_EXT) == 0 && remain > MHLEN) {
 			/* m can't be the lead packet */
 			m_align(n, 0);
 			n->m_next = m_split(m, len, wait);
@@ -1094,8 +1093,7 @@ m_split(struct mbuf *m0, int len0, int wait)
 				n->m_len = 0;
 				return (n);
 			}
-		} else
-			m_align(n, remain);
+		}
 	} else if (remain == 0) {
 		n = m->m_next;
 		m->m_next = NULL;
@@ -1104,14 +1102,13 @@ m_split(struct mbuf *m0, int len0, int wait)
 		MGET(n, wait, m->m_type);
 		if (n == NULL)
 			return (NULL);
-		m_align(n, remain);
 	}
-extpacket:
 	if (m->m_flags & M_EXT) {
 		n->m_ext = m->m_ext;
 		MCLADDREFERENCE(m, n);
 		n->m_data = m->m_data + len;
 	} else {
+		m_align(n, remain);
 		memcpy(mtod(n, caddr_t), mtod(m, caddr_t) + len, remain);
 	}
 	n->m_len = remain;
@@ -1776,6 +1773,14 @@ mq_hdatalen(struct mbuf_queue *mq)
 	return (hdatalen);
 }
 
+void
+mq_set_maxlen(struct mbuf_queue *mq, u_int maxlen)
+{
+	mtx_enter(&mq->mq_mtx);
+	mq->mq_maxlen = maxlen;
+	mtx_leave(&mq->mq_mtx);
+}
+
 int
 sysctl_mq(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen, struct mbuf_queue *mq)
@@ -1793,11 +1798,8 @@ sysctl_mq(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	case IFQCTL_MAXLEN:
 		maxlen = mq->mq_maxlen;
 		error = sysctl_int(oldp, oldlenp, newp, newlen, &maxlen);
-		if (!error && maxlen != mq->mq_maxlen) {
-			mtx_enter(&mq->mq_mtx);
-			mq->mq_maxlen = maxlen;
-			mtx_leave(&mq->mq_mtx);
-		}
+		if (error == 0)
+			mq_set_maxlen(mq, maxlen);
 		return (error);
 	case IFQCTL_DROPS:
 		return (sysctl_rdint(oldp, oldlenp, newp, mq_drops(mq)));

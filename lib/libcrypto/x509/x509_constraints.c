@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_constraints.c,v 1.30 2022/11/28 07:22:15 tb Exp $ */
+/* $OpenBSD: x509_constraints.c,v 1.32 2023/09/29 15:53:59 beck Exp $ */
 /*
  * Copyright (c) 2020 Bob Beck <beck@openbsd.org>
  *
@@ -38,23 +38,23 @@
 #define MAX_IP_ADDRESS_LENGTH (size_t)46
 
 static int
-cbs_is_ip_address(CBS *cbs)
+cbs_is_ip_address(CBS *cbs, int *is_ip)
 {
 	struct sockaddr_in6 sin6;
 	struct sockaddr_in sin4;
 	char *name = NULL;
-	int ret = 0;
 
+	*is_ip = 0;
 	if (CBS_len(cbs) > MAX_IP_ADDRESS_LENGTH)
-		return 0;
+		return 1;
 	if (!CBS_strdup(cbs, &name))
 		return 0;
 	if (inet_pton(AF_INET, name, &sin4) == 1 ||
 	    inet_pton(AF_INET6, name, &sin6) == 1)
-		ret = 1;
+		*is_ip = 1;
 
 	free(name);
-	return ret;
+	return 1;
 }
 
 struct x509_constraints_name *
@@ -192,7 +192,7 @@ x509_constraints_names_dup(struct x509_constraints_names *names)
  * 5890 compliant A-labels (see RFC 6066 section 3). This is more
  * permissive to allow for a leading '.'  for a subdomain based
  * constraint, as well as allowing for '_' which is commonly accepted
- * by nonconformant DNS implementaitons.
+ * by nonconformant DNS implementations.
  *
  * if "wildcards" is set it allows '*' to occur in the string at the end of a
  * component.
@@ -264,16 +264,21 @@ x509_constraints_valid_domain_internal(CBS *cbs, int wildcards)
 }
 
 int
-x509_constraints_valid_host(CBS *cbs)
+x509_constraints_valid_host(CBS *cbs, int permit_ip)
 {
 	uint8_t first;
+	int is_ip;
 
 	if (!CBS_peek_u8(cbs, &first))
 		return 0;
 	if (first == '.')
-		return 0; /* leading . not allowed in a host name */
-	if (cbs_is_ip_address(cbs))
-		return 0;
+		return 0; /* leading . not allowed in a host name or IP */
+	if (!permit_ip) {
+		if (!cbs_is_ip_address(cbs, &is_ip))
+			return 0;
+		if (is_ip)
+			return 0;
+	}
 
 	return x509_constraints_valid_domain_internal(cbs, 0);
 }
@@ -441,7 +446,7 @@ x509_constraints_parse_mailbox(CBS *candidate,
 	if (candidate_local == NULL || candidate_domain == NULL)
 		goto bad;
 	CBS_init(&domain_cbs, candidate_domain, strlen(candidate_domain));
-	if (!x509_constraints_valid_host(&domain_cbs))
+	if (!x509_constraints_valid_host(&domain_cbs, 0))
 		goto bad;
 
 	if (name != NULL) {
@@ -558,7 +563,7 @@ x509_constraints_uri_host(uint8_t *uri, size_t len, char **hostpart)
 	if (host == NULL)
 		host = authority;
 	CBS_init(&host_cbs, host, hostlen);
-	if (!x509_constraints_valid_host(&host_cbs))
+	if (!x509_constraints_valid_host(&host_cbs, 1))
 		return 0;
 	if (hostpart != NULL && !CBS_strdup(&host_cbs, hostpart))
 		return 0;
@@ -587,7 +592,7 @@ x509_constraints_sandns(char *sandns, size_t dlen, char *constraint, size_t len)
  * returns 1 if the domain and constraint match.
  * returns 0 otherwise.
  *
- * an empty constraint matches everyting.
+ * an empty constraint matches everything.
  * constraint will be matched against the domain as a suffix if it
  * starts with a '.'.
  * domain will be matched against the constraint as a suffix if it
@@ -651,10 +656,10 @@ x509_constraints_uri(uint8_t *uri, size_t ulen, uint8_t *constraint,
 }
 
 /*
- * Verify a validated address of size alen with a validated contraint
+ * Verify a validated address of size alen with a validated constraint
  * of size constraint_len. returns 1 if matching, 0 if not.
  * Addresses are assumed to be pre-validated for a length of 4 and 8
- * respectively for ipv4 addreses and constraints, and a length of
+ * respectively for ipv4 addresses and constraints, and a length of
  * 16 and 32 respectively for ipv6 address constraints by the caller.
  */
 int
@@ -909,7 +914,7 @@ x509_constraints_extract_names(struct x509_constraints_names *names,
 			vname = NULL;
 		}
 		/*
-		 * Include the CN as a hostname to be checked againt
+		 * Include the CN as a hostname to be checked against
 		 * name constraints if it looks like a hostname.
 		 */
 		while (include_cn &&
@@ -924,7 +929,7 @@ x509_constraints_extract_names(struct x509_constraints_names *names,
 				goto err;
 			}
 			CBS_init(&cbs, aname->data, aname->length);
-			if (!x509_constraints_valid_host(&cbs))
+			if (!x509_constraints_valid_host(&cbs, 0))
 				continue; /* ignore it if not a hostname */
 			if ((vname = x509_constraints_name_new()) == NULL) {
 				*error = X509_V_ERR_OUT_OF_MEM;
@@ -1210,7 +1215,7 @@ x509_constraints_check(struct x509_constraints_names *names,
 /*
  * Walk a validated chain of X509 certs, starting at the leaf, and
  * validate the name constraints in the chain. Intended for use with
- * the legacy X509 validtion code in x509_vfy.c
+ * the legacy X509 validation code in x509_vfy.c
  *
  * returns 1 if the constraints are ok, 0 otherwise, setting error and
  * depth

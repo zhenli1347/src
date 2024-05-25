@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.52 2022/02/19 08:33:28 visa Exp $
+#	$OpenBSD: install.md,v 1.57 2024/04/09 11:13:51 kettenis Exp $
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -34,12 +34,11 @@
 MOUNT_ARGS_msdos="-o-l"
 
 md_installboot() {
-	local _disk=/dev/$1 _mdec _plat
+	local _disk=$1 _mdec _plat
 
 	case $(sysctl -n hw.product) in
 	*AM335x*)			_plat=am335x;;
 	*OMAP4*)			_plat=panda;;
-	*'Cubietech Cubieboard2'*)	_plat=cubie;;
 	*Cubox-i*|*HummingBoard*)	_plat=cubox;;
 	*Wandboard*)			_plat=wandboard;;
 	*Nitrogen6*|*'SABRE Lite'*)	_plat=nitrogen;;
@@ -53,7 +52,7 @@ md_installboot() {
 	fi
 
 	# Apply some final tweaks on selected platforms
-	mount ${MOUNT_ARGS_msdos} ${_disk}i /mnt/mnt
+	mount ${MOUNT_ARGS_msdos} /dev/${_disk}i /mnt/mnt
 
 	_mdec=/usr/mdec/$_plat
 
@@ -63,10 +62,10 @@ md_installboot() {
 		;;
 	cubox|wandboard)
 		cp $_mdec/*.dtb /mnt/mnt/
-		dd if=$_mdec/SPL of=${_disk}c bs=1024 seek=1 \
-		    >/dev/null 2>&1
-		dd if=$_mdec/u-boot.img of=${_disk}c bs=1024 seek=69 \
-		    >/dev/null 2>&1
+		dd if=$_mdec/SPL of=/dev/${_disk}c bs=1024 seek=1 \
+		    status=none
+		dd if=$_mdec/u-boot.img of=/dev/${_disk}c bs=1024 seek=69 \
+		    status=none
 		;;
 	nitrogen)
 		cp $_mdec/*.dtb /mnt/mnt/
@@ -78,11 +77,6 @@ md_installboot() {
 		__EOT
 		mkuboot -t script -a arm -o linux /tmp/i/boot.cmd \
 		    /mnt/mnt/6x_bootscript
-		;;
-	cubie)
-		cp $_mdec/*.dtb /mnt/mnt/
-		dd if=$_mdec/u-boot-sunxi-with-spl.bin of=${_disk}c \
-		    bs=1024 seek=8 >/dev/null 2>&1
 		;;
 	esac
 

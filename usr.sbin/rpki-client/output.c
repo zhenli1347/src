@@ -1,4 +1,4 @@
-/*	$OpenBSD: output.c,v 1.28 2022/11/04 13:01:19 tb Exp $ */
+/*	$OpenBSD: output.c,v 1.33 2024/02/22 12:49:42 job Exp $ */
 /*
  * Copyright (c) 2019 Theo de Raadt <deraadt@openbsd.org>
  *
@@ -51,7 +51,6 @@
 #include <signal.h>
 #include <string.h>
 #include <limits.h>
-#include <unistd.h>
 #include <time.h>
 
 #include "extern.h"
@@ -65,7 +64,7 @@ static const struct outputs {
 	int	 format;
 	char	*name;
 	int	(*fn)(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct stats *);
+		    struct vap_tree *, struct vsp_tree *, struct stats *);
 } outputs[] = {
 	{ FORMAT_OPENBGPD, "openbgpd", output_bgpd },
 	{ FORMAT_BIRD, "bird1v4", output_bird1v4 },
@@ -73,6 +72,7 @@ static const struct outputs {
 	{ FORMAT_BIRD, "bird", output_bird2 },
 	{ FORMAT_CSV, "csv", output_csv },
 	{ FORMAT_JSON, "json", output_json },
+	{ FORMAT_OMETRIC, "metrics", output_ometric },
 	{ 0, NULL, NULL }
 };
 
@@ -84,7 +84,7 @@ static void	 set_signal_handler(void);
 
 int
 outputfiles(struct vrp_tree *v, struct brk_tree *b, struct vap_tree *a,
-    struct stats *st)
+    struct vsp_tree *p, struct stats *st)
 {
 	int i, rc = 0;
 
@@ -103,7 +103,7 @@ outputfiles(struct vrp_tree *v, struct brk_tree *b, struct vap_tree *a,
 			rc = 1;
 			continue;
 		}
-		if ((*outputs[i].fn)(fout, v, b, a, st) != 0) {
+		if ((*outputs[i].fn)(fout, v, b, a, p, st) != 0) {
 			warn("output for %s format failed", outputs[i].name);
 			fclose(fout);
 			output_cleantmp();
@@ -213,17 +213,18 @@ outputheader(FILE *out, struct stats *st)
 	if (fprintf(out,
 	    "# Generated on host %s at %s\n"
 	    "# Processing time %lld seconds (%llds user, %llds system)\n"
-	    "# Route Origin Authorizations: %zu (%zu failed parse, %zu invalid)\n"
-	    "# BGPsec Router Certificates: %zu\n"
-	    "# Certificates: %zu (%zu invalid)\n",
+	    "# Route Origin Authorizations: %u (%u failed parse, %u invalid)\n"
+	    "# BGPsec Router Certificates: %u\n"
+	    "# Certificates: %u (%u invalid)\n",
 	    hn, tbuf, (long long)st->elapsed_time.tv_sec,
 	    (long long)st->user_time.tv_sec, (long long)st->system_time.tv_sec,
-	    st->roas, st->roas_fail, st->roas_invalid,
-	    st->brks, st->certs, st->certs_fail) < 0)
+	    st->repo_tal_stats.roas, st->repo_tal_stats.roas_fail,
+	    st->repo_tal_stats.roas_invalid, st->repo_tal_stats.brks,
+	    st->repo_tal_stats.certs, st->repo_tal_stats.certs_fail) < 0)
 		return -1;
 
 	if (fprintf(out,
-	    "# Trust Anchor Locators: %zu (%zu invalid) [", st->tals,
+	    "# Trust Anchor Locators: %u (%u invalid) [", st->tals,
 	    talsz - st->tals) < 0)
 		return -1;
 	for (i = 0; i < talsz; i++)
@@ -232,16 +233,16 @@ outputheader(FILE *out, struct stats *st)
 
 	if (fprintf(out,
 	    " ]\n"
-	    "# Manifests: %zu (%zu failed parse, %zu stale)\n"
-	    "# Certificate revocation lists: %zu\n"
-	    "# Ghostbuster records: %zu\n"
-	    "# Repositories: %zu\n"
-	    "# VRP Entries: %zu (%zu unique)\n",
-	    st->mfts, st->mfts_fail, st->mfts_stale,
-	    st->crls,
-	    st->gbrs,
+	    "# Manifests: %u (%u failed parse)\n"
+	    "# Certificate revocation lists: %u\n"
+	    "# Ghostbuster records: %u\n"
+	    "# Repositories: %u\n"
+	    "# VRP Entries: %u (%u unique)\n",
+	    st->repo_tal_stats.mfts, st->repo_tal_stats.mfts_fail,
+	    st->repo_tal_stats.crls,
+	    st->repo_tal_stats.gbrs,
 	    st->repos,
-	    st->vrps, st->uniqs) < 0)
+	    st->repo_tal_stats.vrps, st->repo_tal_stats.vrps_uniqs) < 0)
 		return -1;
 	return 0;
 }

@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.54 2021/07/26 12:47:47 kn Exp $
+#	$OpenBSD: Makefile,v 1.58 2024/01/19 20:06:00 miod Exp $
 
 FS=		floppy${OSrev}.img
 FSSIZE=		2880
@@ -17,9 +17,9 @@ all: ${FS}
 
 ${FS}: bsd.gz
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
-	vnconfig -v ${FS} > vnd
-	disklabel -w `cat vnd` ${FSDISKTYPE}
-	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} /dev/r`cat vnd`a
+	vnconfig -v -t ${FSDISKTYPE} ${FS} > vnd
+	echo '/ *' | disklabel -wAT- `cat vnd`
+	newfs -O 1 -m 0 -o space -i 524288 -c ${FSSIZE} -b 4096 -f 512 /dev/r`cat vnd`a
 	mount /dev/`cat vnd`a ${MOUNT_POINT}
 	install -c -m 555 -o root -g wheel \
 	    ${DESTDIR}/usr/mdec/ofwboot ${MOUNT_POINT}/ofwboot
@@ -37,7 +37,7 @@ bsd.gz: bsd.rd
 	    bsd.rd bsd.strip
 	gzip -9cn bsd.strip > bsd.gz
 
-bsd.rd: mr.fs bsd
+bsd.rd: mr.fs
 	cp bsd bsd.rd
 	rdsetroot bsd.rd mr.fs
 
@@ -46,7 +46,7 @@ bsd:
 	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && exec ${MAKE} ${MFLAGS}'
 	cp -p ${.CURDIR}/../../../sys/arch/${MACHINE}/compile/${RAMDISK}/obj/bsd bsd
 
-mr.fs: instbin
+mr.fs: instbin bsd
 	rm -rf $@.d
 	install -d -o root -g wheel $@.d
 	mtree -def ${MTREE} -p $@.d -u
@@ -77,8 +77,8 @@ install:
 
 clean cleandir:
 	rm -f *.core mr.fs instbin instbin.mk instbin.cache \
-	    lib*.a lib*.olist instbin.map \
-	    *.o *.lo *.c bsd bsd.rd bsd.gz ${FS}
+	    lib*.a lib*.olist instbin.map instbin.conf \
+	    *.o *.lo *.c bsd bsd.rd bsd.strip bsd.gz ${FS}
 	rm -rf mr.fs.d
 
 .include <bsd.obj.mk>

@@ -1,4 +1,4 @@
-/*	$OpenBSD: smi.c,v 1.32 2022/10/06 14:41:08 martijn Exp $	*/
+/*	$OpenBSD: smi.c,v 1.40 2024/02/06 12:44:27 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008 Reyk Floeter <reyk@openbsd.org>
@@ -16,43 +16,47 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/queue.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/tree.h>
-#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <sys/types.h>
 
-#include <net/if.h>
-#include <net/if_dl.h>
-#include <net/if_arp.h>
-#include <net/if_media.h>
-#include <net/route.h>
-#include <netinet/in.h>
-#include <netinet/if_ether.h>
 #include <arpa/inet.h>
 
-#include <stdlib.h>
-#include <stdio.h>
+#include <ber.h>
 #include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <string.h>
-#include <unistd.h>
 #include <limits.h>
-#include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 #include <vis.h>
 
-#include "snmpd.h"
+#include "log.h"
 #include "mib.h"
-#include "application.h"
+#include "smi.h"
+#include "snmp.h"
+#include "snmpd.h"
 
-#define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
+struct oid {
+	struct ber_oid		 o_id;
+#define o_oid			 o_id.bo_id
+#define o_oidlen		 o_id.bo_n
+
+	char			*o_name;
+
+	RB_ENTRY(oid)		 o_element;
+	RB_ENTRY(oid)		 o_keyword;
+};
+
+void		 smi_mibtree(struct oid *);
+struct oid	*smi_findkey(char *);
+int		 smi_oid_cmp(struct oid *, struct oid *);
+int		 smi_key_cmp(struct oid *, struct oid *);
 
 RB_HEAD(oidtree, oid);
 RB_PROTOTYPE(oidtree, oid, o_element, smi_oid_cmp);
 struct oidtree smi_oidtree;
+static struct oid smi_objects[] = MIB_TREE;
 
 RB_HEAD(keytree, oid);
 RB_PROTOTYPE(keytree, oid, o_keyword, smi_key_cmp);
@@ -75,26 +79,6 @@ smi_getticks(void)
 	return (ticks);
 }
 
-void
-smi_oidlen(struct ber_oid *o)
-{
-	size_t	 i;
-
-	for (i = 0; i < BER_MAX_OID_LEN && o->bo_id[i] != 0; i++)
-		;
-	o->bo_n = i;
-}
-
-void
-smi_scalar_oidlen(struct ber_oid *o)
-{
-	smi_oidlen(o);
-
-	/* Append .0. */
-	if (o->bo_n < BER_MAX_OID_LEN)
-		o->bo_n++;
-}
-
 char *
 smi_oid2string(struct ber_oid *o, char *buf, size_t len, size_t skip)
 {
@@ -105,7 +89,6 @@ smi_oid2string(struct ber_oid *o, char *buf, size_t len, size_t skip)
 	bzero(buf, len);
 	bzero(&key, sizeof(key));
 	bcopy(o, &key.o_id, sizeof(struct ber_oid));
-	key.o_flags |= OID_KEY;		/* do not match wildcards */
 
 	if (snmpd_env->sc_flags & SNMPD_F_NONAMES)
 		lookup = 0;
@@ -163,40 +146,27 @@ smi_string2oid(const char *oidstr, struct ber_oid *o)
 	return (0);
 }
 
-void
-smi_delete(struct oid *oid)
+const char *
+smi_insert(struct ber_oid *oid, const char *name)
 {
-	struct oid	 key, *value;
+	struct oid	 *object;
 
-	bzero(&key, sizeof(key));
-	bcopy(&oid->o_id, &key.o_id, sizeof(struct ber_oid));
-	if ((value = RB_FIND(oidtree, &smi_oidtree, &key)) != NULL &&
-	    value == oid)
-		RB_REMOVE(oidtree, &smi_oidtree, value);
+	if ((object = calloc(1, sizeof(*object))) == NULL)
+		return strerror(errno);
 
-	free(oid->o_data);
-	if (oid->o_flags & OID_DYNAMIC) {
-		free(oid->o_name);
-		free(oid);
+	object->o_id = *oid;
+	if ((object->o_name = strdup(name)) == NULL) {
+		free(object);
+		return strerror(errno);
 	}
-}
 
-int
-smi_insert(struct oid *oid)
-{
-	struct oid		 key, *value;
+	if (RB_INSERT(oidtree, &smi_oidtree, object) != NULL) {
+		free(object->o_name);
+		free(object);
+		return "duplicate oid";
+	}
 
-	if ((oid->o_flags & OID_TABLE) && oid->o_get == NULL)
-		fatalx("smi_insert: invalid MIB table");
-
-	bzero(&key, sizeof(key));
-	bcopy(&oid->o_id, &key.o_id, sizeof(struct ber_oid));
-	value = RB_FIND(oidtree, &smi_oidtree, &key);
-	if (value != NULL)
-		return (-1);
-
-	RB_INSERT(oidtree, &smi_oidtree, oid);
-	return (0);
+	return NULL;
 }
 
 void
@@ -207,10 +177,7 @@ smi_mibtree(struct oid *oids)
 
 	for (i = 0; oids[i].o_oid[0] != 0; i++) {
 		oid = &oids[i];
-		smi_oidlen(&oid->o_id);
 		if (oid->o_name != NULL) {
-			if ((oid->o_flags & OID_TABLE) && oid->o_get == NULL)
-				fatalx("smi_mibtree: invalid MIB table");
 			RB_INSERT(oidtree, &smi_oidtree, oid);
 			RB_INSERT(keytree, &smi_keytree, oid);
 			continue;
@@ -218,11 +185,6 @@ smi_mibtree(struct oid *oids)
 		decl = RB_FIND(oidtree, &smi_oidtree, oid);
 		if (decl == NULL)
 			fatalx("smi_mibtree: undeclared MIB");
-		decl->o_flags = oid->o_flags;
-		decl->o_get = oid->o_get;
-		decl->o_table = oid->o_table;
-		decl->o_val = oid->o_val;
-		decl->o_data = oid->o_data;
 	}
 }
 
@@ -231,20 +193,8 @@ smi_init(void)
 {
 	/* Initialize the Structure of Managed Information (SMI) */
 	RB_INIT(&smi_oidtree);
-	mib_init();
+	smi_mibtree(smi_objects);
 	return (0);
-}
-
-struct oid *
-smi_find(struct oid *oid)
-{
-	return (RB_FIND(oidtree, &smi_oidtree, oid));
-}
-
-struct oid *
-smi_nfind(struct oid *oid)
-{
-	return (RB_NFIND(oidtree, &smi_oidtree, oid));
 }
 
 struct oid *
@@ -255,37 +205,6 @@ smi_findkey(char *name)
 		return (NULL);
 	oid.o_name = name;
 	return (RB_FIND(keytree, &smi_keytree, &oid));
-}
-
-struct oid *
-smi_next(struct oid *oid)
-{
-	return (RB_NEXT(oidtree, &smi_oidtree, oid));
-}
-
-struct oid *
-smi_foreach(struct oid *oid, u_int flags)
-{
-	/*
-	 * Traverse the tree of MIBs with the option to check
-	 * for specific OID flags.
-	 */
-	if (oid == NULL) {
-		oid = RB_MIN(oidtree, &smi_oidtree);
-		if (oid == NULL)
-			return (NULL);
-		if (flags == 0 || (oid->o_flags & flags))
-			return (oid);
-	}
-	for (;;) {
-		oid = RB_NEXT(oidtree, &smi_oidtree, oid);
-		if (oid == NULL)
-			break;
-		if (flags == 0 || (oid->o_flags & flags))
-			return (oid);
-	}
-
-	return (oid);
 }
 
 #ifdef DEBUG
@@ -551,8 +470,8 @@ smi_print_element(struct ber_element *root)
 		case BER_TYPE_OBJECT:
 			if (ober_get_oid(root, &o) == -1)
 				goto fail;
-			if (asprintf(&str, "%s", smi_oid2string(&o, strbuf,
-			    sizeof(strbuf), 0)) == -1)
+			if (asprintf(&str, "%s", mib_oid2string(&o, strbuf,
+			    sizeof(strbuf), snmpd_env->sc_oidfmt)) == -1)
 				goto fail;
 			break;
 		case BER_TYPE_OCTETSTRING:
@@ -689,23 +608,7 @@ smi_application(struct ber_element *elm)
 int
 smi_oid_cmp(struct oid *a, struct oid *b)
 {
-	size_t	 i;
-
-	for (i = 0; i < MINIMUM(a->o_oidlen, b->o_oidlen); i++)
-		if (a->o_oid[i] != b->o_oid[i])
-			return (a->o_oid[i] - b->o_oid[i]);
-
-	/*
-	 * Return success if the matched object is a table
-	 * or a MIB registered by a subagent
-	 * (it will match any sub-elements)
-	 */
-	if (b->o_flags & OID_TABLE &&
-	    (a->o_flags & OID_KEY) == 0 &&
-	    (a->o_oidlen > b->o_oidlen))
-		return (0);
-
-	return (a->o_oidlen - b->o_oidlen);
+	return ober_oid_cmp(&a->o_id, &b->o_id);
 }
 
 RB_GENERATE(oidtree, oid, o_element, smi_oid_cmp);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: event.h,v 1.67 2022/03/31 01:41:22 millert Exp $	*/
+/*	$OpenBSD: event.h,v 1.71 2023/08/20 15:13:43 visa Exp $	*/
 
 /*-
  * Copyright (c) 1999,2000,2001 Jonathan Lemon <jlemon@FreeBSD.org>
@@ -122,6 +122,13 @@ struct kevent {
 /* data/hint flags for EVFILT_DEVICE, shared with userspace */
 #define NOTE_CHANGE	0x00000001		/* device change event */
 
+/* additional flags for EVFILT_TIMER */
+#define NOTE_MSECONDS	0x00000000		/* data is milliseconds */
+#define NOTE_SECONDS	0x00000001		/* data is seconds */
+#define NOTE_USECONDS	0x00000002		/* data is microseconds */
+#define NOTE_NSECONDS	0x00000003		/* data is nanoseconds */
+#define NOTE_ABSTIME	0x00000010		/* timeout is absolute */
+
 /*
  * This is currently visible to userland to work around broken
  * programs which pull in <sys/proc.h> or <sys/selinfo.h>.
@@ -151,12 +158,6 @@ struct klist {
  * hint flag for in-kernel use - must not equal any existing note
  */
 #define NOTE_SUBMIT	0x01000000		/* initial knote submission */
-
-#define KNOTE(list, hint)	do { \
-					struct klist *__list = (list); \
-					if (!klist_empty(__list)) \
-						knote(__list, hint); \
-				} while (0)
 
 #define	KN_HASHSIZE		64		/* XXX should be tunable */
 
@@ -286,12 +287,12 @@ struct timespec;
 
 extern const struct filterops sig_filtops;
 extern const struct filterops dead_filtops;
-extern const struct klistops socket_klistops;
 
 extern void	kqpoll_init(unsigned int);
 extern void	kqpoll_done(unsigned int);
 extern void	kqpoll_exit(void);
 extern void	knote(struct klist *list, long hint);
+extern void	knote_locked(struct klist *list, long hint);
 extern void	knote_fdclose(struct proc *p, int fd);
 extern void	knote_processexit(struct process *);
 extern void	knote_assign(const struct kevent *, struct knote *);
@@ -368,6 +369,7 @@ struct timespec;
 
 __BEGIN_DECLS
 int	kqueue(void);
+int	kqueue1(int flags);
 int	kevent(int kq, const struct kevent *changelist, int nchanges,
 		    struct kevent *eventlist, int nevents,
 		    const struct timespec *timeout);

@@ -1,4 +1,4 @@
-/* $OpenBSD: a_mbstr.c,v 1.25 2022/11/26 16:08:50 tb Exp $ */
+/* $OpenBSD: a_mbstr.c,v 1.27 2023/07/05 21:23:36 beck Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
@@ -90,6 +90,7 @@ ASN1_mbstring_copy(ASN1_STRING **out, const unsigned char *in, int len,
 {
 	return ASN1_mbstring_ncopy(out, in, len, inform, mask, 0, 0);
 }
+LCRYPTO_ALIAS(ASN1_mbstring_copy);
 
 int
 ASN1_mbstring_ncopy(ASN1_STRING **out, const unsigned char *in, int len,
@@ -255,6 +256,7 @@ ASN1_mbstring_ncopy(ASN1_STRING **out, const unsigned char *in, int len,
 	}
 	return -1;
 }
+LCRYPTO_ALIAS(ASN1_mbstring_ncopy);
 
 /* This function traverses a string and passes the value of each character
  * to an optional function along with a void * argument.
@@ -276,7 +278,7 @@ traverse_string(const unsigned char *p, int len, int inform,
 		case MBSTRING_BMP:
 			value = *p++ << 8;
 			value |= *p++;
-			/* BMP is explictly defined to not support surrogates */
+			/* BMP is explicitly defined to not support surrogates */
 			if (UNICODE_IS_SURROGATE(value))
 				return -1;
 			len -= 2;

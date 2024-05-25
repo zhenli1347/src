@@ -1,4 +1,4 @@
-.\"	$OpenBSD: kdump.1,v 1.35 2022/07/30 07:19:30 jsg Exp $
+.\"	$OpenBSD: kdump.1,v 1.40 2023/12/15 15:12:08 deraadt Exp $
 .\"
 .\" Copyright (c) 1990, 1993
 .\"	The Regents of the University of California.  All rights reserved.
@@ -29,7 +29,7 @@
 .\"
 .\"	from: @(#)kdump.1	8.1 (Berkeley) 6/6/93
 .\"
-.Dd $Mdocdate: July 30 2022 $
+.Dd $Mdocdate: December 15 2023 $
 .Dt KDUMP 1
 .Os
 .Sh NAME
@@ -40,8 +40,10 @@
 .Op Fl dHlnRTXx
 .Op Fl f Ar file
 .Op Fl m Ar maxdata
+.Op Fl P Ar program
 .Op Fl p Ar pid
 .Op Fl t Ar trstr
+.Op Fl u Ar label
 .Sh DESCRIPTION
 .Nm
 displays the kernel trace files produced with
@@ -87,6 +89,10 @@ values are replaced with the
 string.
 Suppressing this feature yields a more consistent output format and is
 easily amenable to further processing.
+.It Fl P Ar program
+Show output only for processes with
+.Ar program
+as their command name.
 .It Fl p Ar pid
 Show output only for the
 .Ar pid
@@ -99,19 +105,67 @@ Display absolute timestamps for each entry (seconds since the Epoch).
 If both options are specified, display timestamps relative to trace start.
 .It Fl t Ar trstr
 Select which tracepoints to display.
-The argument can contain one or more of the letters
-.Cm cinpstuxX+ .
-See the
-.Fl t
-option of
-.Xr ktrace 1
-for the meaning of the letters.
+The argument can contain one or more of the following letters.
+By default all trace points except for
+.Cm X
+are enabled.
+.Pp
+.Bl -tag -width flag -offset indent -compact
+.\" Keep this list in sync with ktrace(1) and ltrace(1).
+.It Cm c
+trace system calls
+.It Cm i
+trace I/O
+.It Cm n
+trace namei translations
+.It Cm p
+trace violation of
+.Xr pledge 2
+restrictions
+.It Cm s
+trace signal processing
+.It Cm S
+trace violation of
+.Xr pinsyscalls 2
+.It Cm t
+trace various structures
+.It Cm u
+trace user data coming from
+.Xr utrace 2
+.It Cm x
+trace argument vector in
+.Xr execve 2
+.It Cm X
+trace environment in
+.Xr execve 2
+.It Cm +
+trace the default points
+.El
+.It Fl u Ar label
+Display
+.Xr utrace 2
+tracepoints having
+.Xr utrace 2
+label
+.Ar label
+as strings with
+.Xr vis 3
+escaping, without
+.Xr ktrace 2
+header information.
 .It Fl X
 Display I/O data with hexadecimal data and printable ASCII characters
 side by side.
 .It Fl x
 Display I/O data in hexadecimal.
 .El
+.Pp
+The
+.Fl t
+and
+.Fl u
+options are mutually exclusive;
+the last one specified overrides any previous ones.
 .Sh FILES
 .Bl -tag -width ktrace.out -compact
 .It Pa ktrace.out

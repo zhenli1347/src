@@ -45,15 +45,10 @@
 #endif
 
 #include <sys/systm.h>
-#include <sys/proc.h>
-#include <sys/signal.h>
-#include <sys/signalvar.h>
 #include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/timetc.h>
 #include <sys/task.h>
-#include <sys/syslog.h>
 
 #include <machine/bus.h>
 #include <machine/cpu.h>
@@ -64,7 +59,6 @@
 #include <machine/i82489var.h>
 
 #include <dev/pv/pvvar.h>
-#include <dev/pv/pvreg.h>
 #include <dev/pv/hypervreg.h>
 #include <dev/pv/hypervvar.h>
 
@@ -142,7 +136,6 @@ struct {
 
 struct timecounter hv_timecounter = {
 	.tc_get_timecount = hv_gettime,
-	.tc_poll_pps = 0,
 	.tc_counter_mask = 0xffffffff,
 	.tc_frequency = 10000000,
 	.tc_name = "hyperv",
@@ -408,9 +401,8 @@ hv_hypercall(struct hv_softc *sc, uint64_t control, void *input,
 	}
 
 #ifdef __amd64__
-	__asm__ volatile ("mov %0, %%r8" : : "r" (output_pa) : "r8");
-	__asm__ volatile ("call *%3" : "=a" (status) : "c" (control),
-	    "d" (input_pa), "m" (sc->sc_hc));
+	extern uint64_t hv_hypercall_trampoline(uint64_t, paddr_t, paddr_t);
+	status = hv_hypercall_trampoline(control, input_pa, output_pa);
 #else  /* __i386__ */
 	{
 		uint32_t control_hi = control >> 32;

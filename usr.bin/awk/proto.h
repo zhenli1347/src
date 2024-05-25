@@ -1,4 +1,4 @@
-/*	$OpenBSD: proto.h,v 1.20 2020/12/09 20:00:11 millert Exp $	*/
+/*	$OpenBSD: proto.h,v 1.23 2023/11/22 01:01:21 millert Exp $	*/
 /****************************************************************
 Copyright (C) Lucent Technologies 1997
 All Rights Reserved
@@ -44,14 +44,13 @@ extern	fa	*mkdfa(const char *, bool);
 extern	int	makeinit(fa *, bool);
 extern	void	penter(Node *);
 extern	void	freetr(Node *);
-extern	int	hexstr(const uschar **);
 extern	int	quoted(const uschar **);
-extern	char	*cclenter(const char *);
+extern	int	*cclenter(const char *);
 extern	noreturn void	overflo(const char *);
 extern	void	cfoll(fa *, Node *);
 extern	int	first(Node *);
 extern	void	follow(Node *);
-extern	int	member(int, const char *);
+extern	int	member(int, int *);
 extern	int	match(fa *, const char *);
 extern	int	pmatch(fa *, const char *);
 extern	int	nematch(fa *, const char *);
@@ -69,7 +68,7 @@ extern	void	freefa(fa *);
 extern	int	pgetc(void);
 extern	char	*cursource(void);
 
-extern	Node	*nodealloc(int);
+extern	Node	*nodealloc(size_t);
 extern	Node	*exptostat(Node *);
 extern	Node	*node1(int, Node *);
 extern	Node	*node2(int, Node *, Node *);
@@ -200,8 +199,7 @@ extern	FILE	*openfile(int, const char *, bool *);
 extern	const char	*filename(FILE *);
 extern	Cell	*closefile(Node **, int);
 extern	void	closeall(void);
-extern	Cell	*sub(Node **, int);
-extern	Cell	*gsub(Node **, int);
+extern	Cell	*dosub(Node **, int);
 extern	Cell	*gensub(Node **, int);
 
 extern	FILE	*popen(const char *, const char *);

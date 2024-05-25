@@ -362,13 +362,13 @@ static int radeon_uvd_cs_msg_decode(uint32_t *msg, unsigned buf_sizes[])
 	unsigned pitch = msg[28];
 
 	unsigned width_in_mb = width / 16;
-	unsigned height_in_mb = roundup2(height / 16, 2);
+	unsigned height_in_mb = ALIGN(height / 16, 2);
 
 	unsigned image_size, tmp, min_dpb_size;
 
 	image_size = width * height;
 	image_size += image_size / 2;
-	image_size = roundup2(image_size, 1024);
+	image_size = ALIGN(image_size, 1024);
 
 	switch (stream_type) {
 	case 0: /* H264 */
@@ -399,7 +399,7 @@ static int radeon_uvd_cs_msg_decode(uint32_t *msg, unsigned buf_sizes[])
 
 		/* BP */
 		tmp = max(width_in_mb, height_in_mb);
-		min_dpb_size += roundup2(tmp * 7 * 16, 64);
+		min_dpb_size += ALIGN(tmp * 7 * 16, 64);
 		break;
 
 	case 3: /* MPEG2 */
@@ -417,7 +417,7 @@ static int radeon_uvd_cs_msg_decode(uint32_t *msg, unsigned buf_sizes[])
 		min_dpb_size += width_in_mb * height_in_mb * 64;
 
 		/* IT surface buffer */
-		min_dpb_size += roundup2(width_in_mb * height_in_mb * 32, 64);
+		min_dpb_size += ALIGN(width_in_mb * height_in_mb * 32, 64);
 		break;
 
 	default:
@@ -469,23 +469,12 @@ static int radeon_uvd_cs_msg(struct radeon_cs_parser *p, struct radeon_bo *bo,
 {
 	int32_t *msg, msg_type, handle;
 	unsigned img_size = 0;
-	struct dma_fence *f;
 	void *ptr;
-
 	int i, r;
 
 	if (offset & 0x3F) {
 		DRM_ERROR("UVD messages must be 64 byte aligned!\n");
 		return -EINVAL;
-	}
-
-	f = dma_resv_excl_fence(bo->tbo.base.resv);
-	if (f) {
-		r = radeon_fence_wait((struct radeon_fence *)f, false);
-		if (r) {
-			DRM_ERROR("Failed waiting for UVD message (%d)!\n", r);
-			return r;
-		}
 	}
 
 	r = radeon_bo_kmap(bo, &ptr);
@@ -500,6 +489,7 @@ static int radeon_uvd_cs_msg(struct radeon_cs_parser *p, struct radeon_bo *bo,
 	handle = msg[2];
 
 	if (handle == 0) {
+		radeon_bo_kunmap(bo);
 		DRM_ERROR("Invalid UVD handle!\n");
 		return -EINVAL;
 	}
@@ -562,12 +552,10 @@ static int radeon_uvd_cs_msg(struct radeon_cs_parser *p, struct radeon_bo *bo,
 		return 0;
 
 	default:
-
 		DRM_ERROR("Illegal UVD message type (%d)!\n", msg_type);
-		return -EINVAL;
 	}
 
-	BUG();
+	radeon_bo_kunmap(bo);
 	return -EINVAL;
 }
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: window-copy.c,v 1.340 2022/09/28 07:59:50 nicm Exp $ */
+/* $OpenBSD: window-copy.c,v 1.350 2024/05/14 09:32:37 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -131,6 +131,8 @@ static void	window_copy_cursor_previous_word_pos(struct window_mode_entry *,
 		    const char *, u_int *, u_int *);
 static void	window_copy_cursor_previous_word(struct window_mode_entry *,
 		    const char *, int);
+static void	window_copy_cursor_prompt(struct window_mode_entry *, int,
+		    const char *);
 static void	window_copy_scroll_up(struct window_mode_entry *, u_int);
 static void	window_copy_scroll_down(struct window_mode_entry *, u_int);
 static void	window_copy_rectangle_set(struct window_mode_entry *, int);
@@ -293,6 +295,7 @@ struct window_copy_mode_data {
 	int		 timeout;	/* search has timed out */
 #define WINDOW_COPY_SEARCH_TIMEOUT 10000
 #define WINDOW_COPY_SEARCH_ALL_TIMEOUT 200
+#define WINDOW_COPY_SEARCH_MAX_LINE 2000
 
 	int			 jumptype;
 	struct utf8_data	*jumpchar;
@@ -792,16 +795,24 @@ window_copy_formats(struct window_mode_entry *wme, struct format_tree *ft)
 	format_add(ft, "copy_cursor_x", "%d", data->cx);
 	format_add(ft, "copy_cursor_y", "%d", data->cy);
 
-	format_add(ft, "selection_present", "%d", data->screen.sel != NULL);
 	if (data->screen.sel != NULL) {
 		format_add(ft, "selection_start_x", "%d", data->selx);
 		format_add(ft, "selection_start_y", "%d", data->sely);
 		format_add(ft, "selection_end_x", "%d", data->endselx);
 		format_add(ft, "selection_end_y", "%d", data->endsely);
-		format_add(ft, "selection_active", "%d",
-		    data->cursordrag != CURSORDRAG_NONE);
-	} else
-		format_add(ft, "selection_active", "%d", 0);
+
+		if (data->cursordrag != CURSORDRAG_NONE)
+			format_add(ft, "selection_active", "1");
+		else
+			format_add(ft, "selection_active", "0");
+		if (data->endselx != data->selx || data->endsely != data->sely)
+			format_add(ft, "selection_present", "1");
+		else
+			format_add(ft, "selection_present", "0");
+	} else {
+		format_add(ft, "selection_active", "0");
+		format_add(ft, "selection_present", "0");
+	}
 
 	format_add(ft, "search_present", "%d", data->searchmark != NULL);
 	format_add_cb(ft, "search_match", window_copy_search_match_cb);
@@ -2241,6 +2252,26 @@ window_copy_cmd_jump_to_mark(struct window_copy_cmd_state *cs)
 }
 
 static enum window_copy_cmd_action
+window_copy_cmd_next_prompt(struct window_copy_cmd_state *cs)
+{
+	struct window_mode_entry	*wme = cs->wme;
+	const char			*arg1 = args_string(cs->args, 1);
+
+	window_copy_cursor_prompt(wme, 1, arg1);
+	return (WINDOW_COPY_CMD_NOTHING);
+}
+
+static enum window_copy_cmd_action
+window_copy_cmd_previous_prompt(struct window_copy_cmd_state *cs)
+{
+	struct window_mode_entry	*wme = cs->wme;
+	const char			*arg1 = args_string(cs->args, 1);
+
+	window_copy_cursor_prompt(wme, 0, arg1);
+	return (WINDOW_COPY_CMD_NOTHING);
+}
+
+static enum window_copy_cmd_action
 window_copy_cmd_search_backward(struct window_copy_cmd_state *cs)
 {
 	struct window_mode_entry	*wme = cs->wme;
@@ -2693,6 +2724,18 @@ static const struct {
 	  .maxargs = 0,
 	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
 	  .f = window_copy_cmd_jump_to_mark
+	},
+	{ .command = "next-prompt",
+	  .minargs = 0,
+	  .maxargs = 1,
+	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
+	  .f = window_copy_cmd_next_prompt
+	},
+	{ .command = "previous-prompt",
+	  .minargs = 0,
+	  .maxargs = 1,
+	  .clear = WINDOW_COPY_CMD_CLEAR_ALWAYS,
+	  .f = window_copy_cmd_previous_prompt
 	},
 	{ .command = "middle-line",
 	  .minargs = 0,
@@ -3171,7 +3214,9 @@ window_copy_search_lr_regex(struct grid *gd, u_int *ppx, u_int *psx, u_int py,
 	len = gd->sx - first;
 	endline = gd->hsize + gd->sy - 1;
 	pywrap = py;
-	while (buf != NULL && pywrap <= endline) {
+	while (buf != NULL &&
+	    pywrap <= endline &&
+	    len < WINDOW_COPY_SEARCH_MAX_LINE) {
 		gl = grid_get_line(gd, pywrap);
 		if (~gl->flags & GRID_LINE_WRAPPED)
 			break;
@@ -3228,7 +3273,9 @@ window_copy_search_rl_regex(struct grid *gd, u_int *ppx, u_int *psx, u_int py,
 	len = gd->sx - first;
 	endline = gd->hsize + gd->sy - 1;
 	pywrap = py;
-	while (buf != NULL && (pywrap <= endline)) {
+	while (buf != NULL &&
+	    pywrap <= endline &&
+	    len < WINDOW_COPY_SEARCH_MAX_LINE) {
 		gl = grid_get_line(gd, pywrap);
 		if (~gl->flags & GRID_LINE_WRAPPED)
 			break;
@@ -3729,8 +3776,7 @@ window_copy_search(struct window_mode_entry *wme, int direction, int regex)
 			}
 		}
 		endline = gd->hsize + gd->sy - 1;
-	}
-	else {
+	} else {
 		window_copy_move_left(s, &fx, &fy, wrapflag);
 		endline = 0;
 	}
@@ -3772,8 +3818,7 @@ window_copy_search(struct window_mode_entry *wme, int direction, int regex)
 				data->cy = fy - screen_hsize(data->backing) +
 				    data-> oy;
 			}
-		}
-		else {
+		} else {
 			/*
 			 * When searching backward, position the cursor at the
 			 * beginning of the mark.
@@ -4642,7 +4687,7 @@ window_copy_get_selection(struct window_mode_entry *wme, size_t *len)
 	if (keys == MODEKEY_EMACS || lastex <= ey_last) {
 		if (~grid_get_line(data->backing->grid, ey)->flags &
 		    GRID_LINE_WRAPPED || lastex != ey_last)
-		off -= 1;
+			off -= 1;
 	}
 	*len = off;
 	return (buf);
@@ -5355,6 +5400,54 @@ window_copy_cursor_previous_word(struct window_mode_entry *wme,
 	grid_reader_cursor_previous_word(&gr, separators, already, stop_at_eol);
 	grid_reader_get_cursor(&gr, &px, &py);
 	window_copy_acquire_cursor_up(wme, hsize, data->oy, oldy, px, py);
+}
+
+static void
+window_copy_cursor_prompt(struct window_mode_entry *wme, int direction,
+    const char *args)
+{
+	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = data->backing;
+	struct grid			*gd = s->grid;
+	u_int				 end_line;
+	u_int				 line = gd->hsize - data->oy + data->cy;
+	int				 add, line_flag;
+
+	if (args != NULL && strcmp(args, "-o") == 0)
+		line_flag = GRID_LINE_START_OUTPUT;
+	else
+		line_flag = GRID_LINE_START_PROMPT;
+
+	if (direction == 0) { /* up */
+		add = -1;
+		end_line = 0;
+	} else { /* down */
+		add = 1;
+		end_line = gd->hsize + gd->sy - 1;
+	}
+
+	if (line == end_line)
+		return;
+	for (;;) {
+		if (line == end_line)
+			return;
+		line += add;
+
+		if (grid_get_line(gd, line)->flags & line_flag)
+			break;
+	}
+
+	data->cx = 0;
+	if (line > gd->hsize) {
+		data->cy = line - gd->hsize;
+		data->oy = 0;
+	} else {
+		data->cy = 0;
+		data->oy = gd->hsize - line;
+	}
+
+	window_copy_update_selection(wme, 1, 0);
+	window_copy_redraw_screen(wme);
 }
 
 static void

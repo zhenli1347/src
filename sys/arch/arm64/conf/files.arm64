@@ -1,4 +1,4 @@
-# $OpenBSD: files.arm64,v 1.64 2022/11/21 21:48:06 kettenis Exp $
+# $OpenBSD: files.arm64,v 1.69 2024/03/25 17:24:03 patrick Exp $
 
 maxpartitions	16
 maxusers	2 8 128
@@ -51,8 +51,6 @@ file	arch/arm64/arm64/disasm.c		ddb
 pseudo-device	openprom
 file	arch/arm64/arm64/openprom.c		openprom needs-flag
 
-define	fdt {[early = 0]}
-
 # mainbus files
 define	mainbus {}
 device	mainbus: fdt
@@ -63,9 +61,10 @@ device	simplebus: fdt
 attach	simplebus at fdt
 file	arch/arm64/dev/simplebus.c		simplebus
 
-device	efi {}
+# EFI
+include "dev/efi/files.efi"
 attach	efi at fdt
-file	arch/arm64/dev/efi_machdep.c		efi needs-flag
+file	arch/arm64/dev/efi_machdep.c		efi
 
 device	smbios
 attach	smbios at efi
@@ -169,6 +168,10 @@ device	apldog
 attach	apldog at fdt
 file	arch/arm64/dev/apldog.c			apldog
 
+device	aplefuse
+attach	aplefuse at fdt
+file	arch/arm64/dev/aplefuse.c		aplefuse
+
 device	apliic: i2cbus
 attach	apliic at fdt
 file	arch/arm64/dev/apliic.c			apliic
@@ -256,6 +259,10 @@ attach	smmu at fdt with smmu_fdt
 file	arch/arm64/dev/smmu.c			smmu
 file	arch/arm64/dev/smmu_fdt.c		smmu_fdt
 
+device	rpigpio
+attach	rpigpio at fdt
+file	arch/arm64/dev/rpigpio.c		rpigpio
+
 # ACPI
 include "dev/acpi/files.acpi"
 
@@ -273,6 +280,10 @@ file	arch/arm64/dev/acpipci.c		acpipci
 
 attach	smmu at acpiiort with smmu_acpi
 file	arch/arm64/dev/smmu_acpi.c		smmu_acpi
+
+device	ampchwm
+attach	ampchwm at acpi
+file	arch/arm64/dev/ampchwm.c		ampchwm
 
 device  apm
 attach  apm at mainbus

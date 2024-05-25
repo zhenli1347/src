@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_usrreq.c,v 1.212 2022/11/09 15:01:24 claudio Exp $	*/
+/*	$OpenBSD: tcp_usrreq.c,v 1.231 2024/04/12 16:07:09 bluhm Exp $	*/
 /*	$NetBSD: tcp_usrreq.c,v 1.20 1996/02/13 23:44:16 christos Exp $	*/
 
 /*
@@ -90,6 +90,7 @@
 #include <netinet/ip.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
+#include <netinet6/ip6_var.h>
 #include <netinet/tcp.h>
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_seq.h>
@@ -155,9 +156,6 @@ const struct pr_usrreqs tcp6_usrreqs = {
 
 const struct sysctl_bounded_args tcpctl_vars[] = {
 	{ TCPCTL_RFC1323, &tcp_do_rfc1323, 0, 1 },
-	{ TCPCTL_KEEPINITTIME, &tcptv_keep_init, 1, 3 * TCPTV_KEEP_INIT },
-	{ TCPCTL_KEEPIDLE, &tcp_keepidle, 1, 5 * TCPTV_KEEP_IDLE },
-	{ TCPCTL_KEEPINTVL, &tcp_keepintvl, 1, 3 * TCPTV_KEEPINTVL },
 	{ TCPCTL_SACK, &tcp_do_sack, 0, 1 },
 	{ TCPCTL_MSSDFLT, &tcp_mssdflt, TCP_MSS, 65535 },
 	{ TCPCTL_RSTPPSLIMIT, &tcp_rst_ppslim, 1, 1000 * 1000 },
@@ -169,15 +167,19 @@ const struct sysctl_bounded_args tcpctl_vars[] = {
 	{ TCPCTL_SYN_BUCKET_LIMIT, &tcp_syn_bucket_limit, 1, INT_MAX },
 	{ TCPCTL_RFC3390, &tcp_do_rfc3390, 0, 2 },
 	{ TCPCTL_ALWAYS_KEEPALIVE, &tcp_always_keepalive, 0, 1 },
+	{ TCPCTL_TSO, &tcp_do_tso, 0, 1 },
 };
 
 struct	inpcbtable tcbtable;
+#ifdef INET6
+struct	inpcbtable tcb6table;
+#endif
 
 int	tcp_fill_info(struct tcpcb *, struct socket *, struct mbuf *);
 int	tcp_ident(void *, size_t *, void *, size_t, int);
 
 static inline int tcp_sogetpcb(struct socket *, struct inpcb **,
-                      struct tcpcb **);
+		    struct tcpcb **);
 
 static inline int
 tcp_sogetpcb(struct socket *so, struct inpcb **rinp, struct tcpcb **rtp)
@@ -213,7 +215,7 @@ tcp_fill_info(struct tcpcb *tp, struct socket *so, struct mbuf *m)
 	struct proc *p = curproc;
 	struct tcp_info *ti;
 	u_int t = 1000;		/* msec => usec */
-	uint32_t now;
+	uint64_t now;
 
 	if (sizeof(*ti) > MLEN) {
 		MCLGETL(m, M_WAITOK, sizeof(*ti));
@@ -314,19 +316,12 @@ tcp_ctloutput(int op, struct socket *so, int level, int optname,
 	if (inp == NULL)
 		return (ECONNRESET);
 	if (level != IPPROTO_TCP) {
-		switch (so->so_proto->pr_domain->dom_family) {
 #ifdef INET6
-		case PF_INET6:
+		if (ISSET(inp->inp_flags, INP_IPV6))
 			error = ip6_ctloutput(op, so, level, optname, m);
-			break;
-#endif /* INET6 */
-		case PF_INET:
+		else
+#endif
 			error = ip_ctloutput(op, so, level, optname, m);
-			break;
-		default:
-			error = EAFNOSUPPORT;	/*?*/
-			break;
-		}
 		return (error);
 	}
 	tp = intotcpcb(inp);
@@ -460,6 +455,7 @@ tcp_ctloutput(int op, struct socket *so, int level, int optname,
 int
 tcp_attach(struct socket *so, int proto, int wait)
 {
+	struct inpcbtable *table;
 	struct tcpcb *tp;
 	struct inpcb *inp;
 	int error;
@@ -475,7 +471,13 @@ tcp_attach(struct socket *so, int proto, int wait)
 	}
 
 	NET_ASSERT_LOCKED();
-	error = in_pcballoc(so, &tcbtable, wait);
+#ifdef INET6
+	if (so->so_proto->pr_domain->dom_family == PF_INET6)
+		table = &tcb6table;
+	else
+#endif
+		table = &tcbtable;
+	error = in_pcballoc(so, table, wait);
 	if (error)
 		return (error);
 	inp = sotoinpcb(so);
@@ -490,14 +492,11 @@ tcp_attach(struct socket *so, int proto, int wait)
 	}
 	tp->t_state = TCPS_CLOSED;
 #ifdef INET6
-	/* we disallow IPv4 mapped address completely. */
-	if (inp->inp_flags & INP_IPV6)
+	if (ISSET(inp->inp_flags, INP_IPV6))
 		tp->pf = PF_INET6;
 	else
-		tp->pf = PF_INET;
-#else
-	tp->pf = PF_INET;
 #endif
+		tp->pf = PF_INET;
 	if ((so->so_options & SO_LINGER) && so->so_linger == 0)
 		so->so_linger = TCP_LINGERTIME;
 
@@ -511,7 +510,7 @@ tcp_detach(struct socket *so)
 {
 	struct inpcb *inp;
 	struct tcpcb *otp = NULL, *tp;
-	int error = 0;
+	int error;
 	short ostate;
 
 	soassertlocked(so);
@@ -535,7 +534,7 @@ tcp_detach(struct socket *so)
 
 	if (otp)
 		tcp_trace(TA_USER, ostate, tp, otp, NULL, PRU_DETACH, 0);
-	return (error);
+	return (0);
 }
 
 /*
@@ -588,7 +587,7 @@ tcp_listen(struct socket *so)
 	if (inp->inp_lport == 0)
 		if ((error = in_pcbbind(inp, NULL, curproc)))
 			goto out;
-	
+
 	/*
 	 * If the in_pcbbind() above is called, the tp->pf
 	 * should still be whatever it was before.
@@ -627,7 +626,7 @@ tcp_connect(struct socket *so, struct mbuf *nam)
 	}
 
 #ifdef INET6
-	if (inp->inp_flags & INP_IPV6) {
+	if (ISSET(inp->inp_flags, INP_IPV6)) {
 		struct sockaddr_in6 *sin6;
 
 		if ((error = in6_nam2sin6(nam, &sin6)))
@@ -637,9 +636,8 @@ tcp_connect(struct socket *so, struct mbuf *nam)
 			error = EINVAL;
 			goto out;
 		}
-		error = in6_pcbconnect(inp, nam);
 	} else
-#endif /* INET6 */
+#endif
 	{
 		struct sockaddr_in *sin;
 
@@ -652,13 +650,14 @@ tcp_connect(struct socket *so, struct mbuf *nam)
 			error = EINVAL;
 			goto out;
 		}
-		error = in_pcbconnect(inp, nam);
 	}
+	error = in_pcbconnect(inp, nam);
 	if (error)
 		goto out;
 
 	tp->t_template = tcp_template(tp);
 	if (tp->t_template == 0) {
+		in_pcbunset_faddr(inp);
 		in_pcbdisconnect(inp);
 		error = ENOBUFS;
 		goto out;
@@ -672,7 +671,7 @@ tcp_connect(struct socket *so, struct mbuf *nam)
 	soisconnecting(so);
 	tcpstat_inc(tcps_connattempt);
 	tp->t_state = TCPS_SYN_SENT;
-	TCP_TIMER_ARM(tp, TCPT_KEEP, TCP_TIME(tcptv_keep_init));
+	TCP_TIMER_ARM(tp, TCPT_KEEP, tcptv_keep_init);
 	tcp_set_iss_tsm(tp);
 	tcp_sendseqinit(tp);
 	tp->snd_last = tp->snd_una;
@@ -694,26 +693,17 @@ tcp_accept(struct socket *so, struct mbuf *nam)
 	struct inpcb *inp;
 	struct tcpcb *tp;
 	int error;
-	short ostate;
 
 	soassertlocked(so);
 
 	if ((error = tcp_sogetpcb(so, &inp, &tp)))
 		return (error);
 
-	if (so->so_options & SO_DEBUG)
-		ostate = tp->t_state;
-
-#ifdef INET6
-	if (inp->inp_flags & INP_IPV6)
-		in6_setpeeraddr(inp, nam);
-	else
-#endif
-		in_setpeeraddr(inp, nam);
+	in_setpeeraddr(inp, nam);
 
 	if (so->so_options & SO_DEBUG)
-		tcp_trace(TA_USER, ostate, tp, tp, NULL, PRU_ACCEPT, 0);
-	return (error);
+		tcp_trace(TA_USER, tp->t_state, tp, tp, NULL, PRU_ACCEPT, 0);
+	return (0);
 }
 
 /*
@@ -773,7 +763,7 @@ tcp_shutdown(struct socket *so)
 		ostate = tp->t_state;
 	}
 
-	if (so->so_state & SS_CANTSENDMORE)
+	if (so->so_snd.sb_state & SS_CANTSENDMORE)
 		goto out;
 
 	socantsendmore(so);
@@ -918,7 +908,7 @@ tcp_rcvoob(struct socket *so, struct mbuf *m, int flags)
 		return (error);
 
 	if ((so->so_oobmark == 0 &&
-	    (so->so_state & SS_RCVATMARK) == 0) ||
+	    (so->so_rcv.sb_state & SS_RCVATMARK) == 0) ||
 	    so->so_options & SO_OOBINLINE ||
 	    tp->t_oobflags & TCPOOB_HADDATA) {
 		error = EINVAL;
@@ -1003,12 +993,7 @@ tcp_sockaddr(struct socket *so, struct mbuf *nam)
 	if ((error = tcp_sogetpcb(so, &inp, &tp)))
 		return (error);
 
-#ifdef INET6
-	if (inp->inp_flags & INP_IPV6)
-		in6_setsockaddr(inp, nam);
-	else
-#endif
-		in_setsockaddr(inp, nam);
+	in_setsockaddr(inp, nam);
 
 	if (so->so_options & SO_DEBUG)
 		tcp_trace(TA_USER, tp->t_state, tp, tp, NULL,
@@ -1028,16 +1013,10 @@ tcp_peeraddr(struct socket *so, struct mbuf *nam)
 	if ((error = tcp_sogetpcb(so, &inp, &tp)))
 		return (error);
 
-#ifdef INET6
-	if (inp->inp_flags & INP_IPV6)
-		in6_setpeeraddr(inp, nam);
-	else
-#endif
-		in_setpeeraddr(inp, nam);
+	in_setpeeraddr(inp, nam);
 
 	if (so->so_options & SO_DEBUG)
-		tcp_trace(TA_USER, tp->t_state, tp, tp, NULL,
-		    PRU_PEERADDR, 0);
+		tcp_trace(TA_USER, tp->t_state, tp, tp, NULL, PRU_PEERADDR, 0);
 	return (0);
 }
 
@@ -1110,7 +1089,7 @@ tcp_usrclosed(struct tcpcb *tp)
 		 * not left in FIN_WAIT_2 forever.
 		 */
 		if (tp->t_state == TCPS_FIN_WAIT_2)
-			TCP_TIMER_ARM(tp, TCPT_2MSL, TCP_TIME(tcp_maxidle));
+			TCP_TIMER_ARM(tp, TCPT_2MSL, tcp_maxidle);
 	}
 	return (tp);
 }
@@ -1156,11 +1135,11 @@ tcp_ident(void *oldp, size_t *oldlenp, void *newp, size_t newlen, int dodrop)
 #ifdef INET6
 	case AF_INET6:
 		fin6 = (struct sockaddr_in6 *)&tir.faddr;
-		error = in6_embedscope(&f6, fin6, NULL);
+		error = in6_embedscope(&f6, fin6, NULL, NULL);
 		if (error)
 			return EINVAL;	/*?*/
 		lin6 = (struct sockaddr_in6 *)&tir.laddr;
-		error = in6_embedscope(&l6, lin6, NULL);
+		error = in6_embedscope(&l6, lin6, NULL, NULL);
 		if (error)
 			return EINVAL;	/*?*/
 		break;
@@ -1176,7 +1155,7 @@ tcp_ident(void *oldp, size_t *oldlenp, void *newp, size_t newlen, int dodrop)
 	switch (tir.faddr.ss_family) {
 #ifdef INET6
 	case AF_INET6:
-		inp = in6_pcblookup(&tcbtable, &f6,
+		inp = in6_pcblookup(&tcb6table, &f6,
 		    fin6->sin6_port, &l6, lin6->sin6_port, tir.rdomain);
 		break;
 #endif
@@ -1203,7 +1182,7 @@ tcp_ident(void *oldp, size_t *oldlenp, void *newp, size_t newlen, int dodrop)
 		switch (tir.faddr.ss_family) {
 #ifdef INET6
 		case AF_INET6:
-			inp = in6_pcblookup_listen(&tcbtable,
+			inp = in6_pcblookup_listen(&tcb6table,
 			    &l6, lin6->sin6_port, NULL, tir.rdomain);
 			break;
 #endif
@@ -1239,7 +1218,7 @@ tcp_sysctl_tcpstat(void *oldp, size_t *oldlenp, void *newp)
 #define ASSIGN(field)	do { tcpstat.field = counters[i++]; } while (0)
 
 	memset(&tcpstat, 0, sizeof tcpstat);
-	counters_read(tcpcounters, counters, nitems(counters));
+	counters_read(tcpcounters, counters, nitems(counters), NULL);
 	ASSIGN(tcps_connattempt);
 	ASSIGN(tcps_accepts);
 	ASSIGN(tcps_connects);
@@ -1338,9 +1317,18 @@ tcp_sysctl_tcpstat(void *oldp, size_t *oldlenp, void *newp)
 	ASSIGN(tcps_sack_rcv_opts);
 	ASSIGN(tcps_sack_snd_opts);
 	ASSIGN(tcps_sack_drop_opts);
+	ASSIGN(tcps_outswtso);
+	ASSIGN(tcps_outhwtso);
+	ASSIGN(tcps_outpkttso);
+	ASSIGN(tcps_outbadtso);
+	ASSIGN(tcps_inswlro);
+	ASSIGN(tcps_inhwlro);
+	ASSIGN(tcps_inpktlro);
+	ASSIGN(tcps_inbadlro);
 
 #undef ASSIGN
 
+	mtx_enter(&syn_cache_mtx);
 	set = &tcp_syn_cache[tcp_syn_cache_active];
 	tcpstat.tcps_sc_hash_size = set->scs_size;
 	tcpstat.tcps_sc_entry_count = set->scs_count;
@@ -1354,6 +1342,7 @@ tcp_sysctl_tcpstat(void *oldp, size_t *oldlenp, void *newp)
 	}
 	tcpstat.tcps_sc_bucket_limit = tcp_syn_bucket_limit;
 	tcpstat.tcps_sc_uses_left = set->scs_use;
+	mtx_leave(&syn_cache_mtx);
 
 	return (sysctl_rdstruct(oldp, oldlenp, newp,
 	    &tcpstat, sizeof(tcpstat)));
@@ -1373,6 +1362,36 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (ENOTDIR);
 
 	switch (name[0]) {
+	case TCPCTL_KEEPINITTIME:
+		NET_LOCK();
+		nval = tcptv_keep_init / TCP_TIME(1);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen, &nval,
+		    1, 3 * (TCPTV_KEEP_INIT / TCP_TIME(1)));
+		if (!error)
+			tcptv_keep_init = TCP_TIME(nval);
+		NET_UNLOCK();
+		return (error);
+
+	case TCPCTL_KEEPIDLE:
+		NET_LOCK();
+		nval = tcp_keepidle / TCP_TIME(1);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen, &nval,
+		    1, 5 * (TCPTV_KEEP_IDLE / TCP_TIME(1)));
+		if (!error)
+			tcp_keepidle = TCP_TIME(nval);
+		NET_UNLOCK();
+		return (error);
+
+	case TCPCTL_KEEPINTVL:
+		NET_LOCK();
+		nval = tcp_keepintvl / TCP_TIME(1);
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen, &nval,
+		    1, 3 * (TCPTV_KEEPINTVL / TCP_TIME(1)));
+		if (!error)
+			tcp_keepintvl = TCP_TIME(nval);
+		NET_UNLOCK();
+		return (error);
+
 	case TCPCTL_BADDYNAMIC:
 		NET_LOCK();
 		error = sysctl_struct(oldp, oldlenp, newp, newlen,
@@ -1437,10 +1456,12 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			 * Global tcp_syn_use_limit is used when reseeding a
 			 * new cache.  Also update the value in active cache.
 			 */
+			mtx_enter(&syn_cache_mtx);
 			if (tcp_syn_cache[0].scs_use > tcp_syn_use_limit)
 				tcp_syn_cache[0].scs_use = tcp_syn_use_limit;
 			if (tcp_syn_cache[1].scs_use > tcp_syn_use_limit)
 				tcp_syn_cache[1].scs_use = tcp_syn_use_limit;
+			mtx_leave(&syn_cache_mtx);
 		}
 		NET_UNLOCK();
 		return (error);
@@ -1456,19 +1477,21 @@ tcp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 			 * switch sets as soon as possible.  Then
 			 * the actual hash array will be reallocated.
 			 */
+			mtx_enter(&syn_cache_mtx);
 			if (tcp_syn_cache[0].scs_size != nval)
 				tcp_syn_cache[0].scs_use = 0;
 			if (tcp_syn_cache[1].scs_size != nval)
 				tcp_syn_cache[1].scs_use = 0;
 			tcp_syn_hash_size = nval;
+			mtx_leave(&syn_cache_mtx);
 		}
 		NET_UNLOCK();
 		return (error);
 
 	default:
 		NET_LOCK();
-		error = sysctl_bounded_arr(tcpctl_vars, nitems(tcpctl_vars), name,
-		     namelen, oldp, oldlenp, newp, newlen);
+		error = sysctl_bounded_arr(tcpctl_vars, nitems(tcpctl_vars),
+		    name, namelen, oldp, oldlenp, newp, newlen);
 		NET_UNLOCK();
 		return (error);
 	}

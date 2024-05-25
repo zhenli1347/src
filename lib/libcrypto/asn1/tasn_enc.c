@@ -1,4 +1,4 @@
-/* $OpenBSD: tasn_enc.c,v 1.27 2022/11/26 16:08:50 tb Exp $ */
+/* $OpenBSD: tasn_enc.c,v 1.33 2023/07/28 10:00:10 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 2000.
  */
@@ -92,6 +92,7 @@ ASN1_item_i2d(ASN1_VALUE *val, unsigned char **out, const ASN1_ITEM *it)
 {
 	return asn1_item_flags_i2d(val, out, it, 0);
 }
+LCRYPTO_ALIAS(ASN1_item_i2d);
 
 /* Encode an ASN1 item, this is use by the
  * standard 'i2d' function. 'out' points to
@@ -106,22 +107,28 @@ static int
 asn1_item_flags_i2d(ASN1_VALUE *val, unsigned char **out, const ASN1_ITEM *it,
     int flags)
 {
-	if (out && !*out) {
-		unsigned char *p, *buf;
-		int len;
-		len = ASN1_item_ex_i2d(&val, NULL, it, -1, flags);
-		if (len <= 0)
-			return len;
-		buf = malloc(len);
-		if (!buf)
-			return -1;
-		p = buf;
-		ASN1_item_ex_i2d(&val, &p, it, -1, flags);
-		*out = buf;
+	unsigned char *p, *buf;
+	int len;
+
+	if (out == NULL || *out != NULL)
+		return ASN1_item_ex_i2d(&val, out, it, -1, flags);
+
+	if ((len = ASN1_item_ex_i2d(&val, NULL, it, -1, flags)) <= 0)
 		return len;
+
+	if ((buf = calloc(1, len)) == NULL)
+		return -1;
+
+	p = buf;
+	if (ASN1_item_ex_i2d(&val, &p, it, -1, flags) != len) {
+		freezero(buf, len);
+		ASN1error(ASN1_R_LENGTH_ERROR);
+		return -1;
 	}
 
-	return ASN1_item_ex_i2d(&val, out, it, -1, flags);
+	*out = buf;
+
+	return len;
 }
 
 /* Encode an item, taking care of IMPLICIT tagging (if any).
@@ -262,13 +269,7 @@ ASN1_item_ex_i2d(ASN1_VALUE **pval, unsigned char **out, const ASN1_ITEM *it,
 	}
 	return 0;
 }
-
-int
-ASN1_template_i2d(ASN1_VALUE **pval, unsigned char **out,
-    const ASN1_TEMPLATE *tt)
-{
-	return asn1_template_ex_i2d(pval, out, tt, -1, 0);
-}
+LCRYPTO_ALIAS(ASN1_item_ex_i2d);
 
 static int
 asn1_template_ex_i2d(ASN1_VALUE **pval, unsigned char **out,

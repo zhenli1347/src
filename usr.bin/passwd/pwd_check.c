@@ -1,4 +1,4 @@
-/*	$OpenBSD: pwd_check.c,v 1.17 2021/08/28 06:46:49 robert Exp $	*/
+/*	$OpenBSD: pwd_check.c,v 1.19 2024/05/24 13:32:03 op Exp $	*/
 
 /*
  * Copyright 2000 Niels Provos <provos@citi.umich.edu>
@@ -114,6 +114,8 @@ pwd_check(login_cap_t *lc, char *password)
 	switch (child = fork()) {
 	case -1:
 		warn("fork");
+		close(pipefds[0]);
+		close(pipefds[1]);
 		goto out;
 	case 0:
 		(void)signal(SIGINT, SIG_DFL);
@@ -184,8 +186,10 @@ pwd_check(login_cap_t *lc, char *password)
 
 	/* get the return value from the child */
 	while (waitpid(child, &res, 0) == -1) {
-		if (errno != EINTR)
-			break;
+		if (errno != EINTR) {
+			warn("waitpid");
+			goto out;
+		}
 	}
 	if (WIFEXITED(res) && WEXITSTATUS(res) == 0) {
 		free(checker);
@@ -209,7 +213,7 @@ pwd_gettries(login_cap_t *lc)
 		if (ntries >= 0 && ntries <= INT_MAX)
 			return((int)ntries);
 		fprintf(stderr,
-		    "Warning: pwdtries out of range in /etc/login.conf");
+		    "Warning: passwordtries out of range in /etc/login.conf");
 	}
 
 	/*

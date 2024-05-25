@@ -1,4 +1,4 @@
-#	$OpenBSD: list,v 1.19 2021/10/04 01:34:29 kevlo Exp $
+#	$OpenBSD: list,v 1.23 2023/11/13 12:49:41 jsg Exp $
 
 SRCDIRS distrib/special
 
@@ -37,6 +37,7 @@ LINK	instbin					sbin/fsck_msdos
 LINK	instbin					sbin/growfs
 LINK	instbin					sbin/ifconfig
 LINK	instbin					sbin/init
+LINK	instbin					sbin/kbd
 LINK	instbin					sbin/mknod
 LINK	instbin					sbin/mount
 LINK	instbin					sbin/mount_cd9660
@@ -44,6 +45,7 @@ LINK	instbin					sbin/mount_ext2fs
 LINK	instbin					sbin/mount_ffs
 LINK	instbin					sbin/mount_msdos
 LINK	instbin					sbin/mount_nfs
+LINK	instbin					sbin/mount_udf
 LINK	instbin					sbin/newfs
 LINK	instbin					sbin/newfs_ext2fs
 LINK	instbin					sbin/newfs_msdos
@@ -95,6 +97,7 @@ COPY	${DESTDIR}/etc/firmware/atu-rfmd2958smc-ext etc/firmware/atu-rfmd2958smc-ex
 COPY	${DESTDIR}/etc/firmware/atu-rfmd2958smc-int etc/firmware/atu-rfmd2958smc-int
 COPY    ${DESTDIR}/etc/firmware/rsu-rtl8712	etc/firmware/rsu-rtl8712
 COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8188eu	etc/firmware/urtwn-rtl8188eu
+COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8188ftv etc/firmware/urtwn-rtl8188ftv
 COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192cT	etc/firmware/urtwn-rtl8192cT
 COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192cU	etc/firmware/urtwn-rtl8192cU
 COPY    ${DESTDIR}/etc/firmware/urtwn-rtl8192eu	etc/firmware/urtwn-rtl8192eu
@@ -114,9 +117,6 @@ COPY	/usr/local/share/raspberrypi-firmware/boot/fixup.dat usr/mdec/rpi/fixup.dat
 COPY	/usr/local/share/raspberrypi-firmware/boot/fixup4.dat usr/mdec/rpi/fixup4.dat
 COPY	/usr/local/share/raspberrypi-firmware/boot/overlays/disable-bt.dtbo usr/mdec/rpi/disable-bt.dtbo
 COPY	/usr/local/share/u-boot/rpi_arm64/u-boot.bin usr/mdec/rpi/u-boot.bin
-
-MKDIR	usr/mdec/pine64
-COPY	/usr/local/share/u-boot/pine64_plus/u-boot-sunxi-with-spl.bin usr/mdec/pine64/u-boot-sunxi-with-spl.bin
 
 # copy the MAKEDEV script and make some devices
 SCRIPT	${DESTDIR}/dev/MAKEDEV			dev/MAKEDEV

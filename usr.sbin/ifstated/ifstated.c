@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifstated.c,v 1.66 2021/07/12 15:09:21 beck Exp $	*/
+/*	$OpenBSD: ifstated.c,v 1.68 2024/04/23 13:34:51 jsg Exp $	*/
 
 /*
  * Copyright (c) 2004 Marco Pfatschbacher <mpf@openbsd.org>
@@ -515,7 +515,7 @@ scan_ifstate(const char *ifname, int s, int do_eval)
 }
 
 /*
- * Do a bottom-up ajustment of the expression tree's truth value,
+ * Do a bottom-up adjustment of the expression tree's truth value,
  * level-by-level to ensure that each expression's subexpressions have been
  * evaluated.
  */
@@ -548,7 +548,7 @@ adjust_expressions(struct ifsd_expression_list *expressions, int depth)
 			}
 			if (expression->parent != NULL) {
 				if (TAILQ_EMPTY(&nexpressions))
-				te = NULL;
+					te = NULL;
 				TAILQ_FOREACH(te, &nexpressions, eval)
 					if (expression->parent == te)
 						break;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: raw_ip.c,v 1.150 2022/10/17 14:49:02 mvs Exp $	*/
+/*	$OpenBSD: raw_ip.c,v 1.159 2024/04/17 20:48:51 bluhm Exp $	*/
 /*	$NetBSD: raw_ip.c,v 1.25 1996/02/18 18:58:33 christos Exp $	*/
 
 /*
@@ -108,6 +108,7 @@ const struct pr_usrreqs rip_usrreqs = {
 	.pru_detach	= rip_detach,
 	.pru_lock	= rip_lock,
 	.pru_unlock	= rip_unlock,
+	.pru_locked	= rip_locked,
 	.pru_bind	= rip_bind,
 	.pru_connect	= rip_connect,
 	.pru_disconnect	= rip_disconnect,
@@ -126,8 +127,6 @@ rip_init(void)
 {
 	in_pcbinit(&rawcbtable, 1);
 }
-
-struct mbuf	*rip_chkhdr(struct mbuf *, struct mbuf *);
 
 int
 rip_input(struct mbuf **mp, int *offp, int proto, int af)
@@ -171,12 +170,16 @@ rip_input(struct mbuf **mp, int *offp, int proto, int af)
 	rw_enter_write(&rawcbtable.inpt_notify);
 	mtx_enter(&rawcbtable.inpt_mtx);
 	TAILQ_FOREACH(inp, &rawcbtable.inpt_queue, inp_queue) {
-		if (inp->inp_socket->so_state & SS_CANTRCVMORE)
+		KASSERT(!ISSET(inp->inp_flags, INP_IPV6));
+
+		/*
+		 * Packet must not be inserted after disconnected wakeup
+		 * call.  To avoid race, check again when holding receive
+		 * buffer mutex.
+		 */
+		if (ISSET(READ_ONCE(inp->inp_socket->so_rcv.sb_state),
+		    SS_CANTRCVMORE))
 			continue;
-#ifdef INET6
-		if (inp->inp_flags & INP_IPV6)
-			continue;
-#endif
 		if (rtable_l2(inp->inp_rtableid) !=
 		    rtable_l2(m->m_pkthdr.ph_rtableid))
 			continue;
@@ -221,24 +224,27 @@ rip_input(struct mbuf **mp, int *offp, int proto, int af)
 		else
 			n = m_copym(m, 0, M_COPYALL, M_NOWAIT);
 		if (n != NULL) {
-			int ret;
+			struct socket *so = inp->inp_socket;
+			int ret = 0;
 
 			if (inp->inp_flags & INP_CONTROLOPTS ||
-			    inp->inp_socket->so_options & SO_TIMESTAMP)
+			    so->so_options & SO_TIMESTAMP)
 				ip_savecontrol(inp, &opts, ip, n);
 
-			mtx_enter(&inp->inp_mtx);
-			ret = sbappendaddr(inp->inp_socket,
-			    &inp->inp_socket->so_rcv,
-			    sintosa(&ripsrc), n, opts);
-			mtx_leave(&inp->inp_mtx);
+			mtx_enter(&so->so_rcv.sb_mtx);
+			if (!ISSET(inp->inp_socket->so_rcv.sb_state,
+			    SS_CANTRCVMORE)) {
+				ret = sbappendaddr(so, &so->so_rcv,
+				    sintosa(&ripsrc), n, opts);
+			}
+			mtx_leave(&so->so_rcv.sb_mtx);
 
 			if (ret == 0) {
-				/* should notify about lost packet */
 				m_freem(n);
 				m_freem(opts);
+				ipstat_inc(ips_noproto);
 			} else
-				sorwakeup(inp->inp_socket);
+				sorwakeup(so);
 		}
 		in_pcbunref(inp);
 	}
@@ -326,7 +332,7 @@ rip_output(struct mbuf *m, struct socket *so, struct sockaddr *dstaddr,
 #endif
 
 	error = ip_output(m, inp->inp_options, &inp->inp_route, flags,
-	    inp->inp_moptions, inp, 0);
+	    inp->inp_moptions, &inp->inp_seclevel, 0);
 	return (error);
 }
 
@@ -527,6 +533,14 @@ rip_unlock(struct socket *so)
 }
 
 int
+rip_locked(struct socket *so)
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+	return mtx_owned(&inp->inp_mtx);
+}
+
+int
 rip_bind(struct socket *so, struct mbuf *nam, struct proc *p)
 {
 	struct inpcb *inp = sotoinpcb(so);
@@ -545,7 +559,9 @@ rip_bind(struct socket *so, struct mbuf *nam, struct proc *p)
 	    ifa_ifwithaddr(sintosa(addr), inp->inp_rtableid)))
 		return (EADDRNOTAVAIL);
 
+	mtx_enter(&rawcbtable.inpt_mtx);
 	inp->inp_laddr = addr->sin_addr;
+	mtx_leave(&rawcbtable.inpt_mtx);
 	
 	return (0);
 }
@@ -562,7 +578,9 @@ rip_connect(struct socket *so, struct mbuf *nam)
 	if ((error = in_nam2sin(nam, &addr)))
 		return (error);
 	
+	mtx_enter(&rawcbtable.inpt_mtx);
 	inp->inp_faddr = addr->sin_addr;
+	mtx_leave(&rawcbtable.inpt_mtx);
 	soisconnected(so);
 
 	return (0);
@@ -579,7 +597,9 @@ rip_disconnect(struct socket *so)
 		return (ENOTCONN);
 
 	soisdisconnected(so);
+	mtx_enter(&rawcbtable.inpt_mtx);
 	inp->inp_faddr.s_addr = INADDR_ANY;
+	mtx_leave(&rawcbtable.inpt_mtx);
 
 	return (0);
 }

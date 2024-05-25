@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_proc.c,v 1.93 2022/12/07 20:08:28 mvs Exp $	*/
+/*	$OpenBSD: kern_proc.c,v 1.98 2024/05/20 10:32:20 claudio Exp $	*/
 /*	$NetBSD: kern_proc.c,v 1.14 1996/02/09 18:59:41 christos Exp $	*/
 
 /*
@@ -197,6 +197,24 @@ tfind(pid_t tid)
 		if (p->p_tid == tid)
 			return (p);
 	return (NULL);
+}
+
+/*
+ * Locate a thread by userspace id, from a given process.
+ */
+struct proc *
+tfind_user(pid_t tid, struct process *pr)
+{
+	struct proc *p;
+
+	if (tid < THREAD_PID_OFFSET)
+		return NULL;
+	p = tfind(tid - THREAD_PID_OFFSET);
+
+	/* verify we found a thread in the correct process */
+	if (p != NULL && p->p_p != pr)
+		p = NULL;
+	return p;
 }
 
 /*
@@ -471,18 +489,22 @@ proc_printit(struct proc *p, const char *modif,
 	else
 		pst = pstat[(int)p->p_stat - 1];
 
-	(*pr)("PROC (%s) pid=%d stat=%s\n", p->p_p->ps_comm, p->p_tid, pst);
+	(*pr)("PROC (%s) tid=%d pid=%d tcnt=%d stat=%s\n", p->p_p->ps_comm,
+	    p->p_tid, p->p_p->ps_pid, p->p_p->ps_threadcnt, pst);
 	(*pr)("    flags process=%b proc=%b\n",
 	    p->p_p->ps_flags, PS_BITS, p->p_flag, P_BITS);
-	(*pr)("    pri=%u, usrpri=%u, nice=%d\n",
-	    p->p_runpri, p->p_usrpri, p->p_p->ps_nice);
+	(*pr)("    runpri=%u, usrpri=%u, slppri=%u, nice=%d\n",
+	    p->p_runpri, p->p_usrpri, p->p_slppri, p->p_p->ps_nice);
+	(*pr)("    wchan=%p, wmesg=%s, ps_single=%p scnt=%d ecnt=%d\n",
+	    p->p_wchan, (p->p_wchan && p->p_wmesg) ?  p->p_wmesg : "",
+	    p->p_p->ps_single, p->p_p->ps_singlecnt, p->p_p->ps_exitcnt);
 	(*pr)("    forw=%p, list=%p,%p\n",
 	    TAILQ_NEXT(p, p_runq), p->p_list.le_next, p->p_list.le_prev);
 	(*pr)("    process=%p user=%p, vmspace=%p\n",
 	    p->p_p, p->p_addr, p->p_vmspace);
-	(*pr)("    estcpu=%u, cpticks=%d, pctcpu=%u.%u\n",
-	    p->p_estcpu, p->p_cpticks, p->p_pctcpu / 100, p->p_pctcpu % 100);
-	(*pr)("    user=%u, sys=%u, intr=%u\n",
+	(*pr)("    estcpu=%u, cpticks=%d, pctcpu=%u.%u, "
+	    "user=%u, sys=%u, intr=%u\n",
+	    p->p_estcpu, p->p_cpticks, p->p_pctcpu / 100, p->p_pctcpu % 100,
 	    p->p_uticks, p->p_sticks, p->p_iticks);
 }
 #include <machine/db_machdep.h>

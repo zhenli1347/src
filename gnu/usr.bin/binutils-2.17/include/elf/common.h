@@ -309,11 +309,14 @@
 #define PT_SUNW_EH_FRAME PT_GNU_EH_FRAME      /* Solaris uses the same value */
 #define PT_GNU_STACK	(PT_LOOS + 0x474e551) /* Stack flags */
 #define PT_GNU_RELRO	(PT_LOOS + 0x474e552) /* Read-only after relocation */
+#define PT_GNU_PROPERTY	(PT_LOOS + 0x474e553) /* Program property note */
 
 #define PT_OPENBSD_RANDOMIZE	0x65a3dbe6 /* Fill with random data. */
 #define PT_OPENBSD_WXNEEDED	0x65a3dbe7 /* Program does W^X violations */
+#define PT_OPENBSD_NOBTCFI	0x65a3dbe8 /* no branch target CFI */
 #define PT_OPENBSD_BOOTDATA	0x65a41be6 /* Section for boot arguments */
-#define PT_OPENBSD_MUTABLE	0x65a3dbe5 /* Section for boot arguments */
+#define PT_OPENBSD_MUTABLE	0x65a3dbe5 /* Like bss, but not immutable */
+#define PT_OPENBSD_SYSCALLS	0x65a3dbe9 /* System call sites */
 
 /* Program segment permissions, in program header p_flags field.  */
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_input.c,v 1.254 2022/08/21 14:15:55 bluhm Exp $	*/
+/*	$OpenBSD: ip6_input.c,v 1.262 2024/05/08 13:01:30 bluhm Exp $	*/
 /*	$KAME: ip6_input.c,v 1.188 2001/03/29 05:34:31 itojun Exp $	*/
 
 /*
@@ -166,11 +166,6 @@ ip6_init(void)
 #endif
 }
 
-struct ip6_offnxt {
-	int	ion_off;
-	int	ion_nxt;
-};
-
 /*
  * Enqueue packet for local delivery.  Queuing is used as a boundary
  * between the network layer (input/forward path) running with
@@ -190,10 +185,14 @@ ip6_ours(struct mbuf **mp, int *offp, int nxt, int af)
 	if (af != AF_UNSPEC)
 		return nxt;
 
+	nxt = ip_deliver(mp, offp, nxt, AF_INET6, 1);
+	if (nxt == IPPROTO_DONE)
+		return IPPROTO_DONE;
+
 	/* save values for later, use after dequeue */
 	if (*offp != sizeof(struct ip6_hdr)) {
 		struct m_tag *mtag;
-		struct ip6_offnxt *ion;
+		struct ipoffnxt *ion;
 
 		/* mbuf tags are expensive, but only used for header options */
 		mtag = m_tag_get(PACKET_TAG_IP6_OFFNXT, sizeof(*ion),
@@ -203,7 +202,7 @@ ip6_ours(struct mbuf **mp, int *offp, int nxt, int af)
 			m_freemp(mp);
 			return IPPROTO_DONE;
 		}
-		ion = (struct ip6_offnxt *)(mtag + 1);
+		ion = (struct ipoffnxt *)(mtag + 1);
 		ion->ion_off = *offp;
 		ion->ion_nxt = nxt;
 
@@ -234,9 +233,9 @@ ip6intr(void)
 #endif
 		mtag = m_tag_find(m, PACKET_TAG_IP6_OFFNXT, NULL);
 		if (mtag != NULL) {
-			struct ip6_offnxt *ion;
+			struct ipoffnxt *ion;
 
-			ion = (struct ip6_offnxt *)(mtag + 1);
+			ion = (struct ipoffnxt *)(mtag + 1);
 			off = ion->ion_off;
 			nxt = ion->ion_nxt;
 
@@ -248,7 +247,7 @@ ip6intr(void)
 			off = sizeof(struct ip6_hdr);
 			nxt = ip6->ip6_nxt;
 		}
-		nxt = ip_deliver(&m, &off, nxt, AF_INET6);
+		nxt = ip_deliver(&m, &off, nxt, AF_INET6, 0);
 		KASSERT(nxt == IPPROTO_DONE);
 	}
 }
@@ -357,21 +356,21 @@ bad:
 int
 ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 {
+	struct route ro;
 	struct mbuf *m;
 	struct ip6_hdr *ip6;
-	struct sockaddr_in6 sin6;
-	struct rtentry *rt = NULL;
+	struct rtentry *rt;
 	int ours = 0;
 	u_int16_t src_scope, dst_scope;
 #if NPF > 0
 	struct in6_addr odst;
 #endif
-	int srcrt = 0;
+	int pfrdr = 0;
 
 	KASSERT(*offp == 0);
 
+	ro.ro_rt = NULL;
 	ip6stat_inc(ip6s_total);
-
 	m = *mp = ipv6_check(ifp, *mp);
 	if (m == NULL)
 		goto bad;
@@ -413,7 +412,7 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 		goto bad;
 
 	ip6 = mtod(m, struct ip6_hdr *);
-	srcrt = !IN6_ARE_ADDR_EQUAL(&odst, &ip6->ip6_dst);
+	pfrdr = !IN6_ARE_ADDR_EQUAL(&odst, &ip6->ip6_dst);
 #endif
 
 	/*
@@ -517,18 +516,14 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 	/*
 	 *  Unicast check
 	 */
-	memset(&sin6, 0, sizeof(struct sockaddr_in6));
-	sin6.sin6_len = sizeof(struct sockaddr_in6);
-	sin6.sin6_family = AF_INET6;
-	sin6.sin6_addr = ip6->ip6_dst;
-	rt = rtalloc_mpath(sin6tosa(&sin6), &ip6->ip6_src.s6_addr32[0],
+	rt = route6_mpath(&ro, &ip6->ip6_dst, &ip6->ip6_src,
 	    m->m_pkthdr.ph_rtableid);
 
 	/*
 	 * Accept the packet if the route to the destination is marked
 	 * as local.
 	 */
-	if (rtisvalid(rt) && ISSET(rt->rt_flags, RTF_LOCAL)) {
+	if (rt != NULL && ISSET(rt->rt_flags, RTF_LOCAL)) {
 		struct in6_ifaddr *ia6 = ifatoia6(rt->rt_ifa);
 
 		if (ip6_forwarding == 0 && rt->rt_ifidx != ifp->if_index &&
@@ -618,14 +613,15 @@ ip6_input_if(struct mbuf **mp, int *offp, int nxt, int af, struct ifnet *ifp)
 	}
 #endif /* IPSEC */
 
-	ip6_forward(m, rt, srcrt);
+	ip6_forward(m, &ro, pfrdr);
 	*mp = NULL;
+	rtfree(ro.ro_rt);
 	return IPPROTO_DONE;
  bad:
 	nxt = IPPROTO_DONE;
 	m_freemp(mp);
  out:
-	rtfree(rt);
+	rtfree(ro.ro_rt);
 	return nxt;
 }
 
@@ -1012,11 +1008,11 @@ ip6_unknown_opt(struct mbuf **mp, u_int8_t *optp, int off)
  * you are using IP6_EXTHDR_CHECK() not m_pulldown())
  */
 void
-ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
+ip6_savecontrol(struct inpcb *inp, struct mbuf *m, struct mbuf **mp)
 {
 	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
 
-	if (in6p->inp_socket->so_options & SO_TIMESTAMP) {
+	if (inp->inp_socket->so_options & SO_TIMESTAMP) {
 		struct timeval tv;
 
 		m_microtime(m, &tv);
@@ -1027,7 +1023,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 	}
 
 	/* RFC 2292 sec. 5 */
-	if ((in6p->inp_flags & IN6P_PKTINFO) != 0) {
+	if ((inp->inp_flags & IN6P_PKTINFO) != 0) {
 		struct in6_pktinfo pi6;
 		memcpy(&pi6.ipi6_addr, &ip6->ip6_dst, sizeof(struct in6_addr));
 		if (IN6_IS_SCOPE_EMBED(&pi6.ipi6_addr))
@@ -1040,7 +1036,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 			mp = &(*mp)->m_next;
 	}
 
-	if ((in6p->inp_flags & IN6P_HOPLIMIT) != 0) {
+	if ((inp->inp_flags & IN6P_HOPLIMIT) != 0) {
 		int hlim = ip6->ip6_hlim & 0xff;
 		*mp = sbcreatecontrol((caddr_t) &hlim, sizeof(int),
 		    IPV6_HOPLIMIT, IPPROTO_IPV6);
@@ -1048,7 +1044,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 			mp = &(*mp)->m_next;
 	}
 
-	if ((in6p->inp_flags & IN6P_TCLASS) != 0) {
+	if ((inp->inp_flags & IN6P_TCLASS) != 0) {
 		u_int32_t flowinfo;
 		int tclass;
 
@@ -1069,7 +1065,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 	 * returned to normal user.
 	 * See also RFC 2292 section 6 (or RFC 3542 section 8).
 	 */
-	if ((in6p->inp_flags & IN6P_HOPOPTS) != 0) {
+	if ((inp->inp_flags & IN6P_HOPOPTS) != 0) {
 		/*
 		 * Check if a hop-by-hop options header is contained in the
 		 * received packet, and if so, store the options as ancillary
@@ -1114,7 +1110,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 	}
 
 	/* IPV6_DSTOPTS and IPV6_RTHDR socket options */
-	if ((in6p->inp_flags & (IN6P_RTHDR | IN6P_DSTOPTS)) != 0) {
+	if ((inp->inp_flags & (IN6P_RTHDR | IN6P_DSTOPTS)) != 0) {
 		struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
 		int nxt = ip6->ip6_nxt, off = sizeof(struct ip6_hdr);
 
@@ -1162,7 +1158,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 
 			switch (nxt) {
 			case IPPROTO_DSTOPTS:
-				if (!(in6p->inp_flags & IN6P_DSTOPTS))
+				if (!(inp->inp_flags & IN6P_DSTOPTS))
 					break;
 
 				*mp = sbcreatecontrol((caddr_t)ip6e, elen,
@@ -1173,7 +1169,7 @@ ip6_savecontrol(struct inpcb *in6p, struct mbuf *m, struct mbuf **mp)
 				break;
 
 			case IPPROTO_ROUTING:
-				if (!(in6p->inp_flags & IN6P_RTHDR))
+				if (!(inp->inp_flags & IN6P_RTHDR))
 					break;
 
 				*mp = sbcreatecontrol((caddr_t)ip6e, elen,
@@ -1451,7 +1447,6 @@ const struct sysctl_bounded_args ipv6ctl_vars[] = {
 	{ IPV6CTL_USE_DEPRECATED, &ip6_use_deprecated, 0, 1 },
 	{ IPV6CTL_MAXFRAGS, &ip6_maxfrags, 0, 1000 },
 	{ IPV6CTL_MFORWARDING, &ip6_mforwarding, 0, 1 },
-	{ IPV6CTL_MULTIPATH, &ip6_multipath, 0, 1 },
 	{ IPV6CTL_MCAST_PMTU, &ip6_mcast_pmtu, 0, 1 },
 	{ IPV6CTL_NEIGHBORGCTHRESH, &ip6_neighborgcthresh, -1, 5 * 2048 },
 	{ IPV6CTL_MAXDYNROUTES, &ip6_maxdynroutes, -1, 5 * 4096 },
@@ -1466,7 +1461,7 @@ ip6_sysctl_ip6stat(void *oldp, size_t *oldlenp, void *newp)
 	CTASSERT(sizeof(*ip6stat) == (ip6s_ncounters * sizeof(uint64_t)));
 
 	ip6stat = malloc(sizeof(*ip6stat), M_TEMP, M_WAITOK);
-	counters_read(ip6counters, (uint64_t *)ip6stat, ip6s_ncounters);
+	counters_read(ip6counters, (uint64_t *)ip6stat, ip6s_ncounters, NULL);
 	ret = sysctl_rdstruct(oldp, oldlenp, newp,
 	    ip6stat, sizeof(*ip6stat));
 	free(ip6stat, M_TEMP, sizeof(*ip6stat));
@@ -1499,7 +1494,7 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 #ifdef MROUTING
 	extern struct mrt6stat mrt6stat;
 #endif
-	int error;
+	int oldval, error;
 
 	/* Almost all sysctl names at this level are terminal. */
 	if (namelen != 1 && name[0] != IPV6CTL_IFQUEUE)
@@ -1551,6 +1546,15 @@ ip6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		    oldp, oldlenp, newp, newlen, &ip6intrq));
 	case IPV6CTL_SOIIKEY:
 		return (ip6_sysctl_soiikey(oldp, oldlenp, newp, newlen));
+	case IPV6CTL_MULTIPATH:
+		NET_LOCK();
+		oldval = ip6_multipath;
+		error = sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+		    &ip6_multipath, 0, 1);
+		if (oldval != ip6_multipath)
+			atomic_inc_long(&rtgeneration);
+		NET_UNLOCK();
+		return (error);
 	default:
 		NET_LOCK();
 		error = sysctl_bounded_arr(ipv6ctl_vars, nitems(ipv6ctl_vars),
@@ -1572,11 +1576,11 @@ ip6_send_dispatch(void *xmq)
 	if (ml_empty(&ml))
 		return;
 
-	NET_LOCK();
+	NET_LOCK_SHARED();
 	while ((m = ml_dequeue(&ml)) != NULL) {
 		ip6_output(m, NULL, NULL, 0, NULL, NULL);
 	}
-	NET_UNLOCK();
+	NET_UNLOCK_SHARED();
 }
 
 void

@@ -1,10 +1,10 @@
-/*	$OpenBSD: miidevs.h,v 1.134 2022/04/19 03:26:52 kevlo Exp $	*/
+/*	$OpenBSD: miidevs.h,v 1.137 2023/07/08 08:13:31 kettenis Exp $	*/
 
 /*
  * THIS FILE AUTOMATICALLY GENERATED.  DO NOT EDIT.
  *
  * generated from:
- *	OpenBSD: miidevs,v 1.131 2022/04/19 03:26:33 kevlo Exp 
+ *	OpenBSD: miidevs,v 1.132 2023/03/31 13:37:02 kettenis Exp 
  */
 /* $NetBSD: miidevs,v 1.3 1998/11/05 03:43:43 thorpej Exp $ */
 
@@ -79,6 +79,7 @@
 #define	MII_OUI_PLESSEYSEMI	0x046b40	/* Plessey Semi. */
 #define	MII_OUI_NATSEMI	0x080017	/* National Semi. */
 #define	MII_OUI_TI	0x080028	/* Texas Instruments */
+#define	MII_OUI_MOTORCOMM	0x13d47a	/* Motorcomm */
 
 /* in the 79c873, AMD uses another OUI (which matches Davicom!) */
 #define	MII_OUI_xxALTIMA	0x000895	/* Altima */
@@ -396,6 +397,10 @@
 #define	MII_MODEL_MICREL_KSZ9031	0x0022
 #define	MII_STR_MICREL_KSZ9031	"KSZ9031 10/100/1000 PHY"
 
+/* Motorcomm PHYs */
+#define	MII_MODEL_MOTORCOMM_YT8531	0x0011
+#define	MII_STR_MOTORCOMM_YT8531	"YT8531 10/100/1000 PHY"
+
 /* Myson PHYs */
 #define	MII_MODEL_MYSON_MTD972	0x0000
 #define	MII_STR_MYSON_MTD972	"MTD972 10/100 PHY"
@@ -433,6 +438,8 @@
 /* Realtek PHYs */
 #define	MII_MODEL_xxREALTEK_RTL8251	0x0000
 #define	MII_STR_xxREALTEK_RTL8251	"RTL8251 PHY"
+#define	MII_MODEL_xxREALTEK_RTL8211FVD	0x0007
+#define	MII_STR_xxREALTEK_RTL8211FVD	"RTL8211F-VD PHY"
 #define	MII_MODEL_xxREALTEK_RTL8201E	0x0008
 #define	MII_STR_xxREALTEK_RTL8201E	"RTL8201E 10/100 PHY"
 #define	MII_MODEL_xxREALTEK_RTL8169S	0x0011

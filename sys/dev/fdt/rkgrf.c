@@ -1,4 +1,4 @@
-/*	$OpenBSD: rkgrf.c,v 1.5 2021/10/24 17:52:26 mpi Exp $	*/
+/*	$OpenBSD: rkgrf.c,v 1.7 2023/09/22 01:10:44 jsg Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -27,11 +27,7 @@
 #include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/fdt.h>
 
-#ifdef __armv7__
-#include <arm/simplebus/simplebusvar.h>
-#else
-#include <arm64/dev/simplebusvar.h>
-#endif
+#include <machine/simplebusvar.h>
 
 struct rkgrf_softc {
 	struct simplebus_softc	sc_sbus;
@@ -81,8 +77,6 @@ rkgrf_attach(struct device *parent, struct device *self, void *aux)
 		printf(": can't map registers\n");
 		return;
 	}
-
-	printf("\n");
 
 	regmap_register(faa->fa_node, sc->sc_iot, sc->sc_ioh,
 	    faa->fa_reg[0].size);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.140 2022/11/19 16:23:48 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.146 2024/02/25 19:15:50 cheloha Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993
@@ -180,7 +180,7 @@ struct cpu_info {
 	uint32_t	ci_softpending;		/* pending soft interrupts */
 	int		ci_clock_started;
 	volatile int	ci_clock_deferred;	/* clock interrupt postponed */
-	struct clockintr_queue
+	struct clockqueue
 			ci_queue;
 
 	struct pmap	*ci_curpmap;
@@ -200,6 +200,7 @@ struct cpu_info {
 #endif
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
+	struct clockintr ci_gmonclock;
 #endif
 	char		ci_panicbuf[512];
 };
@@ -216,6 +217,8 @@ extern struct cpu_info *cpu_info_list;
 
 #define CPU_INFO_UNIT(ci)               ((ci)->ci_dev ? (ci)->ci_dev->dv_unit : 0)
 
+#define	cpu_idle_enter()	do { /* nothing */ } while (0)
+#define	cpu_idle_leave()	do { /* nothing */ } while (0)
 extern void (*cpu_idle_cycle_func)(void);
 #define cpu_idle_cycle()		(*cpu_idle_cycle_func)()
 
@@ -257,6 +260,7 @@ void	smp_rendezvous_cpus(unsigned long, void (*)(void *), void *arg);
 
 #define CPU_BUSY_CYCLE()	do {} while (0)
 
+extern void (*md_initclock)(void);
 extern void (*md_startclock)(struct cpu_info *);
 extern void (*md_triggerclock)(void);
 void	cp0_calibrate(struct cpu_info *);
@@ -418,6 +422,7 @@ void	cpu_switchto_asm(struct proc *, struct proc *);
 int	exec_md_map(struct proc *, struct exec_package *);
 void	savectx(struct user *, int);
 
+int	copyinsn(struct proc *, vaddr_t, uint32_t *);
 void	enable_fpu(struct proc *);
 void	save_fpu(void);
 int	fpe_branch_emulate(struct proc *, struct trapframe *, uint32_t,

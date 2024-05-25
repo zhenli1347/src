@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_resource.c,v 1.76 2022/11/17 18:53:13 deraadt Exp $	*/
+/*	$OpenBSD: kern_resource.c,v 1.83 2024/05/22 09:20:22 claudio Exp $	*/
 /*	$NetBSD: kern_resource.c,v 1.38 1996/10/23 07:19:38 matthias Exp $	*/
 
 /*-
@@ -64,7 +64,7 @@ struct plimit	*lim_copy(struct plimit *);
 struct plimit	*lim_write_begin(void);
 void		 lim_write_commit(struct plimit *);
 
-void	tuagg_sub(struct tusage *, struct proc *);
+void	tuagg_sub(struct tusage *, struct proc *, const struct timespec *);
 
 /*
  * Patchable maximum data and stack limits.
@@ -212,11 +212,13 @@ donice(struct proc *curp, struct process *chgpr, int n)
 	if (n < chgpr->ps_nice && suser(curp))
 		return (EACCES);
 	chgpr->ps_nice = n;
+	mtx_enter(&chgpr->ps_mtx);
 	SCHED_LOCK(s);
 	TAILQ_FOREACH(p, &chgpr->ps_threads, p_thr_link) {
 		setpriority(p, p->p_estcpu, n);
 	}
 	SCHED_UNLOCK(s);
+	mtx_leave(&chgpr->ps_mtx);
 	return (0);
 }
 
@@ -368,9 +370,10 @@ sys_getrlimit(struct proc *p, void *v, register_t *retval)
 }
 
 void
-tuagg_sub(struct tusage *tup, struct proc *p)
+tuagg_sub(struct tusage *tup, struct proc *p, const struct timespec *ts)
 {
-	timespecadd(&tup->tu_runtime, &p->p_rtime, &tup->tu_runtime);
+	if (ts != NULL)
+		timespecadd(&tup->tu_runtime, ts, &tup->tu_runtime);
 	tup->tu_uticks += p->p_uticks;
 	tup->tu_sticks += p->p_sticks;
 	tup->tu_iticks += p->p_iticks;
@@ -381,11 +384,10 @@ tuagg_sub(struct tusage *tup, struct proc *p)
  * totals for the thread and process
  */
 void
-tuagg_unlocked(struct process *pr, struct proc *p)
+tuagg_locked(struct process *pr, struct proc *p, const struct timespec *ts)
 {
-	tuagg_sub(&pr->ps_tu, p);
-	tuagg_sub(&p->p_tu, p);
-	timespecclear(&p->p_rtime);
+	tuagg_sub(&pr->ps_tu, p, ts);
+	tuagg_sub(&p->p_tu, p, ts);
 	p->p_uticks = 0;
 	p->p_sticks = 0;
 	p->p_iticks = 0;
@@ -397,7 +399,7 @@ tuagg(struct process *pr, struct proc *p)
 	int s;
 
 	SCHED_LOCK(s);
-	tuagg_unlocked(pr, p);
+	tuagg_locked(pr, p, NULL);
 	SCHED_UNLOCK(s);
 }
 
@@ -410,7 +412,6 @@ calctsru(struct tusage *tup, struct timespec *up, struct timespec *sp,
     struct timespec *ip)
 {
 	u_quad_t st, ut, it;
-	int freq;
 
 	st = tup->tu_sticks;
 	ut = tup->tu_uticks;
@@ -424,16 +425,14 @@ calctsru(struct tusage *tup, struct timespec *up, struct timespec *sp,
 		return;
 	}
 
-	freq = stathz ? stathz : hz;
-
-	st = st * 1000000000 / freq;
+	st = st * 1000000000 / stathz;
 	sp->tv_sec = st / 1000000000;
 	sp->tv_nsec = st % 1000000000;
-	ut = ut * 1000000000 / freq;
+	ut = ut * 1000000000 / stathz;
 	up->tv_sec = ut / 1000000000;
 	up->tv_nsec = ut % 1000000000;
 	if (ip != NULL) {
-		it = it * 1000000000 / freq;
+		it = it * 1000000000 / stathz;
 		ip->tv_sec = it / 1000000000;
 		ip->tv_nsec = it % 1000000000;
 	}
@@ -479,8 +478,9 @@ dogetrusage(struct proc *p, int who, struct rusage *rup)
 	struct process *pr = p->p_p;
 	struct proc *q;
 
-	switch (who) {
+	KERNEL_ASSERT_LOCKED();
 
+	switch (who) {
 	case RUSAGE_SELF:
 		/* start with the sum of dead threads, if any */
 		if (pr->ps_ru != NULL)

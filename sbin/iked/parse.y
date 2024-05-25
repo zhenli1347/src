@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.141 2022/07/22 15:53:33 tobhe Exp $	*/
+/*	$OpenBSD: parse.y,v 1.146 2024/04/25 14:24:54 jsg Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -46,7 +46,6 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
-#include <netdb.h>
 #include <event.h>
 
 #include "iked.h"
@@ -1951,6 +1950,8 @@ parsekeyfile(char *filename, struct iked_auth *auth)
 
 	if ((fd = open(filename, O_RDONLY)) == -1)
 		err(1, "open %s", filename);
+	if (check_file_secrecy(fd, filename) == -1)
+		exit(1);
 	if (fstat(fd, &sb) == -1)
 		err(1, "parsekeyfile: stat %s", filename);
 	if ((sb.st_size > KEYSIZE_LIMIT) || (sb.st_size == 0))
@@ -2520,6 +2521,10 @@ create_ike(char *name, int af, struct ipsec_addr_wrap *ipproto,
 	}
 
 	if (iface != NULL) {
+		/* sec(4) */
+		if (strncmp("sec", iface, strlen("sec")) == 0)
+			pol.pol_flags |= IKED_POLICY_ROUTING;
+
 		pol.pol_iface = if_nametoindex(iface);
 		if (pol.pol_iface == 0) {
 			yyerror("invalid iface");
@@ -2881,8 +2886,7 @@ create_ike(char *name, int af, struct ipsec_addr_wrap *ipproto,
 	if (dstid)
 		strlcpy(idstr, dstid, sizeof(idstr));
 	else if (!pol.pol_peer.addr_net)
-		print_host((struct sockaddr *)&pol.pol_peer.addr, idstr,
-		    sizeof(idstr));
+		strlcpy(idstr, print_addr(&pol.pol_peer.addr), sizeof(idstr));
 
 	ikeauth = &pol.pol_auth;
 	switch (ikeauth->auth_method) {

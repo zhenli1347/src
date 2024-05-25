@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6.h,v 1.109 2021/06/02 00:20:50 dlg Exp $	*/
+/*	$OpenBSD: in6.h,v 1.118 2024/05/13 01:15:53 jsg Exp $	*/
 /*	$KAME: in6.h,v 1.83 2001/03/29 02:55:07 jinmei Exp $	*/
 
 /*
@@ -144,15 +144,6 @@ extern const struct in6_addr in6addr_linklocal_allnodes;
 extern const struct in6_addr in6addr_linklocal_allrouters;
 
 #if __BSD_VISIBLE
-/*
- * IPv6 route structure
- */
-struct route_in6 {
-	struct	rtentry *ro_rt;
-	u_long		 ro_tableid;	/* padded to long for alignment */
-	struct	sockaddr_in6 ro_dst;
-};
-
 /*
  * Definition of some useful macros to handle IP6 addresses
  */
@@ -413,6 +404,7 @@ struct sockaddr_in6;
 struct ifaddr;
 struct in6_ifaddr;
 struct ifnet;
+struct rtentry;
 
 void	ipv6_input(struct ifnet *, struct mbuf *);
 struct mbuf *
@@ -420,17 +412,18 @@ struct mbuf *
 
 int	in6_cksum(struct mbuf *, uint8_t, uint32_t, uint32_t);
 void	in6_proto_cksum_out(struct mbuf *, struct ifnet *);
-int	in6_localaddr(struct in6_addr *);
 int	in6_addrscope(struct in6_addr *);
-struct	in6_ifaddr *in6_ifawithscope(struct ifnet *, struct in6_addr *, u_int);
+struct	in6_ifaddr *in6_ifawithscope(struct ifnet *, struct in6_addr *, u_int,
+	    struct rtentry *);
 int	in6_mask2len(struct in6_addr *, u_char *);
 int	in6_nam2sin6(const struct mbuf *, struct sockaddr_in6 **);
 int	in6_sa2sin6(struct sockaddr *, struct sockaddr_in6 **);
 
-struct inpcb;
+struct ip6_pktopts;
+struct ip6_moptions;
 
 int	in6_embedscope(struct in6_addr *, const struct sockaddr_in6 *,
-	    struct inpcb *);
+	    const struct ip6_pktopts *, const struct ip6_moptions *);
 void	in6_recoverscope(struct sockaddr_in6 *, const struct in6_addr *);
 void	in6_clearscope(struct in6_addr *);
 
@@ -446,10 +439,22 @@ satosin6(struct sockaddr *sa)
 	return ((struct sockaddr_in6 *)(sa));
 }
 
+static inline const struct sockaddr_in6 *
+satosin6_const(const struct sockaddr *sa)
+{
+	return ((const struct sockaddr_in6 *)(sa));
+}
+
 static inline struct sockaddr *
 sin6tosa(struct sockaddr_in6 *sin6)
 {
 	return ((struct sockaddr *)(sin6));
+}
+
+static inline const struct sockaddr *
+sin6tosa_const(const struct sockaddr_in6 *sin6)
+{
+	return ((const struct sockaddr *)(sin6));
 }
 
 static inline struct in6_ifaddr *

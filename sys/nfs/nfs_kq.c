@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_kq.c,v 1.34 2021/12/11 09:28:26 visa Exp $ */
+/*	$OpenBSD: nfs_kq.c,v 1.37 2024/05/01 13:15:59 jsg Exp $ */
 /*	$NetBSD: nfs_kq.c,v 1.7 2003/10/30 01:43:10 simonb Exp $	*/
 
 /*-
@@ -32,18 +32,15 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/malloc.h>
 #include <sys/vnode.h>
-#include <sys/unistd.h>
 #include <sys/file.h>
 #include <sys/kthread.h>
 #include <sys/rwlock.h>
 #include <sys/queue.h>
 
-#include <nfs/rpcv2.h>
 #include <nfs/nfsproto.h>
 #include <nfs/nfs.h>
 #include <nfs/nfsnode.h>
@@ -89,7 +86,6 @@ struct kevqlist kevlist = SLIST_HEAD_INITIALIZER(kevlist);
  * and exits when the watch list is empty. The overhead of thread creation
  * isn't really important, neither speed of attach and detach of knote.
  */
-/* ARGSUSED */
 void
 nfs_kqpoll(void *arg)
 {
@@ -186,7 +182,7 @@ filt_nfsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	klist_remove_locked(&vp->v_selectinfo.si_note, kn);
+	klist_remove_locked(&vp->v_klist, kn);
 
 	/* Remove the vnode from watch list */
 	if ((kn->kn_flags & (__EV_POLL | __EV_SELECT)) == 0)
@@ -343,7 +339,7 @@ nfs_kqfilter(void *v)
 			return (error);
 	}
 
-	klist_insert_locked(&vp->v_selectinfo.si_note, kn);
+	klist_insert_locked(&vp->v_klist, kn);
 
 	return (0);
 }

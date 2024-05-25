@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_verify.c,v 1.61 2022/10/17 18:56:54 jsing Exp $ */
+/* $OpenBSD: x509_verify.c,v 1.69 2024/04/08 23:46:21 beck Exp $ */
 /*
  * Copyright (c) 2020-2021 Bob Beck <beck@openbsd.org>
  *
@@ -27,6 +27,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "asn1_local.h"
 #include "x509_internal.h"
 #include "x509_issuer_cache.h"
 
@@ -44,21 +45,25 @@ static void x509_verify_chain_free(struct x509_verify_chain *chain);
  * Parse an asn1 to a representable time_t as per RFC 5280 rules.
  * Returns -1 if that can't be done for any reason.
  */
-time_t
-x509_verify_asn1_time_to_time_t(const ASN1_TIME *atime, int notAfter)
+int
+x509_verify_asn1_time_to_time_t(const ASN1_TIME *atime, int notAfter,
+    time_t *out)
 {
 	struct tm tm = { 0 };
 	int type;
 
+	if (atime == NULL)
+		return 0;
+
 	type = ASN1_time_parse(atime->data, atime->length, &tm, atime->type);
 	if (type == -1)
-		return -1;
+		return 0;
 
 	/* RFC 5280 section 4.1.2.5 */
 	if (tm.tm_year < 150 && type != V_ASN1_UTCTIME)
-		return -1;
+		return 0;
 	if (tm.tm_year >= 150 && type != V_ASN1_GENERALIZEDTIME)
-		return -1;
+		return 0;
 
 	if (notAfter) {
 		/*
@@ -67,7 +72,7 @@ x509_verify_asn1_time_to_time_t(const ASN1_TIME *atime, int notAfter)
 		 * date, limit the date to a 32 bit representable value.
 		 */
 		if (!ASN1_time_tm_clamp_notafter(&tm))
-			return -1;
+			return 0;
 	}
 
 	/*
@@ -75,22 +80,7 @@ x509_verify_asn1_time_to_time_t(const ASN1_TIME *atime, int notAfter)
 	 * a time_t. A time_t must be sane if you care about times after
 	 * Jan 19 2038.
 	 */
-	return timegm(&tm);
-}
-
-/*
- * Cache certificate hash, and values parsed out of an X509.
- * called from cache_extensions()
- */
-void
-x509_verify_cert_info_populate(X509 *cert)
-{
-	/*
-	 * Parse and save the cert times, or remember that they
-	 * are unacceptable/unparsable.
-	 */
-	cert->not_before = x509_verify_asn1_time_to_time_t(X509_get_notBefore(cert), 0);
-	cert->not_after = x509_verify_asn1_time_to_time_t(X509_get_notAfter(cert), 1);
+	return asn1_time_tm_to_time_t(&tm, out);
 }
 
 struct x509_verify_chain *
@@ -241,15 +231,7 @@ x509_verify_ctx_clear(struct x509_verify_ctx *ctx)
 static int
 x509_verify_cert_cache_extensions(X509 *cert)
 {
-	if (!(cert->ex_flags & EXFLAG_SET)) {
-		CRYPTO_w_lock(CRYPTO_LOCK_X509);
-		x509v3_cache_extensions(cert);
-		CRYPTO_w_unlock(CRYPTO_LOCK_X509);
-	}
-	if (cert->ex_flags & EXFLAG_INVALID)
-		return 0;
-
-	return (cert->ex_flags & EXFLAG_SET);
+	return x509v3_cache_extensions(cert);
 }
 
 static int
@@ -279,11 +261,22 @@ x509_verify_ctx_cert_is_root(struct x509_verify_ctx *ctx, X509 *cert,
 
 	/* Check by lookup if we have a legacy xsc */
 	if (ctx->xsc != NULL) {
+		/*
+		 * "alternative" lookup method, using the "trusted" stack in the
+		 * xsc as the source for roots.
+		 */
+		if (ctx->xsc->trusted != NULL) {
+			for (i = 0; i < sk_X509_num(ctx->xsc->trusted); i++) {
+				if (X509_cmp(sk_X509_value(ctx->xsc->trusted,
+				    i), cert) == 0)
+					return x509_verify_check_chain_end(cert,
+					    full_chain);
+			}
+		}
 		if ((match = x509_vfy_lookup_cert_match(ctx->xsc,
 		    cert)) != NULL) {
 			X509_free(match);
 			return x509_verify_check_chain_end(cert, full_chain);
-
 		}
 	} else {
 		/* Check the provided roots */
@@ -821,26 +814,28 @@ x509_verify_set_check_time(struct x509_verify_ctx *ctx)
 static int
 x509_verify_cert_times(X509 *cert, time_t *cmp_time, int *error)
 {
-	time_t when;
+	time_t when, not_before, not_after;
 
 	if (cmp_time == NULL)
 		when = time(NULL);
 	else
 		when = *cmp_time;
 
-	if (cert->not_before == -1) {
+	if (!x509_verify_asn1_time_to_time_t(X509_get_notBefore(cert), 0,
+	    &not_before)) {
 		*error = X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD;
 		return 0;
 	}
-	if (when < cert->not_before) {
+	if (when < not_before) {
 		*error = X509_V_ERR_CERT_NOT_YET_VALID;
 		return 0;
 	}
-	if (cert->not_after == -1) {
+	if (!x509_verify_asn1_time_to_time_t(X509_get_notAfter(cert), 1,
+	    &not_after)) {
 		*error = X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD;
 		return 0;
 	}
-	if (when > cert->not_after) {
+	if (when > not_after) {
 		*error = X509_V_ERR_CERT_HAS_EXPIRED;
 		return 0;
 	}
@@ -911,12 +906,6 @@ x509_verify_cert_extensions(struct x509_verify_ctx *ctx, X509 *cert, int need_ca
 	}
 	if (ctx->purpose > 0 && X509_check_purpose(cert, ctx->purpose, need_ca)) {
 		ctx->error = X509_V_ERR_INVALID_PURPOSE;
-		return 0;
-	}
-
-	/* XXX support proxy certs later in new api */
-	if (ctx->xsc == NULL && cert->ex_flags & EXFLAG_PROXY) {
-		ctx->error = X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED;
 		return 0;
 	}
 

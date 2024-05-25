@@ -1,4 +1,4 @@
-.\"	$OpenBSD: usb.4,v 1.212 2021/12/24 07:09:46 jmc Exp $
+.\"	$OpenBSD: usb.4,v 1.219 2024/05/15 01:41:18 kevlo Exp $
 .\"	$NetBSD: usb.4,v 1.15 1999/07/29 14:20:32 augustss Exp $
 .\"
 .\" Copyright (c) 1999 The NetBSD Foundation, Inc.
@@ -28,7 +28,7 @@
 .\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 .\" POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: December 24 2021 $
+.Dd $Mdocdate: May 15 2024 $
 .Dt USB 4
 .Os
 .Sh NAME
@@ -112,7 +112,7 @@ ADMtek AN986/ADM8511 Pegasus family 10/100 USB Ethernet device
 .It Xr axe 4
 ASIX Electronics AX88172/AX88178/AX88772 10/100/1Gb USB Ethernet device
 .It Xr axen 4
-ASIX Electronics AX88179 10/100/1Gb USB Ethernet device
+ASIX Electronics AX88179/AX88179A 10/100/1Gb USB Ethernet device
 .It Xr cdce 4
 USB Communication Device Class Ethernet device
 .It Xr cue 4
@@ -130,7 +130,7 @@ Aquantia AQC111U/AQC112U 100/1Gb/2.5Gb/5Gb USB Ethernet device
 .It Xr udav 4
 Davicom DM9601 10/100 USB Ethernet device
 .It Xr ure 4
-Realtek RTL8152/RTL8153/RTL8153B/RTL8156 10/100/1Gb/2.5Gb USB Ethernet device
+Realtek RTL8152/RTL8153/RTL8153B/RTL8153D/RTL8156 10/100/1Gb/2.5Gb USB Ethernet device
 .It Xr url 4
 Realtek RTL8150L 10/100 USB Ethernet device
 .It Xr urndis 4
@@ -143,7 +143,7 @@ Atheros IEEE 802.11a/b/g/n wireless network device
 .It Xr atu 4
 Atmel AT76C50x IEEE 802.11b wireless network device
 .It Xr bwfm 4
-Broadcom and Cypress IEEE 802.11a/ac/b/g/n wireless network device
+Broadcom and Cypress IEEE 802.11a/ac/ax/b/g/n wireless network device
 .It Xr mtw 4
 MediaTek USB IEEE 802.11b/g/n wireless network device
 .It Xr otus 4
@@ -163,7 +163,7 @@ Ralink Technology/MediaTek USB IEEE 802.11b/g wireless network device
 .It Xr urtw 4
 Realtek RTL8187L/RTL8187B USB IEEE 802.11b/g wireless network device
 .It Xr urtwn 4
-Realtek RTL8188CU/RTL8188EU/RTL8192CU/RTL8192EU USB IEEE 802.11b/g/n wireless
+Realtek RTL8188CU/RTL8188EU/RTL8188FTV/RTL8192CU/RTL8192EU USB IEEE 802.11b/g/n wireless
 network device
 .It Xr wi 4
 Intersil PRISM 2-3 IEEE 802.11b wireless network device
@@ -179,7 +179,7 @@ Arkmicro Technologies ARK3116 based USB serial adapter
 .It Xr ubsa 4
 Belkin USB serial adapter
 .It Xr uchcom 4
-WinChipHead CH341/340 based USB serial adapter
+WinChipHead CH9102/343/341/340 based USB serial adapter
 .It Xr ucom 4
 USB tty support
 .It Xr ucrcom 4
@@ -229,7 +229,7 @@ USB MIDI devices
 .Ss Video devices
 .Bl -tag -width 12n -offset ind -compact
 .It Xr udl 4
-DisplayLink DL-120 / DL-160 USB display devices
+DisplayLink DL-120/DL-160 USB display devices
 .It Xr utvfu 4
 USB Fushicai USBTV007 audio/video capture device
 .It Xr uvideo 4

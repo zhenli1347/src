@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfvar.h,v 1.521 2022/11/25 20:27:53 bluhm Exp $ */
+/*	$OpenBSD: pfvar.h,v 1.538 2024/05/13 01:15:53 jsg Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -474,6 +474,7 @@ union pf_rule_ptr {
 	u_int32_t		 nr;
 };
 
+#define	PF_ANCHOR_STACK_MAX	 64
 #define	PF_ANCHOR_NAME_SIZE	 64
 #define	PF_ANCHOR_MAXPATH	(PATH_MAX - PF_ANCHOR_NAME_SIZE - 1)
 #define	PF_ANCHOR_HIWAT		 512
@@ -571,8 +572,8 @@ struct pf_rule {
 	u_int8_t		 keep_state;
 	sa_family_t		 af;
 	u_int8_t		 proto;
-	u_int8_t		 type;
-	u_int8_t		 code;
+	u_int16_t		 type;	/* aux. value 256 is legit */
+	u_int16_t		 code;	/* aux. value 256 is legit */
 	u_int8_t		 flags;
 	u_int8_t		 flagset;
 	u_int8_t		 min_ttl;
@@ -591,7 +592,6 @@ struct pf_rule {
 	u_int8_t		 set_prio[2];
 	sa_family_t		 naf;
 	u_int8_t		 rcvifnot;
-	u_int8_t		 pad[2];
 
 	struct {
 		struct pf_addr		addr;
@@ -704,34 +704,10 @@ struct pf_state_key_cmp {
 	struct pf_addr	 addr[2];
 	u_int16_t	 port[2];
 	u_int16_t	 rdomain;
+	u_int16_t	 hash;
 	sa_family_t	 af;
 	u_int8_t	 proto;
 };
-
-struct pf_state_item {
-	TAILQ_ENTRY(pf_state_item)	 entry;
-	struct pf_state			*s;
-};
-
-TAILQ_HEAD(pf_statelisthead, pf_state_item);
-
-struct pf_state_key {
-	struct pf_addr	 addr[2];
-	u_int16_t	 port[2];
-	u_int16_t	 rdomain;
-	sa_family_t	 af;
-	u_int8_t	 proto;
-
-	RB_ENTRY(pf_state_key)	 entry;
-	struct pf_statelisthead	 states;
-	struct pf_state_key	*reverse;
-	struct inpcb		*inp;
-	pf_refcnt_t		 refcnt;
-	u_int8_t		 removed;
-};
-#define PF_REVERSED_KEY(key, family)				\
-	((key[PF_SK_WIRE]->af != key[PF_SK_STACK]->af) &&	\
-	 (key[PF_SK_WIRE]->af != (family)))
 
 /* keep synced with struct pf_state, used in RB_FIND */
 struct pf_state_cmp {
@@ -846,7 +822,7 @@ struct pf_ruleset {
 		struct {
 			struct pf_rulequeue	*ptr;
 			u_int32_t		 rcount;
-			u_int32_t		 ticket;
+			u_int32_t		 version;
 			int			 open;
 		}			 active, inactive;
 	}			 rules;
@@ -868,6 +844,7 @@ struct pf_anchor {
 	struct pf_ruleset	 ruleset;
 	int			 refcnt;	/* anchor rules */
 	int			 match;
+	struct refcnt		 ref;		/* for transactions */
 };
 RB_PROTOTYPE(pf_anchor_global, pf_anchor, entry_global, pf_anchor_compare)
 RB_PROTOTYPE(pf_anchor_node, pf_anchor, entry_node, pf_anchor_compare)
@@ -1057,9 +1034,6 @@ struct pfr_ktable {
 #define pfrkt_nomatch	pfrkt_ts.pfrts_nomatch
 #define pfrkt_tzero	pfrkt_ts.pfrts_tzero
 
-RB_HEAD(pf_state_tree, pf_state_key);
-RB_PROTOTYPE(pf_state_tree, pf_state_key, entry, pf_state_compare_key)
-
 RB_HEAD(pf_state_tree_ext_gwy, pf_state_key);
 RB_PROTOTYPE(pf_state_tree_ext_gwy, pf_state_key,
     entry_ext_gwy, pf_state_compare_ext_gwy)
@@ -1218,11 +1192,10 @@ enum pfi_kif_refs {
 #define SCNT_SRC_NODE_REMOVALS	2
 #define SCNT_MAX		3
 
-#define ACTION_SET(a, x) \
-	do { \
-		if ((a) != NULL) \
-			*(a) = (x); \
-	} while (0)
+#define NCNT_FRAG_SEARCH	0
+#define NCNT_FRAG_INSERT	1
+#define NCNT_FRAG_REMOVALS	2
+#define NCNT_MAX		3
 
 #define REASON_SET(a, x) \
 	do { \
@@ -1238,6 +1211,7 @@ struct pf_status {
 	u_int64_t	lcounters[LCNT_MAX];	/* limit counters */
 	u_int64_t	fcounters[FCNT_MAX];
 	u_int64_t	scounters[SCNT_MAX];
+	u_int64_t	ncounters[NCNT_MAX];
 	u_int64_t	pcounters[2][2][3];
 	u_int64_t	bcounters[2][2];
 	u_int64_t	stateid;
@@ -1247,6 +1221,7 @@ struct pf_status {
 	u_int32_t	states;
 	u_int32_t	states_halfopen;
 	u_int32_t	src_nodes;
+	u_int32_t	fragments;
 	u_int32_t	debug;
 	u_int32_t	hostid;
 	u_int32_t	reass;			/* reassembly */
@@ -1599,6 +1574,7 @@ struct pfioc_synflwats {
 #define DIOCSETSYNFLWATS	_IOWR('D', 97, struct pfioc_synflwats)
 #define DIOCSETSYNCOOKIES	_IOWR('D', 98, u_int8_t)
 #define DIOCGETSYNFLWATS	_IOWR('D', 99, struct pfioc_synflwats)
+#define DIOCXEND	_IOWR('D', 100, u_int32_t)
 
 #ifdef _KERNEL
 
@@ -1608,23 +1584,17 @@ RB_HEAD(pf_src_tree, pf_src_node);
 RB_PROTOTYPE(pf_src_tree, pf_src_node, entry, pf_src_compare);
 extern struct pf_src_tree tree_src_tracking;
 
-RB_HEAD(pf_state_tree_id, pf_state);
-RB_PROTOTYPE(pf_state_tree_id, pf_state,
-    entry_id, pf_state_compare_id);
-extern struct pf_state_tree_id tree_id;
 extern struct pf_state_list pf_state_list;
 
 TAILQ_HEAD(pf_queuehead, pf_queuespec);
 extern struct pf_queuehead		  pf_queues[2];
 extern struct pf_queuehead		 *pf_queues_active, *pf_queues_inactive;
 
-extern u_int32_t		 ticket_pabuf;
 extern struct pool		 pf_src_tree_pl, pf_sn_item_pl, pf_rule_pl;
 extern struct pool		 pf_state_pl, pf_state_key_pl, pf_state_item_pl,
 				    pf_rule_item_pl, pf_queue_pl,
 				    pf_pktdelay_pl, pf_anchor_pl;
 extern struct pool		 pf_state_scrub_pl;
-extern struct ifnet		*sync_ifp;
 extern struct pf_rule		 pf_default_rule;
 
 extern int			 pf_tbladdr_setup(struct pf_ruleset *,
@@ -1633,15 +1603,9 @@ extern void			 pf_tbladdr_remove(struct pf_addr_wrap *);
 extern void			 pf_tbladdr_copyout(struct pf_addr_wrap *);
 extern void			 pf_calc_skip_steps(struct pf_rulequeue *);
 extern void			 pf_purge_expired_src_nodes(void);
-extern void			 pf_purge_expired_states(u_int32_t);
-extern void			 pf_purge_expired_rules(void);
 extern void			 pf_remove_state(struct pf_state *);
-extern void			 pf_remove_divert_state(struct pf_state_key *);
+extern void			 pf_remove_divert_state(struct inpcb *);
 extern void			 pf_free_state(struct pf_state *);
-extern int			 pf_state_insert(struct pfi_kif *,
-				    struct pf_state_key **,
-				    struct pf_state_key **,
-				    struct pf_state *);
 int				 pf_insert_src_node(struct pf_src_node **,
 				    struct pf_rule *, enum pf_sn_types,
 				    sa_family_t, struct pf_addr *,
@@ -1671,7 +1635,6 @@ extern void			 pf_cksum_fixup(u_int16_t *, u_int16_t,
 				    u_int16_t, u_int8_t);
 void				 pf_rm_rule(struct pf_rulequeue *,
 				    struct pf_rule *);
-void				 pf_purge_rule(struct pf_rule *);
 struct pf_divert		*pf_find_divert(struct mbuf *);
 int				 pf_setup_pdesc(struct pf_pdesc *, sa_family_t,
 				    int, struct pfi_kif *, struct mbuf *,
@@ -1683,8 +1646,7 @@ void	pf_poolmask(struct pf_addr *, struct pf_addr*,
 	    struct pf_addr *, struct pf_addr *, sa_family_t);
 void	pf_addr_inc(struct pf_addr *, sa_family_t);
 
-void   *pf_pull_hdr(struct mbuf *, int, void *, int, u_short *, u_short *,
-	    sa_family_t);
+void   *pf_pull_hdr(struct mbuf *, int, void *, int, u_short *, sa_family_t);
 #define PF_HI (true)
 #define PF_LO (!PF_HI)
 #define PF_ALGNMNT(off) (((off) % 2) == 0 ? PF_HI : PF_LO)
@@ -1695,7 +1657,6 @@ int	pf_patch_32(struct pf_pdesc *, u_int32_t *, u_int32_t);
 int	pf_patch_32_unaligned(struct pf_pdesc *, void *, u_int32_t, bool);
 int	pflog_packet(struct pf_pdesc *, u_int8_t, struct pf_rule *,
 	    struct pf_rule *, struct pf_ruleset *, struct pf_rule *);
-void	pf_send_deferred_syn(struct pf_state *);
 int	pf_match_addr(u_int8_t, struct pf_addr *, struct pf_addr *,
 	    struct pf_addr *, sa_family_t);
 int	pf_match_addr_range(struct pf_addr *, struct pf_addr *,
@@ -1704,6 +1665,10 @@ int	pf_match(u_int8_t, u_int32_t, u_int32_t, u_int32_t);
 int	pf_match_port(u_int8_t, u_int16_t, u_int16_t, u_int16_t);
 int	pf_match_uid(u_int8_t, uid_t, uid_t, uid_t);
 int	pf_match_gid(u_int8_t, gid_t, gid_t, gid_t);
+
+struct pf_state_scrub *
+	pf_state_scrub_get(void);
+void	pf_state_scrub_put(struct pf_state_scrub *);
 
 int	pf_refragment6(struct mbuf **, struct m_tag *mtag,
 	    struct sockaddr_in6 *, struct ifnet *, struct rtentry *);
@@ -1731,7 +1696,6 @@ void	pf_pkt_addr_changed(struct mbuf *);
 struct inpcb *pf_inp_lookup(struct mbuf *);
 void	pf_inp_link(struct mbuf *, struct inpcb *);
 void	pf_inp_unlink(struct inpcb *);
-int	pf_state_key_attach(struct pf_state_key *, struct pf_state *, int);
 int	pf_translate(struct pf_pdesc *, struct pf_addr *, u_int16_t,
 	    struct pf_addr *, u_int16_t, u_int16_t, int);
 int	pf_translate_af(struct pf_pdesc *);
@@ -1817,8 +1781,8 @@ void		 pf_tag2tagname(u_int16_t, char *);
 void		 pf_tag_ref(u_int16_t);
 void		 pf_tag_unref(u_int16_t);
 void		 pf_tag_packet(struct mbuf *, int, int);
-int		 pf_addr_compare(struct pf_addr *, struct pf_addr *,
-		    sa_family_t);
+int		 pf_addr_compare(const struct pf_addr *,
+		     const struct pf_addr *, sa_family_t);
 
 const struct pfq_ops
 		*pf_queue_manager(struct pf_queuespec *);
@@ -1826,10 +1790,16 @@ const struct pfq_ops
 extern struct pf_status	pf_status;
 extern struct pool	pf_frent_pl, pf_frag_pl;
 
+/*
+ * Protection/ownership of pf_pool_limit:
+ *	I	immutable after pfattach()
+ *	p	pf_lock
+ */
+
 struct pf_pool_limit {
-	void		*pp;
-	unsigned	 limit;
-	unsigned	 limit_new;
+	void		*pp;		/* [I] */
+	unsigned	 limit;		/* [p] */
+	unsigned	 limit_new;	/* [p] */
 };
 extern struct pf_pool_limit	pf_pool_limits[PF_LIMIT_MAX];
 
@@ -1854,7 +1824,8 @@ struct pf_ruleset	*pf_find_ruleset(const char *);
 struct pf_ruleset 	*pf_get_leaf_ruleset(char *, char **);
 struct pf_anchor 	*pf_create_anchor(struct pf_anchor *, const char *);
 struct pf_ruleset	*pf_find_or_create_ruleset(const char *);
-void			 pf_rs_initialize(void);
+void			 pf_anchor_rele(struct pf_anchor *);
+struct pf_anchor	*pf_anchor_take(struct pf_anchor *);
 
 /* The fingerprint functions can be linked into userland programs (tcpdump) */
 int	pf_osfp_add(struct pf_osfp_ioctl *);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: bfd.c,v 1.78 2021/09/14 09:15:55 mvs Exp $	*/
+/*	$OpenBSD: bfd.c,v 1.80 2023/08/03 09:49:08 mvs Exp $	*/
 
 /*
  * Copyright (c) 2016-2018 Peter Hessler <phessler@openbsd.org>
@@ -436,7 +436,6 @@ bfd_listener(struct bfd_config *bfd, unsigned int port)
 	struct socket		*so;
 	struct mbuf		*m = NULL, *mopt = NULL;
 	int			*ip, error;
-	int			 s;
 
 	/* sa_family and sa_len must be equal */
 	if (src->sa_family != dst->sa_family || src->sa_len != dst->sa_len)
@@ -453,9 +452,7 @@ bfd_listener(struct bfd_config *bfd, unsigned int port)
 	mopt->m_len = sizeof(int);
 	ip = mtod(mopt, int *);
 	*ip = MAXTTL;
-	s = solock(so);
 	error = sosetopt(so, IPPROTO_IP, IP_MINTTL, mopt);
-	sounlock(so, s);
 	m_freem(mopt);
 	if (error) {
 		printf("%s: sosetopt error %d\n",
@@ -480,9 +477,9 @@ bfd_listener(struct bfd_config *bfd, unsigned int port)
 		break;
 	}
 
-	s = solock(so);
+	solock(so);
 	error = sobind(so, m, p);
-	sounlock(so, s);
+	sounlock(so);
 	if (error) {
 		printf("%s: sobind error %d\n",
 		    __func__, error);
@@ -518,7 +515,6 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 	struct sockaddr_in6	*sin6;
 	struct sockaddr_in	*sin;
 	int		 error, *ip;
-	int		 s;
 
 	/* sa_family and sa_len must be equal */
 	if (src->sa_family != dst->sa_family || src->sa_len != dst->sa_len)
@@ -533,9 +529,7 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 	mopt->m_len = sizeof(int);
 	ip = mtod(mopt, int *);
 	*ip = IP_PORTRANGE_HIGH;
-	s = solock(so);
 	error = sosetopt(so, IPPROTO_IP, IP_PORTRANGE, mopt);
-	sounlock(so, s);
 	m_freem(mopt);
 	if (error) {
 		printf("%s: sosetopt error %d\n",
@@ -547,9 +541,7 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 	mopt->m_len = sizeof(int);
 	ip = mtod(mopt, int *);
 	*ip = MAXTTL;
-	s = solock(so);
 	error = sosetopt(so, IPPROTO_IP, IP_TTL, mopt);
-	sounlock(so, s);
 	m_freem(mopt);
 	if (error) {
 		printf("%s: sosetopt error %d\n",
@@ -561,9 +553,7 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 	mopt->m_len = sizeof(int);
 	ip = mtod(mopt, int *);
 	*ip = IPTOS_PREC_INTERNETCONTROL;
-	s = solock(so);
 	error = sosetopt(so, IPPROTO_IP, IP_TOS, mopt);
-	sounlock(so, s);
 	m_freem(mopt);
 	if (error) {
 		printf("%s: sosetopt error %d\n",
@@ -588,9 +578,9 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 		break;
 	}
 
-	s = solock(so);
+	solock(so);
 	error = sobind(so, m, p);
-	sounlock(so, s);
+	sounlock(so);
 	if (error) {
 		printf("%s: sobind error %d\n",
 		    __func__, error);
@@ -611,9 +601,9 @@ bfd_sender(struct bfd_config *bfd, unsigned int port)
 		break;
 	}
 
-	s = solock(so);
+	solock(so);
 	error = soconnect(so, m);
-	sounlock(so, s);
+	sounlock(so);
 	if (error && error != ECONNREFUSED) {
 		printf("%s: soconnect error %d\n",
 		    __func__, error);

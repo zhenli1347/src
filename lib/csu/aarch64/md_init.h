@@ -1,4 +1,4 @@
-/* $OpenBSD: md_init.h,v 1.10 2020/10/19 17:57:40 naddy Exp $ */
+/* $OpenBSD: md_init.h,v 1.12 2023/11/18 16:26:16 deraadt Exp $ */
 
 /*-
  * Copyright (c) 2001 Ross Harvey
@@ -45,6 +45,7 @@
 	"	.type " #entry_pt ",%function	\n" \
 	"	.align 4			\n" \
 	#entry_pt":				\n" \
+	"	bti	c			\n" \
 	"	sub	sp, sp, #16		\n" \
 	"	str	lr, [sp]		\n" \
 	"	/* fall thru */			\n" \
@@ -68,6 +69,7 @@
 	"	.globl	__start			\n" \
 	"_start:				\n" \
 	"__start:				\n" \
+	"	bti	c			\n" \
 	"	mov	x3, x2	/* cleanup */	\n" \
 	"/* Get argc/argv/envp from stack */	\n" \
 	"	ldr	x0, [sp]		\n" \
@@ -110,10 +112,6 @@
 	"					\n" \
 	"	b	___start		\n" \
 	"					\n" \
-	"_dl_exit:				\n" \
-	"	mov	x8, #" STR(SYS_exit) "	\n" \
-	"	svc	#0			\n" \
-	"	dsb	nsh			\n" \
-	"	isb				\n" \
+	"_csu_abort:				\n" \
 	"	udf	#0			\n" \
 	".previous");

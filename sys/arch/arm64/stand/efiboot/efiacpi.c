@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiacpi.c,v 1.14 2022/01/02 02:13:33 jsg Exp $	*/
+/*	$OpenBSD: efiacpi.c,v 1.16 2023/10/09 22:05:27 patrick Exp $	*/
 
 /*
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -491,11 +491,13 @@ efi_acpi_madt_gic_its(struct acpi_madt_gic_its *its)
 	static uint32_t phandle = 2;
 	void *node, *child;
 	uint64_t reg[2];
+	uint32_t its_id;
 	char name[32];
 
 	snprintf(name, sizeof(name), "gic-its@%llx", its->base_address);
 	reg[0] = htobe64(its->base_address);
 	reg[1] = htobe64(0x20000);
+	its_id = htobe32(its->gic_its_id);
 
 	/* Create "gic-its" node. */
 	node = fdt_find_node("/interrupt-controller");
@@ -504,6 +506,8 @@ efi_acpi_madt_gic_its(struct acpi_madt_gic_its *its)
 	fdt_node_add_property(child, "msi-controller", NULL, 0);
 	fdt_node_add_property(child, "reg", reg, sizeof(reg));
 	fdt_node_add_property(child, "phandle", &phandle, sizeof(phandle));
+	fdt_node_add_property(child, "openbsd,gic-its-id", &its_id,
+	    sizeof(its_id));
 	phandle++;
 }
 
@@ -569,7 +573,8 @@ efi_acpi_madt(struct acpi_table_header *hdr)
 		reg[3] = htobe64(0x100);
 		break;
 	case 3:
-		/* GICv3 */
+	case 4:
+		/* GICv3 and GICv4 */
 		compat = "arm,gic-v3";
 		reg[0] = htobe64(gicd_base);
 		reg[1] = htobe64(0x10000);

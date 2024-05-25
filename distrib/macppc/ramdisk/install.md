@@ -1,4 +1,4 @@
-#	$OpenBSD: install.md,v 1.76 2022/09/11 04:38:28 gkoehler Exp $
+#	$OpenBSD: install.md,v 1.78 2023/05/26 11:41:50 kn Exp $
 #
 # Copyright (c) 1996 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -54,8 +54,7 @@ WARNING: Putting an MBR partition table on $_disk will DESTROY the existing HFS
 $(pdisk -l $_disk)
 
 __EOT
-		ask_yn "Are you *sure* you want an MBR partition table on $_disk?"
-		[[ $resp == n ]] && return 1
+		ask_yn "Are you *sure* you want an MBR partition table on $_disk?" || return 1
 	fi
 
 	while :; do
@@ -74,7 +73,7 @@ __EOT
 		case $resp in
 		[wW]*)
 			echo -n "Creating a 1MB DOS partition and an OpenBSD partition for rest of $_disk..."
-			dd if=/dev/zero of=/dev/r${_disk}c bs=1m count=1
+			dd if=/dev/zero of=/dev/r${_disk}c bs=1m count=1 status=none
 			fdisk -iy -b "2048@1:06" $_disk >/dev/null
 			echo "done."
 			break ;;

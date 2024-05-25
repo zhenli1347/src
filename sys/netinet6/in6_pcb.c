@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6_pcb.c,v 1.123 2022/09/03 22:43:38 mvs Exp $	*/
+/*	$OpenBSD: in6_pcb.c,v 1.144 2024/04/12 16:07:09 bluhm Exp $	*/
 
 /*
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
@@ -114,11 +114,11 @@
 #include <net/pfvar.h>
 
 #include <netinet/in.h>
+#include <netinet6/in6_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
+#include <netinet6/ip6_var.h>
 #include <netinet/in_pcb.h>
-
-#include <netinet6/in6_var.h>
 
 #if NSTOEPLITZ > 0
 #include <net/toeplitz.h>
@@ -126,10 +126,13 @@
 
 const struct in6_addr zeroin6_addr;
 
-struct inpcb *in6_pcbhash_lookup(struct inpcbtable *, u_int,
+struct inpcb *in6_pcbhash_lookup(struct inpcbtable *, uint64_t, u_int,
     const struct in6_addr *, u_short, const struct in6_addr *, u_short);
 
-struct inpcbhead *
+struct inpcb * in6_pcblookup_lock(struct inpcbtable *, const struct in6_addr *,
+    u_int, const struct in6_addr *, u_int, u_int, int);
+
+uint64_t
 in6_pcbhash(struct inpcbtable *table, u_int rdomain,
     const struct in6_addr *faddr, u_short fport,
     const struct in6_addr *laddr, u_short lport)
@@ -143,13 +146,12 @@ in6_pcbhash(struct inpcbtable *table, u_int rdomain,
 	SipHash24_Update(&ctx, &fport, sizeof(fport));
 	SipHash24_Update(&ctx, laddr, sizeof(*laddr));
 	SipHash24_Update(&ctx, &lport, sizeof(lport));
-
-	return (&table->inpt_hashtbl[SipHash24_End(&ctx) & table->inpt_mask]);
+	return SipHash24_End(&ctx);
 }
 
 int
-in6_pcbaddrisavail(struct inpcb *inp, struct sockaddr_in6 *sin6, int wild,
-    struct proc *p)
+in6_pcbaddrisavail_lock(const struct inpcb *inp, struct sockaddr_in6 *sin6,
+    int wild, struct proc *p, int lock)
 {
 	struct socket *so = inp->inp_socket;
 	struct inpcbtable *table = inp->inp_table;
@@ -158,7 +160,8 @@ in6_pcbaddrisavail(struct inpcb *inp, struct sockaddr_in6 *sin6, int wild,
 
 	wild |= INPLOOKUP_IPV6;
 	/* KAME hack: embed scopeid */
-	if (in6_embedscope(&sin6->sin6_addr, sin6, inp) != 0)
+	if (in6_embedscope(&sin6->sin6_addr, sin6,
+	    inp->inp_outputopts6, inp->inp_moptions6) != 0)
 		return (EINVAL);
 	/* this must be cleared for ifa_ifwithaddr() */
 	sin6->sin6_scope_id = 0;
@@ -214,24 +217,33 @@ in6_pcbaddrisavail(struct inpcb *inp, struct sockaddr_in6 *sin6, int wild,
 		int error = 0;
 
 		if (so->so_euid && !IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr)) {
-			t = in_pcblookup_local(table, &sin6->sin6_addr, lport,
-			    INPLOOKUP_WILDCARD | INPLOOKUP_IPV6,
-			    inp->inp_rtableid);
+			t = in_pcblookup_local_lock(table, &sin6->sin6_addr,
+			    lport, INPLOOKUP_WILDCARD | INPLOOKUP_IPV6,
+			    inp->inp_rtableid, lock);
 			if (t && (so->so_euid != t->inp_socket->so_euid))
 				error = EADDRINUSE;
-			in_pcbunref(t);
+			if (lock == IN_PCBLOCK_GRAB)
+				in_pcbunref(t);
 			if (error)
 				return (error);
 		}
-		t = in_pcblookup_local(table, &sin6->sin6_addr, lport,
-		    wild, inp->inp_rtableid);
+		t = in_pcblookup_local_lock(table, &sin6->sin6_addr, lport,
+		    wild, inp->inp_rtableid, lock);
 		if (t && (reuseport & t->inp_socket->so_options) == 0)
 			error = EADDRINUSE;
-		in_pcbunref(t);
+		if (lock == IN_PCBLOCK_GRAB)
+			in_pcbunref(t);
 		if (error)
 			return (error);
 	}
 	return (0);
+}
+
+int
+in6_pcbaddrisavail(const struct inpcb *inp, struct sockaddr_in6 *sin6,
+    int wild, struct proc *p)
+{
+	return in6_pcbaddrisavail_lock(inp, sin6, wild, p, IN_PCBLOCK_GRAB);
 }
 
 /*
@@ -245,13 +257,14 @@ in6_pcbaddrisavail(struct inpcb *inp, struct sockaddr_in6 *sin6, int wild,
 int
 in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 {
-	struct in6_addr *in6a = NULL;
+	struct inpcbtable *table = inp->inp_table;
+	const struct in6_addr *in6a;
 	struct sockaddr_in6 *sin6;
 	struct inpcb *t;
 	int error;
 	struct sockaddr_in6 tmp;
 
-	KASSERT(inp->inp_flags & INP_IPV6);
+	KASSERT(ISSET(inp->inp_flags, INP_IPV6));
 
 	if ((error = in6_nam2sin6(nam, &sin6)))
 		return (error);
@@ -266,8 +279,9 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 	sin6 = &tmp;
 
 	/* KAME hack: embed scopeid */
-	if (in6_embedscope(&sin6->sin6_addr, sin6, inp) != 0)
-		return EINVAL;
+	if (in6_embedscope(&sin6->sin6_addr, sin6,
+	    inp->inp_outputopts6, inp->inp_moptions6) != 0)
+		return (EINVAL);
 	/* this must be cleared for ifa_ifwithaddr() */
 	sin6->sin6_scope_id = 0;
 
@@ -283,11 +297,15 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 
 	inp->inp_ipv6.ip6_hlim = (u_int8_t)in6_selecthlim(inp);
 
-	t = in6_pcblookup(inp->inp_table, &sin6->sin6_addr, sin6->sin6_port,
+	/* keep lookup, modification, and rehash in sync */
+	mtx_enter(&table->inpt_mtx);
+
+	t = in6_pcblookup_lock(inp->inp_table, &sin6->sin6_addr,
+	    sin6->sin6_port,
 	    IN6_IS_ADDR_UNSPECIFIED(&inp->inp_laddr6) ? in6a : &inp->inp_laddr6,
-	    inp->inp_lport, inp->inp_rtableid);
+	    inp->inp_lport, inp->inp_rtableid, IN_PCBLOCK_HOLD);
 	if (t != NULL) {
-		in_pcbunref(t);
+		mtx_leave(&table->inpt_mtx);
 		return (EADDRINUSE);
 	}
 
@@ -295,15 +313,17 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 
 	if (IN6_IS_ADDR_UNSPECIFIED(&inp->inp_laddr6)) {
 		if (inp->inp_lport == 0) {
-			error = in_pcbbind(inp, NULL, curproc);
-			if (error)
+			error = in_pcbbind_locked(inp, NULL, in6a, curproc);
+			if (error) {
+				mtx_leave(&table->inpt_mtx);
 				return (error);
-			t = in6_pcblookup(inp->inp_table, &sin6->sin6_addr,
+			}
+			t = in6_pcblookup_lock(inp->inp_table, &sin6->sin6_addr,
 			    sin6->sin6_port, in6a, inp->inp_lport,
-			    inp->inp_rtableid);
+			    inp->inp_rtableid, IN_PCBLOCK_HOLD);
 			if (t != NULL) {
 				inp->inp_lport = 0;
-				in_pcbunref(t);
+				mtx_leave(&table->inpt_mtx);
 				return (EADDRINUSE);
 			}
 		}
@@ -311,6 +331,10 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 	}
 	inp->inp_faddr6 = sin6->sin6_addr;
 	inp->inp_fport = sin6->sin6_port;
+	in_pcbrehash(inp);
+
+	mtx_leave(&table->inpt_mtx);
+
 	inp->inp_flowinfo &= ~IPV6_FLOWLABEL_MASK;
 	if (ip6_auto_flowlabel)
 		inp->inp_flowinfo |=
@@ -319,7 +343,6 @@ in6_pcbconnect(struct inpcb *inp, struct mbuf *nam)
 	inp->inp_flowid = stoeplitz_ip6port(&inp->inp_faddr6,
 	    &inp->inp_laddr6, inp->inp_fport, inp->inp_lport);
 #endif
-	in_pcbrehash(inp);
 	return (0);
 }
 
@@ -368,10 +391,10 @@ in6_setpeeraddr(struct inpcb *inp, struct mbuf *nam)
 int
 in6_sockaddr(struct socket *so, struct mbuf *nam)
 {
-	struct inpcb *in6p;
+	struct inpcb *inp;
 
-	in6p = sotoinpcb(so);
-	in6_setsockaddr(in6p, nam);
+	inp = sotoinpcb(so);
+	in6_setsockaddr(inp, nam);
 
 	return (0);
 }
@@ -379,10 +402,10 @@ in6_sockaddr(struct socket *so, struct mbuf *nam)
 int
 in6_peeraddr(struct socket *so, struct mbuf *nam)
 {
-	struct inpcb *in6p;
+	struct inpcb *inp;
 
-	in6p = sotoinpcb(so);
-	in6_setpeeraddr(in6p, nam);
+	inp = sotoinpcb(so);
+	in6_setpeeraddr(inp, nam);
 
 	return (0);
 }
@@ -400,7 +423,7 @@ in6_peeraddr(struct socket *so, struct mbuf *nam)
  *    once PCB to be notified has been located.
  */
 void
-in6_pcbnotify(struct inpcbtable *table, struct sockaddr_in6 *dst,
+in6_pcbnotify(struct inpcbtable *table, const struct sockaddr_in6 *dst,
     uint fport_arg, const struct sockaddr_in6 *src, uint lport_arg,
     u_int rtable, int cmd, void *cmdarg, void (*notify)(struct inpcb *, int))
 {
@@ -456,8 +479,7 @@ in6_pcbnotify(struct inpcbtable *table, struct sockaddr_in6 *dst,
 	rw_enter_write(&table->inpt_notify);
 	mtx_enter(&table->inpt_mtx);
 	TAILQ_FOREACH(inp, &table->inpt_queue, inp_queue) {
-		if ((inp->inp_flags & INP_IPV6) == 0)
-			continue;
+		KASSERT(ISSET(inp->inp_flags, INP_IPV6));
 
 		/*
 		 * Under the following condition, notify of redirects
@@ -493,13 +515,10 @@ in6_pcbnotify(struct inpcbtable *table, struct sockaddr_in6 *dst,
 		if ((PRC_IS_REDIRECT(cmd) || cmd == PRC_HOSTDEAD) &&
 		    IN6_IS_ADDR_UNSPECIFIED(&inp->inp_laddr6) &&
 		    inp->inp_route.ro_rt &&
-		    !(inp->inp_route.ro_rt->rt_flags & RTF_HOST)) {
-			struct sockaddr_in6 *dst6;
-
-			dst6 = satosin6(&inp->inp_route.ro_dst);
-			if (IN6_ARE_ADDR_EQUAL(&dst6->sin6_addr,
-			    &dst->sin6_addr))
-				goto do_notify;
+		    !(inp->inp_route.ro_rt->rt_flags & RTF_HOST) &&
+		    IN6_ARE_ADDR_EQUAL(&inp->inp_route.ro_dstsin6.sin6_addr,
+		    &dst->sin6_addr)) {
+			goto do_notify;
 		}
 
 		/*
@@ -511,14 +530,12 @@ in6_pcbnotify(struct inpcbtable *table, struct sockaddr_in6 *dst,
 		 * as usual.
 		 */
 		if (lport == 0 && fport == 0 && flowinfo &&
-		    inp->inp_socket != NULL &&
 		    flowinfo == (inp->inp_flowinfo & IPV6_FLOWLABEL_MASK) &&
 		    IN6_ARE_ADDR_EQUAL(&inp->inp_laddr6, &sa6_src.sin6_addr))
 			goto do_notify;
 		else if (!IN6_ARE_ADDR_EQUAL(&inp->inp_faddr6,
 					     &dst->sin6_addr) ||
 			 rtable_l2(inp->inp_rtableid) != rdomain ||
-			 inp->inp_socket == NULL ||
 			 (lport && inp->inp_lport != lport) ||
 			 (!IN6_IS_ADDR_UNSPECIFIED(&sa6_src.sin6_addr) &&
 			  !IN6_ARE_ADDR_EQUAL(&inp->inp_laddr6,
@@ -540,8 +557,17 @@ in6_pcbnotify(struct inpcbtable *table, struct sockaddr_in6 *dst,
 	rw_exit_write(&table->inpt_notify);
 }
 
+struct rtentry *
+in6_pcbrtentry(struct inpcb *inp)
+{
+	if (IN6_IS_ADDR_UNSPECIFIED(&inp->inp_faddr6))
+		return (NULL);
+	return (route6_mpath(&inp->inp_route, &inp->inp_faddr6,
+	    &inp->inp_laddr6, inp->inp_rtableid));
+}
+
 struct inpcb *
-in6_pcbhash_lookup(struct inpcbtable *table, u_int rdomain,
+in6_pcbhash_lookup(struct inpcbtable *table, uint64_t hash, u_int rdomain,
     const struct in6_addr *faddr, u_short fport,
     const struct in6_addr *laddr, u_short lport)
 {
@@ -551,10 +577,10 @@ in6_pcbhash_lookup(struct inpcbtable *table, u_int rdomain,
 	NET_ASSERT_LOCKED();
 	MUTEX_ASSERT_LOCKED(&table->inpt_mtx);
 
-	head = in6_pcbhash(table, rdomain, faddr, fport, laddr, lport);
+	head = &table->inpt_hashtbl[hash & table->inpt_mask];
 	LIST_FOREACH(inp, head, inp_hash) {
-		if (!ISSET(inp->inp_flags, INP_IPV6))
-			continue;
+		KASSERT(ISSET(inp->inp_flags, INP_IPV6));
+
 		if (inp->inp_fport == fport && inp->inp_lport == lport &&
 		    IN6_ARE_ADDR_EQUAL(&inp->inp_faddr6, faddr) &&
 		    IN6_ARE_ADDR_EQUAL(&inp->inp_laddr6, laddr) &&
@@ -577,17 +603,30 @@ in6_pcbhash_lookup(struct inpcbtable *table, u_int rdomain,
 }
 
 struct inpcb *
-in6_pcblookup(struct inpcbtable *table, const struct in6_addr *faddr,
-    u_int fport, const struct in6_addr *laddr, u_int lport, u_int rtable)
+in6_pcblookup_lock(struct inpcbtable *table, const struct in6_addr *faddr,
+    u_int fport, const struct in6_addr *laddr, u_int lport, u_int rtable,
+    int lock)
 {
 	struct inpcb *inp;
+	uint64_t hash;
 	u_int rdomain;
 
 	rdomain = rtable_l2(rtable);
-	mtx_enter(&table->inpt_mtx);
-	inp = in6_pcbhash_lookup(table, rdomain, faddr, fport, laddr, lport);
-	in_pcbref(inp);
-	mtx_leave(&table->inpt_mtx);
+	hash = in6_pcbhash(table, rdomain, faddr, fport, laddr, lport);
+
+	if (lock == IN_PCBLOCK_GRAB) {
+		mtx_enter(&table->inpt_mtx);
+	} else {
+		KASSERT(lock == IN_PCBLOCK_HOLD);
+		MUTEX_ASSERT_LOCKED(&table->inpt_mtx);
+	}
+	inp = in6_pcbhash_lookup(table, hash, rdomain,
+	    faddr, fport, laddr, lport);
+	if (lock == IN_PCBLOCK_GRAB) {
+		in_pcbref(inp);
+		mtx_leave(&table->inpt_mtx);
+	}
+
 #ifdef DIAGNOSTIC
 	if (inp == NULL && in_pcbnotifymiss) {
 		printf("%s: faddr= fport=%d laddr= lport=%d rdom=%u\n",
@@ -598,11 +637,20 @@ in6_pcblookup(struct inpcbtable *table, const struct in6_addr *faddr,
 }
 
 struct inpcb *
+in6_pcblookup(struct inpcbtable *table, const struct in6_addr *faddr,
+    u_int fport, const struct in6_addr *laddr, u_int lport, u_int rtable)
+{
+	return in6_pcblookup_lock(table, faddr, fport, laddr, lport, rtable,
+	    IN_PCBLOCK_GRAB);
+}
+
+struct inpcb *
 in6_pcblookup_listen(struct inpcbtable *table, struct in6_addr *laddr,
     u_int lport, struct mbuf *m, u_int rtable)
 {
 	const struct in6_addr *key1, *key2;
 	struct inpcb *inp;
+	uint64_t hash;
 	u_int rdomain;
 
 	key1 = laddr;
@@ -636,14 +684,20 @@ in6_pcblookup_listen(struct inpcbtable *table, struct in6_addr *laddr,
 #endif
 
 	rdomain = rtable_l2(rtable);
+	hash = in6_pcbhash(table, rdomain, &zeroin6_addr, 0, key1, lport);
+
 	mtx_enter(&table->inpt_mtx);
-	inp = in6_pcbhash_lookup(table, rdomain, &zeroin6_addr, 0, key1, lport);
+	inp = in6_pcbhash_lookup(table, hash, rdomain,
+	    &zeroin6_addr, 0, key1, lport);
 	if (inp == NULL && ! IN6_ARE_ADDR_EQUAL(key1, key2)) {
-		inp = in6_pcbhash_lookup(table, rdomain,
+		hash = in6_pcbhash(table, rdomain,
+		    &zeroin6_addr, 0, key2, lport);
+		inp = in6_pcbhash_lookup(table, hash, rdomain,
 		    &zeroin6_addr, 0, key2, lport);
 	}
 	in_pcbref(inp);
 	mtx_leave(&table->inpt_mtx);
+
 #ifdef DIAGNOSTIC
 	if (inp == NULL && in_pcbnotifymiss) {
 		printf("%s: laddr= lport=%d rdom=%u\n",

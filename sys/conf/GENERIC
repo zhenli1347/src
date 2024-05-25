@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.286 2022/09/30 02:56:23 jsg Exp $
+#	$OpenBSD: GENERIC,v 1.296 2024/05/05 07:26:58 jsg Exp $
 #
 #	Machine-independent option; used by all architectures for their
 #	GENERIC kernel
@@ -29,7 +29,6 @@ option		UVM_SWAP_ENCRYPT# support encryption of pages going to swap
 
 option		FFS		# UFS
 option		FFS2		# UFS2
-option		FFS_SOFTUPDATES	# Soft updates
 option		UFS_DIRHASH	# hash large directories
 option		QUOTA		# UFS quotas
 option		EXT2FS		# Second Extended Filesystem
@@ -90,6 +89,7 @@ pseudo-device	veb		# virtual Ethernet bridge
 pseudo-device	carp		# CARP protocol support
 pseudo-device	etherip		# EtherIP (RFC 3378)
 pseudo-device	gif		# IPv[46] over IPv[46] tunnel (RFC1933)
+pseudo-device	sec		# route based IPsec VPN interface
 pseudo-device	gre		# GRE encapsulation interface
 pseudo-device	loop		# network loopback
 pseudo-device	mpe		# MPLS PE interface

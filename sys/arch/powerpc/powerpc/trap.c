@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.127 2022/11/02 07:20:07 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.134 2024/01/11 19:16:27 miod Exp $	*/
 /*	$NetBSD: trap.c,v 1.3 1996/10/13 03:31:37 christos Exp $	*/
 
 /*
@@ -61,13 +61,11 @@ static int fix_unaligned(struct proc *p, struct trapframe *frame);
 int badaddr(char *addr, u_int32_t len);
 void trap(struct trapframe *frame);
 
-/* These definitions should probably be somewhere else				XXX */
-#define	FIRSTARG	3		/* first argument is in reg 3 */
-#define	NARGREG		8		/* 8 args are in registers */
-#define	MOREARGS(sp)	((caddr_t)((int)(sp) + 8)) /* more args go here */
+/* XXX This definition should probably be somewhere else */
+#define	FIRSTARG	3		/* first syscall argument is in reg 3 */
 
 #ifdef ALTIVEC
-static int altivec_assist(void *);
+static int altivec_assist(struct proc *p, vaddr_t);
 
 /*
  * Save state of the vector processor, This is done lazily in the hope
@@ -239,11 +237,9 @@ trap(struct trapframe *frame)
 	struct vm_map *map;
 	vaddr_t va;
 	int access_type;
-	const struct sysent *callp;
-	size_t argsize;
+	const struct sysent *callp = sysent;
 	register_t code, error;
-	register_t *params, rval[2], args[10];
-	int n;
+	register_t *params, rval[2];
 
 	if (frame->srr1 & PSL_PR) {
 		type |= EXC_USER;
@@ -337,7 +333,7 @@ trap(struct trapframe *frame)
 		    frame->srr0, 0, 1))
 			break;
 
-		access_type = PROT_READ | PROT_EXEC;
+		access_type = PROT_EXEC;
 
 		error = uvm_fault(&p->p_vmspace->vm_map,
 		    trunc_page(frame->srr0), 0, access_type);
@@ -361,44 +357,14 @@ trap(struct trapframe *frame)
 		uvmexp.syscalls++;
 
 		code = frame->fixreg[0];
+	        if (code <= 0 || code >= SYS_MAXSYSCALL) {
+			error = ENOSYS;
+			goto bad;
+		}
+
+	        callp += code;
+
 		params = frame->fixreg + FIRSTARG;
-
-		switch (code) {
-		case SYS_syscall:
-			/*
-			 * code is first argument,
-			 * followed by actual args.
-			 */
-			code = *params++;
-			break;
-		case SYS___syscall:
-			/*
-			 * Like syscall, but code is a quad,
-			 * so as to maintain quad alignment
-			 * for the rest of the args.
-			 */
-			params++;
-			code = *params++;
-			break;
-		default:
-			break;
-		}
-
-		callp = sysent;
-		if (code < 0 || code >= SYS_MAXSYSCALL)
-			callp += SYS_syscall;
-		else
-			callp += code;
-		argsize = callp->sy_argsize;
-		n = NARGREG - (params - (frame->fixreg + FIRSTARG));
-		if (argsize > n * sizeof(register_t)) {
-			bcopy(params, args, n * sizeof(register_t));
-
-			if ((error = copyin(MOREARGS(frame->fixreg[1]),
-			   args + n, argsize - n * sizeof(register_t))))
-				goto bad;
-			params = args;
-		}
 
 		rval[0] = 0;
 		rval[1] = frame->fixreg[FIRSTARG + 1];
@@ -516,7 +482,7 @@ brain_damage:
 	case EXC_VECAST_G4|EXC_USER:
 	case EXC_VECAST_G5|EXC_USER:
 #ifdef ALTIVEC
-		if (altivec_assist((void *)frame->srr0) == 0) {
+		if (altivec_assist(p, (vaddr_t)frame->srr0) == 0) {
 			frame->srr0 += 4;
 			break;
 		}
@@ -648,8 +614,26 @@ fix_unaligned(struct proc *p, struct trapframe *frame)
 }
 
 #ifdef ALTIVEC
+static inline int
+copyinsn(struct proc *p, vaddr_t uva, int *insn)
+{
+	struct vm_map *map = &p->p_vmspace->vm_map;
+	int error = 0;
+
+	if (__predict_false((uva & 3) != 0))
+		return EFAULT;
+
+	do {
+		if (pmap_copyinsn(map->pmap, uva, (uint32_t *)insn) == 0)
+			break;
+		error = uvm_fault(map, trunc_page(uva), 0, PROT_EXEC);
+	} while (error == 0);
+
+	return error;
+}
+
 static int
-altivec_assist(void *user_pc)
+altivec_assist(struct proc *p, vaddr_t user_pc)
 {
 	/* These labels are in vecast.S */
 	void vecast_asm(uint32_t, void *);
@@ -665,10 +649,12 @@ altivec_assist(void *user_pc)
 	void vecast_vctsxs(void);
 
 	uint32_t insn, op, va, vc, lo;
+	int error;
 	void (*lab)(void);
 
-	if (copyin(user_pc, &insn, sizeof(insn)) != 0)
-		return -1;
+	error = copyinsn(p, user_pc, &insn);
+	if (error)
+		return error;
 	op = (insn & 0xfc000000) >> 26;	/* primary opcode */
 	va = (insn & 0x001f0000) >> 16;	/* vector A */
 	vc = (insn & 0x000007c0) >>  6;	/* vector C or extended opcode */
@@ -676,7 +662,7 @@ altivec_assist(void *user_pc)
 
 	/* Stop if this isn't an altivec instruction. */
 	if (op != 4)
-		return -1;
+		return EINVAL;
 
 	/* Decide which instruction to emulate. */
 	lab = NULL;
@@ -725,6 +711,6 @@ altivec_assist(void *user_pc)
 		vecast_asm(insn, lab);	/* Emulate it. */
 		return 0;
 	} else
-		return -1;
+		return EINVAL;
 }
 #endif

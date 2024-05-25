@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_extern.h,v 1.166 2022/11/17 18:53:05 deraadt Exp $	*/
+/*	$OpenBSD: uvm_extern.h,v 1.174 2024/04/02 08:39:17 deraadt Exp $	*/
 /*	$NetBSD: uvm_extern.h,v 1.57 2001/03/09 01:02:12 chs Exp $	*/
 
 /*
@@ -111,7 +111,6 @@ typedef int		vm_prot_t;
 #define UVM_FLAG_STACK   0x2000000 /* page may contain a stack */
 #define UVM_FLAG_WC      0x4000000 /* write combining */
 #define UVM_FLAG_CONCEAL 0x8000000 /* omit from dumps */
-#define UVM_FLAG_SYSCALL 0x10000000 /* system calls allowed */
 #define UVM_FLAG_SIGALTSTACK 0x20000000 /* sigaltstack validation required */
 
 /* macros to extract info */
@@ -223,7 +222,7 @@ struct vmspace {
  * such as mbuf pools within address ranges that are reachable by devices
  * that perform DMA.
  *
- * It is also to discourge memory allocations from being satisfied from ranges
+ * It is also to discourage memory allocations from being satisfied from ranges
  * such as the ISA memory range, if they can be satisfied with allocation
  * from other ranges.
  *
@@ -412,7 +411,6 @@ void			uvmspace_free(struct vmspace *);
 struct vmspace		*uvmspace_share(struct process *);
 int			uvm_share(vm_map_t, vaddr_t, vm_prot_t,
 			    vm_map_t, vaddr_t, vsize_t);
-void			uvm_meter(void);
 int			uvm_sysctl(int *, u_int, void *, size_t *, 
 			    void *, size_t, struct proc *);
 struct vm_page		*uvm_pagealloc(struct uvm_object *,
@@ -440,8 +438,8 @@ void			uvm_pmr_use_inc(paddr_t, paddr_t);
 void			uvm_swap_init(void);
 typedef int		uvm_coredump_setup_cb(int _nsegment, void *_cookie);
 typedef int		uvm_coredump_walk_cb(vaddr_t _start, vaddr_t _realend,
-			    vaddr_t _end, vm_prot_t _prot, int _nsegment,
-			    void *_cookie);
+			    vaddr_t _end, vm_prot_t _prot, int _isvnode,
+			    int _nsegment, void *_cookie);
 int			uvm_coredump_walkmap(struct proc *_p,
 			    uvm_coredump_setup_cb *_setup,
 			    uvm_coredump_walk_cb *_walk, void *_cookie);

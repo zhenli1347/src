@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioraw.c,v 1.7 2022/05/04 23:17:25 dv Exp $	*/
+/*	$OpenBSD: vioraw.c,v 1.11 2023/09/14 15:25:43 dv Exp $	*/
 /*
  * Copyright (c) 2018 Ori Bernstein <ori@eigenstate.org>
  *
@@ -32,9 +32,21 @@ raw_pread(void *file, char *buf, size_t len, off_t off)
 }
 
 static ssize_t
+raw_preadv(void *file, struct iovec *iov, int cnt, off_t offset)
+{
+	return preadv(*(int *)file, iov, cnt, offset);
+}
+
+static ssize_t
 raw_pwrite(void *file, char *buf, size_t len, off_t off)
 {
 	return pwrite(*(int *)file, buf, len, off);
+}
+
+static ssize_t
+raw_pwritev(void *file, struct iovec *iov, int cnt, off_t offset)
+{
+	return pwritev(*(int *)file, iov, cnt, offset);
 }
 
 static void
@@ -46,9 +58,8 @@ raw_close(void *file, int stayopen)
 }
 
 /*
- * Initializes a raw disk image backing file from an fd.
- * Stores the number of 512 byte sectors in *szp,
- * returning -1 for error, 0 for success.
+ * Initializes a raw disk image backing file from an fd.  Stores the
+ * number of bytes in *szp, returning -1 for error, 0 for success.
  */
 int
 virtio_raw_init(struct virtio_backing *file, off_t *szp, int *fd, size_t nfd)
@@ -57,21 +68,24 @@ virtio_raw_init(struct virtio_backing *file, off_t *szp, int *fd, size_t nfd)
 	int *fdp;
 
 	if (nfd != 1)
-		return -1;
+		return (-1);
+
 	sz = lseek(fd[0], 0, SEEK_END);
 	if (sz == -1)
-		return -1;
+		return (-1);
 
 	fdp = malloc(sizeof(int));
 	if (!fdp)
-		return -1;
+		return (-1);
 	*fdp = fd[0];
 	file->p = fdp;
 	file->pread = raw_pread;
+	file->preadv = raw_preadv;
 	file->pwrite = raw_pwrite;
+	file->pwritev = raw_pwritev;
 	file->close = raw_close;
 	*szp = sz;
-	return 0;
+	return (0);
 }
 
 /*

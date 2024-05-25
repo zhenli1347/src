@@ -1,4 +1,4 @@
-/* $OpenBSD: rkdrm.h,v 1.2 2020/06/08 04:47:58 jsg Exp $ */
+/* $OpenBSD: rkdrm.h,v 1.4 2023/09/11 04:51:24 jsg Exp $ */
 /* $NetBSD: rk_drm.h,v 1.1 2019/11/09 23:30:14 jmcneill Exp $ */
 /*-
  * Copyright (c) 2019 Jared D. McNeill <jmcneill@invisible.ca>
@@ -33,9 +33,10 @@
 #include <dev/wscons/wsdisplayvar.h>
 #include <dev/rasops/rasops.h>
 
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_gem_dma_helper.h>
 
 #define DRIVER_AUTHOR		"Jared McNeill"
 
@@ -82,13 +83,7 @@ struct rkdrm_softc {
 
 struct rkdrm_framebuffer {
 	struct drm_framebuffer	base;
-	struct drm_gem_cma_object *obj;
-};
-
-struct rkdrm_ports {
-	int			phandle;
-	struct drm_device	*ddev;
-	TAILQ_ENTRY(rkdrm_ports) entries;
+	struct drm_gem_dma_object *obj;
 };
 
 struct rkdrm_fbdev {

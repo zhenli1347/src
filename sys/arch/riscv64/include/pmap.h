@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.6 2021/05/16 03:29:35 jsg Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.12 2024/04/06 18:33:54 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2019-2020 Brian Bamsch <bbamsch@google.com>
@@ -44,8 +44,7 @@
 /* cache flags */
 // XXX These are duplicated from arm64 and may need some reworking
 #define PMAP_CACHE_CI		(PMAP_MD0)		/* cache inhibit */
-#define PMAP_CACHE_WT		(PMAP_MD1)		/* writethru */
-#define PMAP_CACHE_WB		(PMAP_MD1|PMAP_MD0)	/* writeback */
+#define PMAP_CACHE_WB		(PMAP_MD1)		/* writeback */
 #define PMAP_CACHE_DEV		(PMAP_MD2)		/* device mapping */
 #define PMAP_CACHE_BITS		(PMAP_MD0|PMAP_MD1|PMAP_MD2)
 
@@ -95,8 +94,7 @@ extern struct pmap kernel_pmap_;
 
 vaddr_t pmap_bootstrap(long kvo, paddr_t lpt1,
 		vaddr_t kernelstart, vaddr_t kernelend,
-		paddr_t memstart, paddr_t memend,
-		paddr_t ramstart, paddr_t ramend);
+		paddr_t memstart, paddr_t memend);
 void pmap_kenter_cache(vaddr_t va, paddr_t pa, vm_prot_t prot, int cacheable);
 void pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot);
 
@@ -106,17 +104,19 @@ void pmap_physload_avail(void);
 
 #define PMAP_GROWKERNEL
 
+#define	PHYS_TO_DMAP(pa)	((pa) - dmap_phys_base + DMAP_MIN_ADDRESS)
+
 struct pv_entry;
 
 /* investigate */
 #define pmap_unuse_final(p)		do { /* nothing */ } while (0)
 int	pmap_fault_fixup(pmap_t, vaddr_t, vm_prot_t);
 void	pmap_postinit(void);
+void	pmap_init_percpu(void);
 
 #endif /* _KERNEL && !_LOCORE */
 
 #ifndef _LOCORE
-#define __HAVE_VM_PAGE_MD
 struct vm_page_md {
 	struct mutex pv_mtx;
 	LIST_HEAD(,pte_desc) pv_list;

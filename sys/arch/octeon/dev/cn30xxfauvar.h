@@ -1,4 +1,4 @@
-/*	$OpenBSD: cn30xxfauvar.h,v 1.3 2016/07/10 10:18:58 visa Exp $	*/
+/*	$OpenBSD: cn30xxfauvar.h,v 1.5 2024/05/20 23:13:33 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007 Internet Initiative Japan, Inc.
@@ -13,10 +13,10 @@
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -42,29 +42,9 @@ void		cn30xxfau_op_init(struct cn30xxfau_desc *, size_t, size_t);
 uint64_t	cn30xxfau_op_save(struct cn30xxfau_desc *);
 void		cn30xxfau_op_restore(struct cn30xxfau_desc *, uint64_t);
 int64_t		cn30xxfau_op_inc_8(struct cn30xxfau_desc *, int64_t);
-int32_t		cn30xxfau_op_inc_4(struct cn30xxfau_desc *, int32_t);
-int16_t		cn30xxfau_op_inc_2(struct cn30xxfau_desc *, int16_t);
-int8_t		cn30xxfau_op_inc_1(struct cn30xxfau_desc *, int8_t);
 int64_t		cn30xxfau_op_incwait_8(struct cn30xxfau_desc *, int);
-int32_t		cn30xxfau_op_incwait_4(struct cn30xxfau_desc *, int);
-int16_t		cn30xxfau_op_incwait_2(struct cn30xxfau_desc *, int);
-int8_t		cn30xxfau_op_incwait_1(struct cn30xxfau_desc *, int);
-int64_t		cn30xxfau_op_get_8(struct cn30xxfau_desc *);
-int32_t		cn30xxfau_op_get_4(struct cn30xxfau_desc *);
-int16_t		cn30xxfau_op_get_2(struct cn30xxfau_desc *);
-int8_t		cn30xxfau_op_get_1(struct cn30xxfau_desc *);
-int64_t		cn30xxfau_op_getwait_8(struct cn30xxfau_desc *);
-int32_t		cn30xxfau_op_getwait_4(struct cn30xxfau_desc *);
-int16_t		cn30xxfau_op_getwait_2(struct cn30xxfau_desc *);
-int8_t		cn30xxfau_op_getwait_1(struct cn30xxfau_desc *);
 void		cn30xxfau_op_add_8(struct cn30xxfau_desc *, int64_t);
-void		cn30xxfau_op_add_4(struct cn30xxfau_desc *, int32_t);
-void		cn30xxfau_op_add_2(struct cn30xxfau_desc *, int16_t);
-void		cn30xxfau_op_add_1(struct cn30xxfau_desc *, int8_t);
 void		cn30xxfau_op_set_8(struct cn30xxfau_desc *, int64_t);
-void		cn30xxfau_op_set_4(struct cn30xxfau_desc *, int32_t);
-void		cn30xxfau_op_set_2(struct cn30xxfau_desc *, int16_t);
-void		cn30xxfau_op_set_1(struct cn30xxfau_desc *, int8_t);
 
 /* ---- old API */
 

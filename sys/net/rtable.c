@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtable.c,v 1.80 2022/06/29 22:20:47 bluhm Exp $ */
+/*	$OpenBSD: rtable.c,v 1.87 2024/04/09 12:53:08 claudio Exp $ */
 
 /*
  * Copyright (c) 2014-2016 Martin Pieuchot
@@ -30,6 +30,7 @@
 
 #include <net/rtable.h>
 #include <net/route.h>
+#include <net/art.h>
 
 /*
  * Structures used by rtable_get() to retrieve the corresponding
@@ -349,9 +350,10 @@ rtable_l2set(unsigned int rtableid, unsigned int rdomain, unsigned int loifidx)
 }
 
 
-static inline uint8_t	*satoaddr(struct art_root *, struct sockaddr *);
+static inline const uint8_t *satoaddr(struct art_root *,
+    const struct sockaddr *);
 
-int	an_match(struct art_node *, struct sockaddr *, int);
+int	an_match(struct art_node *, const struct sockaddr *, int);
 void	rtentry_ref(void *, void *);
 void	rtentry_unref(void *, void *);
 
@@ -376,10 +378,12 @@ rtable_setsource(unsigned int rtableid, int af, struct sockaddr *src)
 {
 	struct art_root		*ar;
 
+	NET_ASSERT_LOCKED_EXCLUSIVE();
+
 	if ((ar = rtable_get(rtableid, af)) == NULL)
 		return (EAFNOSUPPORT);
 
-	ar->source = src;
+	ar->ar_source = src;
 
 	return (0);
 }
@@ -389,11 +393,13 @@ rtable_getsource(unsigned int rtableid, int af)
 {
 	struct art_root		*ar;
 
+	NET_ASSERT_LOCKED();
+
 	ar = rtable_get(rtableid, af);
 	if (ar == NULL)
 		return (NULL);
 
-	return (ar->source);
+	return (ar->ar_source);
 }
 
 void
@@ -410,14 +416,14 @@ rtable_clearsource(unsigned int rtableid, struct sockaddr *src)
 }
 
 struct rtentry *
-rtable_lookup(unsigned int rtableid, struct sockaddr *dst,
-    struct sockaddr *mask, struct sockaddr *gateway, uint8_t prio)
+rtable_lookup(unsigned int rtableid, const struct sockaddr *dst,
+    const struct sockaddr *mask, const struct sockaddr *gateway, uint8_t prio)
 {
 	struct art_root			*ar;
 	struct art_node			*an;
 	struct rtentry			*rt = NULL;
 	struct srp_ref			 sr, nsr;
-	uint8_t				*addr;
+	const uint8_t			*addr;
 	int				 plen;
 
 	ar = rtable_get(rtableid, dst->sa_family);
@@ -466,13 +472,13 @@ out:
 }
 
 struct rtentry *
-rtable_match(unsigned int rtableid, struct sockaddr *dst, uint32_t *src)
+rtable_match(unsigned int rtableid, const struct sockaddr *dst, uint32_t *src)
 {
 	struct art_root			*ar;
 	struct art_node			*an;
 	struct rtentry			*rt = NULL;
 	struct srp_ref			 sr, nsr;
-	uint8_t				*addr;
+	const uint8_t			*addr;
 	int				 hash;
 
 	ar = rtable_get(rtableid, dst->sa_family);
@@ -540,14 +546,14 @@ out:
 
 int
 rtable_insert(unsigned int rtableid, struct sockaddr *dst,
-    struct sockaddr *mask, struct sockaddr *gateway, uint8_t prio,
+    const struct sockaddr *mask, const struct sockaddr *gateway, uint8_t prio,
     struct rtentry *rt)
 {
 	struct rtentry			*mrt;
 	struct srp_ref			 sr;
 	struct art_root			*ar;
 	struct art_node			*an, *prev;
-	uint8_t				*addr;
+	const uint8_t			*addr;
 	int				 plen;
 	unsigned int			 rt_flags;
 	int				 error = 0;
@@ -586,7 +592,7 @@ rtable_insert(unsigned int rtableid, struct sockaddr *dst,
 		}
 	}
 
-	an = art_get(dst, plen);
+	an = art_get(plen);
 	if (an == NULL) {
 		error = ENOBUFS;
 		goto leave;
@@ -645,13 +651,13 @@ leave:
 }
 
 int
-rtable_delete(unsigned int rtableid, struct sockaddr *dst,
-    struct sockaddr *mask, struct rtentry *rt)
+rtable_delete(unsigned int rtableid, const struct sockaddr *dst,
+    const struct sockaddr *mask, struct rtentry *rt)
 {
 	struct art_root			*ar;
 	struct art_node			*an;
 	struct srp_ref			 sr;
-	uint8_t				*addr;
+	const uint8_t			*addr;
 	int				 plen;
 	struct rtentry			*mrt;
 	int				 npaths = 0;
@@ -791,7 +797,7 @@ rtable_mpath_reprio(unsigned int rtableid, struct sockaddr *dst,
 	struct art_root			*ar;
 	struct art_node			*an;
 	struct srp_ref			 sr;
-	uint8_t				*addr;
+	const uint8_t			*addr;
 	int				 error = 0;
 
 	ar = rtable_get(rtableid, dst->sa_family);
@@ -860,7 +866,7 @@ rtable_mpath_insert(struct art_node *an, struct rtentry *rt)
  * Returns 1 if ``an'' perfectly matches (``dst'', ``plen''), 0 otherwise.
  */
 int
-an_match(struct art_node *an, struct sockaddr *dst, int plen)
+an_match(struct art_node *an, const struct sockaddr *dst, int plen)
 {
 	struct rtentry			*rt;
 	struct srp_ref			 sr;
@@ -870,7 +876,7 @@ an_match(struct art_node *an, struct sockaddr *dst, int plen)
 		return (0);
 
 	rt = SRPL_FIRST(&sr, &an->an_rtlist);
-	match = (memcmp(rt->rt_dest, dst, dst->sa_len) == 0);
+	match = (rt != NULL && memcmp(rt->rt_dest, dst, dst->sa_len) == 0);
 	SRPL_LEAVE(&sr);
 
 	return (match);
@@ -897,17 +903,17 @@ rtentry_unref(void *null, void *xrt)
  * BSD radix tree needed to skip the non-address fields from the flavor
  * of "struct sockaddr" used by this routing table.
  */
-static inline uint8_t *
-satoaddr(struct art_root *at, struct sockaddr *sa)
+static inline const uint8_t *
+satoaddr(struct art_root *at, const struct sockaddr *sa)
 {
-	return (((uint8_t *)sa) + at->ar_off);
+	return (((const uint8_t *)sa) + at->ar_off);
 }
 
 /*
  * Return the prefix length of a mask.
  */
 int
-rtable_satoplen(sa_family_t af, struct sockaddr *mask)
+rtable_satoplen(sa_family_t af, const struct sockaddr *mask)
 {
 	const struct domain	*dp;
 	uint8_t			*ap, *ep;

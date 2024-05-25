@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_txp.c,v 1.129 2022/03/11 18:00:50 mpi Exp $	*/
+/*	$OpenBSD: if_txp.c,v 1.131 2024/05/24 06:02:57 jsg Exp $	*/
 
 /*
  * Copyright (c) 2001
@@ -39,7 +39,6 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
@@ -213,7 +212,7 @@ txp_attachhook(struct device *self)
 	ifp->if_start = txp_start;
 	ifp->if_watchdog = txp_watchdog;
 	ifp->if_baudrate = IF_Mbps(10);
-	ifq_set_maxlen(&ifp->if_snd, TX_ENTRIES);
+	ifq_init_maxlen(&ifp->if_snd, TX_ENTRIES);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	txp_capabilities(sc);

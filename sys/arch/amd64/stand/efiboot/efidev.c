@@ -1,4 +1,4 @@
-/*	$OpenBSD: efidev.c,v 1.40 2022/09/01 13:45:26 krw Exp $	*/
+/*	$OpenBSD: efidev.c,v 1.42 2023/10/26 14:08:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 1996 Michael Shalayeff
@@ -454,23 +454,14 @@ efi_getdisklabel(efi_diskinfo_t ed, struct disklabel *label)
 static int
 efi_getdisklabel_cd9660(efi_diskinfo_t ed, struct disklabel *label)
 {
-	int		 off;
 	uint8_t		 buf[DEV_BSIZE];
 	EFI_STATUS	 status;
 
-	for (off = 0; off < 100; off++) {
-		status = efid_io(F_READ, ed,
-		    EFI_BLKSPERSEC(ed) * (16 + off), 1, buf);
-		if (EFI_ERROR(status))
-			return (-1);
-		if (bcmp(buf + 1, ISO_STANDARD_ID, 5) != 0 ||
-		    buf[0] == ISO_VD_END)
-			return (-1);
-		if (buf[0] == ISO_VD_PRIMARY)
-			break;
-	}
-	if (off >= 100)
-		return (-1);
+	status = efid_io(F_READ, ed, 64, 1, buf);
+	if (EFI_ERROR(status))
+		return -1;
+	if (buf[0] != ISO_VD_PRIMARY || bcmp(buf + 1, ISO_STANDARD_ID, 5) != 0)
+		return -1;
 
 	/* Create an imaginary disk label */
 	label->d_secsize = 2048;
@@ -567,6 +558,8 @@ efiopen(struct open_file *f, ...)
 #ifdef SOFTRAID
 	/* Intercept softraid disks. */
 	if (strncmp("sr", dev, 2) == 0) {
+		/* We only support read-only softraid. */
+		f->f_flags |= F_NOWRITE;
 
 		/* Create a fake diskinfo for this softraid volume. */
 		SLIST_FOREACH(bv, &sr_volumes, sbv_link)

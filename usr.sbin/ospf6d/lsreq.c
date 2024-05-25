@@ -1,4 +1,4 @@
-/*	$OpenBSD: lsreq.c,v 1.13 2021/11/03 21:40:03 sthen Exp $ */
+/*	$OpenBSD: lsreq.c,v 1.15 2023/07/03 09:51:38 claudio Exp $ */
 
 /*
  * Copyright (c) 2004, 2005, 2007 Esben Norby <norby@openbsd.org>
@@ -59,8 +59,9 @@ send_ls_req(struct nbr *nbr)
 		goto fail;
 
 	/* LSA header(s) */
-	for (le = TAILQ_FIRST(&nbr->ls_req_list); le != NULL &&
-	    buf->wpos + sizeof(struct ls_req_hdr) < buf->max; le = nle) {
+	for (le = TAILQ_FIRST(&nbr->ls_req_list);
+	    le != NULL && sizeof(ls_req_hdr) < ibuf_left(buf);
+	    le = nle) {
 		nbr->ls_req = nle = TAILQ_NEXT(le, entry);
 		ls_req_hdr.zero = 0;
 		ls_req_hdr.type = le->le_lsa->type;
@@ -186,7 +187,6 @@ ls_req_list_empty(struct nbr *nbr)
 }
 
 /* timers */
-/* ARGSUSED */
 void
 ls_req_tx_timer(int fd, short event, void *arg)
 {

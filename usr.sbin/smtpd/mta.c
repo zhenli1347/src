@@ -1,4 +1,4 @@
-/*	$OpenBSD: mta.c,v 1.243 2022/02/18 16:57:36 millert Exp $	*/
+/*	$OpenBSD: mta.c,v 1.248 2024/04/23 13:34:51 jsg Exp $	*/
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <tls.h>
 
 #include "smtpd.h"
@@ -489,38 +490,41 @@ mta_setup_dispatcher(struct dispatcher *dispatcher)
 	if (remote->tls_ciphers)
 		ciphers = remote->tls_ciphers;
 	if (ciphers && tls_config_set_ciphers(config, ciphers) == -1)
-		fatal("%s", tls_config_error(config));
+		fatalx("%s", tls_config_error(config));
 
 	if (remote->tls_protocols) {
 		if (tls_config_parse_protocols(&protos,
 		    remote->tls_protocols) == -1)
-			fatal("failed to parse protocols \"%s\"",
+			fatalx("failed to parse protocols \"%s\"",
 			    remote->tls_protocols);
 		if (tls_config_set_protocols(config, protos) == -1)
-			fatal("%s", tls_config_error(config));
+			fatalx("%s", tls_config_error(config));
 	}
 
 	if (remote->pki) {
 		pki = dict_get(env->sc_pki_dict, remote->pki);
 		if (pki == NULL)
-			fatal("client pki \"%s\" not found ", remote->pki);
+			fatalx("client pki \"%s\" not found", remote->pki);
 
 		tls_config_set_dheparams(config, dheparams[pki->pki_dhe]);
 		tls_config_use_fake_private_key(config);
 		if (tls_config_set_keypair_mem(config, pki->pki_cert,
 		    pki->pki_cert_len, NULL, 0) == -1)
-		fatal("tls_config_set_keypair_mem");
+			fatalx("tls_config_set_keypair_mem: %s",
+			    tls_config_error(config));
 	}
 
 	if (remote->ca) {
 		ca = dict_get(env->sc_ca_dict, remote->ca);
 		if (tls_config_set_ca_mem(config, ca->ca_cert, ca->ca_cert_len)
 		    == -1)
-			fatal("tls_config_set_ca_mem");
+			fatalx("tls_config_set_ca_mem: %s",
+			    tls_config_error(config));
 	}
 	else if (tls_config_set_ca_file(config, tls_default_ca_cert_file())
 	    == -1)
-		fatal("tls_config_set_ca_file");
+		fatalx("tls_config_set_ca_file: %s",
+		    tls_config_error(config));
 
 	if (remote->tls_verify) {
 		tls_config_verify(config);
@@ -805,11 +809,8 @@ mta_handle_envelope(struct envelope *evp, const char *smarthost)
 	if (strcmp(buf, e->dest))
 		e->rcpt = xstrdup(buf);
 	e->task = task;
-	if (evp->dsn_orcpt.user[0] && evp->dsn_orcpt.domain[0]) {
-		(void)snprintf(buf, sizeof buf, "%s@%s",
-	    	    evp->dsn_orcpt.user, evp->dsn_orcpt.domain);
-		e->dsn_orcpt = xstrdup(buf);
-	}
+	if (evp->dsn_orcpt[0] != '\0')
+		e->dsn_orcpt = xstrdup(evp->dsn_orcpt);
 	(void)strlcpy(e->dsn_envid, evp->dsn_envid,
 	    sizeof e->dsn_envid);
 	e->dsn_notify = evp->dsn_notify;
@@ -1083,6 +1084,10 @@ mta_on_mx(void *tag, void *arg, void *data)
 			relay->failstr = "Host not found";
 		else
 			relay->failstr = "No MX found for domain";
+		break;
+	case DNS_NULLMX:
+		relay->fail = IMSG_MTA_DELIVERY_PERMFAIL;
+		relay->failstr = "Domain does not accept mail";
 		break;
 	default:
 		fatalx("bad DNS lookup error code");
@@ -1359,7 +1364,7 @@ mta_connect(struct mta_connector *c)
 	mta_session(c->relay, route, mx->mxname);	/* this never fails synchronously */
 	mta_relay_ref(c->relay);
 
-    goto again;
+	goto again;
 }
 
 static void

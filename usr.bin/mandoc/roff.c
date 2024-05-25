@@ -1,6 +1,6 @@
-/* $OpenBSD: roff.c,v 1.267 2022/08/16 17:29:18 schwarze Exp $ */
+/* $OpenBSD: roff.c,v 1.272 2023/10/24 20:30:49 schwarze Exp $ */
 /*
- * Copyright (c) 2010-2015, 2017-2022 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2010-2015, 2017-2023 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008-2012, 2014 Kristaps Dzonsons <kristaps@bsd.lv>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -365,7 +365,8 @@ const char *__roff_name[MAN_MAX + 1] = {
 	"PD",		"AT",		"in",
 	"SY",		"YS",		"OP",
 	"EX",		"EE",		"UR",
-	"UE",		"MT",		"ME",		NULL
+	"UE",		"MT",		"ME",		"MR",
+	NULL
 };
 const	char *const *roff_name = __roff_name;
 
@@ -1360,6 +1361,7 @@ roff_expand(struct roff *r, struct buf *buf, int ln, int pos, char ec)
 	const char	*res;		/* the string to be pasted */
 	const char	*src;		/* source for copying */
 	char		*dst;		/* destination for copying */
+	enum mandoc_esc	 subtype;	/* return value from roff_escape */
 	int		 iesc;		/* index of leading escape char */
 	int		 inam;		/* index of the escape name */
 	int		 iarg;		/* index beginning the argument */
@@ -1385,7 +1387,7 @@ roff_expand(struct roff *r, struct buf *buf, int ln, int pos, char ec)
 		 */
 
 		if (buf->buf[pos] != ec) {
-			if (ec != ASCII_ESC && buf->buf[pos] == '\\') {
+			if (buf->buf[pos] == '\\') {
 				roff_expand_patch(buf, pos, "\\e", pos + 1);
 				pos++;
 			}
@@ -1447,7 +1449,7 @@ roff_expand(struct roff *r, struct buf *buf, int ln, int pos, char ec)
 				break;
 
 			/*
-			 * If not overriden,
+			 * If not overridden,
 			 * let \*(.T through to the formatters.
 			 */
 
@@ -1549,8 +1551,34 @@ roff_expand(struct roff *r, struct buf *buf, int ln, int pos, char ec)
 			res = ubuf;
 			break;
 		case 'w':
-			(void)snprintf(ubuf, sizeof(ubuf),
-			    "%d", (iendarg - iarg) * 24);
+			rsz = 0;
+			subtype = ESCAPE_UNDEF;
+			while (iarg < iendarg) {
+				asz = subtype == ESCAPE_SKIPCHAR ? 0 : 1;
+				if (buf->buf[iarg] != '\\') {
+					rsz += asz;
+					iarg++;
+					continue;
+				}
+				switch ((subtype = roff_escape(buf->buf, 0,
+				    iarg, NULL, NULL, NULL, NULL, &iarg))) {
+				case ESCAPE_SPECIAL:
+				case ESCAPE_NUMBERED:
+				case ESCAPE_UNICODE:
+				case ESCAPE_OVERSTRIKE:
+				case ESCAPE_UNDEF:
+					break;
+				case ESCAPE_DEVICE:
+					asz *= 8;
+					break;
+				case ESCAPE_EXPAND:
+					abort();
+				default:
+					continue;
+				}
+				rsz += asz;
+			}
+			(void)snprintf(ubuf, sizeof(ubuf), "%d", rsz * 24);
 			res = ubuf;
 			break;
 		default:
@@ -1630,12 +1658,7 @@ roff_getarg(struct roff *r, char **cpp, int ln, int *pos)
 				cp++;
 				break;
 			case '\\':
-				/*
-				 * Signal to roff_expand() that an escape
-				 * sequence resulted from copy-in processing
-				 * and needs to be checked or interpolated.
-				 */
-				cp[-pairs] = ASCII_ESC;
+				cp[-pairs] = '\\';
 				newesc = 1;
 				pairs++;
 				cp++;
@@ -1692,7 +1715,7 @@ roff_getarg(struct roff *r, char **cpp, int ln, int *pos)
 	buf.buf = start;
 	buf.sz = strlen(start) + 1;
 	buf.next = NULL;
-	if (roff_expand(r, &buf, ln, 0, ASCII_ESC) & ROFF_IGN) {
+	if (roff_expand(r, &buf, ln, 0, '\\') == ROFF_IGN) {
 		free(buf.buf);
 		buf.buf = mandoc_strdup("");
 	}
@@ -2477,7 +2500,7 @@ roff_getnum(const char *v, int *pos, int *res, int flags)
  * Evaluate a string comparison condition.
  * The first character is the delimiter.
  * Succeed if the string up to its second occurrence
- * matches the string up to its third occurence.
+ * matches the string up to its third occurrence.
  * Advance the cursor after the third occurrence
  * or lacking that, to the end of the line.
  */
@@ -4369,7 +4392,7 @@ roff_getformat(const struct roff *r)
  * return zero and don't change the current position.
  * If the control character has been set with `.cc', then let that grain
  * precedence.
- * This is slighly contrary to groff, where using the non-breaking
+ * This is slightly contrary to groff, where using the non-breaking
  * control character when `cc' has been invoked will cause the
  * non-breaking macro contents to be printed verbatim.
  */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpe.c,v 1.85 2022/10/06 14:41:08 martijn Exp $	*/
+/*	$OpenBSD: snmpe.c,v 1.95 2024/05/21 05:00:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -18,27 +18,27 @@
  */
 
 #include <sys/queue.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/un.h>
+#include <sys/time.h>
 #include <sys/tree.h>
+#include <sys/types.h>
 
-#include <net/if.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
+#include <ber.h>
+#include <event.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <imsg.h>
+#include <locale.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <locale.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
-#include <pwd.h>
 
 #include "application.h"
+#include "log.h"
 #include "snmpd.h"
 #include "snmpe.h"
 #include "mib.h"
@@ -48,7 +48,6 @@ int	 snmpe_dispatch_parent(int, struct privsep_proc *, struct imsg *);
 int	 snmpe_parse(struct snmp_message *);
 void	 snmpe_tryparse(int, struct snmp_message *);
 int	 snmpe_parsevarbinds(struct snmp_message *);
-void	 snmpe_sig_handler(int sig, short, void *);
 int	 snmpe_bind(struct address *);
 void	 snmpe_recvmsg(int fd, short, void *);
 void	 snmpe_readcb(int fd, short, void *);
@@ -71,20 +70,9 @@ snmpe(struct privsep *ps, struct privsep_proc *p)
 {
 	struct snmpd		*env = ps->ps_env;
 	struct address		*h;
-#ifdef DEBUG
-	char		 buf[BUFSIZ];
-	struct oid	*oid;
-#endif
 
 	if ((setlocale(LC_CTYPE, "en_US.UTF-8")) == NULL)
 		fatal("setlocale(LC_CTYPE, \"en_US.UTF-8\")");
-
-#ifdef DEBUG
-	for (oid = NULL; (oid = smi_foreach(oid, 0)) != NULL;) {
-		smi_oid2string(&oid->o_id, buf, sizeof(buf), 0);
-		log_debug("oid %s", buf);
-	}
-#endif
 
 	appl();
 
@@ -96,7 +84,6 @@ snmpe(struct privsep *ps, struct privsep_proc *p)
 	proc_run(ps, p, procs, nitems(procs), snmpe_init, NULL);
 }
 
-/* ARGSUSED */
 void
 snmpe_init(struct privsep *ps, struct privsep_proc *p, void *arg)
 {
@@ -150,7 +137,7 @@ snmpe_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	switch (imsg->hdr.type) {
 	case IMSG_AX_FD:
-		appl_agentx_backend(imsg->fd);
+		appl_agentx_backend(imsg_get_fd(imsg));
 		return 0;
 	default:
 		return -1;
@@ -445,10 +432,18 @@ badversion:
 		goto fail;
 	}
 
-	for (a = msg->sm_varbind; a != NULL; a = a->be_next) {
+	for (len = 0, a = msg->sm_varbind; a != NULL; a = a->be_next, len++) {
 		if (ober_scanf_elements(a, "{oS$}", NULL) == -1)
 			goto parsefail;
 	}
+	/*
+	 * error-status == non-repeaters
+	 * error-index == max-repetitions
+	 */
+	if (msg->sm_pdutype == SNMP_C_GETBULKREQ &&
+	    (errval < 0 || errval > (long long)len ||
+	    erridx < 1 || erridx > UINT16_MAX))
+		goto parsefail;
 
 	msg->sm_request = req;
 	msg->sm_error = errval;
@@ -558,7 +553,6 @@ snmpe_tryparse(int fd, struct snmp_message *msg)
 	if (snmpe_parse(msg) == -1) {
 		if (msg->sm_usmerr && MSG_REPORT(msg)) {
 			usm_make_report(msg);
-			snmpe_response(msg);
 			return;
 		} else
 			goto fail;
@@ -612,8 +606,7 @@ snmpe_writecb(int fd, short type, void *arg)
 	if (type == EV_TIMEOUT)
 		goto fail;
 
-	len = ber->br_wend - ber->br_wbuf;
-	ber->br_wptr = ber->br_wbuf;
+	len = ber->br_wend - ber->br_wptr;
 
 	log_debug("%s: write fd %d len %zd", __func__, fd, len);
 
@@ -654,7 +647,6 @@ snmpe_writecb(int fd, short type, void *arg)
 		    msg->sm_datalen - reqlen);
 		nmsg->sm_datalen = msg->sm_datalen - reqlen;
 		snmp_msgfree(msg);
-		snmpe_prepare_read(nmsg, fd);
 		snmpe_tryparse(fd, nmsg);
 	} else {
 		snmp_msgfree(msg);
@@ -711,7 +703,6 @@ snmpe_recvmsg(int fd, short sig, void *arg)
 	if (snmpe_parse(msg) == -1) {
 		if (msg->sm_usmerr != 0 && MSG_REPORT(msg)) {
 			usm_make_report(msg);
-			snmpe_response(msg);
 			return;
 		} else {
 			snmp_msgfree(msg);
@@ -754,7 +745,6 @@ snmpe_send(struct snmp_message *msg, enum snmp_pdutype type, int32_t requestid,
 	msg->sm_errorindex = index;
 	msg->sm_varbindresp = varbindlist;
 
-	msg->sm_pdutype = SNMP_C_RESPONSE;
 	snmpe_response(msg);
 }
 
@@ -799,6 +789,7 @@ snmpe_response(struct snmp_message *msg)
 
 	usm_finalize_digest(msg, ptr, len);
 	if (msg->sm_sock_tcp) {
+		msg->sm_ber.br_wptr = msg->sm_ber.br_wbuf;
 		event_del(&msg->sm_sockev);
 		event_set(&msg->sm_sockev, msg->sm_sock, EV_WRITE,
 		    snmpe_writecb, msg);

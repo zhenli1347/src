@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbuf.h,v 1.255 2022/08/15 16:15:37 bluhm Exp $	*/
+/*	$OpenBSD: mbuf.h,v 1.263 2024/04/14 20:46:27 bluhm Exp $	*/
 /*	$NetBSD: mbuf.h,v 1.19 1996/02/09 18:25:14 christos Exp $	*/
 
 /*
@@ -129,12 +129,13 @@ struct	pkthdr {
 	SLIST_HEAD(, m_tag)	 ph_tags;	/* list of packet tags */
 	int64_t			 ph_timestamp;	/* packet timestamp */
 	int			 len;		/* total packet length */
+	u_int			 ph_rtableid;	/* routing table id */
+	u_int			 ph_ifidx;	/* rcv interface index */
 	u_int16_t		 ph_tagsset;	/* mtags attached */
 	u_int16_t		 ph_flowid;	/* pseudo unique flow id */
 	u_int16_t		 csum_flags;	/* checksum flags */
 	u_int16_t		 ether_vtag;	/* Ethernet 802.1p+Q vlan tag */
-	u_int			 ph_rtableid;	/* routing table id */
-	u_int			 ph_ifidx;	/* rcv interface index */
+	u_int16_t		 ph_mss;	/* TCP max segment size */
 	u_int8_t		 ph_loopcnt;	/* mbuf is looping in kernel */
 	u_int8_t		 ph_family;	/* af, used when queueing */
 	struct pkthdr_pf	 pf;
@@ -226,13 +227,14 @@ struct mbuf {
 #define	M_IPV6_DF_OUT		0x1000	/* don't fragment outgoing IPv6 */
 #define	M_TIMESTAMP		0x2000	/* ph_timestamp is set */
 #define	M_FLOWID		0x4000	/* ph_flowid is set */
+#define	M_TCP_TSO		0x8000	/* TCP Segmentation Offload needed */
 
 #ifdef _KERNEL
 #define MCS_BITS \
     ("\20\1IPV4_CSUM_OUT\2TCP_CSUM_OUT\3UDP_CSUM_OUT\4IPV4_CSUM_IN_OK" \
     "\5IPV4_CSUM_IN_BAD\6TCP_CSUM_IN_OK\7TCP_CSUM_IN_BAD\10UDP_CSUM_IN_OK" \
     "\11UDP_CSUM_IN_BAD\12ICMP_CSUM_OUT\13ICMP_CSUM_IN_OK\14ICMP_CSUM_IN_BAD" \
-    "\15IPV6_NODF_OUT" "\16TIMESTAMP" "\17FLOWID")
+    "\15IPV6_NODF_OUT" "\16TIMESTAMP" "\17FLOWID" "\20TCP_TSO")
 #endif
 
 /* mbuf types */
@@ -361,6 +363,12 @@ u_int mextfree_register(void (*)(caddr_t, u_int, void *));
 /* length to m_copy to copy all */
 #define	M_COPYALL	1000000000
 
+#define MBSTAT_TYPES           MT_NTYPES
+#define MBSTAT_DROPS           (MBSTAT_TYPES + 0)
+#define MBSTAT_WAIT            (MBSTAT_TYPES + 1)
+#define MBSTAT_DRAIN           (MBSTAT_TYPES + 2)
+#define MBSTAT_COUNT           (MBSTAT_TYPES + 3)
+
 /*
  * Mbuf statistics.
  * For statistics related to mbuf and cluster allocations, see also the
@@ -370,14 +378,9 @@ struct mbstat {
 	u_long	m_drops;	/* times failed to find space */
 	u_long	m_wait;		/* times waited for space */
 	u_long	m_drain;	/* times drained protocols for space */
-	u_short	m_mtypes[256];	/* type specific mbuf allocations */
+	u_long	m_mtypes[MBSTAT_COUNT];
+				/* type specific mbuf allocations */
 };
-
-#define MBSTAT_TYPES           MT_NTYPES
-#define MBSTAT_DROPS           (MBSTAT_TYPES + 0)
-#define MBSTAT_WAIT            (MBSTAT_TYPES + 1)
-#define MBSTAT_DRAIN           (MBSTAT_TYPES + 2)
-#define MBSTAT_COUNT           (MBSTAT_TYPES + 3)
 
 #include <sys/mutex.h>
 
@@ -398,8 +401,6 @@ struct mbuf_queue {
 struct pool;
 
 extern	long nmbclust;			/* limit on the # of clusters */
-extern	int mblowat;			/* mbuf low water mark */
-extern	int mcllowat;			/* mbuf cluster low water mark */
 extern	int max_linkhdr;		/* largest link-level header */
 extern	int max_protohdr;		/* largest protocol header */
 extern	int max_hdr;			/* largest link+protocol header */
@@ -435,7 +436,6 @@ void	m_adj(struct mbuf *, int);
 int	m_copyback(struct mbuf *, int, int, const void *, int);
 struct mbuf *m_freem(struct mbuf *);
 void	m_purge(struct mbuf *);
-void	m_reclaim(void *, int);
 void	m_copydata(struct mbuf *, int, int, void *);
 void	m_cat(struct mbuf *, struct mbuf *);
 struct mbuf *m_devget(char *, int, int);
@@ -471,6 +471,8 @@ struct m_tag *m_tag_next(struct mbuf *, struct m_tag *);
 #define PACKET_TAG_IPSEC_IN_DONE	0x0001  /* IPsec applied, in */
 #define PACKET_TAG_IPSEC_OUT_DONE	0x0002  /* IPsec applied, out */
 #define PACKET_TAG_IPSEC_FLOWINFO	0x0004	/* IPsec flowinfo */
+#define PACKET_TAG_IP_OFFNXT		0x0010  /* IPv4 offset and next proto */
+#define PACKET_TAG_IP6_OFFNXT		0x0020  /* IPv6 offset and next proto */
 #define PACKET_TAG_WIREGUARD		0x0040  /* WireGuard data */
 #define PACKET_TAG_GRE			0x0080  /* GRE processing done */
 #define PACKET_TAG_DLT			0x0100 /* data link layer type */
@@ -479,7 +481,6 @@ struct m_tag *m_tag_next(struct mbuf *, struct m_tag *);
 #define PACKET_TAG_SRCROUTE		0x1000 /* IPv4 source routing options */
 #define PACKET_TAG_TUNNEL		0x2000	/* Tunnel endpoint address */
 #define PACKET_TAG_CARP_BAL_IP		0x4000  /* carp(4) ip balanced marker */
-#define PACKET_TAG_IP6_OFFNXT		0x8000  /* IPv6 offset and next proto */
 
 #define MTAG_BITS \
     ("\20\1IPSEC_IN_DONE\2IPSEC_OUT_DONE\3IPSEC_FLOWINFO" \
@@ -526,6 +527,8 @@ unsigned int		ml_hdatalen(struct mbuf_list *);
  * mbuf queues
  */
 
+#include <sys/atomic.h>
+
 #define MBUF_QUEUE_INITIALIZER(_maxlen, _ipl) \
     { MUTEX_INITIALIZER(_ipl), MBUF_LIST_INITIALIZER(), (_maxlen), 0 }
 
@@ -538,12 +541,12 @@ void			mq_delist(struct mbuf_queue *, struct mbuf_list *);
 struct mbuf *		mq_dechain(struct mbuf_queue *);
 unsigned int		mq_purge(struct mbuf_queue *);
 unsigned int		mq_hdatalen(struct mbuf_queue *);
+void			mq_set_maxlen(struct mbuf_queue *, u_int);
 
-#define	mq_len(_mq)		ml_len(&(_mq)->mq_list)
-#define	mq_empty(_mq)		ml_empty(&(_mq)->mq_list)
-#define	mq_full(_mq)		(mq_len((_mq)) >= (_mq)->mq_maxlen)
-#define	mq_drops(_mq)		((_mq)->mq_drops)
-#define	mq_set_maxlen(_mq, _l)	((_mq)->mq_maxlen = (_l))
+#define mq_len(_mq)		READ_ONCE((_mq)->mq_list.ml_len)
+#define mq_empty(_mq)		(mq_len(_mq) == 0)
+#define mq_full(_mq)		(mq_len((_mq)) >= READ_ONCE((_mq)->mq_maxlen))
+#define mq_drops(_mq)		READ_ONCE((_mq)->mq_drops)
 
 #endif /* _KERNEL */
 #endif /* _SYS_MBUF_H_ */

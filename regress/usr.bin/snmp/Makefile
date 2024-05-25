@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.5 2022/09/02 07:07:45 martijn Exp $
+# $OpenBSD: Makefile,v 1.8 2024/04/17 06:18:18 claudio Exp $
 
 SNMP?=			/usr/bin/snmp
 SNMPD?=			/usr/sbin/snmpd -f ${.OBJDIR}/snmpd.conf
@@ -18,8 +18,8 @@ REGRESS_CLEANUP=	stop
 REGRESS_SKIP_TARGETS=
 CLEANFILES=
 
-IFIDX!=			ifconfig egress | awk '/index/{print $$2}'
-IFLLADDR!=		ifconfig egress | awk '/lladdr/{gsub(":", " ", $$2); print toupper($$2)}'
+IFIDX!=			ifconfig egress | awk '/index/{print $$2; exit}'
+IFLLADDR!=		ifconfig egress | awk '/lladdr/{gsub(":", " ", $$2); print toupper($$2); exit}'
 
 CLEANFILES+=		snmpd.conf
 snmpd.conf: Makefile
@@ -31,6 +31,7 @@ snmpd.conf: Makefile
 	printf 'listen on $$listen6_addr snmpv1 snmpv2c snmpv3\n' >> snmpd.conf
 	printf 'listen on tcp $$listen6_addr snmpv1 snmpv2c snmpv3\n' >> snmpd.conf
 	printf 'listen on $$listen_addr notify snmpv1 snmpv2c snmpv3\n\n' >> snmpd.conf
+	printf 'agentx path "/tmp/agentx"\n\n' >> snmpd.conf
 	printf 'read-only community public\n' >> snmpd.conf
 	printf 'read-write community private\n' >> snmpd.conf
 	printf 'trap community public\n\n' >> snmpd.conf
@@ -79,7 +80,19 @@ trap_output: Makefile
 	chmod a+rw trap_output
 
 start: stop snmpd.conf traphandle.sh trap_output
+	rm -f /tmp/agentx 2>/dev/null
 	${SUDO} ${SNMPD}
+	@(i=0; \
+	while [ ! -S /tmp/agentx ]; do \
+		i=$$((i + 1)); \
+		[ $$i -eq 100 ] && ( \
+			printf "%s\n" '${SUDO} pkill -xf "${SNMPD}"'; \
+			printf "Failed to start snmpd\n" >&2; \
+			${SUDO} pkill -xf "${SNMPD}"; \
+			exit 1; \
+		); \
+		sleep 0.1; \
+	done;)
 
 stop:
 	-${SUDO} pkill -xf "${SNMPD}"
@@ -749,42 +762,54 @@ output_hex:
 	${SNMPGET} -v2c -cpublic -Ox 127.0.0.1 1.3.6.1.4.1.30155.42.3.2.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_utf8
+REGRESS_EXPECTED_FAILURES:= output_displayhint_255t_utf8
 CLEANFILES+=		output_displayhint_255t_utf8.res output_displayhint_255t_utf8.exp
 output_displayhint_255t_utf8:
 	printf "STRING: Reyk Flöter\n" > $@.exp
 	LC_ALL=en_US.UTF-8 ${SNMPGET} -Ov -v2c -cpublic 127.0.0.1 1.3.6.1.6.3.15.1.2.2.1.2.1.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_ascii
+REGRESS_EXPECTED_FAILURES+= output_displayhint_255t_ascii
 CLEANFILES+=		output_displayhint_255t_ascii.res output_displayhint_255t_ascii.exp
 output_displayhint_255t_ascii:
 	printf "STRING: Reyk Fl.ter\n" > $@.exp
 	LC_ALL=C ${SNMPGET} -Ov -v2c -cpublic 127.0.0.1 1.3.6.1.6.3.15.1.2.2.1.2.1.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_invalchar_utf8
+REGRESS_EXPECTED_FAILURES+= output_displayhint_255t_invalchar_utf8
 CLEANFILES+=		output_displayhint_255t_invalchar_utf8.res output_displayhint_255t_invalchar_utf8.exp
 output_displayhint_255t_invalchar_utf8:
 	printf "STRING: Reyk Fl�ter\n" > $@.exp
 	LC_ALL=en_US.UTF-8 ${SNMPGET} -Ov -v2c -cpublic 127.0.0.1 1.3.6.1.6.3.15.1.2.2.1.2.2.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_invalchar_ascii
+REGRESS_EXPECTED_FAILURES+= output_displayhint_255t_invalchar_ascii
 CLEANFILES+=		output_displayhint_255t_invalchar_ascii.res output_displayhint_255t_invalchar_ascii.exp
 output_displayhint_255t_invalchar_ascii:
 	printf "STRING: Reyk Fl?ter\n" > $@.exp
 	LC_ALL=C ${SNMPGET} -Ov -v2c -cpublic 127.0.0.1 1.3.6.1.6.3.15.1.2.2.1.2.2.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_truncatefull
+REGRESS_EXPECTED_FAILURES+= output_displayhint_255t_truncatefull
 CLEANFILES+=		output_displayhint_255t_truncatefull.res output_displayhint_255t_truncatefull.exp
 output_displayhint_255t_truncatefull:
 	printf "STRING: %s\n" "$$(jot -ba 255 | tr -d '\n')" > $@.exp
 	LC_ALL=en_US.UTF-8 ${SNMPGET} -Ov -v2c -cpublic 127.0.0.1 1.3.6.1.6.3.15.1.2.2.1.2.3.0 > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) setting customer oids under SNMPv2-MIB are not allowed anymore
 REGRESS_TARGETS+=	output_displayhint_255t_truncatehalf
+REGRESS_EXPECTED_FAILURES+= output_displayhint_255t_truncatehalf
 CLEANFILES+=		output_displayhint_255t_truncatehalf.res output_displayhint_255t_truncatehalf.exp
 output_displayhint_255t_truncatehalf:
 	printf "STRING: %s\n" "$$(jot -ba 254 | tr -d '\n')" > $@.exp
@@ -842,14 +867,18 @@ getnext_multiple:
 ### SNMP BULKGET
 # Building output manually is large and error prone: Assume get/getnext works
 
+# XXX snmpd(8) currently doesn't have any entries in sysORTable
 REGRESS_TARGETS+=	bulkget_simple
+REGRESS_EXPECTED_FAILURES+= bulkget_simple
 CLEANFILES+=		bulkget_simple.res bulkget_simple.exp
 bulkget_simple:
 	IDX=1; while [ $$IDX -le 4 ]; do ${SNMPGET} -v2c -cpublic 127.0.0.1 sysORDescr.$$IDX; IDX=$$((IDX+1)); done > $@.exp
 	${SNMPBULKGET} -v2c -cpublic -Cr4 127.0.0.1 sysORDescr > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) currently doesn't have any entries in sysORTable
 REGRESS_TARGETS+=	bulkget_multi
+REGRESS_EXPECTED_FAILURES+= bulkget_multi
 CLEANFILES+=		bulkget_multi.res bulkget_multi.exp
 bulkget_multi:
 	> $@.exp
@@ -857,7 +886,9 @@ bulkget_multi:
 	${SNMPBULKGET} -v2c -cpublic -Cr4 127.0.0.1 sysORDescr sysORID > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) currently doesn't have any entries in sysORTable
 REGRESS_TARGETS+=	bulkget_nonrep
+REGRESS_EXPECTED_FAILURES+= bulkget_nonrep
 CLEANFILES+=		bulkget_nonrep.res bulkget_nonrep.exp
 bulkget_nonrep:
 	${SNMPGET} -v2c -cpublic 127.0.0.1 sysDescr.0 > $@.exp
@@ -865,7 +896,9 @@ bulkget_nonrep:
 	${SNMPBULKGET} -v2c -cpublic -Cn1 -Cr4 127.0.0.1 sysDescr sysORDescr > $@.res
 	diff -up $@.exp $@.res
 
+# XXX snmpd(8) currently doesn't have any entries in sysORTable
 REGRESS_TARGETS+=	bulkget_maxrep
+REGRESS_EXPECTED_FAILURES+= bulkget_maxrep
 CLEANFILES+=		bulkget_maxrep.res bulkget_maxrep.exp
 bulkget_maxrep:
 	IDX=1; while [ $$IDX -le 4 ]; do ${SNMPGET} -v2c -cpublic 127.0.0.1 sysORDescr.$$IDX; IDX=$$((IDX+1)); done > $@.exp
@@ -886,8 +919,8 @@ walk_simple:
 REGRESS_TARGETS+=	walk_end
 CLEANFILES+=		walk_end.res walk_end.exp
 walk_end:
-	OID=system; while true; do OID="$$(${SNMPGETNEXT} -v2c -cpublic 127.0.0.1 "$$OID")"; [ "$${OID%% *}" == "sysORLastChange.0" ] && break; printf "%s\n" "$${OID}"; OID="$${OID%% *}"; done | grep -v ^sysUpTime.0 > $@.exp
-	${SNMPWALK} -v2c -cpublic -CE sysORLastChange 127.0.0.1 system | grep -v ^sysUpTime.0 > $@.res
+	OID=system; while true; do OID="$$(${SNMPGETNEXT} -v2c -cpublic 127.0.0.1 "$$OID")"; [ "$${OID%% *}" == "sysServices.0" ] && break; printf "%s\n" "$${OID}"; OID="$${OID%% *}"; done | grep -v ^sysUpTime.0 > $@.exp
+	${SNMPWALK} -v2c -cpublic -CE sysServices 127.0.0.1 system | grep -v ^sysUpTime.0 > $@.res
 	diff -up $@.exp $@.res
 
 REGRESS_TARGETS+=	walk_includeoid

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ldasm.S,v 1.8 2019/05/10 13:29:21 guenther Exp $ */
+/*	$OpenBSD: ldasm.S,v 1.11 2023/07/08 14:09:43 jasper Exp $ */
 
 /*
  * Copyright (c) 2016 Dale Rahn
@@ -57,6 +57,7 @@ _dl_start:
 	ldr	x2, [x20, #7*8]			// loff from dl_data
 	mov	x3, x20				// dl_data
 	bl	_dl_boot
+	mov	x17, x0
 
 	mov	sp, x29				// move stack back
 	mov	x29, xzr			// clear frame back pointer
@@ -65,7 +66,7 @@ _dl_start:
 	adrp	x8, :got:_dl_dtors
 	ldr	x2, [x8, :got_lo12:_dl_dtors]
 
-	br	x0
+	br	x17
 END(_dl_start)
 
 ENTRY(_dl_bind_start)
@@ -75,7 +76,7 @@ ENTRY(_dl_bind_start)
 	 * return address and pointer to pltgot entry for this
 	 * relocation are on the stack
 	 */
-	mov x17, sp
+	mov	x17, sp
 
 	// save parameter/result registers
 	stp	x0, x1, [sp, #-16]!
@@ -105,14 +106,7 @@ ENTRY(_dl_bind_start)
 	ldp	x2, x3, [sp], #16
 	ldp	x0, x1, [sp], #16
 
-	// restore LR saved by PLT stub	
+	// restore LR saved by PLT stub
 	ldp	xzr, x30, [sp], #16
 	br	x17
 END(_dl_bind_start)
-
-ENTRY(_rtld_tlsdesc)
-	RETGUARD_SETUP(_rtld_tlsdesc, x15)
-	ldr	x0, [x0, #8]
-	RETGUARD_CHECK(_rtld_tlsdesc, x15)
-	ret
-END(_rtld_tlsdesc)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: com_pcmcia.c,v 1.59 2022/04/06 18:59:30 naddy Exp $	*/
+/*	$OpenBSD: com_pcmcia.c,v 1.61 2024/05/13 01:15:51 jsg Exp $	*/
 /*	$NetBSD: com_pcmcia.c,v 1.15 1998/08/22 17:47:58 msaitoh Exp $	*/
 
 /*
@@ -91,7 +91,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/ioctl.h>
-#include <sys/selinfo.h>
 #include <sys/tty.h>
 #include <sys/conf.h>
 #include <sys/uio.h>
@@ -126,7 +125,6 @@ struct com_pcmcia_product {
 int com_pcmcia_match(struct device *, void *, void *);
 void com_pcmcia_attach(struct device *, struct device *, void *);
 int com_pcmcia_detach(struct device *, int);
-void com_pcmcia_cleanup(void *);
 int com_pcmcia_activate(struct device *, int);
 
 int com_pcmcia_enable(struct com_softc *);

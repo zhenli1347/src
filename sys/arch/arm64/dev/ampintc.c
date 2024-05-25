@@ -1,4 +1,4 @@
-/* $OpenBSD: ampintc.c,v 1.29 2022/07/16 12:07:55 kettenis Exp $ */
+/* $OpenBSD: ampintc.c,v 1.31 2023/09/22 01:10:43 jsg Exp $ */
 /*
  * Copyright (c) 2007,2009,2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -35,7 +35,7 @@
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/openfirm.h>
 
-#include <arm64/dev/simplebusvar.h>
+#include <machine/simplebusvar.h>
 
 /* registers */
 #define	ICD_DCR			0x000
@@ -290,7 +290,7 @@ ampintc_attach(struct device *parent, struct device *self, void *aux)
 
 	/* insert self as interrupt handler */
 	arm_set_intr_handler(ampintc_splraise, ampintc_spllower, ampintc_splx,
-	    ampintc_setipl, ampintc_irq_handler, NULL);
+	    ampintc_setipl, ampintc_irq_handler, NULL, NULL, NULL);
 
 #ifdef MULTIPROCESSOR
 	/* setup IPI interrupts */

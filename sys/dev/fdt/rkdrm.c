@@ -1,4 +1,4 @@
-/* $OpenBSD: rkdrm.c,v 1.14 2022/07/15 17:57:26 kettenis Exp $ */
+/* $OpenBSD: rkdrm.c,v 1.22 2024/05/13 01:15:50 jsg Exp $ */
 /* $NetBSD: rk_drm.c,v 1.3 2019/12/15 01:00:58 mrg Exp $ */
 /*-
  * Copyright (c) 2019 Jared D. McNeill <jmcneill@invisible.ca>
@@ -47,27 +47,19 @@
 #define	RK_DRM_MAX_WIDTH	3840
 #define	RK_DRM_MAX_HEIGHT	2160
 
-TAILQ_HEAD(, rkdrm_ports) rkdrm_ports =
-    TAILQ_HEAD_INITIALIZER(rkdrm_ports);
-
 int	rkdrm_match(struct device *, void *, void *);
 void	rkdrm_attach(struct device *, struct device *, void *);
 void	rkdrm_attachhook(struct device *);
 
-#ifdef notyet
-vmem_t	*rkdrm_alloc_cma_pool(struct drm_device *, size_t);
-#endif
-
-int	rkdrm_load(struct drm_device *, unsigned long);
 int	rkdrm_unload(struct drm_device *);
 
 struct drm_driver rkdrm_driver = {
 	.driver_features = DRIVER_ATOMIC | DRIVER_MODESET | DRIVER_GEM,
 
-	.dumb_create = drm_gem_cma_dumb_create,
+	.dumb_create = drm_gem_dma_dumb_create,
 	.dumb_map_offset = drm_gem_dumb_map_offset,
 
-	.gem_fault = drm_gem_cma_fault,
+	.gem_fault = drm_gem_dma_fault,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
@@ -78,7 +70,7 @@ struct drm_driver rkdrm_driver = {
 };
 
 const struct drm_gem_object_funcs rkdrm_gem_object_funcs = {
-	.free = drm_gem_cma_free_object,
+	.free = drm_gem_dma_free_object,
 };
 
 const struct cfattach rkdrm_ca = {
@@ -164,7 +156,7 @@ rkdrm_fb_create(struct drm_device *ddev, struct drm_file *file,
 	drm_helper_mode_fill_fb_struct(ddev, &fb->base, cmd);
 	fb->base.format = drm_format_info(DRM_FORMAT_ARGB8888);
 	fb->base.obj[0] = gem_obj;
-	fb->obj = to_drm_gem_cma_obj(gem_obj);
+	fb->obj = to_drm_gem_dma_obj(gem_obj);
 
 	error = drm_framebuffer_init(ddev, &fb->base, &rkdrm_framebuffer_funcs);
 	if (error != 0)
@@ -215,8 +207,6 @@ int rkdrm_show_screen(void *, void *, int,
     void (*)(void *, int, int), void *);
 void rkdrm_doswitch(void *);
 void rkdrm_enter_ddb(void *, void *);
-int rkdrm_get_param(struct wsdisplay_param *);
-int rkdrm_set_param(struct wsdisplay_param *);
 
 struct wsscreen_descr rkdrm_stdscreen = {
 	"std",
@@ -269,7 +259,7 @@ rkdrm_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 			return ws_set_param(dp);
 		return -1;
 	case WSDISPLAYIO_GTYPE:
-		*(u_int *)data = WSDISPLAY_TYPE_RKDRM;
+		*(u_int *)data = WSDISPLAY_TYPE_KMS;
 		return 0;
 	case WSDISPLAYIO_GINFO:
 		wdf = (struct wsdisplay_fbinfo *)data;
@@ -282,6 +272,9 @@ rkdrm_wsioctl(void *v, u_long cmd, caddr_t data, int flag, struct proc *p)
 		return 0;
 	case WSDISPLAYIO_LINEBYTES:
 		*(u_int *)data = ri->ri_stride;
+		return 0;
+	case WSDISPLAYIO_SVIDEO:
+	case WSDISPLAYIO_GVIDEO:
 		return 0;
 	}
 
@@ -345,8 +338,6 @@ rkdrm_doswitch(void *v)
 {
 	struct rasops_info *ri = v;
 	struct rkdrm_softc *sc = ri->ri_hw;
-	struct rkdrm_crtc *rkdrm_crtc;
-	int i, crtc;
 
 	rasops_show_screen(ri, sc->switchcookie, 0, NULL, NULL);
 	drm_fb_helper_restore_fbdev_mode_unlocked(&sc->helper);
@@ -366,7 +357,7 @@ rkdrm_enter_ddb(void *v, void *cookie)
 		return;
 
 	rasops_show_screen(ri, cookie, 0, NULL, NULL);
-	drm_fb_helper_debug_enter(fb_helper->fbdev);
+	drm_fb_helper_debug_enter(fb_helper->info);
 }
 
 void
@@ -422,7 +413,8 @@ rkdrm_attachhook(struct device *dev)
 
 	drm_mode_config_reset(&sc->sc_ddev);
 
-	drm_fb_helper_prepare(&sc->sc_ddev, &sc->helper, &rkdrm_fb_helper_funcs);
+	drm_fb_helper_prepare(&sc->sc_ddev, &sc->helper, 32,
+	    &rkdrm_fb_helper_funcs);
 	if (drm_fb_helper_init(&sc->sc_ddev, &sc->helper)) {
 		printf("%s: can't initialize framebuffer helper\n",
 		    sc->sc_dev.dv_xname);
@@ -433,7 +425,7 @@ rkdrm_attachhook(struct device *dev)
 	sc->helper.fb = malloc(sizeof(struct rkdrm_framebuffer),
 	    M_DRM, M_WAITOK | M_ZERO);
 
-	drm_fb_helper_initial_config(&sc->helper, 32);
+	drm_fb_helper_initial_config(&sc->helper);
 
 	task_set(&sc->switchtask, rkdrm_doswitch, ri);
 
@@ -511,7 +503,7 @@ rkdrm_fb_probe(struct drm_fb_helper *helper, struct drm_fb_helper_surface_size *
 
 	/* FIXME: CMA pool? */
 
-	sfb->obj = drm_gem_cma_create(ddev, size);
+	sfb->obj = drm_gem_dma_create(ddev, size);
 	if (sfb->obj == NULL) {
 		DRM_ERROR("failed to allocate memory for framebuffer\n");
 		return -ENOMEM;
@@ -526,10 +518,10 @@ rkdrm_fb_probe(struct drm_fb_helper *helper, struct drm_fb_helper_surface_size *
 		return error;
 	}
 
-	info = drm_fb_helper_alloc_fbi(helper);
+	info = drm_fb_helper_alloc_info(helper);
 	if (IS_ERR(info)) {
 		DRM_ERROR("Failed to allocate fb_info\n");
-		return error;
+		return PTR_ERR(info);
 	}
 	info->par = helper;
 	return 0;

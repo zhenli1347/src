@@ -1,4 +1,4 @@
-/*	$OpenBSD: slowcgi.c,v 1.5 2022/10/27 13:24:22 claudio Exp $ */
+/*	$OpenBSD: slowcgi.c,v 1.7 2024/01/26 18:11:49 job Exp $ */
 /*
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -44,6 +44,7 @@
 #include "slowcgi.h"
 #include "bgplgd.h"
 #include "http.h"
+#include "version.h"
 
 #define TIMEOUT_DEFAULT		 30
 #define WWW_USER		 "www"
@@ -159,6 +160,7 @@ void		parse_begin_request(uint8_t *, uint16_t, struct request *,
 void		parse_params(uint8_t *, uint16_t, struct request *, uint16_t);
 void		parse_stdin(uint8_t *, uint16_t, struct request *, uint16_t);
 char		*env_get(struct request *, const char *);
+void		error_response(struct request *, int);
 void		exec_cgi(struct request *);
 void		script_std_in(int, short, void *);
 void		script_err_in(int, short, void *);
@@ -299,7 +301,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	while ((c = getopt(argc, argv, "dp:S:s:U:u:")) != -1) {
+	while ((c = getopt(argc, argv, "dp:S:s:U:u:V")) != -1) {
 		switch (c) {
 		case 'd':
 			debug++;
@@ -316,6 +318,9 @@ main(int argc, char *argv[])
 		case 'U':
 			sock_user = optarg;
 			break;
+		case 'V':
+			fprintf(stderr, "OpenBGPD %s\n", BGPD_VERSION);
+			return 0;
 		default:
 			usage();
 			/* NOTREACHED */
@@ -504,6 +509,12 @@ slowcgi_timeout(int fd, short events, void *arg)
 
 	if (c->script_flags & SCRIPT_DONE)
 		return;
+
+	if (c->command_pid == 0) {
+		c->command_status = SIGALRM;
+		error_response(c, 408);
+		return;
+	}
 
 	ldebug("timeout fired for pid %d", c->command_pid);
 
@@ -887,7 +898,7 @@ http_error(int *res)
 	return "Internal Server Error";
 }
 
-static void
+void
 error_response(struct request *c, int res)
 {
 	const char *type = "text/html";

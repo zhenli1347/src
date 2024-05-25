@@ -1,4 +1,4 @@
-/* $OpenBSD: dsa_key.c,v 1.32 2022/11/26 16:08:52 tb Exp $ */
+/* $OpenBSD: dsa_key.c,v 1.37 2024/05/11 06:43:50 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -69,52 +69,43 @@
 #include "bn_local.h"
 #include "dsa_local.h"
 
-static int dsa_builtin_keygen(DSA *dsa);
-
 int
 DSA_generate_key(DSA *dsa)
 {
-	if (dsa->meth->dsa_keygen)
-		return dsa->meth->dsa_keygen(dsa);
-	return dsa_builtin_keygen(dsa);
-}
-
-static int
-dsa_builtin_keygen(DSA *dsa)
-{
-	int ok = 0;
-	BN_CTX *ctx = NULL;
 	BIGNUM *pub_key = NULL, *priv_key = NULL;
+	BN_CTX *ctx = NULL;
+	int ok = 0;
+
+	if ((priv_key = BN_new()) == NULL)
+		goto err;
+	if ((pub_key = BN_new()) == NULL)
+		goto err;
 
 	if ((ctx = BN_CTX_new()) == NULL)
 		goto err;
 
-	if ((priv_key = dsa->priv_key) == NULL) {
-		if ((priv_key = BN_new()) == NULL)
-			goto err;
-	}
-
-	if (!bn_rand_interval(priv_key, BN_value_one(), dsa->q))
+	if (!bn_rand_interval(priv_key, 1, dsa->q))
 		goto err;
-
-	if ((pub_key = dsa->pub_key) == NULL) {
-		if ((pub_key = BN_new()) == NULL)
-			goto err;
-	}
-
 	if (!BN_mod_exp_ct(pub_key, dsa->g, priv_key, dsa->p, ctx))
 		goto err;
 
+	BN_free(dsa->priv_key);
 	dsa->priv_key = priv_key;
+	priv_key = NULL;
+
+	BN_free(dsa->pub_key);
 	dsa->pub_key = pub_key;
+	pub_key = NULL;
+
 	ok = 1;
 
  err:
-	if (dsa->pub_key == NULL)
-		BN_free(pub_key);
-	if (dsa->priv_key == NULL)
-		BN_free(priv_key);
+	BN_free(pub_key);
+	BN_free(priv_key);
 	BN_CTX_free(ctx);
+
 	return ok;
 }
+LCRYPTO_ALIAS(DSA_generate_key);
+
 #endif

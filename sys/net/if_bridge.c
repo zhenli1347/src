@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bridge.c,v 1.364 2022/08/07 00:57:43 bluhm Exp $	*/
+/*	$OpenBSD: if_bridge.c,v 1.370 2024/04/14 20:46:27 bluhm Exp $	*/
 
 /*
  * Copyright (c) 1999, 2000 Jason L. Wright (jason@thought.net)
@@ -48,6 +48,7 @@
 #include <net/if_types.h>
 #include <net/if_llc.h>
 #include <net/netisr.h>
+#include <net/route.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -337,6 +338,10 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		 * released.
 		 */
 
+		NET_LOCK();
+		ifsetlro(ifs, 0);
+		NET_UNLOCK();
+
 		bif->bridge_sc = sc;
 		bif->ifp = ifs;
 		bif->bif_flags = IFBIF_LEARNING | IFBIF_DISCOVER;
@@ -395,6 +400,11 @@ bridge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			error = ENOMEM;
 			break;
 		}
+
+		NET_LOCK();
+		ifsetlro(ifs, 0);
+		NET_UNLOCK();
+
 		bif->bridge_sc = sc;
 		bif->ifp = ifs;
 		bif->bif_flags = IFBIF_SPAN;
@@ -1590,7 +1600,7 @@ bridge_ipsec(struct ifnet *ifp, struct ether_header *eh, int hassnap,
 			    off);
 			tdb_unref(tdb);
 			if (prot != IPPROTO_DONE)
-				ip_deliver(&m, &hlen, prot, af);
+				ip_deliver(&m, &hlen, prot, af, 0);
 			return (1);
 		} else {
 			tdb_unref(tdb);
@@ -1726,15 +1736,8 @@ bridge_ip(struct ifnet *brifp, int dir, struct ifnet *ifp,
 			return (NULL);
 		if (m->m_len < sizeof(struct ip))
 			goto dropit;
+		in_hdr_cksum_out(m, ifp);
 		in_proto_cksum_out(m, ifp);
-		ip = mtod(m, struct ip *);
-		ip->ip_sum = 0;
-		if (0 && (ifp->if_capabilities & IFCAP_CSUM_IPv4))
-			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_OUT;
-		else {
-			ipstat_inc(ips_outswcsum);
-			ip->ip_sum = in_cksum(m, hlen);
-		}
 
 #if NPF > 0
 		if (dir == BRIDGE_IN &&
@@ -1817,7 +1820,7 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
     struct mbuf *m)
 {
 	struct llc llc;
-	struct mbuf_list fml;
+	struct mbuf_list ml;
 	int error = 0;
 	int hassnap = 0;
 	u_int16_t etype;
@@ -1875,11 +1878,11 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
 		return;
 	}
 
-	error = ip_fragment(m, &fml, ifp, ifp->if_mtu);
+	error = ip_fragment(m, &ml, ifp, ifp->if_mtu);
 	if (error)
 		return;
 
-	while ((m = ml_dequeue(&fml)) != NULL) {
+	while ((m = ml_dequeue(&ml)) != NULL) {
 		if (hassnap) {
 			M_PREPEND(m, LLC_SNAPFRAMELEN, M_DONTWAIT);
 			if (m == NULL) {
@@ -1899,7 +1902,7 @@ bridge_fragment(struct ifnet *brifp, struct ifnet *ifp, struct ether_header *eh,
 			break;
 	}
 	if (error)
-		ml_purge(&fml);
+		ml_purge(&ml);
 	else
 		ipstat_inc(ips_fragmented);
 
@@ -1984,8 +1987,7 @@ bridge_send_icmp_err(struct ifnet *ifp,
 	ip->ip_off &= htons(IP_DF);
 	ip->ip_id = htons(ip_randomid());
 	ip->ip_ttl = MAXTTL;
-	ip->ip_sum = 0;
-	ip->ip_sum = in_cksum(m, hlen);
+	in_hdr_cksum_out(m, NULL);
 
 	/* Swap ethernet addresses */
 	bcopy(&eh->ether_dhost, &ether_tmp, sizeof(ether_tmp));

@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_vnops.c,v 1.139 2022/08/23 20:37:16 cheloha Exp $	*/
+/*	$OpenBSD: msdosfs_vnops.c,v 1.141 2024/05/13 11:17:40 semarie Exp $	*/
 /*	$NetBSD: msdosfs_vnops.c,v 1.63 1997/10/17 11:24:19 ws Exp $	*/
 
 /*-
@@ -810,12 +810,6 @@ msdosfs_remove(void *v)
 	printf("msdosfs_remove(), dep %p, v_usecount %d\n", dep,
 	    ap->a_vp->v_usecount);
 #endif
-	if (ddep == dep)
-		vrele(ap->a_vp);
-	else
-		vput(ap->a_vp);	/* causes msdosfs_inactive() to be called
-				 * via vrele() */
-	vput(ap->a_dvp);
 	return (error);
 }
 
@@ -1970,7 +1964,7 @@ msdosfs_kqfilter(void *v)
 
 	kn->kn_hook = (caddr_t)vp;
 
-	klist_insert_locked(&vp->v_selectinfo.si_note, kn);
+	klist_insert_locked(&vp->v_klist, kn);
 
 	return (0);
 }
@@ -1980,7 +1974,7 @@ filt_msdosfsdetach(struct knote *kn)
 {
 	struct vnode *vp = (struct vnode *)kn->kn_hook;
 
-	klist_remove_locked(&vp->v_selectinfo.si_note, kn);
+	klist_remove_locked(&vp->v_klist, kn);
 }
 
 int

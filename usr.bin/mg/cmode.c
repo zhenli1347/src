@@ -1,4 +1,4 @@
-/* $OpenBSD: cmode.c,v 1.19 2022/10/15 09:54:29 op Exp $ */
+/* $OpenBSD: cmode.c,v 1.23 2024/05/21 05:00:48 jsg Exp $ */
 /*
  * This file is in the public domain.
  *
@@ -35,7 +35,6 @@ static struct line *findnonblank(struct line *);
 static int isnonblank(const struct line *, int);
 
 void cmode_init(void);
-int cc_comment(int, int);
 
 /* Keymaps */
 
@@ -213,7 +212,7 @@ cc_lfindent(int f, int n)
 }
 
 /*
- * Get the level of indention after line lp is processed
+ * Get the level of indentation after line lp is processed
  * Note getindent has two returns:
  * curi = value if indenting current line.
  * return value = value affecting subsequent lines.
@@ -227,7 +226,7 @@ getindent(const struct line *lp, int *curi)
 	int newind = 0;		/* new index value */
 	int stringp = FALSE;	/* in string? */
 	int escp = FALSE;	/* Escape char? */
-	int lastc = '\0';	/* Last matched string delimeter */
+	int lastc = '\0';	/* Last matched string delimiter */
 	int nparen = 0;		/* paren count */
 	int obrace = 0;		/* open brace count */
 	int cbrace = 0;		/* close brace count */
@@ -245,14 +244,10 @@ getindent(const struct line *lp, int *curi)
 	for (lo = 0; lo < llength(lp); lo++) {
 		if (!isspace(c = lgetc(lp, lo)))
 			break;
-		if (c == '\t'
-#ifdef NOTAB
-		    && !(curbp->b_flag & BFNOTAB)
-#endif /* NOTAB */
-		    ) {
-			nicol |= 0x07;
-		}
-		nicol++;
+		if (c == '\t')
+			nicol = ntabstop(nicol, curbp->b_tabw);
+		else
+			nicol++;
 	}
 
 	/* If last line was blank, choose 0 */
@@ -356,7 +351,7 @@ getindent(const struct line *lp, int *curi)
 }
 
 /*
- * Given a delimeter and its purported mate, tell us if they
+ * Given a delimiter and its purported mate, tell us if they
  * match.
  */
 static int
@@ -414,13 +409,8 @@ findcolpos(const struct buffer *bp, const struct line *lp, int lo)
 
 	for (i = 0; i < lo; ++i) {
 		c = lgetc(lp, i);
-		if (c == '\t'
-#ifdef NOTAB
-		    && !(bp->b_flag & BFNOTAB)
-#endif /* NOTAB */
-			) {
-			col |= 0x07;
-			col++;
+		if (c == '\t') {
+			col = ntabstop(col, curbp->b_tabw);
 		} else if (ISCTRL(c) != FALSE)
 			col += 2;
 		else if (isprint(c)) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_community.c,v 1.9 2022/09/01 13:19:11 claudio Exp $ */
+/*	$OpenBSD: rde_community.c,v 1.15 2024/01/24 14:51:12 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
@@ -97,6 +97,16 @@ fc2c(struct community *fc, struct rde_peer *peer, struct community *c,
 		type = (int32_t)fc->data3 >> 8;
 		subtype = fc->data3 & 0xff;
 
+		if ((fc->flags >> 24 & 0xff) == COMMUNITY_ANY) {
+			/* special case for 'ext-community * *' */
+			if (m == NULL)
+				return -1;
+			m->data1 = 0;
+			m->data2 = 0;
+			m->data3 = 0;
+			return 0;
+		}
+
 		if (type == -1) {
 			/* special case for 'ext-community rt *' */
 			if ((fc->flags >> 8 & 0xff) != COMMUNITY_ANY ||
@@ -112,6 +122,7 @@ fc2c(struct community *fc, struct rde_peer *peer, struct community *c,
 		c->data3 = type << 8 | subtype;
 		switch (type & EXT_COMMUNITY_VALUE) {
 		case EXT_COMMUNITY_TRANS_TWO_AS:
+		case EXT_COMMUNITY_TRANS_FOUR_AS:
 			if ((fc->flags >> 8 & 0xff) == COMMUNITY_ANY)
 				break;
 
@@ -121,11 +132,9 @@ fc2c(struct community *fc, struct rde_peer *peer, struct community *c,
 			if (apply_flag(fc->data2, fc->flags >> 16, peer,
 			    &c->data2, m ? &m->data2 : NULL))
 				return -1;
-			/* check that values fit */
-			if (c->data1 > USHRT_MAX)
-				return -1;
+			if (m)
+				m->data3 &= ~(EXT_COMMUNITY_TRANS_FOUR_AS << 8);
 			return 0;
-		case EXT_COMMUNITY_TRANS_FOUR_AS:
 		case EXT_COMMUNITY_TRANS_IPV4:
 			if ((fc->flags >> 8 & 0xff) == COMMUNITY_ANY)
 				break;
@@ -150,10 +159,11 @@ fc2c(struct community *fc, struct rde_peer *peer, struct community *c,
 			return 0;
 		}
 
-		if (m) {
-			m->data1 = 0;
-			m->data2 = 0;
-		}
+		/* this is for 'ext-community subtype *' */
+		if (m == NULL)
+			return -1;
+		m->data1 = 0;
+		m->data2 = 0;
 		return 0;
 	default:
 		fatalx("%s: unknown type %d", __func__, (uint8_t)c->flags);
@@ -215,10 +225,9 @@ insert_community(struct rde_community *comm, struct community *c)
 		struct community *new;
 		int newsize = comm->size + 8;
 
-		if ((new = reallocarray(comm->communities, newsize,
-		    sizeof(struct community))) == NULL)
+		if ((new = recallocarray(comm->communities, comm->size,
+		    newsize, sizeof(struct community))) == NULL)
 			fatal(__func__);
-		memset(new + comm->size, 0, 8 * sizeof(struct community));
 		comm->communities = new;
 		comm->size = newsize;
 	}
@@ -246,6 +255,8 @@ insert_community(struct rde_community *comm, struct community *c)
 static int
 non_transitive_ext_community(struct community *c)
 {
+	if ((uint8_t)c->flags != COMMUNITY_TYPE_EXT)
+		return 0;
 	if ((c->data3 >> 8) & EXT_COMMUNITY_NON_TRANSITIVE)
 		return 1;
 	return 0;
@@ -268,7 +279,6 @@ struct rde_peer *peer)
 		    sizeof(*fc), fast_match) != NULL);
 	} else {
 		/* slow path */
-
 		if (fc2c(fc, peer, &test, &mask) == -1)
 			return 0;
 
@@ -335,6 +345,24 @@ struct rde_peer *peer)
 	} else {
 		if (fc2c(fc, peer, &set, NULL) == -1)
 			return 0;
+		if ((uint8_t)set.flags == COMMUNITY_TYPE_EXT) {
+			int type = (int)set.data3 >> 8;
+			switch (type & EXT_COMMUNITY_VALUE) {
+			case EXT_COMMUNITY_TRANS_TWO_AS:
+			case EXT_COMMUNITY_TRANS_FOUR_AS:
+				/* check that values fit */
+				if (set.data1 > USHRT_MAX &&
+				    set.data2 > USHRT_MAX)
+					return 0;
+				if (set.data1 > USHRT_MAX)
+					set.data3 = (set.data3 & 0xff) |
+					    EXT_COMMUNITY_TRANS_FOUR_AS << 8;
+				else
+					set.data3 = (set.data3 & 0xff) |
+					    EXT_COMMUNITY_TRANS_TWO_AS << 8;
+				break;
+			}
+		}
 		insert_community(comm, &set);
 	}
 	return 1;
@@ -390,24 +418,23 @@ struct rde_peer *peer)
  * - community_ext_add for ATTR_EXT_COMMUNITIES
  */
 int
-community_add(struct rde_community *comm, int flags, void *buf, size_t len)
+community_add(struct rde_community *comm, int flags, struct ibuf *buf)
 {
 	struct community set = { .flags = COMMUNITY_TYPE_BASIC };
-	uint8_t *b = buf;
-	uint16_t c;
-	size_t l;
+	uint16_t data1, data2;
 
-	if (len == 0 || len % 4 != 0)
+	if (ibuf_size(buf) == 0 || ibuf_size(buf) % 4 != 0)
 		return -1;
 
 	if (flags & ATTR_PARTIAL)
 		comm->flags |= PARTIAL_COMMUNITIES;
 
-	for (l = 0; l < len; l += 4, b += 4) {
-		memcpy(&c, b, sizeof(c));
-		set.data1 = ntohs(c);
-		memcpy(&c, b + 2, sizeof(c));
-		set.data2 = ntohs(c);
+	while (ibuf_size(buf) > 0) {
+		if (ibuf_get_n16(buf, &data1) == -1 ||
+		    ibuf_get_n16(buf, &data2) == -1)
+			return -1;
+		set.data1 = data1;
+		set.data2 = data2;
 		insert_community(comm, &set);
 	}
 
@@ -415,26 +442,21 @@ community_add(struct rde_community *comm, int flags, void *buf, size_t len)
 }
 
 int
-community_large_add(struct rde_community *comm, int flags, void *buf,
-    size_t len)
+community_large_add(struct rde_community *comm, int flags, struct ibuf *buf)
 {
 	struct community set = { .flags = COMMUNITY_TYPE_LARGE };
-	uint8_t *b = buf;
-	size_t l;
 
-	if (len == 0 || len % 12 != 0)
+	if (ibuf_size(buf) == 0 || ibuf_size(buf) % 12 != 0)
 		return -1;
 
 	if (flags & ATTR_PARTIAL)
 		comm->flags |= PARTIAL_LARGE_COMMUNITIES;
 
-	for (l = 0; l < len; l += 12, b += 12) {
-		memcpy(&set.data1, b, sizeof(set.data1));
-		memcpy(&set.data2, b + 4, sizeof(set.data2));
-		memcpy(&set.data3, b + 8, sizeof(set.data3));
-		set.data1 = ntohl(set.data1);
-		set.data2 = ntohl(set.data2);
-		set.data3 = ntohl(set.data3);
+	while (ibuf_size(buf) > 0) {
+		if (ibuf_get_n32(buf, &set.data1) == -1 ||
+		    ibuf_get_n32(buf, &set.data2) == -1 ||
+		    ibuf_get_n32(buf, &set.data3) == -1)
+			return -1;
 		insert_community(comm, &set);
 	}
 
@@ -443,23 +465,22 @@ community_large_add(struct rde_community *comm, int flags, void *buf,
 
 int
 community_ext_add(struct rde_community *comm, int flags, int ebgp,
-    void *buf, size_t len)
+    struct ibuf *buf)
 {
 	struct community set = { .flags = COMMUNITY_TYPE_EXT };
-	uint8_t *b = buf, type;
 	uint64_t c;
-	size_t l;
+	uint8_t type;
 
-	if (len == 0 || len % 8 != 0)
+	if (ibuf_size(buf) == 0 || ibuf_size(buf) % 8 != 0)
 		return -1;
 
 	if (flags & ATTR_PARTIAL)
 		comm->flags |= PARTIAL_EXT_COMMUNITIES;
 
-	for (l = 0; l < len; l += 8, b += 8) {
-		memcpy(&c, b, 8);
+	while (ibuf_size(buf) > 0) {
+		if (ibuf_get_n64(buf, &c) == -1)
+			return (-1);
 
-		c = be64toh(c);
 		type = c >> 56;
 		/* filter out non-transitive ext communuties from ebgp peers */
 		if (ebgp && (type & EXT_COMMUNITY_NON_TRANSITIVE))
@@ -487,228 +508,83 @@ community_ext_add(struct rde_community *comm, int flags, int ebgp,
 
 /*
  * Convert communities back to the wireformat.
- * This function needs to make sure that the attribute buffer is overflowed
- * while writing out the communities.
- * - community_write for ATTR_COMMUNITUES
- * - community_large_write for ATTR_LARGE_COMMUNITIES
- * - community_ext_write for ATTR_EXT_COMMUNITIES
- *   When writing ATTR_EXT_COMMUNITIES non-transitive communities need to
- *   be skipped if it is sent to an ebgp peer.
+ * When writing ATTR_EXT_COMMUNITIES non-transitive communities need to
+ * be skipped if they are sent to an ebgp peer.
  */
 int
-community_write(struct rde_community *comm, void *buf, uint16_t len)
-{
-	uint8_t *b = buf;
-	uint16_t c;
-	size_t n = 0;
-	int l, r, flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
-
-	if (comm->flags & PARTIAL_COMMUNITIES)
-		flags |= ATTR_PARTIAL;
-
-	/* first count how many communities will be written */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_BASIC)
-			n++;
-
-	if (n == 0)
-		return 0;
-
-	/* write attribute header */
-	r = attr_write(b, len, flags, ATTR_COMMUNITIES, NULL, n * 4);
-	if (r == -1)
-		return -1;
-	b += r;
-
-	/* write out the communities */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_BASIC) {
-			c = htons(comm->communities[l].data1);
-			memcpy(b, &c, sizeof(c));
-			b += sizeof(c);
-			r += sizeof(c);
-
-			c = htons(comm->communities[l].data2);
-			memcpy(b, &c, sizeof(c));
-			b += sizeof(c);
-			r += sizeof(c);
-		}
-
-	return r;
-}
-
-int
-community_large_write(struct rde_community *comm, void *buf, uint16_t len)
-{
-	uint8_t *b = buf;
-	uint32_t c;
-	size_t n = 0;
-	int l, r, flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
-
-	if (comm->flags & PARTIAL_LARGE_COMMUNITIES)
-		flags |= ATTR_PARTIAL;
-
-	/* first count how many communities will be written */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_LARGE)
-			n++;
-
-	if (n == 0)
-		return 0;
-
-	/* write attribute header */
-	r = attr_write(b, len, flags, ATTR_LARGE_COMMUNITIES, NULL, n * 12);
-	if (r == -1)
-		return -1;
-	b += r;
-
-	/* write out the communities */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_LARGE) {
-			c = htonl(comm->communities[l].data1);
-			memcpy(b, &c, sizeof(c));
-			b += sizeof(c);
-			r += sizeof(c);
-
-			c = htonl(comm->communities[l].data2);
-			memcpy(b, &c, sizeof(c));
-			b += sizeof(c);
-			r += sizeof(c);
-
-			c = htonl(comm->communities[l].data3);
-			memcpy(b, &c, sizeof(c));
-			b += sizeof(c);
-			r += sizeof(c);
-		}
-
-	return r;
-}
-
-int
-community_ext_write(struct rde_community *comm, int ebgp, void *buf,
-    uint16_t len)
+community_writebuf(struct rde_community *comm, uint8_t type, int ebgp,
+    struct ibuf *buf)
 {
 	struct community *cp;
-	uint8_t *b = buf;
 	uint64_t ext;
-	size_t n = 0;
-	int l, r, flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
+	int l, size, start, end, num;
+	int flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
+	uint8_t t;
 
-	if (comm->flags & PARTIAL_EXT_COMMUNITIES)
-		flags |= ATTR_PARTIAL;
+	switch (type) {
+	case ATTR_COMMUNITIES:
+		if (comm->flags & PARTIAL_COMMUNITIES)
+			flags |= ATTR_PARTIAL;
+		size = 4;
+		t = COMMUNITY_TYPE_BASIC;
+		break;
+	case ATTR_EXT_COMMUNITIES:
+		if (comm->flags & PARTIAL_EXT_COMMUNITIES)
+			flags |= ATTR_PARTIAL;
+		size = 8;
+		t = COMMUNITY_TYPE_EXT;
+		break;
+	case ATTR_LARGE_COMMUNITIES:
+		if (comm->flags & PARTIAL_LARGE_COMMUNITIES)
+			flags |= ATTR_PARTIAL;
+		size = 12;
+		t = COMMUNITY_TYPE_LARGE;
+		break;
+	default:
+		return -1;
+	}
 
 	/* first count how many communities will be written */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_EXT && !(ebgp &&
-		    non_transitive_ext_community(&comm->communities[l])))
-			n++;
+	num = 0;
+	start = -1;
+	for (l = 0; l < comm->nentries; l++) {
+		cp = &comm->communities[l];
+		if ((uint8_t)cp->flags == t) {
+			if (ebgp && non_transitive_ext_community(cp))
+				continue;
+			num++;
+			if (start == -1)
+				start = l;
+		}
+		if ((uint8_t)cp->flags > t)
+			break;
+	}
+	end = l;
 
-	if (n == 0)
+	/* no communities for this type present */
+	if (num == 0)
 		return 0;
 
-	/* write attribute header */
-	r = attr_write(b, len, flags, ATTR_EXT_COMMUNITIES, NULL, n * 8);
-	if (r == -1)
+	if (num > INT16_MAX / size)
 		return -1;
-	b += r;
+
+	/* write attribute header */
+	if (attr_writebuf(buf, flags, type, NULL, num * size) == -1)
+		return -1;
 
 	/* write out the communities */
-	for (l = 0; l < comm->nentries; l++) {
-		cp = comm->communities + l;
-		if ((uint8_t)cp->flags == COMMUNITY_TYPE_EXT && !(ebgp &&
-		    non_transitive_ext_community(cp))) {
-			ext = (uint64_t)cp->data3 << 48;
-			switch ((cp->data3 >> 8) & EXT_COMMUNITY_VALUE) {
-			case EXT_COMMUNITY_TRANS_TWO_AS:
-			case EXT_COMMUNITY_TRANS_OPAQUE:
-			case EXT_COMMUNITY_TRANS_EVPN:
-				ext |= ((uint64_t)cp->data1 & 0xffff) << 32;
-				ext |= (uint64_t)cp->data2;
-				break;
-			case EXT_COMMUNITY_TRANS_FOUR_AS:
-			case EXT_COMMUNITY_TRANS_IPV4:
-				ext |= (uint64_t)cp->data1 << 16;
-				ext |= (uint64_t)cp->data2 & 0xffff;
-				break;
-			}
-			ext = htobe64(ext);
-			memcpy(b, &ext, sizeof(ext));
-			b += sizeof(ext);
-			r += sizeof(ext);
-		}
-	}
+	for (l = start; l < end; l++) {
+		cp = &comm->communities[l];
 
-	return r;
-}
-
-/*
- * Convert communities back to the wireformat and dump them into the ibuf buf.
- * This function is used by the mrt dump code.
- */
-int
-community_writebuf(struct ibuf *buf, struct rde_community *comm)
-{
-	size_t basic_n = 0, large_n = 0, ext_n = 0;
-	int l, flags;
-
-	/* first count how many communities will be written */
-	for (l = 0; l < comm->nentries; l++)
-		if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_BASIC)
-			basic_n++;
-		else if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_EXT)
-			ext_n++;
-		else if ((uint8_t)comm->communities[l].flags ==
-		    COMMUNITY_TYPE_LARGE)
-			large_n++;
-
-
-	if (basic_n != 0) {
-		/* write attribute header */
-		flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
-		if (comm->flags & PARTIAL_COMMUNITIES)
-			flags |= ATTR_PARTIAL;
-
-		if (attr_writebuf(buf, flags, ATTR_COMMUNITIES, NULL,
-		    basic_n * 4) == -1)
-			return -1;
-
-		/* write out the communities */
-		for (l = 0; l < comm->nentries; l++)
-			if ((uint8_t)comm->communities[l].flags ==
-			    COMMUNITY_TYPE_BASIC) {
-				uint16_t c;
-				c = htons(comm->communities[l].data1);
-				if (ibuf_add(buf, &c, sizeof(c)) == -1)
-					return (-1);
-				c = htons(comm->communities[l].data2);
-				if (ibuf_add(buf, &c, sizeof(c)) == -1)
-					return (-1);
-			}
-	}
-	if (ext_n != 0) {
-		/* write attribute header */
-		flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
-		if (comm->flags & PARTIAL_COMMUNITIES)
-			flags |= ATTR_PARTIAL;
-
-		if (attr_writebuf(buf, flags, ATTR_EXT_COMMUNITIES, NULL,
-		    ext_n * 8) == -1)
-			return -1;
-
-		/* write out the communities */
-		for (l = 0; l < comm->nentries; l++) {
-			struct community *cp;
-			uint64_t ext;
-
-			cp = comm->communities + l;
-			if ((uint8_t)cp->flags != COMMUNITY_TYPE_EXT)
+		switch (type) {
+		case ATTR_COMMUNITIES:
+			if (ibuf_add_n16(buf, cp->data1) == -1)
+				return -1;
+			if (ibuf_add_n16(buf, cp->data2) == -1)
+				return -1;
+			break;
+		case ATTR_EXT_COMMUNITIES:
+			if (ebgp && non_transitive_ext_community(cp))
 				continue;
 
 			ext = (uint64_t)cp->data3 << 48;
@@ -725,38 +601,19 @@ community_writebuf(struct ibuf *buf, struct rde_community *comm)
 				ext |= (uint64_t)cp->data2 & 0xffff;
 				break;
 			}
-			ext = htobe64(ext);
-			if (ibuf_add(buf, &ext, sizeof(ext)) == -1)
-				return (-1);
+			if (ibuf_add_n64(buf, ext) == -1)
+				return -1;
+			break;
+		case ATTR_LARGE_COMMUNITIES:
+			if (ibuf_add_n32(buf, cp->data1) == -1)
+				return -1;
+			if (ibuf_add_n32(buf, cp->data2) == -1)
+				return -1;
+			if (ibuf_add_n32(buf, cp->data3) == -1)
+				return -1;
+			break;
 		}
 	}
-	if (large_n != 0) {
-		/* write attribute header */
-		flags = ATTR_OPTIONAL | ATTR_TRANSITIVE;
-		if (comm->flags & PARTIAL_COMMUNITIES)
-			flags |= ATTR_PARTIAL;
-
-		if (attr_writebuf(buf, flags, ATTR_LARGE_COMMUNITIES, NULL,
-		    large_n * 12) == -1)
-			return -1;
-
-		/* write out the communities */
-		for (l = 0; l < comm->nentries; l++)
-			if ((uint8_t)comm->communities[l].flags ==
-			    COMMUNITY_TYPE_LARGE) {
-				uint32_t c;
-				c = htonl(comm->communities[l].data1);
-				if (ibuf_add(buf, &c, sizeof(c)) == -1)
-					return (-1);
-				c = htonl(comm->communities[l].data2);
-				if (ibuf_add(buf, &c, sizeof(c)) == -1)
-					return (-1);
-				c = htonl(comm->communities[l].data3);
-				if (ibuf_add(buf, &c, sizeof(c)) == -1)
-					return (-1);
-			}
-	}
-
 	return 0;
 }
 
@@ -857,7 +714,7 @@ communities_copy(struct rde_community *to, struct rde_community *from)
 {
 	memset(to, 0, sizeof(*to));
 
-	/* ingore from->size and allocate the perfect amount */
+	/* ignore from->size and allocate the perfect amount */
 	to->size = from->size;
 	to->nentries = from->nentries;
 	to->flags = from->flags;

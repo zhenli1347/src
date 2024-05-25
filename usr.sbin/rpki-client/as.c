@@ -1,4 +1,4 @@
-/*	$OpenBSD: as.c,v 1.11 2022/11/30 08:17:21 job Exp $ */
+/*	$OpenBSD: as.c,v 1.16 2023/12/27 07:15:55 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -23,38 +23,16 @@
 
 #include "extern.h"
 
-/*
- * Parse a uint32_t AS identifier from an ASN1_INTEGER.
- * This relies on the specification for ASN1_INTEGER itself, which is
- * essentially a series of big-endian bytes in the unsigned case.
- * All we do here is check if the number is negative then start copying
- * over bytes.
- * This is necessary because ASN1_INTEGER_get() on a 32-bit machine
- * (e.g., i386) will fail for AS numbers of UINT32_MAX.
- */
+/* Parse a uint32_t AS identifier from an ASN1_INTEGER. */
 int
 as_id_parse(const ASN1_INTEGER *v, uint32_t *out)
 {
-	int	 i;
-	uint32_t res = 0;
+	uint64_t res = 0;
 
-	/* If the negative bit is set, this is wrong. */
-
-	if (v->type & V_ASN1_NEG)
+	if (!ASN1_INTEGER_get_uint64(&res, v))
 		return 0;
-
-	/* Too many bytes for us to consider. */
-
-	if ((size_t)v->length > sizeof(uint32_t))
+	if (res > UINT32_MAX)
 		return 0;
-
-	/* Stored as big-endian bytes. */
-
-	for (i = 0; i < v->length; i++) {
-		res <<= 8;
-		res |= v->data[i];
-	}
-
 	*out = res;
 	return 1;
 }
@@ -67,7 +45,7 @@ as_id_parse(const ASN1_INTEGER *v, uint32_t *out)
  */
 int
 as_check_overlap(const struct cert_as *a, const char *fn,
-    const struct cert_as *as, size_t asz)
+    const struct cert_as *as, size_t asz, int quiet)
 {
 	size_t	 i;
 
@@ -75,31 +53,29 @@ as_check_overlap(const struct cert_as *a, const char *fn,
 
 	if (asz &&
 	    (a->type == CERT_AS_INHERIT || as[0].type == CERT_AS_INHERIT)) {
-		warnx("%s: RFC 3779 section 3.2.3.3: "
-		    "cannot have inheritance and multiple ASnum or "
-		    "multiple inheritance", fn);
+		if (!quiet) {
+			warnx("%s: RFC 3779 section 3.2.3.3: "
+			    "cannot have inheritance and multiple ASnum or "
+			    "multiple inheritance", fn);
+		}
 		return 0;
 	}
 
 	/* Now check for overlaps between singletons/ranges. */
 
-	for (i = 0; i < asz; i++)
+	for (i = 0; i < asz; i++) {
 		switch (as[i].type) {
 		case CERT_AS_ID:
 			switch (a->type) {
 			case CERT_AS_ID:
 				if (a->id != as[i].id)
-					break;
-				warnx("%s: RFC 3779 section 3.2.3.4: "
-				    "cannot have overlapping ASnum", fn);
-				return 0;
+					continue;
+				break;
 			case CERT_AS_RANGE:
 				if (as->range.min > as[i].id ||
 				    as->range.max < as[i].id)
-					break;
-				warnx("%s: RFC 3779 section 3.2.3.4: "
-				    "cannot have overlapping ASnum", fn);
-				return 0;
+					continue;
+				break;
 			default:
 				abort();
 			}
@@ -109,17 +85,13 @@ as_check_overlap(const struct cert_as *a, const char *fn,
 			case CERT_AS_ID:
 				if (as[i].range.min > a->id ||
 				    as[i].range.max < a->id)
-					break;
-				warnx("%s: RFC 3779 section 3.2.3.4: "
-				    "cannot have overlapping ASnum", fn);
-				return 0;
+					continue;
+				break;
 			case CERT_AS_RANGE:
 				if (a->range.max < as[i].range.min ||
 				    a->range.min > as[i].range.max)
-					break;
-				warnx("%s: RFC 3779 section 3.2.3.4: "
-				    "cannot have overlapping ASnum", fn);
-				return 0;
+					continue;
+				break;
 			default:
 				abort();
 			}
@@ -127,6 +99,12 @@ as_check_overlap(const struct cert_as *a, const char *fn,
 		default:
 			abort();
 		}
+		if (!quiet) {
+			warnx("%s: RFC 3779 section 3.2.3.4: "
+			    "cannot have overlapping ASnum", fn);
+		}
+		return 0;
+	}
 
 	return 1;
 }
@@ -156,4 +134,24 @@ as_check_covered(uint32_t min, uint32_t max,
 	}
 
 	return -1;
+}
+
+void
+as_warn(const char *fn, const char *msg, const struct cert_as *as)
+{
+	switch (as->type) {
+	case CERT_AS_ID:
+		warnx("%s: %s: AS %u", fn, msg, as->id);
+		break;
+	case CERT_AS_RANGE:
+		warnx("%s: %s: AS range %u--%u", fn, msg, as->range.min,
+		    as->range.max);
+		break;
+	case CERT_AS_INHERIT:
+		warnx("%s: %s: AS (inherit)", fn, msg);
+		break;
+	default:
+		warnx("%s: corrupt cert", fn);
+		break;
+	}
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: lka_filter.c,v 1.68 2021/06/14 17:58:15 eric Exp $	*/
+/*	$OpenBSD: lka_filter.c,v 1.77 2024/05/14 13:38:54 op Exp $	*/
 
 /*
  * Copyright (c) 2018 Gilles Chehade <gilles@poolp.org>
@@ -24,7 +24,7 @@
 #include "smtpd.h"
 #include "log.h"
 
-#define	PROTOCOL_VERSION	"0.6"
+#define	PROTOCOL_VERSION	"0.7"
 
 struct filter;
 struct filter_session;
@@ -192,6 +192,7 @@ static void
 lka_proc_config(struct processor_instance *pi)
 {
 	io_printf(pi->io, "config|smtpd-version|%s\n", SMTPD_VERSION);
+	io_printf(pi->io, "config|protocol|%s\n", PROTOCOL_VERSION);
 	io_printf(pi->io, "config|smtp-session-timeout|%d\n", SMTPD_SESSION_TIMEOUT);
 	if (pi->subsystems & FILTER_SUBSYSTEM_SMTP_IN)
 		io_printf(pi->io, "config|subsystem|smtp-in\n");
@@ -593,40 +594,29 @@ lka_filter_process_response(const char *name, const char *line)
 {
 	uint64_t reqid;
 	uint64_t token;
-	char buffer[LINE_MAX];
 	char *ep = NULL;
-	char *kind = NULL;
-	char *qid = NULL;
-	/*char *phase = NULL;*/
-	char *response = NULL;
-	char *parameter = NULL;
+	const char *kind = NULL;
+	const char *qid = NULL;
+	const char *response = NULL;
+	const char *parameter = NULL;
 	struct filter_session *fs;
 
-	(void)strlcpy(buffer, line, sizeof buffer);
-	if ((ep = strchr(buffer, '|')) == NULL)
+	kind = line;
+
+	if ((ep = strchr(kind, '|')) == NULL)
 		fatalx("Missing token: %s", line);
-	ep[0] = '\0';
-
-	kind = buffer;
-
 	qid = ep+1;
-	if ((ep = strchr(qid, '|')) == NULL)
-		fatalx("Missing reqid: %s", line);
-	ep[0] = '\0';
 
+	errno = 0;
 	reqid = strtoull(qid, &ep, 16);
-	if (qid[0] == '\0' || *ep != '\0')
+	if (qid[0] == '\0' || *ep != '|')
 		fatalx("Invalid reqid: %s", line);
 	if (errno == ERANGE && reqid == ULLONG_MAX)
 		fatal("Invalid reqid: %s", line);
 
-	qid = ep+1;
-	if ((ep = strchr(qid, '|')) == NULL)
-		fatal("Missing directive: %s", line);
-	ep[0] = '\0';
-
+	qid = ep + 1;
 	token = strtoull(qid, &ep, 16);
-	if (qid[0] == '\0' || *ep != '\0')
+	if (qid[0] == '\0' || *ep != '|')
 		fatalx("Invalid token: %s", line);
 	if (errno == ERANGE && token == ULLONG_MAX)
 		fatal("Invalid token: %s", line);
@@ -637,7 +627,7 @@ lka_filter_process_response(const char *name, const char *line)
 	if ((fs = tree_get(&sessions, reqid)) == NULL)
 		return;
 
-	if (strcmp(kind, "filter-dataline") == 0) {
+	if (strncmp(kind, "filter-dataline|", 16) == 0) {
 		if (fs->phase != FILTER_DATA_LINE)
 			fatalx("filter-dataline out of dataline phase");
 		filter_data_next(token, reqid, response);
@@ -646,19 +636,13 @@ lka_filter_process_response(const char *name, const char *line)
 	if (fs->phase == FILTER_DATA_LINE)
 		fatalx("filter-result in dataline phase");
 
-	if ((ep = strchr(response, '|'))) {
+	if ((ep = strchr(response, '|')) != NULL)
 		parameter = ep + 1;
-		ep[0] = '\0';
-	}
 
 	if (strcmp(response, "proceed") == 0) {
-		if (parameter != NULL)
-			fatalx("Unexpected parameter after proceed: %s", line);
 		filter_protocol_next(token, reqid, 0);
 		return;
 	} else if (strcmp(response, "junk") == 0) {
-		if (parameter != NULL)
-			fatalx("Unexpected parameter after junk: %s", line);
 		if (fs->phase == FILTER_COMMIT)
 			fatalx("filter-reponse junk after DATA");
 		filter_result_junk(reqid);
@@ -667,11 +651,11 @@ lka_filter_process_response(const char *name, const char *line)
 		if (parameter == NULL)
 			fatalx("Missing parameter: %s", line);
 
-		if (strcmp(response, "rewrite") == 0)
+		if (strncmp(response, "rewrite|", 8) == 0)
 			filter_result_rewrite(reqid, parameter);
-		else if (strcmp(response, "reject") == 0)
+		else if (strncmp(response, "reject|", 7) == 0)
 			filter_result_reject(reqid, parameter);
-		else if (strcmp(response, "disconnect") == 0)
+		else if (strncmp(response, "disconnect|", 11) == 0)
 			filter_result_disconnect(reqid, parameter);
 		else
 			fatalx("Invalid directive: %s", line);
@@ -746,7 +730,7 @@ filter_protocol_internal(struct filter_session *fs, uint64_t *token, uint64_t re
 			    filter->name,
 			    param,
 			    filter->config->rewrite);
-			    filter_result_rewrite(reqid, filter->config->rewrite);
+			filter_result_rewrite(reqid, filter->config->rewrite);
 			return;
 		}
 		else if (filter->config->disconnect) {
@@ -933,13 +917,13 @@ filter_protocol_query(struct filter *filter, uint64_t token, uint64_t reqid, con
 		n = io_printf(lka_proc_get_io(filter->proc),
 		    "filter|%s|%lld.%06ld|smtp-in|%s|%016"PRIx64"|%016"PRIx64"|%s|%s\n",
 		    PROTOCOL_VERSION,
-		    tv.tv_sec, tv.tv_usec,
+		    (long long)tv.tv_sec, (long)tv.tv_usec,
 		    phase, reqid, token, fs->rdns, param);
 	else
 		n = io_printf(lka_proc_get_io(filter->proc),
 		    "filter|%s|%lld.%06ld|smtp-in|%s|%016"PRIx64"|%016"PRIx64"|%s\n",
 		    PROTOCOL_VERSION,
-		    tv.tv_sec, tv.tv_usec,
+		    (long long)tv.tv_sec, (long)tv.tv_usec,
 		    phase, reqid, token, param);
 	if (n == -1)
 		fatalx("failed to write to processor");
@@ -957,7 +941,7 @@ filter_data_query(struct filter *filter, uint64_t token, uint64_t reqid, const c
 	    "filter|%s|%lld.%06ld|smtp-in|data-line|"
 	    "%016"PRIx64"|%016"PRIx64"|%s\n",
 	    PROTOCOL_VERSION,
-	    tv.tv_sec, tv.tv_usec,
+	    (long long)tv.tv_sec, (long)tv.tv_usec,
 	    reqid, token, line);
 	if (n == -1)
 		fatalx("failed to write to processor");
@@ -1374,8 +1358,9 @@ report_smtp_broadcast(uint64_t reqid, const char *direction, struct timeval *tv,
 		va_start(ap, format);
 		if (io_printf(lka_proc_get_io(rp->name),
 		    "report|%s|%lld.%06ld|%s|%s|%016"PRIx64"%s",
-		    PROTOCOL_VERSION, tv->tv_sec, tv->tv_usec, direction,
-		    event, reqid, format[0] != '\n' ? "|" : "") == -1 ||
+		    PROTOCOL_VERSION, (long long)tv->tv_sec, (long)tv->tv_usec,
+		    direction, event, reqid,
+		    format[0] != '\n' ? "|" : "") == -1 ||
 		    io_vprintf(lka_proc_get_io(rp->name), format, ap) == -1)
 			fatalx("failed to write to processor");
 		va_end(ap);
@@ -1460,7 +1445,7 @@ lka_report_smtp_link_auth(const char *direction, struct timeval *tv, uint64_t re
 		fs->username = xstrdup(username);
 	}
 	report_smtp_broadcast(reqid, direction, tv, "link-auth", "%s|%s\n",
-	    username, result);
+	    result, username);
 }
 
 void

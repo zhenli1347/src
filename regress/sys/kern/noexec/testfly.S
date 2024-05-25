@@ -1,4 +1,4 @@
-/*	$OpenBSD: testfly.S,v 1.10 2021/06/20 16:48:50 deraadt Exp $	*/
+/*	$OpenBSD: testfly.S,v 1.13 2024/03/26 19:12:34 miod Exp $	*/
 
 /*
  * Copyright (c) 2002,2003 Michael Shalayeff
@@ -30,9 +30,33 @@
 
 #include <machine/asm.h>
 
+#if !defined(_ASM_TYPE_FUNCTION)
+#define _ASM_TYPE_FUNCTION @function
+#endif
+
 	.space 16384
 
-#if defined(__aarch64__) || defined(__amd64__) || defined(__i386__)
+#if defined(__aarch64__)
+	.section .rodata
+	.globl	testfly
+	.type	testfly,_ASM_TYPE_FUNCTION
+testfly:
+	bti c
+	ret
+END(testfly)
+#endif
+
+#if defined(__amd64__)
+	.section .rodata
+	.globl	testfly
+	.type	testfly,_ASM_TYPE_FUNCTION
+testfly:
+	endbr64
+	ret
+END(testfly)
+#endif
+
+#if defined(__i386__)
 ENTRY(testfly)
 	ret
 END(testfly)

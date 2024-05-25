@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.154 2021/06/14 17:58:16 eric Exp $	*/
+/*	$OpenBSD: util.c,v 1.158 2024/05/13 06:48:26 jsg Exp $	*/
 
 /*
  * Copyright (c) 2000,2001 Markus Friedl.  All rights reserved.
@@ -531,6 +531,30 @@ valid_smtp_response(const char *s)
 }
 
 int
+valid_xtext(const char *s)
+{
+	for (; *s != '\0'; ++s) {
+		if (*s < '!' || *s > '~' || *s == '=')
+			return 0;
+
+		if (*s != '+')
+			continue;
+
+		s++;
+		if (!isdigit((unsigned char)*s) &&
+		    !(*s >= 'A' && *s <= 'F'))
+			return 0;
+
+		s++;
+		if (!isdigit((unsigned char)*s) &&
+		    !(*s >= 'A' && *s <= 'F'))
+			return 0;
+	}
+
+	return 1;
+}
+
+int
 secure_file(int fd, char *path, char *userdir, uid_t uid, int mayread)
 {
 	char		 buf[PATH_MAX];
@@ -720,22 +744,24 @@ parse_mailname_file(char *hostname, size_t len)
 	if ((fp = fopen(MAILNAME_FILE, "r")) == NULL)
 		return 1;
 
-	if ((buflen = getline(&buf, &bufsz, fp)) == -1)
-		goto error;
+	buflen = getline(&buf, &bufsz, fp);
+	fclose(fp);
+	if (buflen == -1) {
+		free(buf);
+		return 1;
+	}
 
 	if (buf[buflen - 1] == '\n')
 		buf[buflen - 1] = '\0';
 
-	if (strlcpy(hostname, buf, len) >= len) {
+	bufsz = strlcpy(hostname, buf, len);
+	free(buf);
+	if (bufsz >= len) {
 		fprintf(stderr, MAILNAME_FILE " entry too long");
-		goto error;
+		return 1;
 	}
 
 	return 0;
-error:
-	fclose(fp);
-	free(buf);
-	return 1;
 }
 
 int
@@ -825,4 +851,68 @@ log_trace_verbose(int v)
 
 	/* Set debug logging in log.c */
 	log_setverbose(v & TRACE_DEBUG ? 2 : foreground_log);
+}
+
+int
+parse_table_line(FILE *fp, char **line, size_t *linesize,
+    int *type, char **key, char **val, int *malformed)
+{
+	char	*keyp, *valp;
+	ssize_t	 linelen;
+
+	*key = NULL;
+	*val = NULL;
+	*malformed = 0;
+
+	if ((linelen = getline(line, linesize, fp)) == -1)
+		return (-1);
+
+	keyp = *line;
+	while (isspace((unsigned char)*keyp)) {
+		++keyp;
+		--linelen;
+	}
+	if (*keyp == '\0')
+		return 0;
+	while (linelen > 0 && isspace((unsigned char)keyp[linelen - 1]))
+		keyp[--linelen] = '\0';
+	if (*keyp == '#') {
+		if (*type == T_NONE) {
+			keyp++;
+			while (isspace((unsigned char)*keyp))
+				++keyp;
+			if (!strcmp(keyp, "@list"))
+				*type = T_LIST;
+		}
+		return 0;
+	}
+
+	if (*keyp == '[') {
+		if ((valp = strchr(keyp, ']')) == NULL) {
+			*malformed = 1;
+			return (0);
+		}
+		valp++;
+	} else
+		valp = keyp + strcspn(keyp, " \t:");
+
+	if (*type == T_NONE)
+		*type = (*valp == '\0') ? T_LIST : T_HASH;
+
+	if (*type == T_LIST) {
+		*key = keyp;
+		return (0);
+	}
+
+	/* T_HASH */
+	if (*valp != '\0') {
+		*valp++ = '\0';
+		valp += strspn(valp, " \t");
+	}
+	if (*valp == '\0')
+		*malformed = 1;
+
+	*key = keyp;
+	*val = valp;
+	return (0);
 }

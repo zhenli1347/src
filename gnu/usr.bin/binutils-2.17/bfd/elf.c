@@ -1102,8 +1102,10 @@ get_segment_type (unsigned int p_type)
     case PT_GNU_RELRO: pt = "RELRO"; break;
     case PT_OPENBSD_RANDOMIZE: pt = "OPENBSD_RANDOMIZE"; break;
     case PT_OPENBSD_WXNEEDED: pt = "OPENBSD_WXNEEDED"; break;
+    case PT_OPENBSD_NOBTCFI: pt = "OPENBSD_NOBTCFI"; break;
     case PT_OPENBSD_BOOTDATA: pt = "OPENBSD_BOOTDATA"; break;
     case PT_OPENBSD_MUTABLE: pt = "OPENBSD_MUTABLE"; break;
+    case PT_OPENBSD_SYSCALLS: pt = "OPENBSD_SYSCALLS"; break;
     default: pt = NULL; break;
     }
   return pt;
@@ -2646,9 +2648,18 @@ bfd_section_from_phdr (bfd *abfd, Elf_Internal_Phdr *hdr, int index)
       return _bfd_elf_make_section_from_phdr (abfd, hdr, index,
 					      "openbsd_wxneeded");
 
+    case PT_OPENBSD_NOBTCFI:
+      return _bfd_elf_make_section_from_phdr (abfd, hdr, index,
+					      "openbsd_nobtcfi");
+
     case PT_OPENBSD_MUTABLE:
       return _bfd_elf_make_section_from_phdr (abfd, hdr, index,
 					      "openbsd_mutable");
+
+    case PT_OPENBSD_SYSCALLS:
+      return _bfd_elf_make_section_from_phdr (abfd, hdr, index,
+					      "openbsd_syscalls");
+
     default:
       /* Check for any processor-specific program segment types.  */
       bed = get_elf_backend_data (abfd);
@@ -3654,6 +3665,7 @@ map_sections_to_segments (bfd *abfd)
   int tls_count = 0;
   asection *first_tls = NULL;
   asection *dynsec, *eh_frame_hdr, *randomdata, *mutabledata;
+  asection *syscalls;
   bfd_size_type amt;
 
   if (elf_tdata (abfd)->segment_map != NULL)
@@ -3981,7 +3993,22 @@ map_sections_to_segments (bfd *abfd)
 	goto error_return;
       m->next = NULL;
       m->p_type = PT_OPENBSD_WXNEEDED;
-      m->p_flags = 1;
+      m->p_flags = PF_X;
+      m->p_flags_valid = 1;
+
+      *pm = m;
+      pm = &m->next;
+    }
+
+  if (elf_tdata (abfd)->nobtcfi)
+    {
+      amt = sizeof (struct elf_segment_map);
+      m = bfd_zalloc (abfd, amt);
+      if (m == NULL)
+	goto error_return;
+      m->next = NULL;
+      m->p_type = PT_OPENBSD_NOBTCFI;
+      m->p_flags = PF_X;
       m->p_flags_valid = 1;
 
       *pm = m;
@@ -4019,6 +4046,24 @@ map_sections_to_segments (bfd *abfd)
       m->p_type = PT_OPENBSD_MUTABLE;
       m->count = 1;
       m->sections[0] = mutabledata->output_section;
+
+      *pm = m;
+      pm = &m->next;
+    }
+
+  /* If there is a .openbsd.syscalls section, throw in a PT_OPENBSD_SYSCALLS
+     segment.  */
+  syscalls = bfd_get_section_by_name (abfd, ".openbsd.syscalls");
+  if (syscalls != NULL && (syscalls->flags & SEC_LOAD) == 0)
+    {
+      amt = sizeof (struct elf_segment_map);
+      m = bfd_zalloc (abfd, amt);
+      if (m == NULL)
+	goto error_return;
+      m->next = NULL;
+      m->p_type = PT_OPENBSD_SYSCALLS;
+      m->count = 1;
+      m->sections[0] = syscalls->output_section;
 
       *pm = m;
       pm = &m->next;
@@ -4574,6 +4619,12 @@ assign_file_positions_for_segments (bfd *abfd, struct bfd_link_info *link_info)
 	      else if (p->p_type == PT_NOTE
 		  && (flags & SEC_HAS_CONTENTS) != 0)
 		p->p_filesz += sec->size;
+	      else if (p->p_type == PT_OPENBSD_SYSCALLS)
+	        {
+		  sec->filepos = off;
+		  off += sec->size;
+		  p->p_filesz += sec->size;
+		}
 
 	      /* .tbss is special.  It doesn't contribute to p_memsz of
 		 normal segments.  */
@@ -4597,7 +4648,8 @@ assign_file_positions_for_segments (bfd *abfd, struct bfd_link_info *link_info)
 
 	  if (! m->p_flags_valid)
 	    {
-	      p->p_flags |= PF_R;
+	      if ((flags & SEC_CODE) == 0 || !link_info->execute_only)
+	        p->p_flags |= PF_R;
 	      if ((flags & SEC_CODE) != 0)
 		p->p_flags |= PF_X;
 	      if ((flags & SEC_READONLY) == 0)
@@ -4775,6 +4827,12 @@ get_program_header_size (bfd *abfd)
       ++segs;
     }
 
+  if (bfd_get_section_by_name (abfd, ".openbsd.syscalls") != NULL)
+    {
+      /* We need a PT_OPENBSD_SYSCALLS segment.  */
+      ++segs;
+    }
+
   if (elf_tdata (abfd)->eh_frame_hdr)
     {
       /* We need a PT_GNU_EH_FRAME segment.  */
@@ -4796,6 +4854,12 @@ get_program_header_size (bfd *abfd)
   if (elf_tdata (abfd)->wxneeded)
     {
       /* We need a PT_OPENBSD_WXNEEDED segment.  */
+      ++segs;
+    }
+
+  if (elf_tdata (abfd)->nobtcfi)
+    {
+      /* We need a PT_OPENBSD_NOBTCFI segment.  */
       ++segs;
     }
 
@@ -5294,6 +5358,14 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
    && ((bfd_vma) s->filepos + s->size				\
        <= p->p_offset + p->p_filesz))
 
+  /* Special case: OpenBSD pinsyscalls(2) information.  */
+#define IS_PINSYSCALL_DATA(p, s)					\
+  (p->p_type == PT_OPENBSD_SYSCALLS					\
+   && s->vma == 0 && s->lma == 0					\
+   && (bfd_vma) s->filepos >= p->p_offset				\
+   && ((bfd_vma) s->filepos + s->size					\
+       <= p->p_offset + p->p_filesz))
+
   /* The complicated case when p_vaddr is 0 is to handle the Solaris
      linker, which generates a PT_INTERP section with p_vaddr and
      p_memsz set to 0.  */
@@ -5312,7 +5384,7 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
      A section will be included if:
        1. It is within the address space of the segment -- we use the LMA
           if that is set for the segment and the VMA otherwise,
-       2. It is an allocated segment,
+       2. It is an allocated segment, or part of PT_OPENBSD_SYSCALLS,
        3. There is an output section associated with it,
        4. The section has not already been allocated to a previous segment.
        5. PT_GNU_STACK segments do not include any sections.
@@ -5325,7 +5397,8 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
       ? IS_CONTAINED_BY_LMA (section, segment, segment->p_paddr)	\
       : IS_CONTAINED_BY_VMA (section, segment))				\
      && (section->flags & SEC_ALLOC) != 0)				\
-    || IS_COREFILE_NOTE (segment, section))				\
+    || IS_COREFILE_NOTE (segment, section)				\
+    || IS_PINSYSCALL_DATA (segment, section))				\
    && section->output_section != NULL					\
    && segment->p_type != PT_GNU_STACK					\
    && (segment->p_type != PT_TLS					\
@@ -5591,6 +5664,7 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
 		 LMA address of the output section.  */
 	      if (IS_CONTAINED_BY_LMA (output_section, segment, map->p_paddr)
 		  || IS_COREFILE_NOTE (segment, section)
+		  || IS_PINSYSCALL_DATA (segment, section)
 		  || (bed->want_p_paddr_set_to_zero &&
 		      IS_CONTAINED_BY_VMA (output_section, segment))
                 )
@@ -5687,7 +5761,8 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
 	      BFD_ASSERT (output_section != NULL);
 
 	      if (IS_CONTAINED_BY_LMA (output_section, segment, map->p_paddr)
-		  || IS_COREFILE_NOTE (segment, section))
+		  || IS_COREFILE_NOTE (segment, section)
+		  || IS_PINSYSCALL_DATA (segment, section))
 		{
 		  if (map->count == 0)
 		    {
@@ -5804,6 +5879,7 @@ rewrite_elf_program_header (bfd *ibfd, bfd *obfd)
 #undef IS_CONTAINED_BY_VMA
 #undef IS_CONTAINED_BY_LMA
 #undef IS_COREFILE_NOTE
+#undef IS_PINSYSCALL_DATA
 #undef IS_SOLARIS_PT_INTERP
 #undef INCLUDE_SECTION_IN_SEGMENT
 #undef SEGMENT_AFTER_SEGMENT

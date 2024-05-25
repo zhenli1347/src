@@ -138,10 +138,10 @@ sub get_warn() {
 
 { # Test certain things that are not hexfloats and should stay that way.
     eval '0xp3';
-    like(get_warn(), qr/Missing operator before p3/);
+    like(get_warn(), qr/Missing operator before "p3"/);
 
     eval '5p3';
-    like(get_warn(), qr/Missing operator before p3/);
+    like(get_warn(), qr/Missing operator before "p3"/);
 
     my @a;
     eval '@a = 0x3..5';
@@ -246,7 +246,7 @@ SKIP: {
     skip("non-80-bit-long-double", 4)
         unless ($Config{uselongdouble} &&
 		($Config{nvsize} == 16 || $Config{nvsize} == 12) &&
-		($Config{long_double_style_ieee_extended}));
+		($Config{d_long_double_style_ieee_extended}));
     is(0x1p-1074,  4.94065645841246544e-324);
     is(0x1p-1075,  2.47032822920623272e-324, '[perl #128919]');
     is(0x1p-1076,  1.23516411460311636e-324);

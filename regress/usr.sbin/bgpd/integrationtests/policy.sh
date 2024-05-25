@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$OpenBSD: policy.sh,v 1.1 2022/06/27 13:29:40 claudio Exp $
+#	$OpenBSD: policy.sh,v 1.3 2023/02/15 14:19:08 claudio Exp $
 
 set -e
 
@@ -46,19 +46,17 @@ test_bgpd() {
 
 	route -T ${RDOMAIN1} exec ${BGPD} \
 		-v -f ${BGPDCONFIGDIR}/bgpd.op.master.conf
-	sleep 1
-
 	i=1
 	for p in $@; do
 		route -T ${RDOMAIN2} exec ${BGPD} -DNUM=$i -DPOLICY=$p \
 			-DSOCK=\"/var/run/bgpd.sock.c$i\" \
 			-v -f ${BGPDCONFIGDIR}/bgpd.op.client.conf
 		i=$(($i + 1))
-
-		sleep 1
 	done
 
-	sleep 2
+	sleep 1
+	route -T ${RDOMAIN1} exec bgpctl nei group TEST up
+	sleep 1
 
 	for i in 1 2 3 4 5; do
 		route -T ${RDOMAIN1} exec bgpctl show nei PEER$i | \
@@ -107,7 +105,7 @@ ifconfig lo${RDOMAIN2} inet 127.0.0.1/8
 
 echo test1: no policy
 test_bgpd "Last error sent: error in OPEN message, role mismatch" \
-    "no" "no" "no" "no" "no"
+    "none" "none" "none" "none" "none"
 
 echo test2: wrong policy
 test_bgpd "Last error sent: error in OPEN message, role mismatch" \

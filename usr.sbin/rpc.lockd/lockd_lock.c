@@ -1,4 +1,4 @@
-/*	$OpenBSD: lockd_lock.c,v 1.10 2019/06/28 13:32:50 deraadt Exp $	*/
+/*	$OpenBSD: lockd_lock.c,v 1.12 2023/03/08 04:43:15 guenther Exp $	*/
 
 /*
  * Copyright (c) 2000 Manuel Bouyer.
@@ -171,7 +171,6 @@ lock_lookup(struct file_lock *newfl, int flags)
  */
 
 struct nlm4_holder *
-/*ARGSUSED*/
 testlock(struct nlm4_lock *lock, int flags)
 {
 	struct file_lock *fl;
@@ -398,7 +397,7 @@ unlock(nlm4_lock *lck, int flags)
 			/* nothing to do */
 			break;
 		default:
-			syslog(LOG_NOTICE, "unknow status %d for %s",
+			syslog(LOG_NOTICE, "unknown status %d for %s",
 			    fl->status, fl->client_name);
 		}
 		sigunlock();
@@ -430,7 +429,6 @@ lfree(struct file_lock *fl)
 }
 
 void
-/*ARGSUSED*/
 sigchild_handler(int sig)
 {
 	int sstatus;
@@ -604,7 +602,6 @@ do_lock(struct file_lock *fl, int block)
 }
 
 void
-/*ARGSUSED*/
 send_granted(struct file_lock *fl, int opcode)
 {
 	CLIENT *cli;
@@ -835,7 +832,7 @@ notify(const char *hostname, int state)
 			case LKST_DYING:
 				break;
 			default:
-				syslog(LOG_NOTICE, "unknow status %d for %s",
+				syslog(LOG_NOTICE, "unknown status %d for %s",
 				    fl->status, fl->client_name);
 			}
 		}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ktrace.h,v 1.42 2022/09/02 13:18:07 mbuhl Exp $	*/
+/*	$OpenBSD: ktrace.h,v 1.48 2023/12/15 15:12:08 deraadt Exp $	*/
 /*	$NetBSD: ktrace.h,v 1.12 1996/02/04 02:12:29 christos Exp $	*/
 
 /*
@@ -34,6 +34,8 @@
 
 #include <sys/uio.h>
 #include <sys/syslimits.h>
+#include <sys/signal.h>
+#include <sys/time.h>
 
 /*
  * operations to ktrace system call  (KTROP(op))
@@ -165,6 +167,16 @@ struct ktr_pledge {
 };
 
 /*
+ * KTR_PINSYSCALL - details of pinsyscall violation
+ */
+#define	KTR_PINSYSCALL	13
+struct ktr_pinsyscall {
+	int		error;
+	int		syscall;
+	vaddr_t		addr;
+};
+
+/*
  * kernel trace points (in ps_traceflag)
  */
 #define KTRFAC_MASK	0x00ffffff
@@ -178,6 +190,7 @@ struct ktr_pledge {
 #define KTRFAC_EXECARGS	(1<<KTR_EXECARGS)
 #define KTRFAC_EXECENV	(1<<KTR_EXECENV)
 #define	KTRFAC_PLEDGE	(1<<KTR_PLEDGE)
+#define	KTRFAC_PINSYSCALL	(1<<KTR_PINSYSCALL)
 
 /*
  * trace flags (also in ps_traceflag)
@@ -210,6 +223,7 @@ void ktrsysret(struct proc *, register_t, int, const register_t [2]);
 int ktruser(struct proc *, const char *, const void *, size_t);
 void ktrexec(struct proc *, int, const char *, ssize_t);
 void ktrpledge(struct proc *, int, uint64_t, int);
+void ktrpinsyscall(struct proc *, int, int, vaddr_t);
 
 void ktrcleartrace(struct process *);
 void ktrsettrace(struct process *, int, struct vnode *, struct ucred *);
@@ -253,5 +267,7 @@ void    ktrstruct(struct proc *, const char *, const void *, size_t);
 	ktrstruct(p, "fds", fds, (count) * sizeof(int))
 #define ktrflock(p, fl) \
 	ktrstruct(p, "flock", (fl), sizeof(struct flock))
+#define ktrsiginfo(p, si) \
+	ktrstruct(p, "siginfo", (si), sizeof(siginfo_t))
 
 #endif	/* !_KERNEL */

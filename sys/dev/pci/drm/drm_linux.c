@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.c,v 1.94 2022/09/16 01:48:07 jsg Exp $	*/
+/*	$OpenBSD: drm_linux.c,v 1.112 2024/03/30 13:33:20 mpi Exp $	*/
 /*
  * Copyright (c) 2013 Jonathan Gray <jsg@openbsd.org>
  * Copyright (c) 2015, 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -53,6 +53,7 @@
 #include <linux/sync_file.h>
 
 #include <drm/drm_device.h>
+#include <drm/drm_connector.h>
 #include <drm/drm_print.h>
 
 #if defined(__amd64__) || defined(__i386__)
@@ -97,30 +98,30 @@ tasklet_run(void *arg)
 struct mutex atomic64_mtx = MUTEX_INITIALIZER(IPL_HIGH);
 #endif
 
-struct mutex sch_mtx = MUTEX_INITIALIZER(IPL_SCHED);
-volatile struct proc *sch_proc;
-volatile void *sch_ident;
-int sch_priority;
-
 void
 set_current_state(int state)
 {
-	if (sch_ident != curproc)
-		mtx_enter(&sch_mtx);
-	MUTEX_ASSERT_LOCKED(&sch_mtx);
-	sch_ident = sch_proc = curproc;
-	sch_priority = state;
+	int prio = state;
+
+	KASSERT(state != TASK_RUNNING);
+	/* check if already on the sleep list */
+	if (curproc->p_wchan != NULL)
+		return;
+	sleep_setup(curproc, prio, "schto");
 }
 
 void
 __set_current_state(int state)
 {
+	struct proc *p = curproc;
+	int s;
+
 	KASSERT(state == TASK_RUNNING);
-	if (sch_ident == curproc) {
-		MUTEX_ASSERT_LOCKED(&sch_mtx);
-		sch_ident = NULL;
-		mtx_leave(&sch_mtx);
-	}
+	SCHED_LOCK(s);
+	unsleep(p);
+	p->p_stat = SONPROC;
+	atomic_clearbits_int(&p->p_flag, P_WSLEEP);
+	SCHED_UNLOCK(s);
 }
 
 void
@@ -132,32 +133,18 @@ schedule(void)
 long
 schedule_timeout(long timeout)
 {
-	struct sleep_state sls;
 	unsigned long deadline;
-	int wait, spl, timo = 0;
+	int timo = 0;
 
-	MUTEX_ASSERT_LOCKED(&sch_mtx);
 	KASSERT(!cold);
 
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
 		timo = timeout;
-	sleep_setup(&sls, sch_ident, sch_priority, "schto", timo);
-
-	wait = (sch_proc == curproc && timeout > 0);
-
-	spl = MUTEX_OLDIPL(&sch_mtx);
-	MUTEX_OLDIPL(&sch_mtx) = splsched();
-	mtx_leave(&sch_mtx);
-
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
 		deadline = jiffies + timeout;
-	sleep_finish(&sls, wait);
+	sleep_finish(timo, timeout > 0);
 	if (timeout != MAX_SCHEDULE_TIMEOUT)
 		timeout = deadline - jiffies;
-
-	mtx_enter(&sch_mtx);
-	MUTEX_OLDIPL(&sch_mtx) = spl;
-	sch_ident = curproc;
 
 	return timeout > 0 ? timeout : 0;
 }
@@ -172,8 +159,44 @@ schedule_timeout_uninterruptible(long timeout)
 int
 wake_up_process(struct proc *p)
 {
-	atomic_cas_ptr(&sch_proc, p, NULL);
-	return wakeup_proc(p, NULL);
+	int s, rv;
+
+	SCHED_LOCK(s);
+	rv = wakeup_proc(p, 0);
+	SCHED_UNLOCK(s);
+	return rv;
+}
+
+int
+autoremove_wake_function(struct wait_queue_entry *wqe, unsigned int mode,
+    int sync, void *key)
+{
+	if (wqe->private)
+		wake_up_process(wqe->private);
+	list_del_init(&wqe->entry);
+	return 0;
+}
+
+void
+prepare_to_wait(wait_queue_head_t *wqh, wait_queue_entry_t *wqe, int state)
+{
+	mtx_enter(&wqh->lock);
+	if (list_empty(&wqe->entry))
+		__add_wait_queue(wqh, wqe);
+	mtx_leave(&wqh->lock);
+
+	set_current_state(state);
+}
+
+void
+finish_wait(wait_queue_head_t *wqh, wait_queue_entry_t *wqe)
+{
+	__set_current_state(TASK_RUNNING);
+
+	mtx_enter(&wqh->lock);
+	if (!list_empty(&wqe->entry))
+		list_del_init(&wqe->entry);
+	mtx_leave(&wqh->lock);
 }
 
 void
@@ -489,15 +512,21 @@ dmi_first_match(const struct dmi_system_id *sysid)
 
 #if NBIOS > 0
 extern char smbios_bios_date[];
+extern char smbios_bios_version[];
 #endif
 
 const char *
 dmi_get_system_info(int slot)
 {
-	WARN_ON(slot != DMI_BIOS_DATE);
 #if NBIOS > 0
-	if (slot == DMI_BIOS_DATE)
+	switch (slot) {
+	case DMI_BIOS_DATE:
 		return smbios_bios_date;
+	case DMI_BIOS_VERSION:
+		return smbios_bios_version;
+	default:
+		printf("%s slot %d not handled\n", __func__, slot);
+	}
 #endif
 	return NULL;
 }
@@ -635,6 +664,28 @@ vmap(struct vm_page **pages, unsigned int npages, unsigned long flags,
 		return NULL;
 	for (i = 0; i < npages; i++) {
 		pa = VM_PAGE_TO_PHYS(pages[i]) | prot;
+		pmap_enter(pmap_kernel(), va + (i * PAGE_SIZE), pa,
+		    PROT_READ | PROT_WRITE,
+		    PROT_READ | PROT_WRITE | PMAP_WIRED);
+		pmap_update(pmap_kernel());
+	}
+
+	return (void *)va;
+}
+
+void *
+vmap_pfn(unsigned long *pfns, unsigned int npfn, pgprot_t prot)
+{
+	vaddr_t va;
+	paddr_t pa;
+	int i;
+
+	va = (vaddr_t)km_alloc(PAGE_SIZE * npfn, &kv_any, &kp_none,
+	    &kd_nowait);
+	if (va == 0)
+		return NULL;
+	for (i = 0; i < npfn; i++) {
+		pa = round_page(pfns[i]) | prot;
 		pmap_enter(pmap_kernel(), va + (i * PAGE_SIZE), pa,
 		    PROT_READ | PROT_WRITE,
 		    PROT_READ | PROT_WRITE | PMAP_WIRED);
@@ -901,6 +952,24 @@ ida_simple_remove(struct ida *ida, unsigned int id)
 }
 
 int
+ida_alloc_min(struct ida *ida, unsigned int min, gfp_t gfp)
+{
+	return idr_alloc(&ida->idr, NULL, min, INT_MAX, gfp);
+}
+
+int
+ida_alloc_max(struct ida *ida, unsigned int max, gfp_t gfp)
+{
+	return idr_alloc(&ida->idr, NULL, 0, max - 1, gfp);
+}
+
+void
+ida_free(struct ida *ida, unsigned int id)
+{
+	idr_remove(&ida->idr, id);
+}
+
+int
 xarray_cmp(struct xarray_entry *a, struct xarray_entry *b)
 {
 	return (a->id < b->id ? -1 : a->id > b->id);
@@ -938,6 +1007,7 @@ xa_destroy(struct xarray *xa)
 	}
 }
 
+/* Don't wrap ids. */
 int
 __xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 {
@@ -974,6 +1044,20 @@ __xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 	xid->ptr = entry;
 	*id = xid->id;
 	return 0;
+}
+
+/*
+ * Wrap ids and store next id.
+ * We walk the entire tree so don't special case wrapping.
+ * The only caller of this (i915_drm_client.c) doesn't use next id.
+ */
+int
+__xa_alloc_cyclic(struct xarray *xa, u32 *id, void *entry, int limit, u32 *next,
+    gfp_t gfp)
+{
+	int r = __xa_alloc(xa, id, entry, limit, gfp);
+	*next = *id + 1;
+	return r;
 }
 
 void *
@@ -1240,7 +1324,8 @@ vga_disable_bridge(struct pci_attach_args *pa)
 void
 vga_get_uninterruptible(struct pci_dev *pdev, int rsrc)
 {
-	KASSERT(pdev->pci->sc_bridgetag == NULL);
+	if (pdev->pci->sc_bridgetag != NULL)
+		return;
 	pci_enumerate_bus(pdev->pci, vga_disable_bridge, NULL);
 }
 
@@ -1296,6 +1381,11 @@ acpi_get_table(const char *sig, int instance,
 	}
 
 	return AE_NOT_FOUND;
+}
+
+void
+acpi_put_table(struct acpi_table_header *hdr)
+{
 }
 
 acpi_status
@@ -1434,6 +1524,9 @@ acpi_format_exception(acpi_status status)
 
 #endif
 
+SLIST_HEAD(,backlight_device) backlight_device_list =
+    SLIST_HEAD_INITIALIZER(backlight_device_list);
+
 void
 backlight_do_update_status(void *arg)
 {
@@ -1442,7 +1535,7 @@ backlight_do_update_status(void *arg)
 
 struct backlight_device *
 backlight_device_register(const char *name, void *kdev, void *data,
-    const struct backlight_ops *ops, struct backlight_properties *props)
+    const struct backlight_ops *ops, const struct backlight_properties *props)
 {
 	struct backlight_device *bd;
 
@@ -1452,6 +1545,9 @@ backlight_device_register(const char *name, void *kdev, void *data,
 	bd->data = data;
 
 	task_set(&bd->task, backlight_do_update_status, bd);
+
+	SLIST_INSERT_HEAD(&backlight_device_list, bd, next);
+	bd->name = name;
 	
 	return bd;
 }
@@ -1459,16 +1555,8 @@ backlight_device_register(const char *name, void *kdev, void *data,
 void
 backlight_device_unregister(struct backlight_device *bd)
 {
+	SLIST_REMOVE(&backlight_device_list, bd, backlight_device, next);
 	free(bd, M_DRM, sizeof(*bd));
-}
-
-struct backlight_device *
-devm_backlight_device_register(void *dev, const char *name, void *parent,
-    void *data, const struct backlight_ops *bo,
-    const struct backlight_properties *bp)
-{
-	STUB();
-	return NULL;
 }
 
 void
@@ -1477,7 +1565,7 @@ backlight_schedule_update_status(struct backlight_device *bd)
 	task_add(systq, &bd->task);
 }
 
-inline int
+int
 backlight_enable(struct backlight_device *bd)
 {
 	if (bd == NULL)
@@ -1488,7 +1576,7 @@ backlight_enable(struct backlight_device *bd)
 	return bd->ops->update_status(bd);
 }
 
-inline int
+int
 backlight_disable(struct backlight_device *bd)
 {
 	if (bd == NULL)
@@ -1499,10 +1587,86 @@ backlight_disable(struct backlight_device *bd)
 	return bd->ops->update_status(bd);
 }
 
+struct backlight_device *
+backlight_device_get_by_name(const char *name)
+{
+	struct backlight_device *bd;
+
+	SLIST_FOREACH(bd, &backlight_device_list, next) {
+		if (strcmp(name, bd->name) == 0)
+			return bd;
+	}
+
+	return NULL;
+}
+
+struct drvdata {
+	struct device *dev;
+	void *data;
+	SLIST_ENTRY(drvdata) next;
+};
+
+SLIST_HEAD(,drvdata) drvdata_list = SLIST_HEAD_INITIALIZER(drvdata_list);
+
+void
+dev_set_drvdata(struct device *dev, void *data)
+{
+	struct drvdata *drvdata;
+
+	SLIST_FOREACH(drvdata, &drvdata_list, next) {
+		if (drvdata->dev == dev) {
+			drvdata->data = data;
+			return;
+		}
+	}
+
+	if (data == NULL)
+		return;
+
+	drvdata = malloc(sizeof(*drvdata), M_DRM, M_WAITOK);
+	drvdata->dev = dev;
+	drvdata->data = data;
+
+	SLIST_INSERT_HEAD(&drvdata_list, drvdata, next);
+}
+
+void *
+dev_get_drvdata(struct device *dev)
+{
+	struct drvdata *drvdata;
+
+	SLIST_FOREACH(drvdata, &drvdata_list, next) {
+		if (drvdata->dev == dev)
+			return drvdata->data;
+	}
+
+	return NULL;
+}
+
 void
 drm_sysfs_hotplug_event(struct drm_device *dev)
 {
-	KNOTE(&dev->note, NOTE_CHANGE);
+	knote_locked(&dev->note, NOTE_CHANGE);
+}
+
+void
+drm_sysfs_connector_hotplug_event(struct drm_connector *connector)
+{
+	knote_locked(&connector->dev->note, NOTE_CHANGE);
+}
+
+void
+drm_sysfs_connector_status_event(struct drm_connector *connector,
+    struct drm_property *property)
+{
+	STUB();
+}
+
+void
+drm_sysfs_connector_property_event(struct drm_connector *connector,
+    struct drm_property *property)
+{
+	STUB();
 }
 
 struct dma_fence *
@@ -1640,6 +1804,18 @@ dma_fence_is_signaled_locked(struct dma_fence *fence)
 	}
 
 	return false;
+}
+
+ktime_t
+dma_fence_timestamp(struct dma_fence *fence)
+{
+	if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
+		while (!test_bit(DMA_FENCE_FLAG_TIMESTAMP_BIT, &fence->flags))
+			CPU_BUSY_CYCLE();
+		return fence->timestamp;
+	} else {
+		return ktime_get();
+	}
 }
 
 long
@@ -1898,6 +2074,15 @@ cb_cleanup:
 	return ret;
 }
 
+void
+dma_fence_set_deadline(struct dma_fence *f, ktime_t t)
+{
+	if (f->ops->set_deadline == NULL)
+		return;
+	if (dma_fence_is_signaled(f) == false)
+		f->ops->set_deadline(f, t);
+}
+
 static struct dma_fence dma_fence_stub;
 static struct mutex dma_fence_stub_mtx = MUTEX_INITIALIZER(IPL_TTY);
 
@@ -1927,14 +2112,14 @@ dma_fence_get_stub(void)
 }
 
 struct dma_fence *
-dma_fence_allocate_private_stub(void)
+dma_fence_allocate_private_stub(ktime_t ts)
 {
 	struct dma_fence *f = malloc(sizeof(*f), M_DRM,
 	    M_ZERO | M_WAITOK | M_CANFAIL);
 	if (f == NULL)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 	dma_fence_init(f, &dma_fence_stub_ops, &dma_fence_stub_mtx, 0, 0);
-	dma_fence_signal(f);
+	dma_fence_signal_timestamp(f, ts);
 	return f;
 }
 
@@ -2033,6 +2218,40 @@ dma_fence_array_create(int num_fences, struct dma_fence **fences, u64 context,
 	dfa->fences = fences;
 
 	return dfa;
+}
+
+struct dma_fence *
+dma_fence_array_first(struct dma_fence *f)
+{
+	struct dma_fence_array *dfa;
+
+	if (f == NULL)
+		return NULL;
+
+	if ((dfa = to_dma_fence_array(f)) == NULL)
+		return f;
+
+	if (dfa->num_fences > 0)
+		return dfa->fences[0];
+
+	return NULL;
+}
+
+struct dma_fence *
+dma_fence_array_next(struct dma_fence *f, unsigned int i)
+{
+	struct dma_fence_array *dfa;
+
+	if (f == NULL)
+		return NULL;
+
+	if ((dfa = to_dma_fence_array(f)) == NULL)
+		return NULL;
+
+	if (i < dfa->num_fences)
+		return dfa->fences[i];
+
+	return NULL;
 }
 
 const struct dma_fence_ops dma_fence_array_ops = {
@@ -2242,6 +2461,13 @@ const struct dma_fence_ops dma_fence_chain_ops = {
 	.release = dma_fence_chain_release,
 	.use_64bit_seqno = true,
 };
+
+bool
+dma_fence_is_container(struct dma_fence *fence)
+{
+	return (fence->ops == &dma_fence_chain_ops) ||
+	    (fence->ops == &dma_fence_array_ops);
+}
 
 int
 dmabuf_read(struct file *fp, struct uio *uio, int fflags)
@@ -2518,17 +2744,6 @@ pcie_aspm_enabled(struct pci_dev *pdev)
 	return false;
 }
 
-int
-autoremove_wake_function(struct wait_queue_entry *wqe, unsigned int mode,
-    int sync, void *key)
-{
-	wakeup(wqe);
-	if (wqe->private)
-		wake_up_process(wqe->private);
-	list_del_init(&wqe->entry);
-	return 0;
-}
-
 static wait_queue_head_t bit_waitq;
 wait_queue_head_t var_waitq;
 struct mutex wait_bit_mtx = MUTEX_INITIALIZER(IPL_TTY);
@@ -2702,7 +2917,7 @@ pci_resize_resource(struct pci_dev *pdev, int bar, int nsize)
 TAILQ_HEAD(, shrinker) shrinkers = TAILQ_HEAD_INITIALIZER(shrinkers);
 
 int
-register_shrinker(struct shrinker *shrinker)
+register_shrinker(struct shrinker *shrinker, const char *format, ...)
 {
 	TAILQ_INSERT_TAIL(&shrinkers, shrinker, next);
 	return 0;
@@ -3000,3 +3215,718 @@ sync_file_create(struct dma_fence *fence)
 	fp->f_data = sf;
 	return sf;
 }
+
+bool
+drm_firmware_drivers_only(void)
+{
+	return false;
+}
+
+
+void *
+memremap(phys_addr_t phys_addr, size_t size, int flags)
+{
+	STUB();
+	return NULL;
+}
+
+void
+memunmap(void *addr)
+{
+	STUB();
+}
+
+#include <linux/platform_device.h>
+
+bus_dma_tag_t
+dma_tag_lookup(struct device *dev)
+{
+	extern struct cfdriver drm_cd;
+	struct drm_device *drm;
+	int i;
+
+	for (i = 0; i < drm_cd.cd_ndevs; i++) {
+		drm = drm_cd.cd_devs[i];
+		if (drm && drm->dev == dev)
+			return drm->dmat;
+	}
+
+	return ((struct platform_device *)dev)->dmat;
+}
+
+LIST_HEAD(, drm_dmamem) dmamem_list = LIST_HEAD_INITIALIZER(dmamem_list);
+
+void *
+dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle,
+    int gfp)
+{
+	bus_dma_tag_t dmat = dma_tag_lookup(dev);
+	struct drm_dmamem *mem;
+
+	mem = drm_dmamem_alloc(dmat, size, PAGE_SIZE, 1, size,
+	    BUS_DMA_COHERENT, 0);
+	if (mem == NULL)
+		return NULL;
+	*dma_handle = mem->map->dm_segs[0].ds_addr;
+	LIST_INSERT_HEAD(&dmamem_list, mem, next);
+	return mem->kva;
+}
+
+void
+dma_free_coherent(struct device *dev, size_t size, void *cpu_addr,
+    dma_addr_t dma_handle)
+{
+	bus_dma_tag_t dmat = dma_tag_lookup(dev);
+	struct drm_dmamem *mem;
+
+	LIST_FOREACH(mem, &dmamem_list, next) {
+		if (mem->kva == cpu_addr)
+			break;
+	}
+	KASSERT(mem);
+	KASSERT(mem->size == size);
+	KASSERT(mem->map->dm_segs[0].ds_addr == dma_handle);
+
+	LIST_REMOVE(mem, next);
+	drm_dmamem_free(dmat, mem);
+}
+
+int
+dma_get_sgtable(struct device *dev, struct sg_table *sgt, void *cpu_addr,
+    dma_addr_t dma_addr, size_t size)
+{
+	paddr_t pa;
+	int ret;
+
+	if (!pmap_extract(pmap_kernel(), (vaddr_t)cpu_addr, &pa))
+		return -EINVAL;
+
+	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	sg_set_page(sgt->sgl, PHYS_TO_VM_PAGE(pa), size, 0);
+	return 0;
+}
+
+dma_addr_t
+dma_map_resource(struct device *dev, phys_addr_t phys_addr, size_t size,
+    enum dma_data_direction dir, u_long attr)
+{
+	bus_dma_tag_t dmat= dma_tag_lookup(dev);
+	bus_dmamap_t map;
+	bus_dma_segment_t seg;
+
+	if (bus_dmamap_create(dmat, size, 1, size, 0,
+	    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &map))
+		return DMA_MAPPING_ERROR;
+	seg.ds_addr = phys_addr;
+	seg.ds_len = size;
+	if (bus_dmamap_load_raw(dmat, map, &seg, 1, size, BUS_DMA_WAITOK)) {
+		bus_dmamap_destroy(dmat, map);
+		return DMA_MAPPING_ERROR;
+	}
+
+	return map->dm_segs[0].ds_addr;
+}
+
+#ifdef BUS_DMA_FIXED
+
+#include <linux/iommu.h>
+
+size_t
+iommu_map_sgtable(struct iommu_domain *domain, u_long iova,
+    struct sg_table *sgt, int prot)
+{
+	bus_dma_segment_t seg;
+	int error;
+
+	error = bus_dmamap_create(domain->dmat, sgt->sgl->length, 1,
+	    sgt->sgl->length, 0, BUS_DMA_WAITOK, &sgt->dmamap);
+	if (error)
+		return -ENOMEM;
+
+	sgt->dmamap->dm_segs[0].ds_addr = iova;
+	sgt->dmamap->dm_segs[0].ds_len = sgt->sgl->length;
+	sgt->dmamap->dm_nsegs = 1;
+	seg.ds_addr = VM_PAGE_TO_PHYS(sgt->sgl->__page);
+	seg.ds_len = sgt->sgl->length;
+	error = bus_dmamap_load_raw(domain->dmat, sgt->dmamap, &seg, 1,
+	    sgt->sgl->length, BUS_DMA_WAITOK | BUS_DMA_FIXED);
+	if (error)
+		return -ENOMEM;
+
+	return sg_dma_len(sgt->sgl);
+}
+
+size_t
+iommu_unmap(struct iommu_domain *domain, u_long iova, size_t size)
+{
+	STUB();
+	return 0;
+}
+
+struct iommu_domain *
+iommu_get_domain_for_dev(struct device *dev)
+{
+	STUB();
+	return NULL;
+}
+
+phys_addr_t
+iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
+{
+	STUB();
+	return 0;
+}
+
+struct iommu_domain *
+iommu_domain_alloc(struct bus_type *type)
+{
+	return malloc(sizeof(struct iommu_domain), M_DEVBUF, M_WAITOK | M_ZERO);
+}
+
+int
+iommu_attach_device(struct iommu_domain *domain, struct device *dev)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+
+	domain->dmat = pdev->dmat;
+	return 0;
+}
+
+#endif
+
+#include <linux/component.h>
+
+struct component {
+	struct device *dev;
+	struct device *adev;
+	const struct component_ops *ops;
+	SLIST_ENTRY(component) next;
+};
+
+SLIST_HEAD(,component) component_list = SLIST_HEAD_INITIALIZER(component_list);
+
+int
+component_add(struct device *dev, const struct component_ops *ops)
+{
+	struct component *component;
+
+	component = malloc(sizeof(*component), M_DEVBUF, M_WAITOK | M_ZERO);
+	component->dev = dev;
+	component->ops = ops;
+	SLIST_INSERT_HEAD(&component_list, component, next);
+	return 0;
+}
+
+int
+component_add_typed(struct device *dev, const struct component_ops *ops,
+	int type)
+{
+	return component_add(dev, ops);
+}
+
+int
+component_bind_all(struct device *dev, void *data)
+{
+	struct component *component;
+	int ret = 0;
+
+	SLIST_FOREACH(component, &component_list, next) {
+		if (component->adev == dev) {
+			ret = component->ops->bind(component->dev, NULL, data);
+			if (ret)
+				break;
+		}
+	}
+
+	return ret;
+}
+
+struct component_match_entry {
+	int (*compare)(struct device *, void *);
+	void *data;
+};
+
+struct component_match {
+	struct component_match_entry match[4];
+	int nmatches;
+};
+
+int
+component_master_add_with_match(struct device *dev,
+    const struct component_master_ops *ops, struct component_match *match)
+{
+	struct component *component;
+	int found = 0;
+	int i, ret;
+
+	SLIST_FOREACH(component, &component_list, next) {
+		for (i = 0; i < match->nmatches; i++) {
+			struct component_match_entry *m = &match->match[i];
+			if (m->compare(component->dev, m->data)) {
+				component->adev = dev;
+				found = 1;
+				break;
+			}
+		}
+	}
+
+	if (found) {
+		ret = ops->bind(dev);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+#ifdef __HAVE_FDT
+
+#include <linux/platform_device.h>
+#include <dev/ofw/openfirm.h>
+#include <dev/ofw/fdt.h>
+#include <machine/fdt.h>
+
+LIST_HEAD(, platform_device) pdev_list = LIST_HEAD_INITIALIZER(pdev_list);
+
+void
+platform_device_register(struct platform_device *pdev)
+{
+	int i;
+
+	pdev->num_resources = pdev->faa->fa_nreg;
+	if (pdev->faa->fa_nreg > 0) {
+		pdev->resource = mallocarray(pdev->faa->fa_nreg,
+		    sizeof(*pdev->resource), M_DEVBUF, M_WAITOK | M_ZERO);
+		for (i = 0; i < pdev->faa->fa_nreg; i++) {
+			pdev->resource[i].start = pdev->faa->fa_reg[i].addr;
+			pdev->resource[i].end = pdev->faa->fa_reg[i].addr +
+			    pdev->faa->fa_reg[i].size - 1;
+		}
+	}
+
+	pdev->parent = pdev->dev.dv_parent;
+	pdev->node = pdev->faa->fa_node;
+	pdev->iot = pdev->faa->fa_iot;
+	pdev->dmat = pdev->faa->fa_dmat;
+	LIST_INSERT_HEAD(&pdev_list, pdev, next);
+}
+
+
+struct resource *
+platform_get_resource(struct platform_device *pdev, u_int type, u_int num)
+{
+	KASSERT(num < pdev->num_resources);
+	return &pdev->resource[num];
+}
+
+void __iomem *
+devm_platform_ioremap_resource_byname(struct platform_device *pdev,
+				      const char *name)
+{
+	bus_space_handle_t ioh;
+	int err, idx;
+
+	idx = OF_getindex(pdev->node, name, "reg-names");
+	if (idx == -1 || idx >= pdev->num_resources)
+		return ERR_PTR(-EINVAL);
+
+	err = bus_space_map(pdev->iot, pdev->resource[idx].start,
+	    pdev->resource[idx].end - pdev->resource[idx].start + 1,
+	    BUS_SPACE_MAP_LINEAR, &ioh);
+	if (err)
+		return ERR_PTR(-err);
+
+	return bus_space_vaddr(pdev->iot, ioh);
+}
+
+#include <dev/ofw/ofw_clock.h>
+#include <linux/clk.h>
+
+struct clk *
+devm_clk_get(struct device *dev, const char *name)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+	struct clk *clk;
+
+	clk = malloc(sizeof(*clk), M_DEVBUF, M_WAITOK);
+	clk->freq = clock_get_frequency(pdev->node, name);
+	return clk;
+}
+
+u_long
+clk_get_rate(struct clk *clk)
+{
+	return clk->freq;
+}
+
+#include <linux/gpio/consumer.h>
+#include <dev/ofw/ofw_gpio.h>
+
+struct gpio_desc {
+	uint32_t gpios[4];
+};
+
+struct gpio_desc *
+devm_gpiod_get_optional(struct device *dev, const char *name, int flags)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+	struct gpio_desc *desc;
+	char fullname[128];
+	int len;
+
+	snprintf(fullname, sizeof(fullname), "%s-gpios", name);
+
+	desc = malloc(sizeof(*desc), M_DEVBUF, M_WAITOK | M_ZERO);
+	len = OF_getpropintarray(pdev->node, fullname, desc->gpios,
+	     sizeof(desc->gpios));
+	KASSERT(len <= sizeof(desc->gpios));
+	if (len < 0) {
+		free(desc, M_DEVBUF, sizeof(*desc));
+		return NULL;
+	}
+
+	switch (flags) {
+	case GPIOD_IN:
+		gpio_controller_config_pin(desc->gpios, GPIO_CONFIG_INPUT);
+		break;
+	case GPIOD_OUT_HIGH:
+		gpio_controller_config_pin(desc->gpios, GPIO_CONFIG_OUTPUT);
+		gpio_controller_set_pin(desc->gpios, 1);
+		break;
+	default:
+		panic("%s: unimplemented flags 0x%x", __func__, flags);
+	}
+
+	return desc;
+}
+
+int
+gpiod_get_value_cansleep(const struct gpio_desc *desc)
+{
+	return gpio_controller_get_pin(((struct gpio_desc *)desc)->gpios);
+}
+
+struct phy {
+	int node;
+	const char *name;
+};
+
+struct phy *
+devm_phy_optional_get(struct device *dev, const char *name)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+	struct phy *phy;
+	int idx;
+
+	idx = OF_getindex(pdev->node, name, "phy-names");
+	if (idx == -1)
+		return NULL;
+
+	phy = malloc(sizeof(*phy), M_DEVBUF, M_WAITOK);
+	phy->node = pdev->node;
+	phy->name = name;
+
+	return phy;
+}
+
+struct bus_type platform_bus_type;
+
+#include <dev/ofw/ofw_misc.h>
+
+#include <linux/of.h>
+#include <linux/platform_device.h>
+
+struct device_node *
+__of_devnode(void *arg)
+{
+	struct device *dev = container_of(arg, struct device, of_node);
+	struct platform_device *pdev = (struct platform_device *)dev;
+
+	return (struct device_node *)(uintptr_t)pdev->node;
+}
+
+int
+__of_device_is_compatible(struct device_node *np, const char *compatible)
+{
+	return OF_is_compatible((uintptr_t)np, compatible);
+}
+
+int
+__of_property_present(struct device_node *np, const char *propname)
+{
+	return OF_getpropbool((uintptr_t)np, (char *)propname);
+}
+
+int
+__of_property_read_variable_u32_array(struct device_node *np,
+    const char *propname, uint32_t *out_values, size_t sz_min, size_t sz_max)
+{
+	int len;
+
+	len = OF_getpropintarray((uintptr_t)np, (char *)propname, out_values,
+	    sz_max * sizeof(*out_values));
+	if (len < 0)
+		return -EINVAL;
+	if (len == 0)
+		return -ENODATA;
+	if (len < sz_min * sizeof(*out_values) ||
+	    len > sz_max * sizeof(*out_values))
+		return -EOVERFLOW;
+	if (sz_min == 1 && sz_max == 1)
+		return 0;
+	return len / sizeof(*out_values);
+}
+
+int
+__of_property_read_variable_u64_array(struct device_node *np,
+    const char *propname, uint64_t *out_values, size_t sz_min, size_t sz_max)
+{
+	int len;
+
+	len = OF_getpropint64array((uintptr_t)np, (char *)propname, out_values,
+	    sz_max * sizeof(*out_values));
+	if (len < 0)
+		return -EINVAL;
+	if (len == 0)
+		return -ENODATA;
+	if (len < sz_min * sizeof(*out_values) ||
+	    len > sz_max * sizeof(*out_values))
+		return -EOVERFLOW;
+	if (sz_min == 1 && sz_max == 1)
+		return 0;
+	return len / sizeof(*out_values);
+}
+
+int
+__of_property_match_string(struct device_node *np,
+    const char *propname, const char *str)
+{
+	int idx;
+
+	idx = OF_getindex((uintptr_t)np, str, propname);
+	if (idx == -1)
+		return -ENODATA;
+	return idx;
+}
+
+struct device_node *
+__of_parse_phandle(struct device_node *np, const char *propname, int idx)
+{
+	uint32_t phandles[16] = {};
+	int len, node;
+
+	len = OF_getpropintarray((uintptr_t)np, (char *)propname, phandles,
+	    sizeof(phandles));
+	if (len < (idx + 1) * sizeof(uint32_t))
+		return NULL;
+
+	node = OF_getnodebyphandle(phandles[idx]);
+	if (node == 0)
+		return NULL;
+
+	return (struct device_node *)(uintptr_t)node;
+}
+
+int
+__of_parse_phandle_with_args(struct device_node *np, const char *propname,
+    const char *cellsname, int idx, struct of_phandle_args *args)
+{
+	uint32_t phandles[16] = {};
+	int i, len, node;
+
+	len = OF_getpropintarray((uintptr_t)np, (char *)propname, phandles,
+	    sizeof(phandles));
+	if (len < (idx + 1) * sizeof(uint32_t))
+		return -ENOENT;
+
+	node = OF_getnodebyphandle(phandles[idx]);
+	if (node == 0)
+		return -ENOENT;
+
+	args->np = (struct device_node *)(uintptr_t)node;
+	args->args_count = OF_getpropint(node, (char *)cellsname, 0);
+	for (i = 0; i < args->args_count; i++)
+		args->args[i] = phandles[i + 1];
+
+	return 0;
+}
+
+int
+of_address_to_resource(struct device_node *np, int idx, struct resource *res)
+{
+	uint64_t reg[16] = {};
+	int len;
+
+	KASSERT(idx < 8);
+
+	len = OF_getpropint64array((uintptr_t)np, "reg", reg, sizeof(reg));
+	if (len < 0 || idx >= (len / (2 * sizeof(uint64_t))))
+		return -EINVAL;
+
+	res->start = reg[2 * idx];
+	res->end = reg[2 * idx] + reg[2 * idx + 1] - 1;
+
+	return 0;
+}
+
+static int
+next_node(int node)
+{
+	int peer = OF_peer(node);
+
+	while (node && !peer) {
+		node = OF_parent(node);
+		if (node)
+			peer = OF_peer(node);
+	}
+
+	return peer;
+}
+
+static int
+find_matching_node(int node, const struct of_device_id *id)
+{
+	int child, match;
+	int i;
+
+	for (child = OF_child(node); child; child = OF_peer(child)) {
+		match = find_matching_node(child, id);
+		if (match)
+			return match;
+	}
+
+	for (i = 0; id[i].compatible; i++) {
+		if (OF_is_compatible(node, id[i].compatible))
+			return node;
+	}
+
+	return 0;
+}
+
+struct device_node *
+__matching_node(struct device_node *np, const struct of_device_id *id)
+{
+	int node = OF_peer(0);
+	int match;
+
+	if (np)
+		node = next_node((uintptr_t)np);
+	while (node) {
+		match = find_matching_node(node, id);
+		if (match)
+			return (struct device_node *)(uintptr_t)match;
+		node = next_node(node);
+	}
+
+	return NULL;
+}
+
+struct platform_device *
+of_platform_device_create(struct device_node *np, const char *bus_id,
+    struct device *parent)
+{
+	struct platform_device *pdev;
+
+	pdev = malloc(sizeof(*pdev), M_DEVBUF, M_WAITOK | M_ZERO);
+	pdev->node = (intptr_t)np;
+	pdev->parent = parent;
+
+	LIST_INSERT_HEAD(&pdev_list, pdev, next);
+
+	return pdev;
+}
+
+struct platform_device *
+of_find_device_by_node(struct device_node *np)
+{
+	struct platform_device *pdev;
+
+	LIST_FOREACH(pdev, &pdev_list, next) {
+		if (pdev->node == (intptr_t)np)
+			return pdev;
+	}
+
+	return NULL;
+}
+
+int
+of_device_is_available(struct device_node *np)
+{
+	char status[32];
+
+	if (OF_getprop((uintptr_t)np, "status", status, sizeof(status)) > 0 &&
+	    strcmp(status, "disabled") == 0)
+		return 0;
+
+	return 1;
+}
+
+int
+of_dma_configure(struct device *dev, struct device_node *np, int force_dma)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+	bus_dma_tag_t dmat = dma_tag_lookup(pdev->parent);
+
+	pdev->dmat = iommu_device_map(pdev->node, dmat);
+	return 0;
+}
+
+struct device_node *
+__of_get_compatible_child(void *p, const char *compat)
+{
+	struct device *dev = container_of(p, struct device, of_node);
+	struct platform_device *pdev = (struct platform_device *)dev;
+	int child;
+
+	for (child = OF_child(pdev->node); child; child = OF_peer(child)) {
+		if (OF_is_compatible(child, compat))
+			return (struct device_node *)(uintptr_t)child;
+	}
+	return NULL;
+}
+
+struct device_node *
+__of_get_child_by_name(void *p, const char *name)
+{
+	struct device *dev = container_of(p, struct device, of_node);
+	struct platform_device *pdev = (struct platform_device *)dev;
+	int child;
+
+	child = OF_getnodebyname(pdev->node, name);
+	if (child == 0)
+		return NULL;
+	return (struct device_node *)(uintptr_t)child;
+}
+
+int
+component_compare_of(struct device *dev, void *data)
+{
+	struct platform_device *pdev = (struct platform_device *)dev;
+
+	return (pdev->node == (intptr_t)data);
+}
+
+void
+drm_of_component_match_add(struct device *master,
+			   struct component_match **matchptr,
+			   int (*compare)(struct device *, void *),
+			   struct device_node *np)
+{
+	struct component_match *match = *matchptr;
+
+	if (match == NULL) {
+		match = malloc(sizeof(struct component_match),
+		    M_DEVBUF, M_WAITOK | M_ZERO);
+		*matchptr = match;
+	}
+
+	KASSERT(match->nmatches < nitems(match->match));
+	match->match[match->nmatches].compare = compare;
+	match->match[match->nmatches].data = np;
+	match->nmatches++;
+}
+
+#endif

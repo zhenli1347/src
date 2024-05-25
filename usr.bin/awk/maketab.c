@@ -1,4 +1,4 @@
-/*	$OpenBSD: maketab.c,v 1.20 2020/07/30 17:45:44 millert Exp $	*/
+/*	$OpenBSD: maketab.c,v 1.22 2023/11/22 01:01:21 millert Exp $	*/
 /****************************************************************
 Copyright (C) Lucent Technologies 1997
 All Rights Reserved
@@ -53,8 +53,8 @@ struct xx
 	{ ARRAY, "array", NULL },
 	{ INDIRECT, "indirect", "$(" },
 	{ SUBSTR, "substr", "substr" },
-	{ SUB, "sub", "sub" },
-	{ GSUB, "gsub", "gsub" },
+	{ SUB, "dosub", "sub" },
+	{ GSUB, "dosub", "gsub" },
 	{ INDEX, "sindex", "sindex" },
 	{ SPRINTF, "awksprintf", "sprintf " },
 	{ ADD, "arith", " + " },
@@ -160,13 +160,13 @@ int main(int argc, char *argv[])
 		}
 		if (tok < FIRSTTOKEN || tok > LASTTOKEN) {
 			tokentype = TOK_UNKNOWN;
-			/* fprintf(stderr, "maketab: funny token %d %s ignored\n", tok, buf); */
+			/* fprintf(stderr, "maketab funny token %d %s ignored\n", tok, buf); */
 			continue;
 		}
 		names[tok-FIRSTTOKEN] = strdup(name);
 		if (names[tok-FIRSTTOKEN] == NULL) {
 			fprintf(stderr, "maketab out of space copying %s", name);
-			exit(1);
+			return 1;
 		}
 		printf("\t\"%s\",\t/* %d */\n", name, tok);
 		i++;

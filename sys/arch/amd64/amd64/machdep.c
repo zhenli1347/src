@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.284 2022/11/29 21:41:39 guenther Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.293 2024/04/29 00:29:48 jsg Exp $	*/
 /*	$NetBSD: machdep.c,v 1.3 2003/05/07 22:58:18 fvdl Exp $	*/
 
 /*-
@@ -160,7 +160,8 @@ char machine[] = MACHINE;
 /*
  * switchto vectors
  */
-void (*cpu_idle_cycle_fcn)(void) = NULL;
+void cpu_idle_cycle_hlt(void);
+void (*cpu_idle_cycle_fcn)(void) = &cpu_idle_cycle_hlt;
 
 /* the following is used externally for concurrent handlers */
 int setperf_prio = 0;
@@ -177,10 +178,7 @@ int biosbasemem = 0;		/* base memory reported by BIOS */
 u_int bootapiver = 0;		/* /boot API version */
 
 int	physmem;
-u_int64_t	dumpmem_low;
-u_int64_t	dumpmem_high;
 extern int	boothowto;
-int	cpu_class;
 
 paddr_t	dumpmem_paddr;
 vaddr_t	dumpmem_vaddr;
@@ -226,6 +224,7 @@ paddr_t avail_end;
 
 void (*delay_func)(int) = i8254_delay;
 void (*initclock_func)(void) = i8254_initclocks;
+void (*startclock_func)(void) = i8254_start_both_clocks;
 
 /*
  * Format of boot information passed to us by 32-bit /boot
@@ -484,6 +483,7 @@ bios_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 
 extern int tsc_is_invariant;
 extern int amd64_has_xcrypt;
+extern int need_retpoline;
 
 const struct sysctl_bounded_args cpuctl_vars[] = {
 	{ CPU_LIDACTION, &lid_action, 0, 2 },
@@ -492,6 +492,7 @@ const struct sysctl_bounded_args cpuctl_vars[] = {
 	{ CPU_CPUFEATURE, &cpu_feature, SYSCTL_INT_READONLY },
 	{ CPU_XCRYPT, &amd64_has_xcrypt, SYSCTL_INT_READONLY },
 	{ CPU_INVARIANTTSC, &tsc_is_invariant, SYSCTL_INT_READONLY },
+	{ CPU_RETPOLINE, &need_retpoline, SYSCTL_INT_READONLY },
 };
 
 /*
@@ -564,6 +565,63 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	/* NOTREACHED */
 }
 
+static inline void
+maybe_enable_user_cet(struct proc *p)
+{
+#ifndef SMALL_KERNEL
+	/* Enable indirect-branch tracking if present and not disabled */
+	if ((xsave_mask & XFEATURE_CET_U) &&
+	    (p->p_p->ps_flags & PS_NOBTCFI) == 0) {
+		uint64_t msr = rdmsr(MSR_U_CET);
+		wrmsr(MSR_U_CET, msr | MSR_CET_ENDBR_EN | MSR_CET_NO_TRACK_EN);
+	}
+#endif
+}
+
+static inline void
+initialize_thread_xstate(struct proc *p)
+{
+	if (cpu_use_xsaves) {
+		xrstors(fpu_cleandata, xsave_mask);
+		maybe_enable_user_cet(p);
+	} else {
+		/* Reset FPU state in PCB */
+		memcpy(&p->p_addr->u_pcb.pcb_savefpu, fpu_cleandata,
+		    fpu_save_len);
+
+		if (curcpu()->ci_pflags & CPUPF_USERXSTATE) {
+			/* state in CPU is obsolete; reset it */
+			fpureset();
+		}
+	}
+
+	/* The reset state _is_ the userspace state for this thread now */
+	curcpu()->ci_pflags |= CPUPF_USERXSTATE;
+}
+
+/*
+ * Copy out the FPU state, massaging it to be usable from userspace
+ * and acceptable to xrstor_user()
+ */
+static inline int
+copyoutfpu(struct savefpu *sfp, char *sp, size_t len)
+{
+	uint64_t bvs[2];
+
+	if (copyout(sfp, sp, len))
+		return 1;
+	if (len > offsetof(struct savefpu, fp_xstate.xstate_bv)) {
+		sp  += offsetof(struct savefpu, fp_xstate.xstate_bv);
+		len -= offsetof(struct savefpu, fp_xstate.xstate_bv);
+		bvs[0] = sfp->fp_xstate.xstate_bv & XFEATURE_XCR0_MASK;
+		bvs[1] = sfp->fp_xstate.xstate_xcomp_bv &
+		    (XFEATURE_XCR0_MASK | XFEATURE_COMPRESSED);
+		if (copyout(bvs, sp, min(len, sizeof bvs)))
+			return 1;
+	}
+	return 0;
+}
+
 /*
  * Send an interrupt to process.
  *
@@ -613,23 +671,22 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
 	else
 		sp = tf->tf_rsp - 128;
 
-	sp &= ~15ULL;	/* just in case */
-	sss = (sizeof(ksc) + 15) & ~15;
+	sp -= fpu_save_len;
+	if (cpu_use_xsaves)
+		sp &= ~63ULL;	/* just in case */
+	else
+		sp &= ~15ULL;	/* just in case */
 
 	/* Save FPU state to PCB if necessary, then copy it out */
-	if (curcpu()->ci_pflags & CPUPF_USERXSTATE) {
-		curcpu()->ci_pflags &= ~CPUPF_USERXSTATE;
-		fpusavereset(&p->p_addr->u_pcb.pcb_savefpu);
-	}
-	sp -= fpu_save_len;
-	ksc.sc_fpstate = (struct fxsave64 *)sp;
-	if (copyout(sfp, (void *)sp, fpu_save_len))
+	if (curcpu()->ci_pflags & CPUPF_USERXSTATE)
+		fpusave(&p->p_addr->u_pcb.pcb_savefpu);
+	if (copyoutfpu(sfp, (void *)sp, fpu_save_len))
 		return 1;
 
-	/* Now reset the FPU state in PCB */
-	memcpy(&p->p_addr->u_pcb.pcb_savefpu,
-	    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
+	initialize_thread_xstate(p);
 
+	ksc.sc_fpstate = (struct fxsave64 *)sp;
+	sss = (sizeof(ksc) + 15) & ~15;
 	sip = 0;
 	if (info) {
 		sip = sp - ((sizeof(*ksip) + 15) & ~15);
@@ -658,9 +715,6 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
 	tf->tf_rsp = scp;
 	tf->tf_ss = GSEL(GUDATA_SEL, SEL_UPL);
 
-	/* The reset state _is_ the userspace state for this thread now */
-	curcpu()->ci_pflags |= CPUPF_USERXSTATE;
-
 	return 0;
 }
 
@@ -682,6 +736,7 @@ sys_sigreturn(struct proc *p, void *v, register_t *retval)
 	} */ *uap = v;
 	struct sigcontext ksc, *scp = SCARG(uap, sigcntxp);
 	struct trapframe *tf = p->p_md.md_regs;
+	struct savefpu *sfp = &p->p_addr->u_pcb.pcb_savefpu;
 	int error;
 
 	if (PROC_PC(p) != p->p_p->ps_sigcoderet) {
@@ -706,7 +761,7 @@ sys_sigreturn(struct proc *p, void *v, register_t *retval)
 	    !USERMODE(ksc.sc_cs, ksc.sc_eflags))
 		return (EINVAL);
 
-	/* Current state is obsolete; toss it and force a reload */
+	/* Current FPU state is obsolete; toss it and force a reload */
 	if (curcpu()->ci_pflags & CPUPF_USERXSTATE) {
 		curcpu()->ci_pflags &= ~CPUPF_USERXSTATE;
 		fpureset();
@@ -714,15 +769,17 @@ sys_sigreturn(struct proc *p, void *v, register_t *retval)
 
 	/* Copy in the FPU state to restore */
 	if (__predict_true(ksc.sc_fpstate != NULL)) {
-		struct fxsave64 *fx = &p->p_addr->u_pcb.pcb_savefpu.fp_fxsave;
-
-		if ((error = copyin(ksc.sc_fpstate, fx, fpu_save_len)))
-			return (error);
-		fx->fx_mxcsr &= fpu_mxcsr_mask;
+		if ((error = copyin(ksc.sc_fpstate, sfp, fpu_save_len)))
+			return error;
+		if (xrstor_user(sfp, xsave_mask)) {
+			memcpy(sfp, fpu_cleandata, fpu_save_len);
+			return EINVAL;
+		}
+		maybe_enable_user_cet(p);
+		curcpu()->ci_pflags |= CPUPF_USERXSTATE;
 	} else {
 		/* shouldn't happen, but handle it */
-		memcpy(&p->p_addr->u_pcb.pcb_savefpu,
-		    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
+		initialize_thread_xstate(p);
 	}
 
 	tf->tf_rdi = ksc.sc_rdi;
@@ -1146,17 +1203,7 @@ setregs(struct proc *p, struct exec_package *pack, u_long stack,
 {
 	struct trapframe *tf;
 
-	/* Reset FPU state in PCB */
-	memcpy(&p->p_addr->u_pcb.pcb_savefpu,
-	    &proc0.p_addr->u_pcb.pcb_savefpu, fpu_save_len);
-
-	if (curcpu()->ci_pflags & CPUPF_USERXSTATE) {
-		/* state in CPU is obsolete; reset it */
-		fpureset();
-	} else {
-		/* the reset state _is_ the userspace state now */
-		curcpu()->ci_pflags |= CPUPF_USERXSTATE;
-	}
+	initialize_thread_xstate(p);
 
 	/* To reset all registers we have to return via iretq */
 	p->p_md.md_flags |= MDP_IRET;
@@ -1343,6 +1390,23 @@ map_tramps(void)
 #endif
 }
 
+void
+cpu_set_vendor(struct cpu_info *ci, int level, const char *vendor)
+{
+	ci->ci_cpuid_level = level;
+	cpuid_level = MIN(cpuid_level, level);
+
+	/* map the vendor string to an integer */
+	if (strcmp(vendor, "AuthenticAMD") == 0)
+		ci->ci_vendor = CPUV_AMD;
+	else if (strcmp(vendor, "GenuineIntel") == 0)
+		ci->ci_vendor = CPUV_INTEL;
+	else if (strcmp(vendor, "CentaurHauls") == 0)
+		ci->ci_vendor = CPUV_VIA;
+	else
+		ci->ci_vendor = CPUV_UNKNOWN;
+}
+
 #define	IDTVEC(name)	__CONCAT(X, name)
 typedef void (vector)(void);
 extern vector *IDTVEC(exceptions)[];
@@ -1366,6 +1430,7 @@ init_x86_64(paddr_t first_avail)
 	early_pte_pages = first_avail;
 	first_avail += 3 * NBPG;
 
+	cpu_set_vendor(&cpu_info_primary, cpuid_level, cpu_vendor);
 	cpu_init_msrs(&cpu_info_primary);
 
 	proc0.p_addr = proc0paddr;
@@ -1694,9 +1759,6 @@ init_x86_64(paddr_t first_avail)
 	set_mem_segment(GDT_ADDR_MEM(cpu_info_primary.ci_gdt, GDATA_SEL), 0,
 	    0xfffff, SDT_MEMRWA, SEL_KPL, 1, 0, 1);
 
-	set_mem_segment(GDT_ADDR_MEM(cpu_info_primary.ci_gdt, GUCODE32_SEL), 0,
-	    atop(VM_MAXUSER_ADDRESS32) - 1, SDT_MEMERA, SEL_UPL, 1, 1, 0);
-
 	set_mem_segment(GDT_ADDR_MEM(cpu_info_primary.ci_gdt, GUDATA_SEL), 0,
 	    atop(VM_MAXUSER_ADDRESS) - 1, SDT_MEMRWA, SEL_UPL, 1, 0, 1);
 
@@ -1834,6 +1896,12 @@ cpu_initclocks(void)
 }
 
 void
+cpu_startclock(void)
+{
+	(*startclock_func)();
+}
+
+void
 need_resched(struct cpu_info *ci)
 {
 	ci->ci_want_resched = 1;
@@ -1858,6 +1926,29 @@ idt_vec_alloc(int low, int high)
 	for (vec = low; vec <= high; vec++) {
 		if (idt_allocmap[vec] == 0) {
 			idt_allocmap[vec] = 1;
+			return vec;
+		}
+	}
+	return 0;
+}
+
+int
+idt_vec_alloc_range(int low, int high, int num)
+{
+	int i, vec;
+
+	KASSERT(powerof2(num));
+	low = (low + num - 1) & ~(num - 1);
+	high = ((high + 1) & ~(num - 1)) - 1;
+
+	for (vec = low; vec <= high; vec += num) {
+		for (i = 0; i < num; i++) {
+			if (idt_allocmap[vec + i] != 0)
+				break;
+		}
+		if (i == num) {
+			for (i = 0; i < num; i++)
+				idt_allocmap[vec + i] = 1;
 			return vec;
 		}
 	}
@@ -1951,62 +2042,33 @@ getbootinfo(char *bootinfo, int bootinfo_size)
 		case BOOTARG_PCIINFO:
 			/* generated by i386 boot loader */
 			break;
-		case BOOTARG_CONSDEV:
-			if (q->ba_size > sizeof(bios_oconsdev_t) +
-			    offsetof(struct _boot_args32, ba_arg)) {
+		case BOOTARG_CONSDEV: {
 #if NCOM > 0
-				bios_consdev_t *cdp =
-				    (bios_consdev_t*)q->ba_arg;
-				static const int ports[] =
-				    { 0x3f8, 0x2f8, 0x3e8, 0x2e8 };
-				int unit = minor(cdp->consdev);
-				uint64_t consaddr = cdp->consaddr;
-				if (consaddr == -1 && unit >= 0 &&
-				    unit < nitems(ports))
-					consaddr = ports[unit];
-				if (major(cdp->consdev) == 8 &&
-				    consaddr != -1) {
-					comconsunit = unit;
-					comconsaddr = consaddr;
-					comconsrate = cdp->conspeed;
-					comconsfreq = cdp->consfreq;
-					comcons_reg_width = cdp->reg_width;
-					comcons_reg_shift = cdp->reg_shift;
-					if (cdp->flags & BCD_MMIO)
-						comconsiot = X86_BUS_SPACE_MEM;
-					else
-						comconsiot = X86_BUS_SPACE_IO;
-				}
-#endif
-#ifdef BOOTINFO_DEBUG
-				printf(" console 0x%x:%d",
-				    cdp->consdev, cdp->conspeed);
-#endif
-			} else {
-#if NCOM > 0
-				bios_oconsdev_t *cdp =
-				    (bios_oconsdev_t*)q->ba_arg;
-				static const int ports[] =
-				    { 0x3f8, 0x2f8, 0x3e8, 0x2e8 };
-				int unit = minor(cdp->consdev);
-				int consaddr = cdp->consaddr;
-				if (consaddr == -1 && unit >= 0 &&
-				    unit < nitems(ports))
-					consaddr = ports[unit];
-				if (major(cdp->consdev) == 8 &&
-				    consaddr != -1) {
-					comconsunit = unit;
-					comconsaddr = consaddr;
-					comconsrate = cdp->conspeed;
+			bios_consdev_t *cdp = (bios_consdev_t*)q->ba_arg;
+			static const int ports[] =
+			    { 0x3f8, 0x2f8, 0x3e8, 0x2e8 };
+			int unit = minor(cdp->consdev);
+			uint64_t consaddr = cdp->consaddr;
+			if (consaddr == -1 && unit >= 0 && unit < nitems(ports))
+				consaddr = ports[unit];
+			if (major(cdp->consdev) == 8 && consaddr != -1) {
+				comconsunit = unit;
+				comconsaddr = consaddr;
+				comconsrate = cdp->conspeed;
+				comconsfreq = cdp->consfreq;
+				comcons_reg_width = cdp->reg_width;
+				comcons_reg_shift = cdp->reg_shift;
+				if (cdp->flags & BCD_MMIO)
+					comconsiot = X86_BUS_SPACE_MEM;
+				else
 					comconsiot = X86_BUS_SPACE_IO;
-				}
+			}
 #endif
 #ifdef BOOTINFO_DEBUG
-				printf(" console 0x%x:%d",
-				    cdp->consdev, cdp->conspeed);
+			printf(" console 0x%x:%d", cdp->consdev, cdp->conspeed);
 #endif
-			}
 			break;
+		}
 		case BOOTARG_BOOTMAC:
 			bios_bootmac = (bios_bootmac_t *)q->ba_arg;
 			break;

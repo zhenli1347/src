@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_de.c,v 1.141 2022/08/15 02:07:11 jsg Exp $	*/
+/*	$OpenBSD: if_de.c,v 1.143 2024/05/24 06:02:53 jsg Exp $	*/
 /*	$NetBSD: if_de.c,v 1.58 1998/01/12 09:39:58 thorpej Exp $	*/
 
 /*-
@@ -44,11 +44,9 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
-#include <sys/malloc.h>
 #include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
-#include <sys/pool.h>
 
 #include <net/if.h>
 #include <net/if_media.h>
@@ -960,7 +958,7 @@ tulip_21041_media_poll(tulip_softc_t * const sc, const tulip_mediapoll_event_t e
     }
 
     /*
-     * If we've been been asked to start a poll or link change interrupt
+     * If we've been asked to start a poll or link change interrupt
      * restart the probe (and reset the tulip to a known state).
      */
     if (event == TULIP_MEDIAPOLL_START) {
@@ -3747,7 +3745,7 @@ tulip_txput(tulip_softc_t * const sc, struct mbuf *m, int notonqueue)
      * a bit reminiscent of going on the Ark two by two
      * since each descriptor for the TULIP can describe
      * two buffers.  So we advance through packet filling
-     * each of the two entries at a time to to fill each
+     * each of the two entries at a time to fill each
      * descriptor.  Clear the first and last segment bits
      * in each descriptor (actually just clear everything
      * but the end-of-ring or chain bits) to make sure

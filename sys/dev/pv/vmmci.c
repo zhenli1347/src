@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmmci.c,v 1.9 2021/11/05 11:38:29 mpi Exp $	*/
+/*	$OpenBSD: vmmci.c,v 1.11 2024/05/24 10:05:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 2017 Reyk Floeter <reyk@openbsd.org>
@@ -18,13 +18,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/timeout.h>
-#include <sys/signalvar.h>
-#include <sys/syslog.h>
 #include <sys/device.h>
-#include <sys/pool.h>
-#include <sys/proc.h>
 #include <sys/sensors.h>
 
 #include <machine/bus.h>
@@ -120,6 +115,7 @@ vmmci_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	printf("\n");
+	virtio_set_status(vsc, VIRTIO_CONFIG_DEVICE_STATUS_DRIVER_OK);
 }
 
 int

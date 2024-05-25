@@ -1,6 +1,25 @@
+struct rde_peer peer = {
+	.conf.local_as = 42,
+	.conf.remote_as = 22512,
+};
+struct rde_peer peer_l4 = {
+	.conf.local_as = 196618,
+	.conf.remote_as = 22512,
+};
+struct rde_peer peer_r4 = {
+	.conf.local_as = 22512,
+	.conf.remote_as = 196618,
+};
+struct rde_peer peer_b4 = {
+	.conf.local_as = 196618,
+	.conf.remote_as = 424242,
+};
+
 struct vector {
 	uint8_t	*data;
 	size_t	size;
+	uint8_t	*expected;
+	size_t	expsize;
 } vectors[] = {
 
 	{
@@ -99,6 +118,11 @@ struct vector {
 	{
 		.data = "\xc0\x10\x08\x00\x02\xfd\xe8\x00\x00\x2a\xf8",
 		.size = 11
+	},
+	{
+		.data = "\xc0\x20\x0c\x00\x00\xd0\x5b\x00\x00\x00\x0b\x00\x00"
+		    "\x00\x03",
+		.size = 15
 	},
 	{
 		.data = "\xc0\x20\x18\x00\x00\xd0\x5b\x00\x00\x00\x0b\x00\x00"
@@ -255,7 +279,65 @@ struct vector {
 		    "\x00\xd0\x00\x03\x22\xd3\x00\x00\x00\x79\x00\x00"
 		    "\x00\x00",
 		.size = 183
-	}
+	},
+	{
+		.data = "\xc0\x10\x08\x43\x00\x00\x00\x00\x00\x00\x02",
+		.size = 11,
+		.expected = "",
+		.expsize = 0,
+	},
+	{
+		.data = "\xc0\x10\x10\x00\x02\xfc\x00\x00\x00\x00\x40"
+		    "\x43\x00\x00\x00\x00\x00\x00\x02",
+		.size = 19,
+		.expected = "\xc0\x10\x08\x00\x02\xfc\x00\x00\x00\x00\x40",
+		.expsize = 11,
+	},
+	{
+		.data = "\xc0\x10\x18\x00\x02\xfc\x00\x00\x00\x00\x40"
+		    "\x43\x00\x00\x00\x00\x00\x00\x02"
+		    "\x06\x00\x00\x00\x00\x00\x00\x01",
+		.size = 27,
+		.expected = "\xc0\x10\x10\x06\x00\x00\x00\x00\x00\x00\x01"
+		    "\x00\x02\xfc\x00\x00\x00\x00\x40",
+		.expsize = 19,
+	},
+	{
+		.data = "\xe0\x08\x04\x4e\x97\x00\x03"
+		    "\xc0\x10\x08\x43\x00\x00\x00\x00\x00\x00\x02",
+		.size = 7 + 11,
+		.expected = "\xe0\x08\x04\x4e\x97\x00\x03",
+		.expsize = 7,
+	},
+	{
+		.data = "\xe0\x08\x04\x4e\x97\x00\x03"
+		    "\xc0\x10\x10\x00\x02\xfc\x00\x00\x00\x00\x40"
+		    "\x43\x00\x00\x00\x00\x00\x00\x02",
+		.size = 7 + 19,
+		.expected = "\xe0\x08\x04\x4e\x97\x00\x03"
+		    "\xc0\x10\x08\x00\x02\xfc\x00\x00\x00\x00\x40",
+		.expsize = 7 + 11,
+	},
+	{
+		.data = "\xc0\x10\x08\x43\x00\x00\x00\x00\x00\x00\x02"
+		    "\xc0\x20\x0c\x00\x00\xd0\x5b\x00\x00\x00\x0b"
+		    "\x00\x00\x00\x03",
+		.size = 11 + 15,
+		.expected = "\xc0\x20\x0c\x00\x00\xd0\x5b\x00\x00\x00\x0b"
+		    "\x00\x00\x00\x03",
+		.expsize = 15,
+	},
+	{
+		.data = "\xe0\x08\x04\x4e\x97\x00\x03"
+		    "\xc0\x10\x08\x43\x00\x00\x00\x00\x00\x00\x02"
+		    "\xc0\x20\x0c\x00\x00\xd0\x5b\x00\x00\x00\x0b"
+		    "\x00\x00\x00\x03",
+		.size = 7 + 11 + 15,
+		.expected = "\xe0\x08\x04\x4e\x97\x00\x03"
+		    "\xc0\x20\x0c\x00\x00\xd0\x5b\x00\x00\x00\x0b"
+		    "\x00\x00\x00\x03",
+		.expsize = 7 + 15,
+	},
 };
 
 struct community filters[] = {
@@ -409,16 +491,109 @@ struct community filters[] = {
 		.data1 = 22512,
 		.data2 = 15,
 	},
+	{ /* 28 */
+		.flags = COMMUNITY_TYPE_BASIC | (COMMUNITY_LOCAL_AS << 8) |
+		    (COMMUNITY_NEIGHBOR_AS << 16),
+	},
+	{ /* 29 */
+		.flags = COMMUNITY_TYPE_LARGE | (COMMUNITY_LOCAL_AS << 8) |
+		    (COMMUNITY_NEIGHBOR_AS << 24),
+	},
+	{ /* 30 */
+		.flags = COMMUNITY_TYPE_EXT | (COMMUNITY_LOCAL_AS << 8) |
+		    (COMMUNITY_NEIGHBOR_AS << 16),
+		.data3 = EXT_COMMUNITY_TRANS_TWO_AS << 8 | 0x02,
+	},
+	{ /* 31 */
+		.flags = COMMUNITY_TYPE_BASIC,
+		.data1 = 42,
+		.data2 = 22512,
+	},
+	{ /* 32 */
+		.flags = COMMUNITY_TYPE_BASIC,
+		.data1 = 65366,
+		.data2 = 22512,
+	},
+	{ /* 33 */
+		.flags = COMMUNITY_TYPE_BASIC,
+		.data1 = 42,
+		.data2 = 65366,
+	},
+	{ /* 34 */
+		.flags = COMMUNITY_TYPE_LARGE,
+		.data1 = 42,
+		.data2 = 0,
+		.data3 = 22512,
+	},
+	{ /* 35 */
+		.flags = COMMUNITY_TYPE_LARGE,
+		.data1 = 196618,
+		.data2 = 0,
+		.data3 = 22512,
+	},
+	{ /* 36 */
+		.flags = COMMUNITY_TYPE_LARGE,
+		.data1 = 22512,
+		.data2 = 0,
+		.data3 = 196618,
+	},
+	{ /* 37 */
+		.flags = COMMUNITY_TYPE_LARGE,
+		.data1 = 196618,
+		.data2 = 0,
+		.data3 = 424242,
+	},
+	{ /* 38 */
+		.flags = COMMUNITY_TYPE_EXT,
+		.data1 = 42,
+		.data2 = 22512,
+		.data3 = EXT_COMMUNITY_TRANS_TWO_AS << 8 | 0x02,
+	},
+	{ /* 39 */
+		.flags = COMMUNITY_TYPE_EXT,
+		.data1 = 42,
+		.data2 = 22512,
+		.data3 = EXT_COMMUNITY_TRANS_FOUR_AS << 8 | 0x02,
+	},
+	{ /* 40 */
+		.flags = COMMUNITY_TYPE_EXT,
+		.data1 = 196618,
+		.data2 = 22512,
+		.data3 = EXT_COMMUNITY_TRANS_FOUR_AS << 8 | 0x02,
+	},
+	{ /* 41 */
+		.flags = COMMUNITY_TYPE_EXT,
+		.data1 = 22512,
+		.data2 = 196618,
+		.data3 = EXT_COMMUNITY_TRANS_TWO_AS << 8 | 0x02,
+	},
+	{ /* 42 */
+		.flags = COMMUNITY_TYPE_EXT | (COMMUNITY_ANY << 24),
+	},
+	{ /* 43 */
+		.flags = COMMUNITY_TYPE_EXT | (COMMUNITY_ANY << 8),
+		.data3 = (-1 << 8) | 0x02,
+	},
+	{ /* 44 */
+		.flags = COMMUNITY_TYPE_EXT | (COMMUNITY_ANY << 8),
+		.data3 = EXT_COMMUNITY_TRANS_FOUR_AS << 8 | 0x02,
+	},
+	{ /* 45 */
+		.flags = COMMUNITY_TYPE_EXT | (COMMUNITY_ANY << 16),
+		.data3 = EXT_COMMUNITY_TRANS_FOUR_AS << 8 | 0x02,
+		.data1 = 196618,
+	},
 };
 
 struct testfilter {
-	ssize_t	in[8];
-	ssize_t	delete;
-	ssize_t	match;
-	int	mout;
-	int	ncomm;
-	int	next;
-	int	nlarge;
+	int		 in[8];
+	int		 delete;
+	int		 match;
+	int		 mout;
+	int		 ncomm;
+	int		 next;
+	int		 nlarge;
+	struct rde_peer *peer;
 } testfilters[] = {
 	{
 		.in = { 1, 2, -1 },
@@ -554,5 +729,352 @@ struct testfilter {
 		.ncomm = 1 + 1,
 		.next = 1 + 1,
 		.nlarge = 1 + 1,
+	},
+	{
+		.in = { 28, -1 },
+		.match = 28,
+		.mout = 1,
+		.delete = 28,
+		.peer = &peer,
+	},
+	{
+		.in = { 31, -1 },
+		.match = 28,
+		.mout = 1,
+		.delete = 28,
+		.peer = &peer,
+	},
+	{
+		.in = { 31, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 31, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{ /* 25 */
+		.in = { 31, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 32, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 32, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 32, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 32, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{ /* 30 */
+		.in = { 33, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 33, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 33, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 33, -1 },
+		.match = 28,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 29, -1 },
+		.match = 29,
+		.mout = 1,
+		.delete = 29,
+		.peer = &peer,
+	},
+	{ /* 35 */
+		.in = { 29, -1 },
+		.match = 29,
+		.mout = 1,
+		.delete = 29,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 29, -1 },
+		.match = 29,
+		.mout = 1,
+		.delete = 29,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 29, -1 },
+		.match = 29,
+		.mout = 1,
+		.delete = 29,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 34, -1 },
+		.match = 29,
+		.mout = 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 34, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{ /* 40 */
+		.in = { 34, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 34, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 35, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 35, -1 },
+		.match = 29,
+		.mout = 1,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 35, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{ /* 45 */
+		.in = { 35, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 36, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 36, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 36, -1 },
+		.match = 29,
+		.mout = 1,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 36, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_b4,
+	},
+	{ /* 50 */
+		.in = { 37, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 37, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 37, -1 },
+		.match = 29,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 37, -1 },
+		.match = 29,
+		.mout = 1,
+		.peer = &peer_b4,
+	},
+	{
+		.in = { 30, -1 },
+		.match = 30,
+		.mout = 1,
+		.delete = 30,
+		.peer = &peer,
+	},
+	{ /* 55 */
+		.in = { 30, -1 },
+		.match = 30,
+		.mout = 1,
+		.delete = 30,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 30, -1 },
+		.match = 30,
+		.mout = 1,
+		.delete = 30,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 38, -1 },
+		.match = 30,
+		.mout = 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 38, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 38, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{ /* 60 */
+		.in = { 39, -1 },
+		.match = 30,
+		.mout = 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 39, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 39, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 40, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 40, -1 },
+		.match = 30,
+		.mout = 1,
+		.peer = &peer_l4,
+	},
+	{ /* 65 */
+		.in = { 40, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 41, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 41, -1 },
+		.match = 30,
+		.mout = 0,
+		.peer = &peer_l4,
+	},
+	{
+		.in = { 41, -1 },
+		.match = 30,
+		.mout = 1,
+		.peer = &peer_r4,
+	},
+	{
+		.in = { 38, -1 },
+		.match = 30,
+		.mout = 1,
+		.peer = &peer,
+	},
+	{ /* 70 */
+		.in = { 38, 39, 40, -1 },
+		.match = 42,
+		.mout = 1,
+		.delete = 42,
+		.next = 0 + 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 38, 39, 40, -1 },
+		.match = 43,
+		.mout = 1,
+		.delete = 43,
+		.next = 0 + 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 39, 40, -1 },
+		.match = 44,
+		.mout = 1,
+		.delete = 44,
+		.next = 0 + 1,
+		.peer = &peer,
+	},
+	{
+		.in = { 38, -1 },
+		.match = 44,
+		.mout = 0,
+		.peer = &peer,
+	},
+	{
+		.in = { 40, -1 },
+		.match = 45,
+		.mout = 1,
+		.delete = 45,
+		.next = 0 + 1,
+		.peer = &peer,
+	},
+	{ /* 75 */
+		.in = { 38, 39, 41, -1 },
+		.match = 45,
+		.mout = 0,
+		.peer = &peer,
 	},
 };

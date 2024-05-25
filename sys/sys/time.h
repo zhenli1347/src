@@ -1,4 +1,4 @@
-/*	$OpenBSD: time.h,v 1.62 2022/07/23 22:58:51 cheloha Exp $	*/
+/*	$OpenBSD: time.h,v 1.66 2023/10/17 00:04:02 cheloha Exp $	*/
 /*	$NetBSD: time.h,v 1.18 1996/04/23 10:29:33 mycroft Exp $	*/
 
 /*
@@ -318,6 +318,9 @@ void	nanoboottime(struct timespec *);
 void	binruntime(struct bintime *);
 void	nanoruntime(struct timespec *);
 
+void getbinruntime(struct bintime *);
+uint64_t getnsecruntime(void);
+
 time_t	gettime(void);
 time_t	getuptime(void);
 
@@ -327,8 +330,10 @@ uint64_t	getnsecuptime(void);
 struct proc;
 int	clock_gettime(struct proc *, clockid_t, struct timespec *);
 
+struct clockrequest;
+void itimer_update(struct clockrequest *, void *, void *);
+
 void	cancel_all_itimers(void);
-int	itimerdecr(struct itimerspec *, long);
 int	settime(const struct timespec *);
 int	ratecheck(struct timeval *, const struct timeval *);
 int	ppsratecheck(struct timeval *, int *, int);

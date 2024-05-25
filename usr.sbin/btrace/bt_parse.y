@@ -1,7 +1,7 @@
-/*	$OpenBSD: bt_parse.y,v 1.48 2022/11/12 14:19:08 mpi Exp $	*/
+/*	$OpenBSD: bt_parse.y,v 1.60 2024/03/30 07:41:45 mpi Exp $	*/
 
 /*
- * Copyright (c) 2019-2021 Martin Pieuchot <mpi@openbsd.org>
+ * Copyright (c) 2019-2023 Martin Pieuchot <mpi@openbsd.org>
  * Copyright (c) 2019 Tobias Heider <tobhe@openbsd.org>
  * Copyright (c) 2015 Ted Unangst <tedu@openbsd.org>
  *
@@ -34,6 +34,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <err.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -72,6 +73,8 @@ struct bt_stmt	*bg_store(const char *, struct bt_arg *);
 struct bt_arg	*bg_find(const char *);
 struct bt_var	*bg_get(const char *);
 
+struct bt_arg	*bi_find(struct bt_arg *, unsigned long);
+
 struct bt_var	*bl_lookup(const char *);
 struct bt_stmt	*bl_store(const char *, struct bt_arg *);
 struct bt_arg	*bl_find(const char *);
@@ -109,25 +112,26 @@ typedef struct {
 static void	 yyerror(const char *, ...);
 static int	 yylex(void);
 
-static int pflag;
+static int 	 pflag = 0;		/* probe parsing context flag */
+static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %}
 
 %token	<v.i>		ERROR ENDFILT
 %token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN END HZ IF
+%token	<v.i>		BUILTIN BEGIN ELSE END HZ IF STR
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
-%token	<v.string>	STRING CSTRING
+%token	<v.string>	STRING CSTRING GVAR LVAR
+%token	<v.arg>		PVAR PNUM
 %token	<v.number>	NUMBER
 
-%type	<v.string>	gvar lvar
 %type	<v.i>		beginend
 %type	<v.probe>	plist probe pname
 %type	<v.filter>	filter
 %type	<v.stmt>	action stmt stmtblck stmtlist block
-%type	<v.arg>		pat vargs mentry mpat pargs staticv
+%type	<v.arg>		vargs mentry mpat pargs
 %type	<v.arg>		expr term fterm variable factor func
 %%
 
@@ -137,7 +141,7 @@ grammar	: /* empty */
 	| grammar error
 	;
 
-rule	: plist filter action		{ br_new($1, $2, $3); }
+rule	: plist filter action		{ br_new($1, $2, $3); beflag = 0; }
 	;
 
 beginend: BEGIN	| END ;
@@ -147,33 +151,18 @@ plist	: plist ',' probe		{ $$ = bp_append($1, $3); }
 	;
 
 probe	: { pflag = 1; } pname		{ $$ = $2; pflag = 0; }
-	| beginend			{ $$ = bp_new(NULL, NULL, NULL, $1); }
+	| { beflag = 1; } beginend	{ $$ = bp_new(NULL, NULL, NULL, $2); }
 	;
 
 pname	: STRING ':' STRING ':' STRING	{ $$ = bp_new($1, $3, $5, 0); }
 	| STRING ':' HZ ':' NUMBER	{ $$ = bp_new($1, "hz", NULL, $5); }
 	;
 
-staticv	: '$' NUMBER			{ $$ = get_varg($2); }
-	| '$' '#'			{ $$ = get_nargs(); }
-	;
-
-gvar	: '@' STRING			{ $$ = $2; }
-	| '@'				{ $$ = UNNAMED_MAP; }
-	;
-
-lvar	: '$' STRING			{ $$ = $2; }
-	;
-
-mentry	: gvar '[' vargs ']'		{ $$ = bm_find($1, $3); }
+mentry	: GVAR '[' vargs ']'		{ $$ = bm_find($1, $3); }
 	;
 
 mpat	: MOP0 '(' ')'			{ $$ = ba_new(NULL, $1); }
-	| MOP1 '(' pat ')'		{ $$ = ba_new($3, $1); }
-	| pat
-	;
-
-pat	: CSTRING			{ $$ = ba_new($1, B_AT_STR); }
+	| MOP1 '(' expr ')'		{ $$ = ba_new($3, $1); }
 	| expr
 	;
 
@@ -185,7 +174,7 @@ filter	: /* empty */			{ $$ = NULL; }
  * Give higher precedence to:
  *  1. && and ||
  *  2. ==, !=, <<, <, >=, >, +, =, &, ^, |
- *  3. * and /
+ *  3. *, /, %
  */
 expr	: expr OP_LAND term	{ $$ = ba_op(B_AT_OP_LAND, $1, $3); }
 	| expr OP_LOR term	{ $$ = ba_op(B_AT_OP_LOR, $1, $3); }
@@ -208,33 +197,37 @@ term	: term OP_EQ fterm	{ $$ = ba_op(B_AT_OP_EQ, $1, $3); }
 
 fterm	: fterm '*' factor	{ $$ = ba_op(B_AT_OP_MULT, $1, $3); }
 	| fterm '/' factor	{ $$ = ba_op(B_AT_OP_DIVIDE, $1, $3); }
+	| fterm '%' factor	{ $$ = ba_op(B_AT_OP_MODULO, $1, $3); }
 	| factor
 	;
 
-variable: lvar			{ $$ = bl_find($1); }
-	| gvar			{ $$ = bg_find($1); }
+variable: LVAR			{ $$ = bl_find($1); }
+	| GVAR			{ $$ = bg_find($1); }
+	| variable '.' NUMBER	{ $$ = bi_find($1, $3); }
 	;
 
 factor : '(' expr ')'		{ $$ = $2; }
+	| '(' vargs ',' expr ')'{ $$ = ba_new(ba_append($2, $4), B_AT_TUPLE); }
 	| NUMBER		{ $$ = ba_new($1, B_AT_LONG); }
 	| BUILTIN		{ $$ = ba_new(NULL, $1); }
 	| CSTRING		{ $$ = ba_new($1, B_AT_STR); }
-	| staticv
+	| PVAR
+	| PNUM
 	| variable
 	| mentry
 	| func
 	;
 
-func	: STR '(' staticv ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
-	| STR '(' staticv ',' pat ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
+func	: STR '(' PVAR ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
+	| STR '(' PVAR ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
 	;
 
-vargs	: pat
-	| vargs ',' pat			{ $$ = ba_append($1, $3); }
+vargs	: expr
+	| vargs ',' expr		{ $$ = ba_append($1, $3); }
 	;
 
 pargs	: expr
-	| gvar ',' pat			{ $$ = ba_append(bg_find($1), $3); }
+	| GVAR ',' expr			{ $$ = ba_append(bg_find($1), $3); }
 	;
 
 NL	: /* empty */
@@ -242,20 +235,22 @@ NL	: /* empty */
 	;
 
 stmt	: ';' NL			{ $$ = NULL; }
-	| gvar '=' pat			{ $$ = bg_store($1, $3); }
-	| lvar '=' pat			{ $$ = bl_store($1, $3); }
-	| gvar '[' vargs ']' '=' mpat	{ $$ = bm_insert($1, $3, $6); }
+	| GVAR '=' expr			{ $$ = bg_store($1, $3); }
+	| LVAR '=' expr			{ $$ = bl_store($1, $3); }
+	| GVAR '[' vargs ']' '=' mpat	{ $$ = bm_insert($1, $3, $6); }
 	| FUNCN '(' vargs ')'		{ $$ = bs_new($1, $3, NULL); }
-	| FUNC1 '(' pat ')'		{ $$ = bs_new($1, $3, NULL); }
+	| FUNC1 '(' expr ')'		{ $$ = bs_new($1, $3, NULL); }
 	| MFUNC '(' variable ')'	{ $$ = bs_new($1, $3, NULL); }
 	| FUNC0 '(' ')'			{ $$ = bs_new($1, NULL, NULL); }
 	| F_DELETE '(' mentry ')'	{ $$ = bm_op($1, $3, NULL); }
 	| F_PRINT '(' pargs ')'		{ $$ = bs_new($1, $3, NULL); }
-	| gvar '=' OP1 '(' pat ')'	{ $$ = bh_inc($1, $5, NULL); }
-	| gvar '=' OP4 '(' pat ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
+	| GVAR '=' OP1 '(' expr ')'	{ $$ = bh_inc($1, $5, NULL); }
+	| GVAR '=' OP4 '(' expr ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
 	;
 
-stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5); }
+stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5, NULL); }
+	| IF '(' expr ')' block ELSE block	{ $$ = bt_new($3, $5, $7); }
+	| IF '(' expr ')' block ELSE stmtblck	{ $$ = bt_new($3, $5, $7); }
 	;
 
 stmtlist: stmtlist stmtblck		{ $$ = bs_append($1, $2); }
@@ -269,6 +264,7 @@ block	: action
 	;
 
 action	: '{' stmtlist '}'		{ $$ = $2; }
+	| '{' '}'			{ $$ = NULL; }
 	;
 
 %%
@@ -281,7 +277,7 @@ get_varg(int index)
 	const char *errstr = NULL;
 	long val;
 
-	if (0 < index && index <= nargs) {
+	if (1 <= index && index <= nargs) {
 		val = (long)strtonum(vargs[index-1], LONG_MIN, LONG_MAX,
 		    &errstr);
 		if (errstr == NULL)
@@ -346,15 +342,22 @@ bc_new(struct bt_arg *term, enum bt_argtype op, struct bt_arg *ba)
 
 /* Create a new if/else test */
 struct bt_stmt *
-bt_new(struct bt_arg *ba, struct bt_stmt *condbs)
+bt_new(struct bt_arg *ba, struct bt_stmt *condbs, struct bt_stmt *elsebs)
 {
 	struct bt_arg *bop;
+	struct bt_cond *bc;
 
 	bop = ba_op(B_AT_OP_NE, NULL, ba);
 
-	return bs_new(B_AC_TEST, bop, (struct bt_var *)condbs);
+	bc = calloc(1, sizeof(*bc));
+	if (bc == NULL)
+		err(1, "bt_cond: calloc");
+	bc->bc_condbs = condbs;
+	bc->bc_elsebs = elsebs;
 
+	return bs_new(B_AC_TEST, bop, (struct bt_var *)bc);
 }
+
 /* Create a new probe */
 struct bt_probe *
 bp_new(const char *prov, const char *func, const char *name, int32_t rate)
@@ -421,7 +424,7 @@ ba_new0(void *val, enum bt_argtype type)
 
 /*
  * Link two arguments together, to build an argument list used in
- * function calls.
+ * operators, tuples and function calls.
  */
 struct bt_arg *
 ba_append(struct bt_arg *da0, struct bt_arg *da1)
@@ -594,6 +597,17 @@ bl_store(const char *vname, struct bt_arg *vval)
 	return bs_new(B_AC_STORE, vval, bv);
 }
 
+/* Create an argument that points to a tuple variable and a given index */
+struct bt_arg *
+bi_find(struct bt_arg *ba, unsigned long index)
+{
+	struct bt_var *bv = ba->ba_value;
+
+	ba = ba_new(bv, B_AT_TMEMBER);
+	ba->ba_key = (void *)index;
+	return ba;
+}
+
 struct bt_stmt *
 bm_op(enum bt_action mact, struct bt_arg *ba, struct bt_arg *mval)
 {
@@ -606,13 +620,16 @@ bm_insert(const char *mname, struct bt_arg *mkey, struct bt_arg *mval)
 {
 	struct bt_arg *ba;
 
+	if (mkey->ba_type == B_AT_TUPLE)
+		yyerror("tuple cannot be used as map key");
+
 	ba = ba_new(bg_get(mname), B_AT_MAP);
 	ba->ba_key = mkey;
 
 	return bs_new(B_AC_INSERT, ba, (struct bt_var *)mval);
 }
 
-/* Create an argument that points to a variable and attach a key to it. */
+/* Create an argument that points to a map variable and attach a key to it. */
 struct bt_arg *
 bm_find(const char *vname, struct bt_arg *mkey)
 {
@@ -651,12 +668,12 @@ bh_inc(const char *hname, struct bt_arg *hval, struct bt_arg *hrange)
 				min = (long)ba->ba_value;
 				if (min >= 0)
 					break;
-				yyerror("negative minium");
+				yyerror("negative minimum");
 			case 2:
 				max = (long)ba->ba_value;
 				if (max > min)
 					break;
-				yyerror("maximum smaller than minium (%d < %d)",
+				yyerror("maximum smaller than minimum (%d < %d)",
 				    max,  min);
 			case 3:
 				break;
@@ -706,6 +723,7 @@ lookup(char *s)
 		{ "count",	MOP0, 		B_AT_MF_COUNT },
 		{ "cpu",	BUILTIN,	B_AT_BI_CPU },
 		{ "delete",	F_DELETE,	B_AC_DELETE },
+		{ "else",	ELSE,		0 },
 		{ "exit",	FUNC0,		B_AC_EXIT },
 		{ "hist",	OP1,		0 },
 		{ "hz",		HZ,		0 },
@@ -760,6 +778,19 @@ lungetc(void)
 		yylval.colno--;
 		pindex--;
 	}
+}
+
+static inline int
+allowed_to_end_number(int x)
+{
+	return (isspace(x) || x == ')' || x == '/' || x == '{' || x == ';' ||
+	    x == ']' || x == ',' || x == '=');
+}
+
+static inline int
+allowed_in_string(int x)
+{
+	return (isalnum(x) || x == '_');
 }
 
 int
@@ -857,6 +888,76 @@ again:
 	case ':':
 	case ';':
 		return c;
+	case '$':
+		c = lgetc();
+		if (c == '#') {
+			yylval.v.arg = get_nargs();
+			return PNUM;
+		} else if (isdigit(c)) {
+			do {
+				*p++ = c;
+				if (p == ebuf) {
+					yyerror("line too long");
+					return ERROR;
+				}
+			} while ((c = lgetc()) != EOF && isdigit(c));
+			lungetc();
+			*p = '\0';
+			if (c == EOF || allowed_to_end_number(c)) {
+				const char *errstr = NULL;
+				int num;
+
+				num = strtonum(buf, 1, INT_MAX, &errstr);
+				if (errstr) {
+					yyerror("'$%s' is %s", buf, errstr);
+					return ERROR;
+				}
+
+				yylval.v.arg = get_varg(num);
+				return PVAR;
+			}
+		} else if (isalpha(c)) {
+			do {
+				*p++ = c;
+				if (p == ebuf) {
+					yyerror("line too long");
+					return ERROR;
+				}
+			} while ((c = lgetc()) != EOF && allowed_in_string(c));
+			lungetc();
+			*p = '\0';
+			if ((yylval.v.string = strdup(buf)) == NULL)
+				err(1, "%s", __func__);
+			return LVAR;
+		}
+		yyerror("'$%s%c' is an invalid variable name", buf, c);
+		return ERROR;
+		break;
+	case '@':
+		c = lgetc();
+		/* check for unnamed map '@' */
+		if (isalpha(c)) {
+			do {
+				*p++ = c;
+				if (p == ebuf) {
+					yyerror("line too long");
+					return ERROR;
+				}
+			} while ((c = lgetc()) != EOF && allowed_in_string(c));
+			lungetc();
+			*p = '\0';
+			if ((yylval.v.string = strdup(buf)) == NULL)
+				err(1, "%s", __func__);
+			return GVAR;
+		} else if (allowed_to_end_number(c) || c == '[') {
+			lungetc();
+			*p = '\0';
+			yylval.v.string = UNNAMED_MAP;
+			return GVAR;
+		}
+		yyerror("'@%s%c' is an invalid variable name", buf, c);
+		return ERROR;
+		break;
 	case EOF:
 		return 0;
 	case '"':
@@ -877,13 +978,13 @@ again:
 				case 't':	c = '\t';	break;
 				case 'v':	c = '\v';	break;
 				default:
-					yyerror("'%c' unsuported escape", c);
+					yyerror("'%c' unsupported escape", c);
 					return ERROR;
 				}
 			}
 			*p++ = c;
 			if (p == ebuf) {
-				yyerror("too long line");
+				yyerror("line too long");
 				return ERROR;
 			}
 		}
@@ -900,28 +1001,28 @@ again:
 		break;
 	}
 
-#define allowed_to_end_number(x) \
-    (isspace(x) || x == ')' || x == '/' || x == '{' || x == ';' || x == ']' || x == ',')
-
 	/* parsing number */
 	if (isdigit(c)) {
 		do {
 			*p++ = c;
 			if (p == ebuf) {
-				yyerror("too long line");
+				yyerror("line too long");
 				return ERROR;
 			}
-		} while ((c = lgetc()) != EOF && isdigit(c));
+		} while ((c = lgetc()) != EOF &&
+		    (isxdigit(c) || c == 'x' || c == 'X'));
 		lungetc();
 		if (c == EOF || allowed_to_end_number(c)) {
-			const char *errstr = NULL;
-
 			*p = '\0';
-			yylval.v.number = strtonum(buf, LONG_MIN, LONG_MAX,
-			    &errstr);
-			if (errstr) {
-				yyerror("invalid number '%s' (%s)", buf,
-				    errstr);
+			errno = 0;
+			yylval.v.number = strtol(buf, NULL, 0);
+			if (errno == ERANGE) {
+				/*
+				 * Characters are already validated, so only
+				 * check ERANGE.
+				 */
+				yyerror("%sflow", (yylval.v.number == LONG_MIN)
+				    ? "under" : "over");
 				return ERROR;
 			}
 			return NUMBER;
@@ -934,15 +1035,13 @@ again:
 		}
 	}
 
-#define allowed_in_string(x) (isalnum(c) || c == '_')
-
 	/* parsing next word */
 	if (allowed_in_string(c)) {
 		struct keyword *kwp;
 		do {
 			*p++ = c;
 			if (p == ebuf) {
-				yyerror("too long line");
+				yyerror("line too long");
 				return ERROR;
 			}
 		} while ((c = lgetc()) != EOF && (allowed_in_string(c)));
@@ -966,6 +1065,12 @@ again:
 				yylval.v.string = kwp->word;
 				return STRING;
 			}
+		} else if (beflag) {
+			/* Interpret tokens in a BEGIN/END context. */
+			if (kwp->type >= B_AT_BI_ARG0 &&
+			    kwp->type <= B_AT_BI_ARG9)
+				yyerror("the %s builtin cannot be used with "
+				    "BEGIN or END probes", kwp->word);
 		}
 		yylval.v.i = kwp->type;
 		return kwp->token;

@@ -25,7 +25,8 @@ SvTRUE_nomg
 
 =implementation
 
-__UNDEFINED__  SvGETMAGIC(x) STMT_START { if (SvGMAGICAL(x)) mg_get(x); } STMT_END
+#undef  SvGETMAGIC
+__UNDEFINED__  SvGETMAGIC(x) ((void)(UNLIKELY(SvGMAGICAL(x)) && mg_get(x)))
 
 /* That's the best we can do... */
 __UNDEFINED__  sv_catpvn_nomg     sv_catpvn
@@ -210,7 +211,7 @@ mg_findext(const SV * sv, int type, const MGVTBL *vtbl) {
 #if { NEED sv_unmagicext }
 
 int
-sv_unmagicext(pTHX_ SV *const sv, const int type, MGVTBL *vtbl)
+sv_unmagicext(pTHX_ SV *const sv, const int type, const MGVTBL *vtbl)
 {
     MAGIC* mg;
     MAGIC** mgp;

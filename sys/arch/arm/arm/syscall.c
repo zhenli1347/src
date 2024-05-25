@@ -1,4 +1,4 @@
-/*	$OpenBSD: syscall.c,v 1.24 2021/12/09 00:26:11 guenther Exp $	*/
+/*	$OpenBSD: syscall.c,v 1.28 2023/12/13 15:57:22 miod Exp $	*/
 /*	$NetBSD: syscall.c,v 1.24 2003/11/14 19:03:17 scw Exp $	*/
 
 /*-
@@ -93,7 +93,7 @@ void
 swi_handler(trapframe_t *frame)
 {
 	struct proc *p = curproc;
-	const struct sysent *callp;
+	const struct sysent *callp = sysent;
 	int code, error;
 	u_int nap = 4, nargs;
 	register_t *ap, *args, copyargs[MAXARGS], rval[2];
@@ -103,35 +103,18 @@ swi_handler(trapframe_t *frame)
 	/* Before enabling interrupts, save FPU state */
 	vfp_save();
 
-	/* Re-enable interrupts if they were enabled previously */
-	if (__predict_true((frame->tf_spsr & PSR_I) == 0))
-		enable_interrupts(PSR_I);
+	enable_interrupts(PSR_I);
 
 	p->p_addr->u_pcb.pcb_tf = frame;
 
 	/* Skip over speculation-blocking barrier. */
 	frame->tf_pc += 8;
 
-	code = frame->tf_r12;
-
 	ap = &frame->tf_r0;
 
-	switch (code) {	
-	case SYS_syscall:
-		code = *ap++;
-		nap--;
-		break;
-        case SYS___syscall:
-		code = ap[_QUAD_LOWWORD];
-		ap += 2;
-		nap -= 2;
-		break;
-	}
-
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
+	code = frame->tf_r12;
+	// XXX out of range stays on syscall0, which we assume is enosys
+	if (code > 0 && code < SYS_MAXSYSCALL)
 		callp += code;
 
 	nargs = callp->sy_argsize / sizeof(register_t);
@@ -155,21 +138,17 @@ swi_handler(trapframe_t *frame)
 	case 0:
 		frame->tf_r0 = rval[0];
 		frame->tf_r1 = rval[1];
-
 		frame->tf_spsr &= ~PSR_C;	/* carry bit */
 		break;
-
 	case ERESTART:
 		/*
 		 * Reconstruct the pc to point at the swi.
 		 */
 		frame->tf_pc -= 12;
 		break;
-
 	case EJUSTRETURN:
 		/* nothing to do */
 		break;
-
 	default:
 	bad:
 		frame->tf_r0 = error;

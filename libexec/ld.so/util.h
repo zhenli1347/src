@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.h,v 1.37 2022/01/08 06:49:41 guenther Exp $	*/
+/*	$OpenBSD: util.h,v 1.41 2024/05/17 06:11:54 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1998 Todd C. Miller <millert@openbsd.org>
@@ -32,8 +32,11 @@
 #define __DL_UTIL_H__
 
 #include <sys/utsname.h>
+#include <sys/signal.h>
 #include <stdarg.h>
 #include <stddef.h>		/* for NULL */
+
+#define MAXIMUM(a,b)	(((a)>(b))?(a):(b))
 
 #ifndef __boot
 # if DO_CLEAN_BOOT
@@ -59,7 +62,6 @@ size_t _dl_strlcat(char *dst, const char *src, size_t siz);
 void _dl_printf(const char *fmt, ...);
 void _dl_vprintf(const char *fmt, va_list ap);
 void _dl_dprintf(int, const char *fmt, ...);
-void _dl_show_objects(void);
 void _dl_arc4randombuf(void *, size_t);
 u_int32_t _dl_arc4random(void);
 ssize_t _dl_write(int fd, const char* buf, size_t len);
@@ -71,11 +73,13 @@ long _dl_strtol(const char *nptr, char **endptr, int base);
 
 __dead void _dl_oom(void);
 __dead void _dl_die(const char *, ...) __attribute__((format (printf, 1, 2)));
-#define _dl_diedie()	_dl_thrkill(0, 9, NULL)
+#define _dl_diedie()	_dl_thrkill(0, SIGKILL, NULL)
 __END_HIDDEN_DECLS
 
 #define	_dl_round_page(x) \
 	(((x) + ((1 << _MAX_PAGE_SHIFT) - 1)) & ~((1 << _MAX_PAGE_SHIFT) - 1))
+
+#define nitems(_a)     (sizeof((_a)) / sizeof((_a)[0]))
 
 /*
  *	The following functions are declared inline so they can

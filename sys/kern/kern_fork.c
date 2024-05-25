@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_fork.c,v 1.244 2022/11/11 18:09:58 cheloha Exp $	*/
+/*	$OpenBSD: kern_fork.c,v 1.258 2024/05/20 10:32:20 claudio Exp $	*/
 /*	$NetBSD: kern_fork.c,v 1.29 1996/02/09 18:59:34 christos Exp $	*/
 
 /*
@@ -50,12 +50,14 @@
 #include <sys/acct.h>
 #include <sys/ktrace.h>
 #include <sys/sched.h>
+#include <sys/smr.h>
 #include <sys/sysctl.h>
 #include <sys/pool.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/atomic.h>
 #include <sys/unistd.h>
+#include <sys/tracepoint.h>
 
 #include <sys/syscallargs.h>
 
@@ -180,7 +182,7 @@ process_initialize(struct process *pr, struct proc *p)
 	pr->ps_mainproc = p;
 	TAILQ_INIT(&pr->ps_threads);
 	TAILQ_INSERT_TAIL(&pr->ps_threads, p, p_thr_link);
-	pr->ps_refcnt = 1;
+	pr->ps_threadcnt = 1;
 	p->p_p = pr;
 
 	/* give the process the same creds as the initial thread */
@@ -241,9 +243,25 @@ process_new(struct proc *p, struct process *parent, int flags)
 	unveil_copy(parent, pr);
 
 	pr->ps_flags = parent->ps_flags &
-	    (PS_SUGID | PS_SUGIDEXEC | PS_PLEDGE | PS_EXECPLEDGE | PS_WXNEEDED);
+	    (PS_SUGID | PS_SUGIDEXEC | PS_PLEDGE | PS_EXECPLEDGE |
+	    PS_WXNEEDED | PS_CHROOT);
 	if (parent->ps_session->s_ttyvp != NULL)
 		pr->ps_flags |= parent->ps_flags & PS_CONTROLT;
+
+	if (parent->ps_pin.pn_pins) {
+		pr->ps_pin.pn_pins = mallocarray(parent->ps_pin.pn_npins,
+		    sizeof(u_int), M_PINSYSCALL, M_WAITOK);
+		memcpy(pr->ps_pin.pn_pins, parent->ps_pin.pn_pins,
+		    parent->ps_pin.pn_npins * sizeof(u_int));
+		pr->ps_flags |= PS_PIN;
+	}
+	if (parent->ps_libcpin.pn_pins) {
+		pr->ps_libcpin.pn_pins = mallocarray(parent->ps_libcpin.pn_npins,
+		    sizeof(u_int), M_PINSYSCALL, M_WAITOK);
+		memcpy(pr->ps_libcpin.pn_pins, parent->ps_libcpin.pn_pins,
+		    parent->ps_libcpin.pn_npins * sizeof(u_int));
+		pr->ps_flags |= PS_LIBCPIN;
+	}
 
 	/*
 	 * Duplicate sub-structures as needed.
@@ -315,6 +333,8 @@ fork_thread_start(struct proc *p, struct proc *parent, int flags)
 
 	SCHED_LOCK(s);
 	ci = sched_choosecpu_fork(parent, flags);
+	TRACEPOINT(sched, fork, p->p_tid + THREAD_PID_OFFSET,
+	    p->p_p->ps_pid, CPU_INFO_UNIT(ci));
 	setrunqueue(ci, p, p->p_usrpri);
 	SCHED_UNLOCK(s);
 }
@@ -465,7 +485,7 @@ fork1(struct proc *curp, int flags, void (*func)(void *), void *arg,
 	/*
 	 * Notify any interested parties about the new process.
 	 */
-	KNOTE(&curpr->ps_klist, NOTE_FORK | pr->ps_pid);
+	knote_locked(&curpr->ps_klist, NOTE_FORK | pr->ps_pid);
 
 	/*
 	 * Update stats now that we know the fork was successful.
@@ -515,7 +535,7 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 	struct proc *p;
 	pid_t tid;
 	vaddr_t uaddr;
-	int s, error;
+	int error;
 
 	if (stack == NULL)
 		return EINVAL;
@@ -535,10 +555,10 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 	p = thread_new(curp, uaddr);
 	atomic_setbits_int(&p->p_flag, P_THREAD);
 	sigstkinit(&p->p_sigstk);
+	memset(p->p_name, 0, sizeof p->p_name);
 
 	/* other links */
 	p->p_p = pr;
-	pr->ps_refcnt++;
 
 	/* local copies */
 	p->p_fd		= pr->ps_fd;
@@ -557,17 +577,19 @@ thread_fork(struct proc *curp, void *stack, void *tcb, pid_t *tidptr,
 	LIST_INSERT_HEAD(&allproc, p, p_list);
 	LIST_INSERT_HEAD(TIDHASH(p->p_tid), p, p_hash);
 
-	SCHED_LOCK(s);
+	mtx_enter(&pr->ps_mtx);
 	TAILQ_INSERT_TAIL(&pr->ps_threads, p, p_thr_link);
+	pr->ps_threadcnt++;
+
 	/*
 	 * if somebody else wants to take us to single threaded mode,
 	 * count ourselves in.
 	 */
 	if (pr->ps_single) {
-		atomic_inc_int(&pr->ps_singlecount);
+		pr->ps_singlecnt++;
 		atomic_setbits_int(&p->p_flag, P_SUSPSINGLE);
 	}
-	SCHED_UNLOCK(s);
+	mtx_leave(&pr->ps_mtx);
 
 	/*
 	 * Return tid to parent thread and copy it out to userspace
@@ -658,20 +680,37 @@ freepid(pid_t pid)
 	oldpids[idx++ % nitems(oldpids)] = pid;
 }
 
-#if defined(MULTIPROCESSOR)
-/*
- * XXX This is a slight hack to get newly-formed processes to
- * XXX acquire the kernel lock as soon as they run.
- */
+/* Do machine independent parts of switching to a new process */
 void
-proc_trampoline_mp(void)
+proc_trampoline_mi(void)
 {
+	struct schedstate_percpu *spc = &curcpu()->ci_schedstate;
+	struct proc *p = curproc;
+
 	SCHED_ASSERT_LOCKED();
+
+	clear_resched(curcpu());
+
+#if defined(MULTIPROCESSOR)
 	__mp_unlock(&sched_lock);
+#endif
 	spl0();
+
 	SCHED_ASSERT_UNLOCKED();
 	KERNEL_ASSERT_UNLOCKED();
+	assertwaitok();
+	smr_idle();
 
+	/* Start any optional clock interrupts needed by the thread. */
+	if (ISSET(p->p_p->ps_flags, PS_ITIMER)) {
+		atomic_setbits_int(&spc->spc_schedflags, SPCF_ITIMER);
+		clockintr_advance(&spc->spc_itimer, hardclock_period);
+	}
+	if (ISSET(p->p_p->ps_flags, PS_PROFIL)) {
+		atomic_setbits_int(&spc->spc_schedflags, SPCF_PROFCLOCK);
+		clockintr_advance(&spc->spc_profclock, profclock_period);
+	}
+
+	nanouptime(&spc->spc_runtime);
 	KERNEL_LOCK();
 }
-#endif

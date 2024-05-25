@@ -1,4 +1,4 @@
-/*	$OpenBSD: server.c,v 1.126 2021/07/14 13:33:57 kn Exp $	*/
+/*	$OpenBSD: server.c,v 1.129 2023/11/08 19:19:10 millert Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -1300,6 +1300,11 @@ server_close(struct client *clt, const char *msg)
 {
 	struct server		*srv = clt->clt_srv;
 
+	if (clt->clt_fcgi_count-- > 0) {
+		clt->clt_fcgi_error = msg;
+		return;
+	}
+
 	SPLAY_REMOVE(client_tree, &srv->srv_clients, clt);
 
 	/* free the HTTP descriptors incl. headers */
@@ -1456,7 +1461,7 @@ server_bufferevent_write_chunk(struct client *clt,
     struct evbuffer *buf, size_t size)
 {
 	int ret;
-	ret = server_bufferevent_write(clt, buf->buffer, size);
+	ret = server_bufferevent_write(clt, EVBUFFER_DATA(buf), size);
 	if (ret != -1)
 		evbuffer_drain(buf, size);
 	return (ret);

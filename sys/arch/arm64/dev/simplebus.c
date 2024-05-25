@@ -1,4 +1,4 @@
-/* $OpenBSD: simplebus.c,v 1.16 2022/11/06 12:01:52 patrick Exp $ */
+/* $OpenBSD: simplebus.c,v 1.18 2023/09/22 01:10:43 jsg Exp $ */
 /*
  * Copyright (c) 2016 Patrick Wildt <patrick@blueri.se>
  *
@@ -26,8 +26,8 @@
 #include <dev/ofw/fdt.h>
 #include <dev/ofw/ofw_misc.h>
 
-#include <arm64/fdt.h>
-#include <arm64/dev/simplebusvar.h>
+#include <machine/fdt.h>
+#include <machine/simplebusvar.h>
 
 int simplebus_match(struct device *, void *, void *);
 void simplebus_attach(struct device *, struct device *, void *);
@@ -140,13 +140,10 @@ simplebus_attach(struct device *parent, struct device *self, void *aux)
 	}
 
 	/* Scan the whole tree. */
-	sc->sc_early = 1;
-	for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
-		simplebus_attach_node(self, node);
-
-	sc->sc_early = 0;
-	for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
-		simplebus_attach_node(self, node);
+	for (sc->sc_early = 2; sc->sc_early >= 0; sc->sc_early--) {
+		for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
+			simplebus_attach_node(self, node);
+	}
 }
 
 int

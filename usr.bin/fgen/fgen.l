@@ -1,5 +1,5 @@
 %{
-/*	$OpenBSD: fgen.l,v 1.14 2021/12/13 18:28:40 deraadt Exp $	*/
+/*	$OpenBSD: fgen.l,v 1.18 2024/05/20 19:16:48 sobrado Exp $	*/
 /*	$NetBSD: fgen.l,v 1.37 2016/03/08 20:13:44 christos Exp $	*/
 /* FLEX input for FORTH input file scanner */
 /*  
@@ -79,7 +79,6 @@ static char *outbuf = NULL;
 static char *outfile, *infile;
 #define BUFCLICK	(1024*1024)
 static size_t outbufsiz = 0;
-static char *myname = NULL;
 static int offsetsize = 8;
 static int defining = 0;
 static int tokenizer = 0;
@@ -1008,8 +1007,8 @@ apply_macros(YY_BUFFER_STATE yinput, const char *str)
 static void
 usage(void)
 {
-	(void)fprintf(stderr, "%s: [-d level] [-o outfile] <infile>\n",
-	getprogname());
+	(void)fprintf(stderr, "usage: %s [-d level] [-o outfile] infile\n",
+	    getprogname());
 	exit(EXIT_FAILURE);
 }
 
@@ -1092,7 +1091,7 @@ main(int argc, char *argv[])
 
 /*
  * Tokenize one file.  This is a separate function so it can
- * be called recursively to parse mutiple levels of include files.
+ * be called recursively to parse multiple levels of include files.
  */
 
 static void
@@ -1265,6 +1264,7 @@ tokenize(YY_BUFFER_STATE yinput)
 						token->text);
 				free((void *)fcode->name);
 				free(fcode);
+				break;
 			}
 			if (debug)
 				printf("Adding %s to dictionary\n", token->text);		
@@ -2063,7 +2063,7 @@ tokenize(YY_BUFFER_STATE yinput)
 #else
 				token_err(yylineno, infile, yytext,
 					"%s: undefined token `%s'\n",
-					myname, token->text);
+					__func__, token->text);
 #endif
 			}
 			break;

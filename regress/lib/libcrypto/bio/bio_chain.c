@@ -1,4 +1,4 @@
-/*	$OpenBSD: bio_chain.c,v 1.13 2022/12/10 10:45:39 tb Exp $	*/
+/*	$OpenBSD: bio_chain.c,v 1.16 2023/08/07 11:00:54 tb Exp $	*/
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  *
@@ -213,14 +213,13 @@ walk_report(BIO *last, BIO *expected_last, size_t len, size_t expected_len,
     const char *direction, const char *last_name)
 {
 	if (last != expected_last) {
-		fprintf(stderr, "%s case (%zu, %zu) %s has unexpected %s\n",
-		    fn, i, j, description, last_name);
+		fprintf(stderr, "%s case (%zu, %zu) %s %s has unexpected %s\n",
+		    fn, i, j, description, direction, last_name);
 		return 0;
 	}
 
 	if (len != expected_len) {
-		fprintf(stderr, "%s case (%zu, %zu) %s length "
-		    "(walking %s) want: %zu, got %zu\n",
+		fprintf(stderr, "%s case (%zu, %zu) %s %s want %zu, got %zu\n",
 		    fn, i, j, description, direction, expected_len, len);
 		return 0;
 	}
@@ -375,7 +374,7 @@ link_chains_at(size_t i, size_t j, int use_bio_push)
 	/* The two chains A[] and B[] are split into three disjoint pieces. */
 	if (nitems(A) + nitems(B) != new_len + oldtail_len + oldhead_len) {
 		fprintf(stderr, "%s case (%zu, %zu) inconsistent lengths: "
-		    "%zu + %zu + %zu != %zu + %zu\n", fn, i, j,
+		    "%zu + %zu != %zu + %zu + %zu\n", fn, i, j,
 		    nitems(A), nitems(B), new_len, oldtail_len, oldhead_len);
 		goto err;
 	}
@@ -461,6 +460,47 @@ bio_set_next_link_test(void)
 	return link_chains(use_bio_push);
 }
 
+static long
+dup_leak_cb(BIO *bio, int cmd, const char *argp, int argi, long argl, long ret)
+{
+	if (argi == BIO_CTRL_DUP)
+		return 0;
+
+	return ret;
+}
+
+static int
+bio_dup_chain_leak(void)
+{
+	BIO *bio[CHAIN_POP_LEN];
+	BIO *dup;
+	int failed = 1;
+
+	if (!bio_chain_create(BIO_s_null(), bio, nitems(bio)))
+		goto err;
+
+	if ((dup = BIO_dup_chain(bio[0])) == NULL) {
+		fprintf(stderr, "BIO_set_callback() failed\n");
+		goto err;
+	}
+
+	BIO_set_callback(bio[CHAIN_POP_LEN - 1], dup_leak_cb);
+
+	BIO_free_all(dup);
+	if ((dup = BIO_dup_chain(bio[0])) != NULL) {
+		fprintf(stderr, "BIO_dup_chain() succeeded unexpectedly\n");
+		BIO_free_all(dup);
+		goto err;
+	}
+
+	failed = 0;
+
+ err:
+	bio_chain_destroy(bio, nitems(bio));
+
+	return failed;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -469,6 +509,7 @@ main(int argc, char **argv)
 	failed |= bio_chain_pop_test();
 	failed |= bio_push_link_test();
 	failed |= bio_set_next_link_test();
+	failed |= bio_dup_chain_leak();
 
 	return failed;
 }

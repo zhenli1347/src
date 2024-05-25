@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: Getopt.pm,v 1.12 2012/04/10 16:57:12 espie Exp $
+# $OpenBSD: Getopt.pm,v 1.17 2023/06/16 06:44:14 espie Exp $
 #
 # Copyright (c) 2006 Marc Espie <espie@openbsd.org>
 #
@@ -18,8 +18,7 @@
 # This is inspired by Getopt::Std, except for the ability to invoke subs
 # on options.
 
-use strict;
-use warnings;
+use v5.36;
 
 package OpenBSD::Getopt;
 require Exporter;
@@ -27,19 +26,17 @@ require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT = qw(getopts);
 
-sub handle_option
+sub handle_option($opt, $hash, @params)
 {
-	my ($opt, $hash, $params) = @_;
-
 	if (defined $hash->{$opt} and ref($hash->{$opt}) eq 'CODE') {
-		&{$hash->{$opt}}($params);
+		&{$hash->{$opt}}(@params);
 	} else {
 		no strict "refs";
 		no strict "vars";
 
-		if (defined $params) {
-			${"opt_$opt"} = $params;
-			$hash->{$opt} = $params;
+		if (@params > 0) {
+			${"opt_$opt"} = $params[0];
+			$hash->{$opt} = $params[0];
 		} else {
 			${"opt_$opt"}++;
 			$hash->{$opt}++;
@@ -48,11 +45,8 @@ sub handle_option
 	}
 }
 
-sub getopts($;$)
+sub getopts($args, $hash = {})
 {
-    my ($args, $hash) = @_;
-
-    $hash = {} unless defined $hash;
     local @EXPORT;
 
     while ($_ = shift @ARGV) {
@@ -82,7 +76,7 @@ sub getopts($;$)
 	}
     }
     local $Exporter::ExportLevel = 1;
-    import OpenBSD::Getopt;
+    OpenBSD::Getopt->import;
     return $hash;
 }
 

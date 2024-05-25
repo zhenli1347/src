@@ -1,8 +1,9 @@
-# $OpenBSD: Makefile,v 1.20 2022/11/09 14:31:31 claudio Exp $
+# $OpenBSD: Makefile,v 1.24 2024/04/09 09:35:57 claudio Exp $
 
-REGRESS_TARGETS	= 	network_statement md5 ovs mrt pftable \
-			maxprefix maxprefixout maxcomm \
-			as0 med eval_all policy l3vpn
+REGRESS_TARGETS	= 	network_statement md5 ovs capa policy pftable \
+			mrt maxprefix maxprefixout maxcomm l3vpn \
+			ixp lladdr \
+			as0 med eval_all attr
 
 BGPD ?=			/usr/sbin/bgpd
 
@@ -18,6 +19,9 @@ md5:
 	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
 
 ovs:
+	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
+
+capa:
 	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
 
 policy:
@@ -41,6 +45,12 @@ maxcomm:
 l3vpn:
 	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12 13 14
 
+ixp:
+	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
+
+lladdr:
+	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
+
 .if ! exists(/usr/local/bin/exabgp)
 as0:
 	# install exabgp from ports for additional tests
@@ -53,6 +63,11 @@ med:
 eval_all:
 	# install exabgp from ports for additional tests
 	@echo SKIPPED
+
+attr:
+	# install exabgp from ports for additional tests
+	@echo SKIPPED
+
 .else
 
 .SUFFIXES: .conf .in
@@ -68,6 +83,9 @@ med: api-exabgp exabgp.med.conf
 	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
 
 eval_all: api-exabgp exabgp.eval_all.conf
+	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
+
+attr: api-exabgp exabgp.attr.conf
 	${SUDO} ksh ${.CURDIR}/$@.sh ${BGPD} ${.CURDIR} 11 12 pair11 pair12
 
 .endif

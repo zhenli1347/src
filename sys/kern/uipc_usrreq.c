@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_usrreq.c,v 1.195 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: uipc_usrreq.c,v 1.206 2024/05/03 17:43:09 mvs Exp $	*/
 /*	$NetBSD: uipc_usrreq.c,v 1.18 1996/02/09 19:00:50 christos Exp $	*/
 
 /*
@@ -73,7 +73,6 @@
  *      s       socket lock
  */
 
-struct rwlock unp_lock = RWLOCK_INITIALIZER("unplock");
 struct rwlock unp_df_lock = RWLOCK_INITIALIZER("unpdflk");
 struct rwlock unp_gc_lock = RWLOCK_INITIALIZER("unpgclk");
 
@@ -294,14 +293,10 @@ uipc_attach(struct socket *so, int proto, int wait)
 	so->so_pcb = unp;
 	getnanotime(&unp->unp_ctime);
 
-	/*
-	 * Enforce `unp_gc_lock' -> `solock()' lock order.
-	 */
-	sounlock(so);
 	rw_enter_write(&unp_gc_lock);
 	LIST_INSERT_HEAD(&unp_head, unp, unp_link);
 	rw_exit_write(&unp_gc_lock);
-	solock(so);
+
 	return (0);
 }
 
@@ -340,7 +335,7 @@ uipc_bind(struct socket *so, struct mbuf *nam, struct proc *p)
 	unp->unp_flags |= UNP_BINDING;
 
 	/*
-	 * Enforce `i_lock' -> `unplock' because fifo subsystem
+	 * Enforce `i_lock' -> `solock' because fifo subsystem
 	 * requires it. The socket can't be closed concurrently
 	 * because the file descriptor reference is still held.
 	 */
@@ -416,6 +411,8 @@ uipc_listen(struct socket *so)
 {
 	struct unpcb *unp = sotounpcb(so);
 
+	if (unp->unp_flags & (UNP_BINDING | UNP_CONNECTING))
+		return (EINVAL);
 	if (unp->unp_vnode == NULL)
 		return (EINVAL);
 	return (0);
@@ -462,9 +459,9 @@ uipc_shutdown(struct socket *so)
 
 	socantsendmore(so);
 
-	if ((so2 = unp_solock_peer(unp->unp_socket))){
+	if (unp->unp_conn != NULL) {
+		so2 = unp->unp_conn->unp_socket;
 		socantrcvmore(so2);
-		sounlock(so2);
 	}
 
 	return (0);
@@ -480,26 +477,33 @@ uipc_dgram_shutdown(struct socket *so)
 void
 uipc_rcvd(struct socket *so)
 {
+	struct unpcb *unp = sotounpcb(so);
 	struct socket *so2;
 
-	if ((so2 = unp_solock_peer(so)) == NULL)
+	if (unp->unp_conn == NULL)
 		return;
+	so2 = unp->unp_conn->unp_socket;
+
 	/*
 	 * Adjust backpressure on sender
 	 * and wakeup any waiting to write.
 	 */
+	mtx_enter(&so->so_rcv.sb_mtx);
+	mtx_enter(&so2->so_snd.sb_mtx);
 	so2->so_snd.sb_mbcnt = so->so_rcv.sb_mbcnt;
 	so2->so_snd.sb_cc = so->so_rcv.sb_cc;
+	mtx_leave(&so2->so_snd.sb_mtx);
+	mtx_leave(&so->so_rcv.sb_mtx);
 	sowwakeup(so2);
-	sounlock(so2);
 }
 
 int
 uipc_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
     struct mbuf *control)
 {
+	struct unpcb *unp = sotounpcb(so);
 	struct socket *so2;
-	int error = 0;
+	int error = 0, dowakeup = 0;
 
 	if (control) {
 		sounlock(so);
@@ -509,25 +513,36 @@ uipc_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 			goto out;
 	}
 
-	if (so->so_state & SS_CANTSENDMORE) {
-		error = EPIPE;
-		goto dispose;
-	}
-	if ((so2 = unp_solock_peer(so)) == NULL) {
+	if (unp->unp_conn == NULL) {
 		error = ENOTCONN;
 		goto dispose;
 	}
+
+	so2 = unp->unp_conn->unp_socket;
 
 	/*
 	 * Send to paired receive port, and then raise
 	 * send buffer counts to maintain backpressure.
 	 * Wake up readers.
 	 */
+	/*
+	 * sbappend*() should be serialized together
+	 * with so_snd modification.
+	 */
+	mtx_enter(&so2->so_rcv.sb_mtx);
+	mtx_enter(&so->so_snd.sb_mtx);
+	if (so->so_snd.sb_state & SS_CANTSENDMORE) {
+		mtx_leave(&so->so_snd.sb_mtx);
+		mtx_leave(&so2->so_rcv.sb_mtx);
+		error = EPIPE;
+		goto dispose;
+	}
 	if (control) {
 		if (sbappendcontrol(so2, &so2->so_rcv, m, control)) {
 			control = NULL;
 		} else {
-			sounlock(so2);
+			mtx_leave(&so->so_snd.sb_mtx);
+			mtx_leave(&so2->so_rcv.sb_mtx);
 			error = ENOBUFS;
 			goto dispose;
 		}
@@ -538,9 +553,13 @@ uipc_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 	so->so_snd.sb_mbcnt = so2->so_rcv.sb_mbcnt;
 	so->so_snd.sb_cc = so2->so_rcv.sb_cc;
 	if (so2->so_rcv.sb_cc > 0)
+		dowakeup = 1;
+	mtx_leave(&so->so_snd.sb_mtx);
+	mtx_leave(&so2->so_rcv.sb_mtx);
+
+	if (dowakeup)
 		sorwakeup(so2);
 
-	sounlock(so2);
 	m = NULL;
 
 dispose:
@@ -562,7 +581,7 @@ uipc_dgram_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 	struct unpcb *unp = sotounpcb(so);
 	struct socket *so2;
 	const struct sockaddr *from;
-	int error = 0;
+	int error = 0, dowakeup = 0;
 
 	if (control) {
 		sounlock(so);
@@ -582,7 +601,7 @@ uipc_dgram_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 			goto dispose;
 	}
 
-	if ((so2 = unp_solock_peer(so)) == NULL) {
+	if (unp->unp_conn == NULL) {
 		if (nam != NULL)
 			error = ECONNREFUSED;
 		else
@@ -590,20 +609,24 @@ uipc_dgram_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 		goto dispose;
 	}
 
+	so2 = unp->unp_conn->unp_socket;
+
 	if (unp->unp_addr)
 		from = mtod(unp->unp_addr, struct sockaddr *);
 	else
 		from = &sun_noname;
+
+	mtx_enter(&so2->so_rcv.sb_mtx);
 	if (sbappendaddr(so2, &so2->so_rcv, from, m, control)) {
-		sorwakeup(so2);
+		dowakeup = 1;
 		m = NULL;
 		control = NULL;
 	} else
 		error = ENOBUFS;
+	mtx_leave(&so2->so_rcv.sb_mtx);
 
-	if (so2 != so)
-		sounlock(so2);
-
+	if (dowakeup)
+		sorwakeup(so2);
 	if (nam)
 		unp_disconnect(unp);
 
@@ -719,7 +742,7 @@ uipc_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		    name + 1, namelen - 1, oldp, oldlenp, newp, newlen);
 	case NET_UNIX_INFLIGHT:
 		valp = &unp_rights;
-		/* FALLTHOUGH */
+		/* FALLTHROUGH */
 	case NET_UNIX_DEFERRED:
 		if (namelen != 1)
 			return (ENOTDIR);
@@ -739,7 +762,6 @@ unp_detach(struct unpcb *unp)
 	unp->unp_vnode = NULL;
 
 	/*
-	 * Enforce `unp_gc_lock' -> `solock()' lock order.
 	 * Enforce `i_lock' -> `solock()' lock order.
 	 */
 	sounlock(so);
@@ -831,7 +853,7 @@ unp_connect(struct socket *so, struct mbuf *nam, struct proc *p)
 	unp->unp_flags |= UNP_CONNECTING;
 
 	/*
-	 * Enforce `i_lock' -> `unplock' because fifo subsystem
+	 * Enforce `i_lock' -> `solock' because fifo subsystem
 	 * requires it. The socket can't be closed concurrently
 	 * because the file descriptor reference is still held.
 	 */
@@ -1389,9 +1411,9 @@ unp_gc(void *arg __unused)
 		if ((unp->unp_gcflags & UNP_GCDEAD) == 0)
 			continue;
 		so = unp->unp_socket;
-		solock(so);
+		mtx_enter(&so->so_rcv.sb_mtx);
 		unp_scan(so->so_rcv.sb_mb, unp_remove_gcrefs);
-		sounlock(so);
+		mtx_leave(&so->so_rcv.sb_mtx);
 	}
 
 	/*
@@ -1413,9 +1435,9 @@ unp_gc(void *arg __unused)
 			unp->unp_gcflags &= ~UNP_GCDEAD;
 
 			so = unp->unp_socket;
-			solock(so);
+			mtx_enter(&so->so_rcv.sb_mtx);
 			unp_scan(so->so_rcv.sb_mb, unp_restore_gcrefs);
-			sounlock(so);
+			mtx_leave(&so->so_rcv.sb_mtx);
 
 			KASSERT(nunref > 0);
 			nunref--;
@@ -1429,16 +1451,26 @@ unp_gc(void *arg __unused)
 	if (nunref) {
 		LIST_FOREACH(unp, &unp_head, unp_link) {
 			if (unp->unp_gcflags & UNP_GCDEAD) {
+				struct sockbuf *sb = &unp->unp_socket->so_rcv;
+				struct mbuf *m;
+
 				/*
 				 * This socket could still be connected
 				 * and if so it's `so_rcv' is still
 				 * accessible by concurrent PRU_SEND
 				 * thread.
 				 */
-				so = unp->unp_socket;
-				solock(so);
-				unp_scan(so->so_rcv.sb_mb, unp_discard);
-				sounlock(so);
+
+				mtx_enter(&sb->sb_mtx);
+				m = sb->sb_mb;
+				memset(&sb->sb_startzero, 0,
+				    (caddr_t)&sb->sb_endzero -
+				        (caddr_t)&sb->sb_startzero);
+				sb->sb_timeo_nsecs = INFSLP;
+				mtx_leave(&sb->sb_mtx);
+
+				unp_scan(m, unp_discard);
+				m_purge(m);
 			}
 		}
 	}

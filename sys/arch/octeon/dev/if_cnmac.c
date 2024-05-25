@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_cnmac.c,v 1.83 2021/03/11 11:16:59 jsg Exp $	*/
+/*	$OpenBSD: if_cnmac.c,v 1.86 2024/05/20 23:13:33 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007 Internet Initiative Japan, Inc.
@@ -13,10 +13,10 @@
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -113,7 +113,6 @@ void	cnmac_attach(struct device *, struct device *, void *);
 void	cnmac_pip_init(struct cnmac_softc *);
 void	cnmac_ipd_init(struct cnmac_softc *);
 void	cnmac_pko_init(struct cnmac_softc *);
-void	cnmac_smi_init(struct cnmac_softc *);
 
 void	cnmac_board_mac_addr(uint8_t *);
 
@@ -134,7 +133,6 @@ void	cnmac_send_queue_add(struct cnmac_softc *,
 void	cnmac_send_queue_del(struct cnmac_softc *,
 	    struct mbuf **, uint64_t **);
 int	cnmac_buf_free_work(struct cnmac_softc *, uint64_t *);
-void	cnmac_buf_ext_free(caddr_t, u_int, void *);
 
 int	cnmac_ioctl(struct ifnet *, u_long, caddr_t);
 void	cnmac_watchdog(struct ifnet *);
@@ -313,7 +311,7 @@ cnmac_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_qstart = cnmac_start;
 	ifp->if_watchdog = cnmac_watchdog;
 	ifp->if_hardmtu = CNMAC_MAX_MTU;
-	ifq_set_maxlen(&ifp->if_snd, max(GATHER_QUEUE_SIZE, IFQ_MAXLEN));
+	ifq_init_maxlen(&ifp->if_snd, max(GATHER_QUEUE_SIZE, IFQ_MAXLEN));
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_TCPv4 |
 	    IFCAP_CSUM_UDPv4 | IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;

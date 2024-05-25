@@ -1,4 +1,4 @@
-/*	$OpenBSD: hack.main.c,v 1.24 2019/06/28 13:32:52 deraadt Exp $	*/
+/*	$OpenBSD: hack.main.c,v 1.26 2023/09/06 11:53:56 jsg Exp $	*/
 
 /*
  * Copyright (c) 1985, Stichting Centrum voor Wiskunde en Informatica,
@@ -103,7 +103,6 @@ static void chdirx(char *, boolean);
 int
 main(int argc, char **argv)
 {
-	extern char *__progname;
 	int fd;
 #ifdef CHDIR
 	char *dir;
@@ -183,15 +182,6 @@ main(int argc, char **argv)
 	u.ux = FAR;	/* prevent nscr() */
 	(void) signal(SIGHUP, hackhangup);
 
-	/*
-	 * Find the creation date of this game,
-	 * so as to avoid restoring outdated savefiles.
-	 */
-	gethdate(__progname);
-
-	/*
-	 * We cannot do chdir earlier, otherwise gethdate will fail.
-	 */
 #ifdef CHDIR
 	chdirx(dir,1);
 #endif
@@ -298,8 +288,7 @@ main(int argc, char **argv)
 	setftty();
 	(void) snprintf(SAVEF, sizeof SAVEF, "save/%u%s", getuid(), plname);
 	regularize(SAVEF+5);		/* avoid . or / in name */
-	if((fd = open(SAVEF, O_RDONLY)) >= 0 &&
-	   (uptodate(fd) || unlink(SAVEF) == 666)) {
+	if((fd = open(SAVEF, O_RDONLY)) >= 0) {
 		(void) signal(SIGINT,done1);
 		pline("Restoring old save file...");
 		(void) fflush(stdout);
@@ -361,7 +350,6 @@ not_recovered:
 
 			if(moves%2 == 0 ||
 			  (!(Fast & ~INTRINSIC) && (!Fast || rn2(3)))) {
-				extern struct monst *makemon();
 				movemon();
 				if(!rn2(70))
 				    (void) makemon((struct permonst *)0, 0, 0);

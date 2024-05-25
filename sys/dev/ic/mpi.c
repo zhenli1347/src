@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpi.c,v 1.224 2022/04/16 19:19:59 naddy Exp $ */
+/*	$OpenBSD: mpi.c,v 1.226 2023/07/06 10:17:43 visa Exp $ */
 
 /*
  * Copyright (c) 2005, 2006, 2009 David Gwynne <dlg@openbsd.org>
@@ -1263,8 +1263,10 @@ mpi_poll_done(struct mpi_ccb *ccb)
 void
 mpi_wait(struct mpi_softc *sc, struct mpi_ccb *ccb)
 {
-	struct mutex			cookie = MUTEX_INITIALIZER(IPL_BIO);
+	struct mutex			cookie;
 	void				(*done)(struct mpi_ccb *);
+
+	mtx_init(&cookie, IPL_BIO);
 
 	done = ccb->ccb_done;
 	ccb->ccb_done = mpi_wait_done;

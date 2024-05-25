@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_output.c,v 1.272 2022/11/12 02:50:59 kn Exp $	*/
+/*	$OpenBSD: ip6_output.c,v 1.291 2024/04/17 20:48:51 bluhm Exp $	*/
 /*	$KAME: ip6_output.c,v 1.172 2001/03/25 09:55:56 itojun Exp $	*/
 
 /*
@@ -143,7 +143,7 @@ static __inline u_int16_t __attribute__((__unused__))
     u_int32_t, u_int32_t);
 void in6_delayed_cksum(struct mbuf *, u_int8_t);
 
-int ip6_output_ipsec_pmtu_update(struct tdb *, struct route_in6 *,
+int ip6_output_ipsec_pmtu_update(struct tdb *, struct route *,
     struct in6_addr *, int, int, int);
 
 /* Context for non-repeating IDs */
@@ -160,16 +160,16 @@ struct idgen32_ctx ip6_id_ctx;
  * We use u_long to hold largest one, * which is rt_mtu.
  */
 int
-ip6_output(struct mbuf *m, struct ip6_pktopts *opt, struct route_in6 *ro,
-    int flags, struct ip6_moptions *im6o, struct inpcb *inp)
+ip6_output(struct mbuf *m, struct ip6_pktopts *opt, struct route *ro,
+    int flags, struct ip6_moptions *im6o, const struct ipsec_level *seclevel)
 {
 	struct ip6_hdr *ip6;
 	struct ifnet *ifp = NULL;
-	struct mbuf_list fml;
+	struct mbuf_list ml;
 	int hlen, tlen;
-	struct route_in6 ip6route;
+	struct route iproute;
 	struct rtentry *rt = NULL;
-	struct sockaddr_in6 *dst, dstsock;
+	struct sockaddr_in6 *dst;
 	int error = 0;
 	u_long mtu;
 	int dontfrag;
@@ -177,17 +177,12 @@ ip6_output(struct mbuf *m, struct ip6_pktopts *opt, struct route_in6 *ro,
 	u_int32_t optlen = 0, plen = 0, unfragpartlen = 0;
 	struct ip6_exthdrs exthdrs;
 	struct in6_addr finaldst;
-	struct route_in6 *ro_pmtu = NULL;
+	struct route *ro_pmtu = NULL;
 	int hdrsplit = 0;
 	u_int8_t sproto = 0;
 	u_char nextproto;
 #ifdef IPSEC
 	struct tdb *tdb = NULL;
-#endif /* IPSEC */
-
-#ifdef IPSEC
-	if (inp && (inp->inp_flags & INP_IPV6) == 0)
-		panic("%s: IPv4 pcb is passed", __func__);
 #endif /* IPSEC */
 
 	ip6 = mtod(m, struct ip6_hdr *);
@@ -218,8 +213,8 @@ ip6_output(struct mbuf *m, struct ip6_pktopts *opt, struct route_in6 *ro,
 	}
 
 #ifdef IPSEC
-	if (ipsec_in_use || inp != NULL) {
-		error = ip6_output_ipsec_lookup(m, inp, &tdb);
+	if (ipsec_in_use || seclevel != NULL) {
+		error = ip6_output_ipsec_lookup(m, seclevel, &tdb);
 		if (error) {
 			/*
 			 * -EINVAL is used to indicate that the packet should
@@ -395,13 +390,13 @@ reroute:
 
 	/* initialize cached route */
 	if (ro == NULL) {
-		ro = &ip6route;
-		bzero((caddr_t)ro, sizeof(*ro));
+		ro = &iproute;
+		ro->ro_rt = NULL;
 	}
 	ro_pmtu = ro;
 	if (opt && opt->ip6po_rthdr)
 		ro = &opt->ip6po_route;
-	dst = &ro->ro_dst;
+	dst = &ro->ro_dstsin6;
 
 	/*
 	 * if specified, try to fill in the traffic class field.
@@ -447,13 +442,7 @@ reroute:
 	}
 #endif /* IPSEC */
 
-	bzero(&dstsock, sizeof(dstsock));
-	dstsock.sin6_family = AF_INET6;
-	dstsock.sin6_addr = ip6->ip6_dst;
-	dstsock.sin6_len = sizeof(dstsock);
-	ro->ro_tableid = m->m_pkthdr.ph_rtableid;
-
-	if (IN6_IS_ADDR_MULTICAST(&dstsock.sin6_addr)) {
+	if (IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst)) {
 		struct in6_pktinfo *pi = NULL;
 
 		/*
@@ -468,7 +457,8 @@ reroute:
 	}
 
 	if (ifp == NULL) {
-		rt = in6_selectroute(&dstsock, opt, ro, ro->ro_tableid);
+		rt = in6_selectroute(&ip6->ip6_dst, opt, ro,
+		    m->m_pkthdr.ph_rtableid);
 		if (rt == NULL) {
 			ip6stat_inc(ip6s_noroute);
 			error = EHOSTUNREACH;
@@ -490,7 +480,7 @@ reroute:
 			goto bad;
 		}
 	} else {
-		*dst = dstsock;
+		route6_cache(ro, &ip6->ip6_dst, NULL, m->m_pkthdr.ph_rtableid);
 	}
 
 	if (rt && (rt->rt_flags & RTF_GATEWAY) &&
@@ -645,6 +635,8 @@ reroute:
 		/* tag as generated to skip over pf_test on rerun */
 		m->m_pkthdr.pf.flags |= PF_TAG_GENERATED;
 		finaldst = ip6->ip6_dst;
+		if (ro == &iproute)
+			rtfree(ro->ro_rt);
 		ro = NULL;
 		if_put(ifp); /* drop reference since destination changed */
 		ifp = NULL;
@@ -664,8 +656,6 @@ reroute:
 			ip6->ip6_dst.s6_addr16[1] = dst_scope;
 	}
 
-	in6_proto_cksum_out(m, ifp);
-
 	/*
 	 * Send the packet to the outgoing interface.
 	 * If necessary, do IPv6 fragmentation before sending.
@@ -679,7 +669,8 @@ reroute:
 	 * 2-a: send as is if tlen <= interface mtu
 	 * 2-b: error if tlen > interface mtu
 	 */
-	tlen = m->m_pkthdr.len;
+	tlen = ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO) ?
+	    m->m_pkthdr.ph_mss : m->m_pkthdr.len;
 
 	if (ISSET(m->m_pkthdr.csum_flags, M_IPV6_DF_OUT)) {
 		CLR(m->m_pkthdr.csum_flags, M_IPV6_DF_OUT);
@@ -688,7 +679,8 @@ reroute:
 		dontfrag = 1;
 	else
 		dontfrag = 0;
-	if (dontfrag && tlen > ifp->if_mtu) {	/* case 2-b */
+
+	if (dontfrag && tlen > ifp->if_mtu) {		/* case 2-b */
 #ifdef IPSEC
 		if (ip_mtudisc)
 			ipsec_adjust_mtu(m, mtu);
@@ -700,9 +692,12 @@ reroute:
 	/*
 	 * transmit packet without fragmentation
 	 */
-	if (dontfrag || (tlen <= mtu)) {	/* case 1-a and 2-a */
-		error = ifp->if_output(ifp, m, sin6tosa(dst), ro->ro_rt);
-		goto done;
+	if (dontfrag || tlen <= mtu) {			/* case 1-a and 2-a */
+		error = if_output_tso(ifp, &m, sin6tosa(dst), ro->ro_rt,
+		    ifp->if_mtu);
+		if (error || m == NULL)
+			goto done;
+		goto bad;				/* should not happen */
 	}
 
 	/*
@@ -751,54 +746,41 @@ reroute:
 		ip6->ip6_nxt = IPPROTO_FRAGMENT;
 	}
 
-	error = ip6_fragment(m, &fml, hlen, nextproto, mtu);
-	if (error)
+	if ((error = ip6_fragment(m, &ml, hlen, nextproto, mtu)) ||
+	    (error = if_output_ml(ifp, &ml, sin6tosa(dst), ro->ro_rt)))
 		goto done;
+	ip6stat_inc(ip6s_fragmented);
+	goto done;
 
-	while ((m = ml_dequeue(&fml)) != NULL) {
-		error = ifp->if_output(ifp, m, sin6tosa(dst), ro->ro_rt);
-		if (error)
-			break;
-	}
-	if (error)
-		ml_purge(&fml);
-	else
-		ip6stat_inc(ip6s_fragmented);
-
-done:
-	if (ro == &ip6route && ro->ro_rt) {
+ freehdrs:
+	m_freem(exthdrs.ip6e_hbh);	/* m_freem will check if mbuf is 0 */
+	m_freem(exthdrs.ip6e_dest1);
+	m_freem(exthdrs.ip6e_rthdr);
+	m_freem(exthdrs.ip6e_dest2);
+ bad:
+	m_freem(m);
+ done:
+	if (ro == &iproute)
 		rtfree(ro->ro_rt);
-	} else if (ro_pmtu == &ip6route && ro_pmtu->ro_rt) {
+	else if (ro_pmtu == &iproute)
 		rtfree(ro_pmtu->ro_rt);
-	}
 	if_put(ifp);
 #ifdef IPSEC
 	tdb_unref(tdb);
 #endif /* IPSEC */
 	return (error);
-
-freehdrs:
-	m_freem(exthdrs.ip6e_hbh);	/* m_freem will check if mbuf is 0 */
-	m_freem(exthdrs.ip6e_dest1);
-	m_freem(exthdrs.ip6e_rthdr);
-	m_freem(exthdrs.ip6e_dest2);
-	/* FALLTHROUGH */
-bad:
-	m_freem(m);
-	goto done;
 }
 
 int
-ip6_fragment(struct mbuf *m0, struct mbuf_list *fml, int hlen,
-    u_char nextproto, u_long mtu)
+ip6_fragment(struct mbuf *m0, struct mbuf_list *ml, int hlen, u_char nextproto,
+    u_long mtu)
 {
-	struct mbuf *m;
 	struct ip6_hdr *ip6;
 	u_int32_t id;
 	int tlen, len, off;
 	int error;
 
-	ml_init(fml);
+	ml_init(ml);
 
 	ip6 = mtod(m0, struct ip6_hdr *);
 	tlen = m0->m_pkthdr.len;
@@ -810,10 +792,11 @@ ip6_fragment(struct mbuf *m0, struct mbuf_list *fml, int hlen,
 	id = htonl(ip6_randomid());
 
 	/*
-	 * Loop through length of segment,
+	 * Loop through length of payload,
 	 * make new header and copy data of each part and link onto chain.
 	 */
 	for (off = hlen; off < tlen; off += len) {
+		struct mbuf *m;
 		struct mbuf *mlast;
 		struct ip6_hdr *mhip6;
 		struct ip6_frag *ip6f;
@@ -823,8 +806,7 @@ ip6_fragment(struct mbuf *m0, struct mbuf_list *fml, int hlen,
 			error = ENOBUFS;
 			goto bad;
 		}
-		ml_enqueue(fml, m);
-
+		ml_enqueue(ml, m);
 		if ((error = m_dup_pkthdr(m, m0, M_DONTWAIT)) != 0)
 			goto bad;
 		m->m_data += max_linkhdr;
@@ -856,13 +838,13 @@ ip6_fragment(struct mbuf *m0, struct mbuf_list *fml, int hlen,
 		ip6f->ip6f_nxt = nextproto;
 	}
 
-	ip6stat_add(ip6s_ofragments, ml_len(fml));
+	ip6stat_add(ip6s_ofragments, ml_len(ml));
 	m_freem(m0);
 	return (0);
 
 bad:
 	ip6stat_inc(ip6s_odropped);
-	ml_purge(fml);
+	ml_purge(ml);
 	m_freem(m0);
 	return (error);
 }
@@ -1344,7 +1326,7 @@ do { \
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_AUTH] = optval;
+				inp->inp_seclevel.sl_auth = optval;
 				break;
 
 			case IPV6_ESP_TRANS_LEVEL:
@@ -1353,7 +1335,7 @@ do { \
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_ESP_TRANS] = optval;
+				inp->inp_seclevel.sl_esp_trans = optval;
 				break;
 
 			case IPV6_ESP_NETWORK_LEVEL:
@@ -1362,7 +1344,7 @@ do { \
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_ESP_NETWORK] = optval;
+				inp->inp_seclevel.sl_esp_network = optval;
 				break;
 
 			case IPV6_IPCOMP_LEVEL:
@@ -1371,7 +1353,7 @@ do { \
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_IPCOMP] = optval;
+				inp->inp_seclevel.sl_ipcomp = optval;
 				break;
 			}
 #endif
@@ -1388,17 +1370,7 @@ do { \
 			if (rtableid != rtid && rtableid != 0 &&
 			    (error = suser(p)) != 0)
 				break;
-			/* table must exist */
-			if (!rtable_exists(rtid)) {
-				error = EINVAL;
-				break;
-			}
-			if (inp->inp_lport) {
-				error = EBUSY;
-				break;
-			}
-			inp->inp_rtableid = rtid;
-			in_pcbrehash(inp);
+			error = in_pcbset_rtableid(inp, rtid);
 			break;
 		case IPV6_PIPEX:
 			if (m != NULL && m->m_len == sizeof(int))
@@ -1508,7 +1480,7 @@ do { \
 			if (!(so->so_state & SS_ISCONNECTED))
 				return (ENOTCONN);
 
-			rt = in_pcbrtentry(inp);
+			rt = in6_pcbrtentry(inp);
 			if (!rtisvalid(rt))
 				return (EHOSTUNREACH);
 
@@ -1576,21 +1548,21 @@ do { \
 			m->m_len = sizeof(int);
 			switch (optname) {
 			case IPV6_AUTH_LEVEL:
-				optval = inp->inp_seclevel[SL_AUTH];
+				optval = inp->inp_seclevel.sl_auth;
 				break;
 
 			case IPV6_ESP_TRANS_LEVEL:
 				optval =
-				    inp->inp_seclevel[SL_ESP_TRANS];
+				    inp->inp_seclevel.sl_esp_trans;
 				break;
 
 			case IPV6_ESP_NETWORK_LEVEL:
 				optval =
-				    inp->inp_seclevel[SL_ESP_NETWORK];
+				    inp->inp_seclevel.sl_esp_network;
 				break;
 
 			case IPV6_IPCOMP_LEVEL:
-				optval = inp->inp_seclevel[SL_IPCOMP];
+				optval = inp->inp_seclevel.sl_ipcomp;
 				break;
 			}
 			*mtod(m, int *) = optval;
@@ -2714,8 +2686,14 @@ in6_proto_cksum_out(struct mbuf *m, struct ifnet *ifp)
 		u_int16_t csum;
 
 		offset = ip6_lasthdr(m, 0, IPPROTO_IPV6, &nxt);
-		csum = in6_cksum_phdr(&ip6->ip6_src, &ip6->ip6_dst,
-		    htonl(m->m_pkthdr.len - offset), htonl(nxt));
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO) &&
+		    in_ifcap_cksum(m, ifp, IFCAP_TSOv6)) {
+			csum = in6_cksum_phdr(&ip6->ip6_src, &ip6->ip6_dst,
+			    htonl(0), htonl(nxt));
+		} else {
+			csum = in6_cksum_phdr(&ip6->ip6_src, &ip6->ip6_dst,
+			    htonl(m->m_pkthdr.len - offset), htonl(nxt));
+		}
 		if (nxt == IPPROTO_TCP)
 			offset += offsetof(struct tcphdr, th_sum);
 		else if (nxt == IPPROTO_UDP)
@@ -2752,7 +2730,8 @@ in6_proto_cksum_out(struct mbuf *m, struct ifnet *ifp)
 
 #ifdef IPSEC
 int
-ip6_output_ipsec_lookup(struct mbuf *m, struct inpcb *inp, struct tdb **tdbout)
+ip6_output_ipsec_lookup(struct mbuf *m, const struct ipsec_level *seclevel,
+    struct tdb **tdbout)
 {
 	struct tdb *tdb;
 	struct m_tag *mtag;
@@ -2766,7 +2745,7 @@ ip6_output_ipsec_lookup(struct mbuf *m, struct inpcb *inp, struct tdb **tdbout)
 
 	/* Do we have any pending SAs to apply ? */
 	error = ipsp_spd_lookup(m, AF_INET6, sizeof(struct ip6_hdr),
-	    IPSP_DIRECTION_OUT, NULL, inp, &tdb, NULL);
+	    IPSP_DIRECTION_OUT, NULL, seclevel, &tdb, NULL);
 	if (error || tdb == NULL) {
 		*tdbout = NULL;
 		return error;
@@ -2792,7 +2771,7 @@ ip6_output_ipsec_lookup(struct mbuf *m, struct inpcb *inp, struct tdb **tdbout)
 }
 
 int
-ip6_output_ipsec_pmtu_update(struct tdb *tdb, struct route_in6 *ro,
+ip6_output_ipsec_pmtu_update(struct tdb *tdb, struct route *ro,
     struct in6_addr *dst, int ifidx, int rtableid, int transportmode)
 {
 	struct rtentry *rt = NULL;
@@ -2813,7 +2792,7 @@ ip6_output_ipsec_pmtu_update(struct tdb *tdb, struct route_in6 *ro,
 		sin6.sin6_len = sizeof(sin6);
 		sin6.sin6_addr = *dst;
 		sin6.sin6_scope_id = in6_addr2scopeid(ifidx, dst);
-		error = in6_embedscope(dst, &sin6, NULL);
+		error = in6_embedscope(dst, &sin6, NULL, NULL);
 		if (error) {
 			/* should be impossible */
 			return error;
@@ -2827,7 +2806,7 @@ ip6_output_ipsec_pmtu_update(struct tdb *tdb, struct route_in6 *ro,
 		rt->rt_mtu = tdb->tdb_mtu;
 		if (ro != NULL && ro->ro_rt != NULL) {
 			rtfree(ro->ro_rt);
-			ro->ro_rt = rtalloc(sin6tosa(&ro->ro_dst), RT_RESOLVE,
+			ro->ro_rt = rtalloc(&ro->ro_dstsa, RT_RESOLVE,
 			    rtableid);
 		}
 		if (rt_mtucloned)
@@ -2837,15 +2816,15 @@ ip6_output_ipsec_pmtu_update(struct tdb *tdb, struct route_in6 *ro,
 }
 
 int
-ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route_in6 *ro,
+ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
     int tunalready, int fwd)
 {
-#if NPF > 0
-	struct ifnet *encif;
-#endif
+	struct mbuf_list ml;
+	struct ifnet *encif = NULL;
 	struct ip6_hdr *ip6;
 	struct in6_addr dst;
-	int error, ifidx, rtableid;
+	u_int len;
+	int error, ifidx, rtableid, tso = 0;
 
 #if NPF > 0
 	/*
@@ -2865,17 +2844,23 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route_in6 *ro,
 	 * Until now the change was not reconsidered.
 	 * What's the behaviour?
 	 */
-	in6_proto_cksum_out(m, encif);
 #endif
 
-	/* Check if we are allowed to fragment */
+	/* Check if we can chop the TCP packet */
 	ip6 = mtod(m, struct ip6_hdr *);
+	if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO) &&
+	    m->m_pkthdr.ph_mss <= tdb->tdb_mtu) {
+		tso = 1;
+		len = m->m_pkthdr.ph_mss;
+	} else
+		len = sizeof(struct ip6_hdr) + ntohs(ip6->ip6_plen);
+
+	/* Check if we are allowed to fragment */
 	dst = ip6->ip6_dst;
 	ifidx = m->m_pkthdr.ph_ifidx;
 	rtableid = m->m_pkthdr.ph_rtableid;
 	if (ip_mtudisc && tdb->tdb_mtu &&
-	    sizeof(struct ip6_hdr) + ntohs(ip6->ip6_plen) > tdb->tdb_mtu &&
-	    tdb->tdb_mtutimeout > gettime()) {
+	    len > tdb->tdb_mtu && tdb->tdb_mtutimeout > gettime()) {
 		int transportmode;
 
 		transportmode = (tdb->tdb_dst.sa.sa_family == AF_INET6) &&
@@ -2902,14 +2887,33 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route_in6 *ro,
 	 */
 	m->m_flags &= ~(M_BCAST | M_MCAST);
 
-	/* Callee frees mbuf */
+	if (tso) {
+		error = tcp_chopper(m, &ml, encif, len);
+		if (error)
+			goto done;
+	} else {
+		CLR(m->m_pkthdr.csum_flags, M_TCP_TSO);
+		in6_proto_cksum_out(m, encif);
+		ml_init(&ml);
+		ml_enqueue(&ml, m);
+	}
+
 	KERNEL_LOCK();
-	error = ipsp_process_packet(m, tdb, AF_INET6, tunalready);
+	while ((m = ml_dequeue(&ml)) != NULL) {
+		/* Callee frees mbuf */
+		error = ipsp_process_packet(m, tdb, AF_INET6, tunalready);
+		if (error)
+			break;
+	}
 	KERNEL_UNLOCK();
+ done:
 	if (error) {
+		ml_purge(&ml);
 		ipsecstat_inc(ipsec_odrops);
 		tdbstat_inc(tdb, tdb_odrops);
 	}
+	if (!error && tso)
+		tcpstat_inc(tcps_outswtso);
 	if (ip_mtudisc && error == EMSGSIZE)
 		ip6_output_ipsec_pmtu_update(tdb, ro, &dst, ifidx, rtableid, 0);
 	return error;

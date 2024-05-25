@@ -1,4 +1,4 @@
-/*	$OpenBSD: tfork_thread.S,v 1.4 2022/09/02 06:19:04 miod Exp $	*/
+/*	$OpenBSD: tfork_thread.S,v 1.6 2024/03/27 20:03:29 miod Exp $	*/
 
 /*
  * Copyright (c) 2007 Miodrag Vallat.
@@ -24,12 +24,7 @@
  *			r4			r5		   r6		r7
  */
 ENTRY(__tfork_thread)
-#if SYS___tfork >= 128
-	mov.l	.LSYS___tfork, r0
-#else
-	mov	#SYS___tfork, r0
-#endif
-	trapa	#0x80
+	systrap SYS___tfork
 	bf	9f
 
 	tst	r0, r0
@@ -41,6 +36,8 @@ ENTRY(__tfork_thread)
 	rts
 	 nop
 
+	systrap_data SYS___tfork
+
 1:
 	/*
 	 * In child process: invoke function, then exit.
@@ -48,25 +45,13 @@ ENTRY(__tfork_thread)
 	jsr	@r6
 	 mov	r7, r4
 
-#if SYS___threxit >= 128
-	mov.l	.LSYS___threxit, r0
-#else
-	mov	#SYS___threxit, r0
-#endif
-	trapa	#0x80
+	systrap SYS___threxit
+	systrap_data SYS___threxit
 
 9:
 	/*
 	 * System call failure.
 	 */
-	SET_ERRNO_AND_RETURN
-
-	.align 2
-#if SYS___tfork >= 128
-.LSYS___tfork:	.long SYS___tfork
-#endif
-#if SYS___threxit >= 128
-.LSYS___threxit:	.long SYS___threxit
-#endif
+	SET_ERRNO_AND_RETURN(__tfork)
 
 	SET_ENTRY_SIZE(__tfork_thread)

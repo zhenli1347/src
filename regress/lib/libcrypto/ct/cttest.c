@@ -1,4 +1,4 @@
-/* $OpenBSD: cttest.c,v 1.3 2022/01/06 04:42:00 jsing Exp $ */
+/* $OpenBSD: cttest.c,v 1.8 2023/04/14 14:36:13 tb Exp $ */
 /*
  * Copyright (c) 2021 Joel Sing <jsing@openbsd.org>
  *
@@ -18,11 +18,14 @@
 #include <err.h>
 #include <string.h>
 
+#include <openssl/ct.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 
-#include "ct/ct.h"
+#ifndef CTPATH
+#define CTPATH "."
+#endif
 
 char *test_ctlog_conf_file;
 char *test_cert_file;
@@ -119,7 +122,7 @@ const struct sct_data sct_test_data[] = {
 			0xbe, 0x57, 0x7d, 0x9c, 0x60, 0x0a, 0xf8, 0xf9,
 			0x4d, 0x5d, 0x26, 0x5c, 0x25, 0x5d, 0xc7, 0x84,
 		},
-		.timestamp = 1637344157551,
+		.timestamp = 1637344157551LL,
 		.extensions_len = 0,
 		.signature_nid = NID_ecdsa_with_SHA256,
 		.signature = sct_signature1,
@@ -133,7 +136,7 @@ const struct sct_data sct_test_data[] = {
 			0x15, 0x1c, 0x11, 0xd9, 0x02, 0xc1, 0x00, 0x29,
 			0x06, 0x8d, 0xb2, 0x08, 0x9a, 0x37, 0xd9, 0x13
 		},
-		.timestamp = 1637344157755,
+		.timestamp = 1637344157755LL,
 		.extensions_len = 0,
 		.signature_nid = NID_ecdsa_with_SHA256,
 		.signature = sct_signature2,
@@ -222,8 +225,9 @@ ct_compare_test_scts(STACK_OF(SCT) *scts)
 		}
 		if (SCT_get_timestamp(sct) != sdt->timestamp) {
 			fprintf(stderr, "FAIL: SCT %d - got timestamp %llu, "
-			    "want %llu\n", i, SCT_get_timestamp(sct),
-			    sdt->timestamp);
+			    "want %llu\n", i,
+			    (unsigned long long)SCT_get_timestamp(sct),
+			    (unsigned long long)sdt->timestamp);
 			goto failure;
 		}
 		if (SCT_get_signature_nid(sct) != sdt->signature_nid) {
@@ -358,14 +362,14 @@ ct_sct_base64_test(void)
 	int failed = 1;
 
 	if ((sct1 = SCT_new_from_base64(SCT_VERSION_V1, sct_log_id1_base64,
-	    CT_LOG_ENTRY_TYPE_X509, 1637344157551, "",
+	    CT_LOG_ENTRY_TYPE_X509, 1637344157551LL, "",
 	    sct_signature1_base64)) == NULL) {
 		fprintf(stderr, "FAIL: SCT_new_from_base64() failed\n");
 		ERR_print_errors_fp(stderr);
 		goto failure;
 	}
 	if ((sct2 = SCT_new_from_base64(SCT_VERSION_V1, sct_log_id2_base64,
-	    CT_LOG_ENTRY_TYPE_X509, 1637344157755, "",
+	    CT_LOG_ENTRY_TYPE_X509, 1637344157755LL, "",
 	    sct_signature2_base64)) == NULL) {
 		fprintf(stderr, "FAIL: SCT_new_from_base64() failed\n");
 		ERR_print_errors_fp(stderr);
@@ -416,7 +420,7 @@ ct_sct_verify_test(void)
 		goto failure;
 
 	CT_POLICY_EVAL_CTX_set_shared_CTLOG_STORE(ct_policy, ctlog_store);
-	CT_POLICY_EVAL_CTX_set_time(ct_policy, 1641393117000);
+	CT_POLICY_EVAL_CTX_set_time(ct_policy, 1641393117000LL);
 
 	if (!CT_POLICY_EVAL_CTX_set1_cert(ct_policy, cert))
 		goto failure;
@@ -446,6 +450,7 @@ ct_sct_verify_test(void)
 	CTLOG_STORE_free(ctlog_store);
 	X509_free(cert);
 	X509_free(issuer);
+	SCT_LIST_free(scts);
 
 	return failed;
 }
@@ -453,14 +458,15 @@ ct_sct_verify_test(void)
 int
 main(int argc, char **argv)
 {
-	const char *ctpath;
+	const char *ctpath = CTPATH;
 	int failed = 0;
 
-        if (argc != 2) {
-		fprintf(stderr, "usage: %s ctpath\n", argv[0]);
+	if (argc > 2) {
+		fprintf(stderr, "usage %s [ctpath]\n", argv[0]);
 		exit(1);
 	}
-	ctpath = argv[1];
+	if (argc == 2)
+		ctpath = argv[1];
 
 	if (asprintf(&test_cert_file, "%s/%s", ctpath,
 	    "libressl.org.crt") == -1)

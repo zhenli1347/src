@@ -1,4 +1,4 @@
-/*	$OpenBSD: vnd.c,v 1.179 2022/10/23 14:39:19 krw Exp $	*/
+/*	$OpenBSD: vnd.c,v 1.181 2023/05/14 18:34:02 krw Exp $	*/
 /*	$NetBSD: vnd.c,v 1.26 1996/03/30 23:06:11 christos Exp $	*/
 
 /*
@@ -85,6 +85,7 @@ struct vnd_softc {
 
 	char		 sc_file[VNDNLEN];	/* file we're covering */
 	int		 sc_flags;		/* flags */
+	uint16_t	 sc_type;		/* d_type we are emulating */
 	size_t		 sc_size;		/* size of vnd in sectors */
 	size_t		 sc_secsize;		/* sector size in bytes */
 	size_t		 sc_nsectors;		/* # of sectors per track */
@@ -224,7 +225,7 @@ vndgetdisklabel(dev_t dev, struct vnd_softc *sc, struct disklabel *lp,
 		lp->d_ncylinders = sc->sc_size / lp->d_secpercyl;
 
 	strncpy(lp->d_typename, "vnd device", sizeof(lp->d_typename));
-	lp->d_type = DTYPE_VND;
+	lp->d_type = sc->sc_type;
 	strncpy(lp->d_packname, "fictitious", sizeof(lp->d_packname));
 	DL_SETDSIZE(lp, sc->sc_size);
 	lp->d_version = 1;
@@ -359,14 +360,12 @@ vndstrategy(struct buf *bp)
 	splx(s);
 }
 
-/* ARGSUSED */
 int
 vndread(dev_t dev, struct uio *uio, int flags)
 {
 	return (physio(vndstrategy, dev, B_READ, minphys, uio));
 }
 
-/* ARGSUSED */
 int
 vndwrite(dev_t dev, struct uio *uio, int flags)
 {
@@ -391,7 +390,6 @@ vndbdevsize(struct vnode *vp, struct proc *p)
 	return (DL_GETPSIZE(pi.part));
 }
 
-/* ARGSUSED */
 int
 vndioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 {
@@ -505,6 +503,7 @@ fail:
 		}
 
 		/* Set geometry for device. */
+		sc->sc_type = vio->vnd_type;
 		sc->sc_secsize = vio->vnd_secsize;
 		sc->sc_ntracks = vio->vnd_ntracks;
 		sc->sc_nsectors = vio->vnd_nsectors;

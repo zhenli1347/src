@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_sis.c,v 1.142 2022/03/11 18:00:48 mpi Exp $ */
+/*	$OpenBSD: if_sis.c,v 1.145 2024/05/24 06:02:56 jsg Exp $ */
 /*
  * Copyright (c) 1997, 1998, 1999
  *	Bill Paul <wpaul@ctr.columbia.edu>.  All rights reserved.
@@ -63,11 +63,8 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/timeout.h>
 
 #include <net/if.h>
@@ -1184,7 +1181,7 @@ sis_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = sis_ioctl;
 	ifp->if_start = sis_start;
 	ifp->if_watchdog = sis_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, SIS_TX_LIST_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, SIS_TX_LIST_CNT - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 	ifp->if_hardmtu = 1518; /* determined experimentally on DP83815 */
 
@@ -1791,7 +1788,7 @@ sis_init(void *xsc)
 	 * This resolves an issue with tons of errors in AcceptPerfectMatch
 	 * (non-IFF_PROMISC) mode.
 	 */
-	 if (sc->sis_type == SIS_TYPE_83815 && sc->sis_srr <= NS_SRR_15D) {
+	if (sc->sis_type == SIS_TYPE_83815 && sc->sis_srr <= NS_SRR_15D) {
 		CSR_WRITE_4(sc, NS_PHY_PAGE, 0x0001);
 		CSR_WRITE_4(sc, NS_PHY_CR, 0x189C);
 		/* set val for c2 */

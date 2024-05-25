@@ -1,4 +1,4 @@
-/*	$OpenBSD: cmd.c,v 1.165 2022/09/11 11:47:55 krw Exp $	*/
+/*	$OpenBSD: cmd.c,v 1.180 2024/03/01 17:48:03 krw Exp $	*/
 
 /*
  * Copyright (c) 1997 Tobias Weingartner
@@ -20,6 +20,7 @@
 #include <sys/disklabel.h>
 
 #include <err.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,10 +41,11 @@ int		 edit(const int, struct mbr *);
 int		 gsetpid(const int);
 int		 setpid(const int, struct mbr *);
 int		 parsepn(const char *);
+int		 parseflag(const char *, uint64_t *);
 
 int		 ask_num(const char *, int, int, int);
 int		 ask_pid(const int);
-struct uuid	*ask_uuid(const struct uuid *);
+const struct uuid *ask_uuid(const struct uuid *);
 
 extern const unsigned char	manpage[];
 extern const int		manpage_sz;
@@ -173,6 +175,39 @@ parsepn(const char *pnstr)
 }
 
 int
+parseflag(const char *flagstr, uint64_t *flagvalue)
+{
+	const char		*errstr;
+	char			*ep;
+	uint64_t		 val;
+
+	flagstr += strspn(flagstr, WHITESPACE);
+	if (flagstr[0] == '0' && (flagstr[1] == 'x' || flagstr[1] == 'X')) {
+		errno = 0;
+		val = strtoull(flagstr, &ep, 16);
+		if (errno || ep == flagstr || *ep != '\0' ||
+		    (gh.gh_sig != GPTSIGNATURE && val > 0xff)) {
+			printf("flag value is invalid: %s\n", flagstr);
+			return -1;
+		}
+		goto done;
+	}
+
+	if (gh.gh_sig == GPTSIGNATURE)
+		val = strtonum(flagstr, 0, INT64_MAX, &errstr);
+	else
+		val = strtonum(flagstr, 0, 0xff, &errstr);
+	if (errstr) {
+		printf("flag value is %s: %s\n", errstr, flagstr);
+		return -1;
+	}
+
+ done:
+	*flagvalue = val;
+	return 0;
+}
+
+int
 edit(const int pn, struct mbr *mbr)
 {
 	struct chs		 start, end;
@@ -259,21 +294,23 @@ Xedit(const char *args, struct mbr *mbr)
 int
 gsetpid(const int pn)
 {
+	int32_t			 is_nil;
 	uint32_t		 status;
 
 	GPT_print_parthdr(TERSE);
 	GPT_print_part(pn, "s", TERSE);
 
-	if (PRT_protected_guid(&gp[pn].gp_type)) {
+	if (PRT_protected_uuid(&gp[pn].gp_type)) {
 		printf("can't edit partition type %s\n",
-		    PRT_uuid_to_sname(&gp[pn].gp_type));
+		    PRT_uuid_to_desc(&gp[pn].gp_type));
 		return -1;
 	}
 
+	is_nil = uuid_is_nil(&gp[pn].gp_type, NULL);
 	gp[pn].gp_type = *ask_uuid(&gp[pn].gp_type);
-	if (PRT_protected_guid(&gp[pn].gp_type)) {
+	if (PRT_protected_uuid(&gp[pn].gp_type) && is_nil == 0) {
 		printf("can't change partition type to %s\n",
-		    PRT_uuid_to_sname(&gp[pn].gp_type));
+		    PRT_uuid_to_desc(&gp[pn].gp_type));
 		return -1;
 	}
 
@@ -385,9 +422,9 @@ Xprint(const char *args, struct mbr *mbr)
 int
 Xwrite(const char *args, struct mbr *mbr)
 {
-	int			i, n;
+	unsigned int		i, n;
 
-	for (i = 0, n = 0; i < NDOSPART; i++)
+	for (i = 0, n = 0; i < nitems(mbr->mbr_prt); i++)
 		if (mbr->mbr_prt[i].prt_id == DOSPTYP_OPENBSD)
 			n++;
 	if (n > 1) {
@@ -453,9 +490,8 @@ int
 Xflag(const char *args, struct mbr *mbr)
 {
 	char			 lbuf[LINEBUFSZ];
-	const char		*errstr;
 	char			*part, *flag;
-	long long		 val = -1;
+	uint64_t		 val;
 	int			 i, pn;
 
 	if (strlcpy(lbuf, args, sizeof(lbuf)) >= sizeof(lbuf)) {
@@ -471,14 +507,8 @@ Xflag(const char *args, struct mbr *mbr)
 		return CMD_CONT;
 
 	if (flag != NULL) {
-		if (gh.gh_sig == GPTSIGNATURE)
-			val = strtonum(flag, 0, INT64_MAX, &errstr);
-		else
-			val = strtonum(flag, 0, 0xff, &errstr);
-		if (errstr) {
-			printf("flag value is %s: %s.\n", errstr, flag);
+		if (parseflag(flag, &val) == -1)
 			return CMD_CONT;
-		}
 		if (gh.gh_sig == GPTSIGNATURE)
 			gp[pn].gp_attrs = val;
 		else
@@ -490,10 +520,10 @@ Xflag(const char *args, struct mbr *mbr)
 				if (i == pn)
 					gp[i].gp_attrs = GPTPARTATTR_BOOTABLE;
 				else
-					gp[i].gp_attrs = 0;
+					gp[i].gp_attrs &= ~GPTPARTATTR_BOOTABLE;
 			}
 		} else {
-			for (i = 0; i < NDOSPART; i++) {
+			for (i = 0; i < nitems(mbr->mbr_prt); i++) {
 				if (i == pn)
 					mbr->mbr_prt[i].prt_flag = DOSACTIVE;
 				else
@@ -574,8 +604,9 @@ ask_pid(const int dflt)
 		if (strlen(lbuf) == 0)
 			return dflt;
 		if (strcmp(lbuf, "?") == 0) {
-			PRT_print_mbrtypes();
-			continue;
+			PRT_print_mbrmenu(lbuf, sizeof(lbuf));
+			if (strlen(lbuf) == 0)
+				continue;
 		}
 
 		num = hex_octet(lbuf);
@@ -586,28 +617,18 @@ ask_pid(const int dflt)
 	}
 }
 
-struct uuid *
+const struct uuid *
 ask_uuid(const struct uuid *olduuid)
 {
-	static struct uuid	 uuid;
 	char			 lbuf[LINEBUFSZ];
-	char			*dflt = NULL;
+	static struct uuid	 uuid;
+	const char		*guid;
+	char			*dflt;
 	uint32_t		 status;
-	int			 num = 0;
 
-	uuid = *olduuid;
-	if (uuid_is_nil(&uuid, NULL) == 0) {
-		num = PRT_uuid_to_type(&uuid);
-		if (num == 0) {
-			uuid_to_string(&uuid, &dflt, &status);
-			if (status != uuid_s_ok) {
-				printf("uuid_to_string() failed\n");
-				goto done;
-			}
-		}
-	}
+	dflt = PRT_uuid_to_menudflt(olduuid);
 	if (dflt == NULL) {
-		if (asprintf(&dflt, "%X", num) == -1) {
+		if (asprintf(&dflt, "00") == -1) {
 			warn("asprintf()");
 			goto done;
 		}
@@ -620,32 +641,23 @@ ask_uuid(const struct uuid *olduuid)
 		string_from_line(lbuf, sizeof(lbuf), TRIMMED);
 
 		if (strcmp(lbuf, "?") == 0) {
-			PRT_print_gpttypes();
-			continue;
+			PRT_print_gptmenu(lbuf, sizeof(lbuf));
+			if (strlen(lbuf) == 0)
+				continue;
 		} else if (strlen(lbuf) == 0) {
 			uuid = *olduuid;
 			goto done;
 		}
 
-		uuid_from_string(lbuf, &uuid, &status);
+		guid = PRT_menuid_to_guid(hex_octet(lbuf));
+		if (guid == NULL)
+			guid = lbuf;
+
+		uuid_from_string(guid, &uuid, &status);
 		if (status == uuid_s_ok)
 			goto done;
 
-		num = hex_octet(lbuf);
-		switch (num) {
-		case -1:
-			printf("'%s' is not a valid partition id\n", lbuf);
-			break;
-		case 0:
-			uuid_create_nil(&uuid, NULL);
-			goto done;
-		default:
-			uuid = *PRT_type_to_guid(num);
-			if (uuid_is_nil(&uuid, NULL) == 0)
-				goto done;
-			printf("'%s' has no associated UUID\n", lbuf);
-			break;
-		}
+		printf("'%s' has no associated UUID\n", lbuf);
 	}
 
  done:

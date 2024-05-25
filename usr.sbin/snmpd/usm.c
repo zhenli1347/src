@@ -1,4 +1,4 @@
-/*	$OpenBSD: usm.c,v 1.24 2022/01/05 17:01:06 tb Exp $	*/
+/*	$OpenBSD: usm.c,v 1.30 2023/12/22 13:03:16 martijn Exp $	*/
 
 /*
  * Copyright (c) 2012 GeNUA mbH
@@ -18,29 +18,24 @@
 
 #include <sys/queue.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/tree.h>
-
-#include <net/if.h>
-
-#include <errno.h>
-#include <event.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <signal.h>
-#ifdef DEBUG
-#include <assert.h>
-#endif
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
-#include "snmpd.h"
+#ifdef DEBUG
+#include <assert.h>
+#endif
+#include <ber.h>
+#include <endian.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "application.h"
+#include "log.h"
 #include "mib.h"
+#include "snmp.h"
+#include "snmpd.h"
 
 SLIST_HEAD(, usmuser)	usmuserlist;
 
@@ -213,8 +208,6 @@ usm_finduser(char *name)
 int
 usm_checkuser(struct usmuser *up, const char **errp)
 {
-	char	*auth = NULL, *priv = NULL;
-
 	if (up->uu_auth != AUTH_NONE && up->uu_authkey == NULL) {
 		*errp = "missing auth passphrase";
 		goto fail;
@@ -235,45 +228,26 @@ usm_checkuser(struct usmuser *up, const char **errp)
 
 	switch (up->uu_auth) {
 	case AUTH_NONE:
-		auth = "none";
 		break;
 	case AUTH_MD5:
-		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "HMAC-MD5-96";
-		break;
 	case AUTH_SHA1:
-		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "HMAC-SHA1-96";
-		break;
 	case AUTH_SHA224:
-		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "usmHMAC128SHA224AuthProtocol";
 	case AUTH_SHA256:
-		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "usmHMAC192SHA256AuthProtocol";
 	case AUTH_SHA384:
-		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "usmHMAC256SHA384AuthProtocol";
 	case AUTH_SHA512:
 		up->uu_seclevel |= SNMP_MSGFLAG_AUTH;
-		auth = "usmHMAC384SHA512AuthProtocol";
+		break;
 	}
 
 	switch (up->uu_priv) {
 	case PRIV_NONE:
-		priv = "none";
 		break;
 	case PRIV_DES:
-		up->uu_seclevel |= SNMP_MSGFLAG_PRIV;
-		priv = "CBC-DES";
-		break;
 	case PRIV_AES:
 		up->uu_seclevel |= SNMP_MSGFLAG_PRIV;
-		priv = "CFB128-AES-128";
 		break;
 	}
 
-	log_debug("user \"%s\" auth %s enc %s", up->uu_name, auth, priv);
 	return 0;
 
 fail:
@@ -398,14 +372,16 @@ usm_decode(struct snmp_message *msg, struct ber_element *elm, const char **errp)
 		ober_replace_elements(elm, decr);
 	}
 
-	now = snmpd_engine_time();
-	if (engine_boots != snmpd_env->sc_engine_boots ||
-	    engine_time < (long long)(now - SNMP_MAX_TIMEWINDOW) ||
-	    engine_time > (long long)(now + SNMP_MAX_TIMEWINDOW)) {
-		*errp = "out of time window";
-		msg->sm_usmerr = OIDVAL_usmErrTimeWindow;
-		stats->snmp_usmtimewindow++;
-		goto done;
+	if (MSG_HAS_AUTH(msg)) {
+		now = snmpd_engine_time();
+		if (engine_boots != snmpd_env->sc_engine_boots ||
+		    engine_time < (long long)(now - SNMP_MAX_TIMEWINDOW) ||
+		    engine_time > (long long)(now + SNMP_MAX_TIMEWINDOW)) {
+			*errp = "out of time window";
+			msg->sm_usmerr = OIDVAL_usmErrTimeWindow;
+			stats->snmp_usmtimewindow++;
+			goto done;
+		}
 	}
 
 	next = elm->be_next;
@@ -504,7 +480,7 @@ usm_encrypt(struct snmp_message *msg, struct ber_element *pdu)
 	struct ber_element	*encrpdu = NULL;
 	void			*ptr;
 	ssize_t			 elen, len;
-	u_char			 encbuf[READ_BUF_SIZE];
+	u_char			*encbuf;
 
 	if (!MSG_HAS_PRIV(msg))
 		return pdu;
@@ -517,10 +493,12 @@ usm_encrypt(struct snmp_message *msg, struct ber_element *pdu)
 #endif
 
 	len = ober_write_elements(&ber, pdu);
-	if (ober_get_writebuf(&ber, &ptr) > 0) {
+	if (ober_get_writebuf(&ber, &ptr) > 0 &&
+	    (encbuf = malloc(len + EVP_MAX_BLOCK_LENGTH)) != NULL) {
 		elen = usm_crypt(msg, ptr, len, encbuf, 1);
 		if (elen > 0)
 			encrpdu = ober_add_nstring(NULL, (char *)encbuf, elen);
+		free(encbuf);
 	}
 
 	ober_free(&ber);
@@ -567,16 +545,7 @@ usm_finalize_digest(struct snmp_message *msg, char *buf, ssize_t len)
 void
 usm_make_report(struct snmp_message *msg)
 {
-	struct ber_oid		 usmstat = OID(MIB_usmStats, 0, 0);
-
-	msg->sm_pdutype = SNMP_C_REPORT;
-	usmstat.bo_id[OIDIDX_usmStats] = msg->sm_usmerr;
-	usmstat.bo_n = OIDIDX_usmStats + 2;
-	if (msg->sm_varbindresp != NULL)
-		ober_free_elements(msg->sm_varbindresp);
-	msg->sm_varbindresp = ober_add_sequence(NULL);
-	mps_getreq(NULL, msg->sm_varbindresp, &usmstat, msg->sm_version);
-	return;
+	appl_report(msg, 0, &OID(MIB_usmStats, msg->sm_usmerr, 0));
 }
 
 int
@@ -617,17 +586,20 @@ usm_decrypt(struct snmp_message *msg, struct ber_element *encr)
 {
 	u_char			*privstr;
 	size_t			 privlen;
-	u_char			 buf[READ_BUF_SIZE];
+	u_char			*buf;
 	struct ber		 ber;
 	struct ber_element	*scoped_pdu = NULL;
 	ssize_t			 scoped_pdu_len;
 
-	if (ober_get_nstring(encr, (void *)&privstr, &privlen) < 0)
+	if (ober_get_nstring(encr, (void *)&privstr, &privlen) < 0 ||
+	    (buf = malloc(privlen)) == NULL)
 		return NULL;
 
 	scoped_pdu_len = usm_crypt(msg, privstr, (int)privlen, buf, 0);
-	if (scoped_pdu_len < 0)
+	if (scoped_pdu_len < 0) {
+		free(buf);
 		return NULL;
+	}
 
 	bzero(&ber, sizeof(ber));
 	ober_set_application(&ber, smi_application);
@@ -642,6 +614,7 @@ usm_decrypt(struct snmp_message *msg, struct ber_element *encr)
 #endif
 
 	ober_free(&ber);
+	free(buf);
 	return scoped_pdu;
 }
 

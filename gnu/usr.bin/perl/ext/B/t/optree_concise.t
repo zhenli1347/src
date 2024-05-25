@@ -7,15 +7,10 @@ BEGIN {
         print "1..0 # Skip -- Perl configured without B module\n";
         exit 0;
     }
-    if (!$Config::Config{useperlio}) {
-        print "1..0 # Skip -- need perlio to walk the optree\n";
-        exit 0;
-    }
 }
 
 # import checkOptree(), and %gOpts (containing test state)
 use OptreeCheck;	# ALSO DOES @ARGV HANDLING !!!!!!
-use Config;
 
 plan tests => 41;
 
@@ -183,13 +178,13 @@ checkOptree ( name	=> "terse basic",
 UNOP (0x82b0918) leavesub [1] 
     LISTOP (0x82b08d8) lineseq 
         COP (0x82b0880) nextstate 
-        UNOP (0x82b0860) null [14] 
+        UNOP (0x82b0860) null [15] 
             PADOP (0x82b0840) gvsv  GV (0x82a818c) *a 
 EOT_EOT
 # UNOP (0x8282310) leavesub [1] 
 #     LISTOP (0x82822f0) lineseq 
 #         COP (0x82822b8) nextstate 
-#         UNOP (0x812fc20) null [14] 
+#         UNOP (0x812fc20) null [15] 
 #             SVOP (0x812fc00) gvsv  GV (0x814692c) *a 
 EONT_EONT
 

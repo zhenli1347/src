@@ -1,4 +1,4 @@
-/*	$OpenBSD: getrrsetbyname_async.c,v 1.11 2017/02/23 17:04:02 eric Exp $	*/
+/*	$OpenBSD: getrrsetbyname_async.c,v 1.14 2024/05/07 23:40:53 djm Exp $	*/
 /*
  * Copyright (c) 2012 Eric Faurot <eric@openbsd.org>
  *
@@ -168,9 +168,9 @@ getrrsetbyname_async_run(struct asr_query *as, struct asr_result *ar)
 	goto next;
 }
 
-/* The rest of this file is taken from the orignal implementation. */
+/* The rest of this file is taken from the original implementation. */
 
-/* $OpenBSD: getrrsetbyname_async.c,v 1.11 2017/02/23 17:04:02 eric Exp $ */
+/* $OpenBSD: getrrsetbyname_async.c,v 1.14 2024/05/07 23:40:53 djm Exp $ */
 
 /*
  * Copyright (c) 2001 Jakob Schlyter. All rights reserved.
@@ -334,13 +334,14 @@ get_response(struct asr_result *ar, const char *pkt, int pktlen)
 
 		if (rdata) {
 			rdata->rdi_length = rr->size;
-			rdata->rdi_data   = malloc(rr->size);
-
-			if (rdata->rdi_data == NULL) {
-				ar->ar_rrset_errno = ERRSET_NOMEMORY;
-				goto fail;
+			if (rr->size != 0) {
+				rdata->rdi_data = malloc(rr->size);
+				if (rdata->rdi_data == NULL) {
+					ar->ar_rrset_errno = ERRSET_NOMEMORY;
+					goto fail;
+				}
+				memcpy(rdata->rdi_data, rr->rdata, rr->size);
 			}
-			memcpy(rdata->rdi_data, rr->rdata, rr->size);
 		}
 	}
 	free_dns_response(response);
@@ -364,6 +365,9 @@ parse_dns_response(const u_char *answer, int size)
 {
 	struct dns_response *resp;
 	const u_char *cp;
+
+	if (size <= HFIXEDSZ)
+		return (NULL);
 
 	/* allocate memory for the response */
 	resp = calloc(1, sizeof(*resp));
@@ -431,14 +435,22 @@ parse_dns_qsection(const u_char *answer, int size, const u_char **cp, int count)
 	int i, length;
 	char name[MAXDNAME];
 
-	for (i = 1, head = NULL, prev = NULL; i <= count; i++, prev = curr) {
+#define NEED(need) \
+	do { \
+		if (*cp + need > answer + size) \
+			goto fail; \
+	} while (0)
 
-		/* allocate and initialize struct */
-		curr = calloc(1, sizeof(struct dns_query));
-		if (curr == NULL) {
+	for (i = 1, head = NULL, prev = NULL; i <= count; i++, prev = curr) {
+		if (*cp >= answer + size) {
+ fail:
 			free_dns_query(head);
 			return (NULL);
 		}
+		/* allocate and initialize struct */
+		curr = calloc(1, sizeof(struct dns_query));
+		if (curr == NULL)
+			goto fail;
 		if (head == NULL)
 			head = curr;
 		if (prev != NULL)
@@ -456,16 +468,20 @@ parse_dns_qsection(const u_char *answer, int size, const u_char **cp, int count)
 			free_dns_query(head);
 			return (NULL);
 		}
+		NEED(length);
 		*cp += length;
 
 		/* type */
+		NEED(INT16SZ);
 		curr->type = _getshort(*cp);
 		*cp += INT16SZ;
 
 		/* class */
+		NEED(INT16SZ);
 		curr->class = _getshort(*cp);
 		*cp += INT16SZ;
 	}
+#undef NEED
 
 	return (head);
 }
@@ -478,14 +494,23 @@ parse_dns_rrsection(const u_char *answer, int size, const u_char **cp,
 	int i, length;
 	char name[MAXDNAME];
 
-	for (i = 1, head = NULL, prev = NULL; i <= count; i++, prev = curr) {
+#define NEED(need) \
+	do { \
+		if (*cp + need > answer + size) \
+			goto fail; \
+	} while (0)
 
-		/* allocate and initialize struct */
-		curr = calloc(1, sizeof(struct dns_rr));
-		if (curr == NULL) {
+	for (i = 1, head = NULL, prev = NULL; i <= count; i++, prev = curr) {
+		if (*cp >= answer + size) {
+ fail:
 			free_dns_rr(head);
 			return (NULL);
 		}
+
+		/* allocate and initialize struct */
+		curr = calloc(1, sizeof(struct dns_rr));
+		if (curr == NULL)
+			goto fail;
 		if (head == NULL)
 			head = curr;
 		if (prev != NULL)
@@ -503,33 +528,41 @@ parse_dns_rrsection(const u_char *answer, int size, const u_char **cp,
 			free_dns_rr(head);
 			return (NULL);
 		}
+		NEED(length);
 		*cp += length;
 
 		/* type */
+		NEED(INT16SZ);
 		curr->type = _getshort(*cp);
 		*cp += INT16SZ;
 
 		/* class */
+		NEED(INT16SZ);
 		curr->class = _getshort(*cp);
 		*cp += INT16SZ;
 
 		/* ttl */
+		NEED(INT32SZ);
 		curr->ttl = _getlong(*cp);
 		*cp += INT32SZ;
 
 		/* rdata size */
+		NEED(INT16SZ);
 		curr->size = _getshort(*cp);
 		*cp += INT16SZ;
 
 		/* rdata itself */
-		curr->rdata = malloc(curr->size);
-		if (curr->rdata == NULL) {
-			free_dns_rr(head);
-			return (NULL);
+		NEED(curr->size);
+		if (curr->size != 0) {
+			if ((curr->rdata = malloc(curr->size)) == NULL) {
+				free_dns_rr(head);
+				return (NULL);
+			}
+			memcpy(curr->rdata, *cp, curr->size);
 		}
-		memcpy(curr->rdata, *cp, curr->size);
 		*cp += curr->size;
 	}
+#undef NEED
 
 	return (head);
 }

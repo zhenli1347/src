@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.219 2022/06/29 14:24:29 dv Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.223 2024/04/03 18:43:32 miod Exp $	*/
 /*	$NetBSD: pmap.c,v 1.91 2000/06/02 17:46:37 thorpej Exp $	*/
 
 /*
@@ -57,19 +57,14 @@
 #include <sys/systm.h>
 #include <sys/atomic.h>
 #include <sys/proc.h>
-#include <sys/malloc.h>
 #include <sys/pool.h>
 #include <sys/user.h>
-#include <sys/kernel.h>
 #include <sys/mutex.h>
 
 #include <uvm/uvm.h>
 
-#include <machine/cpu.h>
 #include <machine/specialreg.h>
-#include <machine/gdt.h>
 
-#include <dev/isa/isareg.h>
 #include <sys/msgbuf.h>
 #include <stand/boot/bootarg.h>
 
@@ -377,7 +372,7 @@ int nkptp_max = 1024 - (KERNBASE / NBPD) - 1;
 
 /*
  * pg_g_kern:  if CPU is affected by Meltdown pg_g_kern is 0,
- * otherwise it is is set to PG_G.  pmap_pg_g will be derived
+ * otherwise it is set to PG_G.  pmap_pg_g will be derived
  * from pg_g_kern, see pmap_bootstrap().
  */
 extern int pg_g_kern;
@@ -1560,7 +1555,7 @@ pmap_extract_86(struct pmap *pmap, vaddr_t va, paddr_t *pap)
 }
 
 /*
- * pmap_virtual_space: used during bootup [pmap_steal_memory] to
+ * pmap_virtual_space: used during bootup [uvm_pageboot_alloc] to
  *	determine the bounds of the kernel virtual address space.
  */
 
@@ -1848,7 +1843,7 @@ pmap_do_remove_86(struct pmap *pmap, vaddr_t sva, vaddr_t eva, int flags)
 		 * with pmap_remove!  if we allow this (and why would
 		 * we?) then we end up freeing the pmap's page
 		 * directory page (PDP) before we are finished using
-		 * it when we hit in in the recursive mapping.  this
+		 * it when we hit it in the recursive mapping.  this
 		 * is BAD.
 		 *
 		 * long term solution is to move the PTEs out of user
@@ -2266,17 +2261,6 @@ pmap_collect(struct pmap *pmap)
 	pmap_do_remove(pmap, VM_MIN_ADDRESS, VM_MAX_ADDRESS,
 	    PMAP_REMOVE_SKIPWIRED);
 }
-
-/*
- * pmap_copy: copy mappings from one pmap to another
- *
- * => optional function
- * void pmap_copy(dst_pmap, src_pmap, dst_addr, len, src_addr)
- */
-
-/*
- * defined as macro in pmap.h
- */
 
 /*
  * pmap_enter: enter a mapping into a pmap

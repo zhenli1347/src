@@ -1,4 +1,4 @@
-/*	$OpenBSD: apmd.c,v 1.110 2022/12/04 23:50:50 cheloha Exp $	*/
+/*	$OpenBSD: apmd.c,v 1.112 2023/04/27 10:51:27 kn Exp $	*/
 
 /*
  *  Copyright (c) 1995, 1996 John T. Kohl
@@ -75,7 +75,6 @@ void do_etc_file(const char *file);
 void error(const char *fmt, const char *arg);
 void set_driver_messages(int fd, int mode);
 
-/* ARGSUSED */
 void
 sigexit(int signo)
 {
@@ -585,11 +584,6 @@ main(int argc, char *argv[])
 		case APM_USER_HIBERNATE_REQ:
 			hibernates++;
 			break;
-#if 0
-		case APM_CANCEL:
-			suspends = standbys = 0;
-			break;
-#endif
 		case APM_NORMAL_RESUME:
 		case APM_CRIT_RESUME:
 		case APM_SYS_STANDBY_RESUME:

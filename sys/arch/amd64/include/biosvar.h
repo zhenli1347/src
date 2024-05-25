@@ -1,4 +1,4 @@
-/*	$OpenBSD: biosvar.h,v 1.29 2022/11/29 21:41:39 guenther Exp $	*/
+/*	$OpenBSD: biosvar.h,v 1.32 2023/09/08 20:47:22 kn Exp $	*/
 
 /*
  * Copyright (c) 1997-1999 Michael Shalayeff
@@ -41,7 +41,7 @@
 #define	BIOSF_BIOS32	0x0001
 #define	BIOSF_PCIBIOS	0x0002
 #define	BIOSF_PROMSCAN	0x0004
-#define	BIOSF_SMBIOS	0x0006
+#define	BIOSF_SMBIOS	0x0008
 
 /* BIOS media ID */
 #define BIOSM_F320K	0xff	/* floppy ds/sd  8 spt */
@@ -172,14 +172,6 @@ typedef struct _bios_consdev {
 	int		reg_shift;
 } __packed bios_consdev_t;
 
-/* Old interface; remove after OpenBSD 7.3 is released */
-typedef struct _bios_oconsdev {
-	dev_t	consdev;
-	int	conspeed;
-	int	consaddr;
-	int	consfreq;
-} __packed bios_oconsdev_t;
-
 #define BOOTARG_BOOTMAC	7
 typedef struct _bios_bootmac {
 	char	mac[6];
@@ -218,11 +210,13 @@ typedef struct _bios_efiinfo {
 	uint32_t	fb_reserved_mask;
 	uint32_t	flags;
 #define BEI_64BIT	0x00000001	/* 64-bit EFI implementation */
+#define BEI_ESRT	0x00000002	/* ESRT table */
 	uint32_t	mmap_desc_ver;
 	uint32_t	mmap_desc_size;
 	uint32_t	mmap_size;
 	uint64_t	mmap_start;
 	uint64_t	system_table;
+	uint64_t	config_esrt;
 } __packed bios_efiinfo_t;
 
 #define	BOOTARG_UCODE 12

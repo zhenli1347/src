@@ -1,4 +1,4 @@
-/*	$OpenBSD: fetch.c,v 1.212 2022/11/09 17:41:05 claudio Exp $	*/
+/*	$OpenBSD: fetch.c,v 1.218 2024/04/23 08:50:38 sthen Exp $	*/
 /*	$NetBSD: fetch.c,v 1.14 1997/08/18 10:20:20 lukem Exp $	*/
 
 /*-
@@ -705,7 +705,8 @@ noslash:
 		 */
 		ftp_printf(fin, "GET %s HTTP/1.1\r\n"
 		    "Connection: close\r\n"
-		    "Host: %s\r\n%s%s\r\n",
+		    "Host: %s\r\n%s%s\r\n"
+		    "Accept: */*\r\n",
 		    epath, proxyhost, buf ? buf : "", httpuseragent);
 		if (credentials)
 			ftp_printf(fin, "Authorization: Basic %s\r\n",
@@ -773,8 +774,8 @@ noslash:
 			ftp_printf(fin, "\r\nIf-Modified-Since: %s", tmbuf);
 #endif /* SMALL */
 
-		ftp_printf(fin, "\r\n%s%s\r\n",
-		    buf ? buf : "", httpuseragent);
+		ftp_printf(fin, "\r\n%s%s\r\n", buf ? buf : "", httpuseragent);
+		ftp_printf(fin, "Accept: */*\r\n");
 		if (credentials)
 			ftp_printf(fin, "Authorization: Basic %s\r\n",
 			    credentials);
@@ -891,7 +892,6 @@ noslash:
 		if (strncasecmp(cp, CONTENTLEN, sizeof(CONTENTLEN) - 1) == 0) {
 			cp += sizeof(CONTENTLEN) - 1;
 			cp += strspn(cp, " \t");
-			cp[strcspn(cp, " \t")] = '\0';
 			filesize = strtonum(cp, 0, LLONG_MAX, &errstr);
 			if (errstr != NULL)
 				goto improper;
@@ -934,7 +934,7 @@ noslash:
 					} else
 						loctail[1] = '\0';
 				}
-				/* Contruct URL from relative redirect */
+				/* Construct URL from relative redirect */
 				if (asprintf(&redirurl, "%s%s%s%s/%s%s",
 				    scheme, full_host,
 				    portnum ? ":" : "",
@@ -964,10 +964,8 @@ noslash:
 #define RETRYAFTER "Retry-After:"
 		} else if (isunavail &&
 		    strncasecmp(cp, RETRYAFTER, sizeof(RETRYAFTER) - 1) == 0) {
-			size_t s;
 			cp += sizeof(RETRYAFTER) - 1;
 			cp += strspn(cp, " \t");
-			cp[strcspn(cp, " \t")] = '\0';
 			retryafter = strtonum(cp, 0, 0, &errstr);
 			if (errstr != NULL)
 				retryafter = -1;
@@ -976,7 +974,6 @@ noslash:
 			    sizeof(TRANSFER_ENCODING) - 1) == 0) {
 			cp += sizeof(TRANSFER_ENCODING) - 1;
 			cp += strspn(cp, " \t");
-			cp[strcspn(cp, " \t")] = '\0';
 			if (strcasecmp(cp, "chunked") == 0)
 				chunked = 1;
 #ifndef SMALL
@@ -984,7 +981,7 @@ noslash:
 		} else if (strncasecmp(cp, LAST_MODIFIED,
 			    sizeof(LAST_MODIFIED) - 1) == 0) {
 			cp += sizeof(LAST_MODIFIED) - 1;
-			cp[strcspn(cp, "\t")] = '\0';
+			cp += strspn(cp, " \t");
 			if (strptime(cp, "%a, %d %h %Y %T %Z", &lmt) == NULL)
 				server_timestamps = 0;
 #endif /* !SMALL */
@@ -1223,7 +1220,6 @@ save_chunked(FILE *fin, struct tls *tls, int out, char *buf, size_t buflen)
 /*
  * Abort a http retrieval
  */
-/* ARGSUSED */
 static void
 aborthttp(int signo)
 {
@@ -1729,11 +1725,13 @@ proxy_connect(int socket, char *host, char *cookie)
 
 	if (cookie) {
 		l = asprintf(&connstr, "CONNECT %s:%s HTTP/1.1\r\n"
+			"Host: %s:%s\r\n"
 			"Proxy-Authorization: Basic %s\r\n%s\r\n\r\n",
-			host, port, cookie, HTTP_USER_AGENT);
+			host, port, host, port, cookie, HTTP_USER_AGENT);
 	} else {
-		l = asprintf(&connstr, "CONNECT %s:%s HTTP/1.1\r\n%s\r\n\r\n",
-			host, port, HTTP_USER_AGENT);
+		l = asprintf(&connstr, "CONNECT %s:%s HTTP/1.1\r\n"
+			"Host: %s:%s\r\n%s\r\n\r\n",
+			host, port, host, port, HTTP_USER_AGENT);
 	}
 
 	if (l == -1)

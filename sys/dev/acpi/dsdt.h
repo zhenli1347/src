@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.h,v 1.79 2021/03/10 21:49:55 patrick Exp $ */
+/* $OpenBSD: dsdt.h,v 1.82 2024/05/13 01:15:50 jsg Exp $ */
 /*
  * Copyright (c) 2005 Marco Peereboom <marco@openbsd.org>
  *
@@ -51,13 +51,11 @@ struct aml_value	*aml_allocvalue(int, int64_t, const void *);
 void			aml_freevalue(struct aml_value *);
 void			aml_notify(struct aml_node *, int);
 void			aml_showvalue(struct aml_value *);
-void			aml_walkroot(void);
-void			aml_walktree(struct aml_node *);
 
 void			aml_find_node(struct aml_node *, const char *,
 			    int (*)(struct aml_node *, void *), void *);
-int			acpi_parse_aml(struct acpi_softc *, u_int8_t *,
-			    uint32_t);
+int			acpi_parse_aml(struct acpi_softc *, const char *,
+			    u_int8_t *, uint32_t);
 void			aml_register_notify(struct aml_node *, const char *,
 			    int (*)(struct aml_node *, int, void *), void *,
 			    int);
@@ -325,7 +323,6 @@ const char		*aml_val_to_string(const struct aml_value *);
 void			aml_disasm(struct aml_scope *scope, int lvl,
 			    void (*dbprintf)(void *, const char *, ...),
 			    void *arg);
-int			aml_getpci(struct aml_node *, int64_t *);
 int			aml_evalhid(struct aml_node *, struct aml_value *);
 
 int			acpi_walkmem(int, const char *);
@@ -387,6 +384,8 @@ enum acpi_osi {
 	OSI_WIN_10_1809,
 	OSI_WIN_10_1903,
 	OSI_WIN_10_2004,
+	OSI_WIN_11,
+	OSI_WIN_11_22H2
 };
 
 #define AML_VALID_OSI		\
@@ -413,7 +412,9 @@ enum acpi_osi {
 	"Windows 2018",		\
 	"Windows 2018.2",	\
 	"Windows 2019",		\
-	"Windows 2020"
+	"Windows 2020",		\
+	"Windows 2021",		\
+	"Windows 2022"
 
 extern enum acpi_osi acpi_max_osi;	/* most recent Win version FW knows */
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.154 2022/11/29 21:41:39 guenther Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.170 2024/05/21 23:16:06 jsg Exp $	*/
 /*	$NetBSD: cpu.h,v 1.1 2003/04/26 18:39:39 fvdl Exp $	*/
 
 /*-
@@ -53,6 +53,7 @@
 #include <sys/sched.h>
 #include <sys/sensors.h>
 #include <sys/srp.h>
+#include <uvm/uvm_percpu.h>
 
 #ifdef _KERNEL
 
@@ -91,6 +92,13 @@ union vmm_cpu_cap {
 	struct svm vcc_svm;
 };
 
+enum cpu_vendor {
+    CPUV_UNKNOWN,
+    CPUV_AMD,
+    CPUV_INTEL,
+    CPUV_VIA,
+};
+
 /*
  *  Locks used to protect struct members in this file:
  *	I	immutable after creation
@@ -98,6 +106,7 @@ union vmm_cpu_cap {
  *	o	owned (read/modified only) by this CPU
  */
 struct x86_64_tss;
+struct vcpu;
 struct cpu_info {
 	/*
 	 * The beginning of this structure in mapped in the userspace "u-k"
@@ -112,10 +121,8 @@ struct cpu_info {
 #define ci_PAGEALIGN	ci_dev
 	struct device *ci_dev;		/* [I] */
 	struct cpu_info *ci_self;	/* [I] */
-	struct schedstate_percpu ci_schedstate; /* scheduler state */
 	struct cpu_info *ci_next;	/* [I] */
 
-	struct proc *ci_curproc;	/* [o] */
 	u_int ci_cpuid;			/* [I] */
 	u_int ci_apicid;		/* [I] */
 	u_int ci_acpi_proc_id;		/* [I] */
@@ -126,10 +133,14 @@ struct cpu_info {
 	u_int64_t ci_user_cr3;		/* [o] U-K page table */
 
 	/* bits for mitigating Micro-architectural Data Sampling */
-	char		ci_mds_tmp[32];	/* [o] 32byte aligned */
+	char		ci_mds_tmp[64];	/* [o] 64-byte aligned */
 	void		*ci_mds_buf;	/* [I] */
 
-	struct pmap *ci_proc_pmap;	/* last userspace pmap */
+	struct proc *ci_curproc;	/* [o] */
+	struct schedstate_percpu ci_schedstate; /* scheduler state */
+
+	struct pmap *ci_proc_pmap;	/* active, non-kernel pmap */
+	struct pmap *ci_user_pmap;	/* [o] last pmap used in userspace */
 	struct pcb *ci_curpcb;		/* [o] */
 	struct pcb *ci_idle_pcb;	/* [o] */
 
@@ -151,6 +162,8 @@ struct cpu_info {
 	volatile u_int	ci_flags;	/* [a] */
 	u_int32_t	ci_ipis;	/* [a] */
 
+	enum cpu_vendor	ci_vendor;		/* [I] mapped from cpuid(0) */
+	u_int32_t       ci_cpuid_level;         /* [I] cpuid(0).eax */
 	u_int32_t	ci_feature_flags;	/* [I] */
 	u_int32_t	ci_feature_eflags;	/* [I] */
 	u_int32_t	ci_feature_sefflags_ebx;/* [I] */
@@ -198,6 +211,8 @@ struct cpu_info {
 
 #ifdef MULTIPROCESSOR
 	struct srp_hazard	ci_srp_hazards[SRP_HAZARD_NUM];
+#define __HAVE_UVM_PERCPU
+	struct uvm_pmr_cache	ci_uvm;		/* [o] page cache */
 #endif
 
 	struct ksensordev	ci_sensordev;
@@ -207,6 +222,7 @@ struct cpu_info {
 	u_int64_t		ci_hz_aperf;
 #if defined(GPROF) || defined(DDBPROF)
 	struct gmonparam	*ci_gmon;
+	struct clockintr	ci_gmonclock;
 #endif
 	u_int32_t	ci_vmm_flags;
 #define	CI_VMM_VMX	(1 << 0)
@@ -217,13 +233,14 @@ struct cpu_info {
 	union		vmm_cpu_cap ci_vmm_cap;
 	paddr_t		ci_vmxon_region_pa;
 	struct vmxon_region *ci_vmxon_region;
+	struct vcpu	*ci_guest_vcpu;		/* [o] last vcpu resumed */
 
 	char		ci_panicbuf[512];
 
 	paddr_t		ci_vmcs_pa;
 	struct rwlock	ci_vmcs_lock;
 
-	struct clockintr_queue ci_queue;
+	struct clockqueue ci_queue;
 };
 
 #define CPUF_BSP	0x0001		/* CPU is the original BSP */
@@ -376,10 +393,6 @@ struct timeval;
 extern int cpu_feature;
 extern int cpu_ebxfeature;
 extern int cpu_ecxfeature;
-extern int cpu_perf_eax;
-extern int cpu_perf_ebx;
-extern int cpu_perf_edx;
-extern int cpu_apmi_edx;
 extern int ecpu_ecxfeature;
 extern int cpu_id;
 extern char cpu_vendor[];
@@ -398,22 +411,26 @@ extern int cpuspeed;
 
 /* machdep.c */
 void	dumpconf(void);
+void	cpu_set_vendor(struct cpu_info *, int _level, const char *_vendor);
 void	cpu_reset(void);
 void	x86_64_proc0_tss_ldt_init(void);
 void	cpu_proc_fork(struct proc *, struct proc *);
 int	amd64_pa_used(paddr_t);
+#define	cpu_idle_enter()	do { /* nothing */ } while (0)
 extern void (*cpu_idle_cycle_fcn)(void);
+#define	cpu_idle_cycle()	(*cpu_idle_cycle_fcn)()
+#define	cpu_idle_leave()	do { /* nothing */ } while (0)
+extern void (*initclock_func)(void);
+extern void (*startclock_func)(void);
 
 struct region_descriptor;
 void	lgdt(struct region_descriptor *);
 
 struct pcb;
 void	savectx(struct pcb *);
-void	switch_exit(struct proc *, void (*)(struct proc *));
 void	proc_trampoline(void);
 
 /* clock.c */
-extern void (*initclock_func)(void);
 void	startclocks(void);
 void	rtcinit(void);
 void	rtcstart(void);
@@ -421,6 +438,7 @@ void	rtcstop(void);
 void	i8254_delay(int);
 void	i8254_initclocks(void);
 void	i8254_startclock(void);
+void	i8254_start_both_clocks(void);
 void	i8254_inittimecounter(void);
 void	i8254_inittimecounter_simple(void);
 
@@ -474,7 +492,8 @@ void mp_setperf_init(void);
 #define CPU_TSCFREQ		16	/* TSC frequency */
 #define CPU_INVARIANTTSC	17	/* has invariant TSC */
 #define CPU_PWRACTION		18	/* action caused by power button */
-#define CPU_MAXID		19	/* number of valid machdep ids */
+#define CPU_RETPOLINE		19	/* cpu requires retpoline pattern */
+#define CPU_MAXID		20	/* number of valid machdep ids */
 
 #define	CTL_MACHDEP_NAMES { \
 	{ 0, 0 }, \
@@ -496,6 +515,7 @@ void mp_setperf_init(void);
 	{ "tscfreq", CTLTYPE_QUAD }, \
 	{ "invarianttsc", CTLTYPE_INT }, \
 	{ "pwraction", CTLTYPE_INT }, \
+	{ "retpoline", CTLTYPE_INT }, \
 }
 
 #endif /* !_MACHINE_CPU_H_ */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: print.c,v 1.13 2017/07/29 07:18:03 florian Exp $ */
+/*	$OpenBSD: print.c,v 1.15 2024/04/23 13:34:51 jsg Exp $ */
 
 /*
  * Copyright (c) 1993-96 Mats O Jansson.  All rights reserved.
@@ -135,7 +135,7 @@ mopPrintOneline(FILE *fd, u_char *pkt, int trans)
 	mopPrintHWA(fd, src); fprintf(fd, " > ");
 	mopPrintHWA(fd, dst);
 	if (len < 1600)
-	fprintf(fd, " len %4d code %02x ", len, code);
+		fprintf(fd, " len %4d code %02x ", len, code);
 	else
 		fprintf(fd, " len %4d code %02x ",
 		    (len % 256)*256 + (len /256), code);
@@ -453,7 +453,7 @@ mopPrintInfo(FILE *fd, u_char *pkt, int *idx, u_short moplen, u_char mopcode,
 			break;
 		case MOP_K_INFO_MFCT:
 			tmps = mopGetShort(pkt, idx);
-			fprintf(fd, "Maint Funcion: %04x ( ", tmps);
+			fprintf(fd, "Maint Function: %04x ( ", tmps);
 			if (tmps &   1) fprintf(fd, "Loop ");
 			if (tmps &   2) fprintf(fd, "Dump ");
 			if (tmps &   4) fprintf(fd, "Pldr ");

@@ -9,19 +9,17 @@ release_schedule - Perl 5 release schedule
 This schedule lists the projected or historical development and
 release schedules for the next, current and previous stable versions
 of Perl.  Dates with two or more question marks will only be releases if
-deemed necessary by the Pumpking.
+deemed necessary by the Steering Council.
 
-=head2 Perl 5.32
+=head2 Perl 5.36
 
-  2020-06-20  5.32.0 ✓        Sawyer X
-  2021-01-23  5.32.1         Steve Hay
+  2022-05-27  5.36.0  ✓       Ricardo Signes
+  2023-04-23  5.36.1  ✓       Steve Hay
 
-=head2 Perl 5.30
+=head2 Perl 5.34
 
-  2019-05-22  5.30.0 ✓        Sawyer X
-  2019-11-10  5.30.1 ✓        Steve Hay
-  2020-03-14  5.30.2 ✓        Steve Hay
-  2020-06-01  5.30.3 ✓        Steve Hay
+  2021-05-20  5.34.0  ✓       Sawyer X
+  2022-03-13  5.34.1  ✓       Steve Hay
 
 =head1 DEVELOPMENT RELEASE SCHEDULE
 
@@ -37,18 +35,23 @@ When shipping a release, you should include the schedule for (at least)
 the next four releases. If a stable version of Perl is released,
 you should reset the version numbers to the next blead series.
 
-=head2 Perl 5.33
+=head2 Perl 5.37
 
-  2020-07-17  5.33.0 ✓       Sawyer X
-  2020-08-20  5.33.1 ✓       Karen Etheridge
-  2020-09-20  5.33.2 ✓       Sawyer X
-  2020-10-20  5.33.3 ✓       Steve Hay
-  2020-11-20  5.33.4 ✓       Tom Hukins
-  2020-12-20  5.33.5 ✓       Max Maischein
-  2021-01-20  5.33.6 ✓       Richard Leach
-  2021-02-20  5.33.7         Renee Backer
-  2021-03-20  5.33.8         Atoomic
-  2021-04-20  5.33.9         Todd Rinaldo
+  2022-05-27  5.37.0  ✓       Ricardo Signes
+  2022-06-20  5.37.1  ✓       Matthew Horsfall
+  2022-07-20  5.37.2  ✓       Nicolas R
+  2022-08-20  5.37.3  ✓       Neil Bowers
+  2022-09-20  5.37.4  ✓       Karen Etheridge
+  2022-10-20  5.37.5  ✓       Todd Rinaldo
+  2022-11-20  5.37.6  ✓       Max Maischein
+  2022-12-20  5.37.7  ✓       Richard Leach
+  2023-01-20  5.37.8  ✓       Renée Bäcker
+  2023-02-20  5.37.9  ✓       Karen Etheridge   Contentious changes freeze
+  2023-03-20  5.37.10 ✓       Yves Orton        User-visible changes to
+                                                correctly functioning
+                                                programs freeze
+  2023-04-20  5.37.11 ✓       Steve Hay         Full code freeze
+  2023-05-20  5.38.0           Ricardo Signes   New perl!
 
 =head1 VICTIMS
 
@@ -57,7 +60,7 @@ one release of bleadperl.  If you can't do a release
 and can't find a substitute amongst this list, mail p5p.
 
 (Please do not add any names to this list without prior
-consent of the Pumpking.)
+consent of the Steering Council.)
 
   Abigail <abigail@abigail.be>
   Aristotle Pagaltzis <pagaltzis@gmx.de>

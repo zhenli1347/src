@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbuf.c,v 1.43 2019/07/16 17:39:02 bluhm Exp $	*/
+/*	$OpenBSD: mbuf.c,v 1.45 2023/07/16 03:01:31 yasuoka Exp $	*/
 /*	$NetBSD: mbuf.c,v 1.9 1996/05/07 02:55:03 thorpej Exp $	*/
 
 /*
@@ -78,8 +78,8 @@ static struct mbtypes {
 	{ 0, 0 }
 };
 
-int nmbtypes = sizeof(mbstat.m_mtypes) / sizeof(short);
-bool seen[256];			/* "have we seen this type yet?" */
+int nmbtypes = sizeof(mbstat.m_mtypes) / sizeof(u_long);
+bool seen[MBSTAT_COUNT];		/* "have we seen this type yet?" */
 
 /*
  * Print mbuf statistics.
@@ -93,7 +93,7 @@ mbpr(void)
 	struct mbtypes *mp;
 	size_t size;
 
-	if (nmbtypes != 256) {
+	if (nmbtypes != MBSTAT_COUNT) {
 		fprintf(stderr,
 		    "%s: unexpected change to mbstat; check source\n",
 		    __progname);
@@ -172,7 +172,7 @@ mbpr(void)
 	for (mp = mbtypes; mp->mt_name; mp++)
 		if (mbstat.m_mtypes[mp->mt_type]) {
 			seen[mp->mt_type] = YES;
-			printf("\t%u mbuf%s allocated to %s\n",
+			printf("\t%lu mbuf%s allocated to %s\n",
 			    mbstat.m_mtypes[mp->mt_type],
 			    plural(mbstat.m_mtypes[mp->mt_type]),
 			    mp->mt_name);
@@ -180,7 +180,7 @@ mbpr(void)
 	seen[MT_FREE] = YES;
 	for (i = 0; i < nmbtypes; i++)
 		if (!seen[i] && mbstat.m_mtypes[i]) {
-			printf("\t%u mbuf%s allocated to <mbuf type %d>\n",
+			printf("\t%lu mbuf%s allocated to <mbuf type %d>\n",
 			    mbstat.m_mtypes[i],
 			    plural(mbstat.m_mtypes[i]), i);
 		}

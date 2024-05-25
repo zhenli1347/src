@@ -1,4 +1,4 @@
-/*	$OpenBSD: syscall.c,v 1.9 2022/11/02 07:20:08 guenther Exp $	*/
+/*	$OpenBSD: syscall.c,v 1.14 2024/01/11 19:16:27 miod Exp $	*/
 
 /*
  * Copyright (c) 2015 Dale Rahn <drahn@dalerahn.com>
@@ -24,44 +24,21 @@
 #include <sys/syscall.h>
 #include <sys/syscall_mi.h>
 
-#define MAXARGS 8
-
 void
 syscall(struct trapframe *frame)
 {
 	struct proc *p = curproc;
-	const struct sysent *callp;
-	int code, error;
-	int nap = 8, nargs;
-	register_t *ap, *args, copyargs[MAXARGS], rval[2];
+	const struct sysent *callp = sysent;
+	int code, error = ENOSYS;
+	register_t *args, rval[2];
 
 	code = frame->fixreg[0];
-	ap = &frame->fixreg[3];
+	if (code <= 0 || code >= SYS_MAXSYSCALL)
+		goto bad;
 
-	switch (code) {
-	case SYS_syscall:
-	case SYS___syscall:
-		code = *ap++;
-		nap--;
-		break;
-	}
+	callp += code;
 
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
-		callp += code;
-	nargs = callp->sy_argsize / sizeof(register_t);
-	if (nargs <= nap) {
-		args = ap;
-	} else {
-		KASSERT(nargs <= MAXARGS);
-		memcpy(copyargs, ap, nap * sizeof(register_t));
-		if ((error = copyin((register_t *)frame->fixreg[1] + 8,
-		    copyargs + nap, (nargs - nap) * sizeof(register_t))))
-			goto bad;
-		args = copyargs;
-	}
+	args = &frame->fixreg[3];
 
 	rval[0] = 0;
 	rval[1] = 0;
@@ -74,15 +51,12 @@ syscall(struct trapframe *frame)
 		frame->fixreg[3] = rval[0];
 		frame->cr &= ~0x10000000;
 		break;
-
 	case ERESTART:
 		frame->srr0 -= 4;
 		break;
-
 	case EJUSTRETURN:
 		/* nothing to do */
 		break;
-
 	default:
 	bad:
 		frame->fixreg[0] = error;

@@ -1,4 +1,4 @@
-/* $OpenBSD: syscall.c,v 1.11 2022/11/02 07:20:08 guenther Exp $ */
+/* $OpenBSD: syscall.c,v 1.18 2024/01/11 19:16:26 miod Exp $ */
 /*
  * Copyright (c) 2015 Dale Rahn <drahn@dalerahn.com>
  *
@@ -23,21 +23,17 @@
 #include <sys/signal.h>
 #include <sys/syscall.h>
 #include <sys/syscall_mi.h>
-#include <sys/systm.h>
-#include <sys/proc.h>
 
 #include <uvm/uvm_extern.h>
-
-#define MAXARGS 8
 
 void
 svc_handler(trapframe_t *frame)
 {
 	struct proc *p = curproc;
 	const struct sysent *callp;
-	int code, error;
-	u_int nap = 8, nargs;
-	register_t *ap, *args, copyargs[MAXARGS], rval[2];
+	int code, error = ENOSYS;
+	u_int nargs;
+	register_t *args, rval[2];
 
 	uvmexp.syscalls++;
 
@@ -49,37 +45,12 @@ svc_handler(trapframe_t *frame)
 	frame->tf_elr += 8;
 
 	code = frame->tf_x[8];
+	if (code <= 0 || code >= SYS_MAXSYSCALL)
+		goto bad;
 
-	ap = &frame->tf_x[0];
-
-	switch (code) {	
-	case SYS_syscall:
-		code = *ap++;
-		nap--;
-		break;
-        case SYS___syscall:
-		code = *ap++;
-		nap--;
-		break;
-	}
-
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
-		callp += code;
-
-	nargs = callp->sy_argsize / sizeof(register_t);
-	if (nargs <= nap) {
-		args = ap;
-	} else {
-		KASSERT(nargs <= MAXARGS);
-		memcpy(copyargs, ap, nap * sizeof(register_t));
-		if ((error = copyin((void *)frame->tf_sp, copyargs + nap,
-		    (nargs - nap) * sizeof(register_t))))
-			goto bad;
-		args = copyargs;
-	}
+	callp = sysent + code;
+	nargs = callp->sy_narg;
+	args = &frame->tf_x[0];
 
 	rval[0] = 0;
 	rval[1] = 0;
@@ -91,18 +62,15 @@ svc_handler(trapframe_t *frame)
 		frame->tf_x[0] = rval[0];
 		frame->tf_spsr &= ~PSR_C;	/* carry bit */
 		break;
-
 	case ERESTART:
 		/*
 		 * Reconstruct the pc to point at the svc.
 		 */
 		frame->tf_elr -= 12;
 		break;
-
 	case EJUSTRETURN:
 		/* nothing to do */
 		break;
-
 	default:
 	bad:
 		frame->tf_x[0] = error;

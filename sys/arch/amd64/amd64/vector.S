@@ -1,4 +1,4 @@
-/*	$OpenBSD: vector.S,v 1.87 2022/12/01 00:26:15 guenther Exp $	*/
+/*	$OpenBSD: vector.S,v 1.95 2024/02/12 01:18:17 guenther Exp $	*/
 /*	$NetBSD: vector.S,v 1.5 2004/06/28 09:13:11 fvdl Exp $	*/
 
 /*
@@ -149,6 +149,14 @@ INTRENTRY_LABEL(calltrap_specstk):
 	movq	%r12,%rax
 	movq	%r13,%rdx
 	wrmsr
+	/* who knows what happened in this trap; use IPBP on the way out */
+	CODEPATCH_START
+	xorl	%edx,%edx
+	movl	$PRED_CMD_IBPB,%eax
+	movl	$MSR_PRED_CMD,%ecx
+	wrmsr
+	CODEPATCH_END(CPTAG_IBPB_NOP)
+	call	pku_xonly
 	popq	%rdi
 	popq	%rsi
 	popq	%rdx
@@ -347,29 +355,31 @@ IDTVEC(trap0d)
 IDTVEC(trap0e)
 	TRAP(T_PAGEFLT)
 IDTVEC(intrspurious)
-IDTVEC_NOALIGN(trap0f)
+IDTVEC_ALIAS(trap0f, intrspurious)
 	iretq
 IDTVEC(trap10)
 	ZTRAP(T_ARITHTRAP)
 IDTVEC(trap11)
-	ZTRAP(T_ALIGNFLT)
+	TRAP(T_ALIGNFLT)
 IDTVEC(trap12)
 	ZTRAP(T_MCA)
 IDTVEC(trap13)
 	ZTRAP(T_XMM)
 IDTVEC(trap14)
-IDTVEC_NOALIGN(trap15)
-IDTVEC_NOALIGN(trap16)
-IDTVEC_NOALIGN(trap17)
-IDTVEC_NOALIGN(trap18)
-IDTVEC_NOALIGN(trap19)
-IDTVEC_NOALIGN(trap1a)
-IDTVEC_NOALIGN(trap1b)
-IDTVEC_NOALIGN(trap1c)
-IDTVEC_NOALIGN(trap1d)
-IDTVEC_NOALIGN(trap1e)
-IDTVEC_NOALIGN(trap1f)
-	/* 20 - 31 reserved for future exp */
+	ZTRAP(T_VE)
+IDTVEC(trap15)
+	TRAP(T_CP)
+IDTVEC(trap1f)
+IDTVEC_ALIAS(trap16, trap1f)
+IDTVEC_ALIAS(trap17, trap1f)
+IDTVEC_ALIAS(trap18, trap1f)
+IDTVEC_ALIAS(trap19, trap1f)
+IDTVEC_ALIAS(trap1a, trap1f)
+IDTVEC_ALIAS(trap1b, trap1f)
+IDTVEC_ALIAS(trap1c, trap1f)
+IDTVEC_ALIAS(trap1d, trap1f)
+IDTVEC_ALIAS(trap1e, trap1f)
+	/* 22 - 31 reserved for future exp */
 	ZTRAP(T_RESERVED)
 
 	.section .rodata
@@ -548,6 +558,7 @@ IDTVEC(intr_lapic_ipi)
 	jae	2f
 END(INTRENTRY_LABEL(intr_lapic_ipi))
 KIDTVEC_FALLTHROUGH(resume_lapic_ipi)
+	endbr64
 1:
 	incl	CPUVAR(IDEPTH)
 	movl	$IPL_IPI,CPUVAR(ILEVEL)
@@ -754,6 +765,7 @@ IDTVEC(intr_lapic_ltimer)
 	jae	2f
 END(INTRENTRY_LABEL(intr_lapic_ltimer))
 KIDTVEC_FALLTHROUGH(resume_lapic_ltimer)
+	endbr64
 1:
 	incl	CPUVAR(IDEPTH)
 	movl	$IPL_CLOCK,CPUVAR(ILEVEL)
@@ -787,6 +799,7 @@ IDTVEC(intr_xen_upcall)
 	jae	2f
 END(INTRENTRY_LABEL(intr_xen_upcall))
 KIDTVEC_FALLTHROUGH(resume_xen_upcall)
+	endbr64
 1:
 	incl	CPUVAR(IDEPTH)
 	movl	$IPL_NET,CPUVAR(ILEVEL)
@@ -819,6 +832,7 @@ IDTVEC(intr_hyperv_upcall)
 	jae	2f
 END(INTRENTRY_LABEL(intr_hyperv_upcall))
 KIDTVEC_FALLTHROUGH(resume_hyperv_upcall)
+	endbr64
 1:
 	incl	CPUVAR(IDEPTH)
 	movl	$IPL_NET,CPUVAR(ILEVEL)
@@ -849,6 +863,7 @@ KIDTVEC(recurse_##name##num)						;\
 	INTR_RECURSE							;\
 END(Xrecurse_##name##num)						;\
 KIDTVEC_FALLTHROUGH(resume_##name##num)					\
+	endbr64								;\
 	movq	$IREENT_MAGIC,TF_ERR(%rsp)				;\
 	movl	%ebx,%r13d						;\
 	movq	CPUVAR(ISOURCES) + (num) * 8, %r14			;\
@@ -1261,35 +1276,46 @@ END(ioapic_level_stubs)
  * Soft interrupt handlers
  */
 NENTRY(retpoline_r13)
+	CODEPATCH_START
 	JMP_RETPOLINE(r13)
+	CODEPATCH_END(CPTAG_RETPOLINE_R13)
 END(retpoline_r13)
 
 KIDTVEC(softtty)
+	endbr64
 	movl	$IPL_SOFTTTY, CPUVAR(ILEVEL)
 	sti
 	incl	CPUVAR(IDEPTH)
 	movl	$X86_SOFTINTR_SOFTTTY,%edi
 	call	softintr_dispatch
 	decl	CPUVAR(IDEPTH)
+	CODEPATCH_START
 	jmp	retpoline_r13
+	CODEPATCH_END(CPTAG_RETPOLINE_R13)
 END(Xsofttty)
 
 KIDTVEC(softnet)
+	endbr64
 	movl	$IPL_SOFTNET, CPUVAR(ILEVEL)
 	sti
 	incl	CPUVAR(IDEPTH)
 	movl	$X86_SOFTINTR_SOFTNET,%edi
 	call	softintr_dispatch
 	decl	CPUVAR(IDEPTH)
+	CODEPATCH_START
 	jmp	retpoline_r13
+	CODEPATCH_END(CPTAG_RETPOLINE_R13)
 END(Xsoftnet)
 
 KIDTVEC(softclock)
+	endbr64
 	movl	$IPL_SOFTCLOCK, CPUVAR(ILEVEL)
 	sti
 	incl	CPUVAR(IDEPTH)
 	movl	$X86_SOFTINTR_SOFTCLOCK,%edi
 	call	softintr_dispatch
 	decl	CPUVAR(IDEPTH)
+	CODEPATCH_START
 	jmp	retpoline_r13
+	CODEPATCH_END(CPTAG_RETPOLINE_R13)
 END(Xsoftclock)

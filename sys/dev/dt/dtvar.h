@@ -1,4 +1,4 @@
-/*	$OpenBSD: dtvar.h,v 1.14 2022/06/28 09:32:27 bluhm Exp $ */
+/*	$OpenBSD: dtvar.h,v 1.19 2024/04/06 11:18:02 mpi Exp $ */
 
 /*
  * Copyright (c) 2019 Martin Pieuchot <mpi@openbsd.org>
@@ -37,6 +37,7 @@
  * Maximum number of arguments passed to a function.
  */
 #define DTMAXFUNCARGS	10
+#define DTMAXARGTYPES	5
 
 /*
  * Event state: where to store information when a probe fires.
@@ -52,6 +53,7 @@ struct dt_evt {
 	 * Recorded if the corresponding flag is set.
 	 */
 	struct stacktrace	dtev_kstack;	/* kernel stack frame */
+	struct stacktrace	dtev_ustack;	/* userland stack frame */
 	char			dtev_comm[DTMAXCOMLEN]; /* current pr. name */
 	union {
 		register_t		E_entry[DTMAXFUNCARGS];
@@ -79,27 +81,6 @@ struct dt_evt {
 	"\002USTACK"		\
 	"\003KSTACK"		\
 	"\004FUNCARGS"		\
-	"\005RETVAL"		\
-
-/*
- * Each PCB can have a filter attached to itself.  A filter do not
- * prevent an enabled probe to fire, but when that happens, event
- * states are only recorded if it is matched.
- */
-struct dt_filter {
-	enum dt_operand {
-		DT_OP_NONE = 0,
-		DT_OP_EQ,
-		DT_OP_NE,
-	}		dtf_operand;
-	enum dt_filtervar {
-		DT_FV_NONE = 0,
-		DT_FV_PID,
-		DT_FV_TID,
-	}		dtf_variable		/* what should be filtered */;
-	unsigned int	dtf_value;		/* PID or TID to filter */
-};
-
 
 struct dtioc_probe_info {
 	uint32_t	dtpi_pbn;		/* probe number */
@@ -114,9 +95,20 @@ struct dtioc_probe {
 	struct dtioc_probe_info	*dtpr_probes;	/* array of probe info */
 };
 
+struct dtioc_arg_info {
+	uint32_t	dtai_pbn;		/* probe number */
+	uint8_t		dtai_argn;		/* arguments number */
+	char		dtai_argtype[DTNAMESIZE];
+};
+
+struct dtioc_arg {
+	uint32_t		 dtar_pbn;	/* probe number */
+	size_t			 dtar_size;	/* size of the buffer */
+	struct dtioc_arg_info	*dtar_args;	/* array of arg info */
+};
+
 struct dtioc_req {
 	uint32_t		 dtrq_pbn;	/* probe number */
-	struct dt_filter	 dtrq_filter;	/* probe filter */
 	uint32_t		 dtrq_rate;	/* number of ticks */
 	uint64_t		 dtrq_evtflags;	/* states to record */
 };
@@ -126,13 +118,18 @@ struct dtioc_stat {
 	uint64_t		 dtst_dropevt;	/* events dropped */
 };
 
+struct dtioc_getaux {
+	pid_t			 dtga_pid;	/* process to inspect */
+	unsigned long		 dtga_auxbase;	/* AUX_base value */
+};
+
 #define DTIOCGPLIST	_IOWR('D', 1, struct dtioc_probe)
 #define DTIOCGSTATS	_IOR('D', 2, struct dtioc_stat)
-
 #define DTIOCRECORD	_IOW('D', 3, int)
 #define DTIOCPRBENABLE	_IOW('D', 4, struct dtioc_req)
 #define DTIOCPRBDISABLE	 _IOW('D', 5, struct dtioc_req)
-
+#define DTIOCGARGS	_IOWR('D', 6, struct dtioc_arg)
+#define DTIOCGETAUXBASE	 _IOWR('D', 7, struct dtioc_getaux)
 
 #ifdef _KERNEL
 
@@ -147,8 +144,6 @@ struct dtioc_stat {
 
 struct dt_softc;
 
-int		dtioc_req_isvalid(struct dtioc_req *);
-
 /*
  * Probe control block, possibly per-CPU.
  *
@@ -157,6 +152,7 @@ int		dtioc_req_isvalid(struct dtioc_req *);
  * userland read(2)s them.
  *
  *  Locks used to protect struct members in this file:
+ *	D	dt_lock
  *	I	immutable after creation
  *	K	kernel lock
  *	K,S	kernel lock for writing and SMR for reading
@@ -170,18 +166,17 @@ struct dt_pcb {
 	/* Event states ring */
 	unsigned int		 dp_prod;	/* [m] read index */
 	unsigned int		 dp_cons;	/* [m] write index */
-	struct dt_evt		*dp_ring;	/* [m] ring of event sates */
+	struct dt_evt		*dp_ring;	/* [m] ring of event states */
 	struct mutex		 dp_mtx;
 
 	struct dt_softc		*dp_sc;		/* [I] related softc */
 	struct dt_probe		*dp_dtp;	/* [I] related probe */
 	uint64_t		 dp_evtflags;	/* [I] event states to record */
-	struct dt_filter	 dp_filter;	/* [I] filter to match */
 
 	/* Provider specific fields. */
-	unsigned int		 dp_cpuid;	/* [I] on which CPU */
-	unsigned int		 dp_maxtick;	/* [I] freq. of profiling */
-	unsigned int		 dp_nticks;	/* [c] current tick count */
+	struct clockintr	 dp_clockintr;	/* [D] profiling handle */
+	uint64_t		 dp_nsecs;	/* [I] profiling period */
+	struct cpu_info		*dp_cpu;	/* [I] on which CPU */
 
 	/* Counters */
 	uint64_t		 dp_dropevt;	/* [m] # dropped event */
@@ -192,7 +187,6 @@ TAILQ_HEAD(dt_pcb_list, dt_pcb);
 struct dt_pcb	*dt_pcb_alloc(struct dt_probe *, struct dt_softc *);
 void		 dt_pcb_free(struct dt_pcb *);
 void		 dt_pcb_purge(struct dt_pcb_list *);
-int		 dt_pcb_filter(struct dt_pcb *);
 
 struct dt_evt	*dt_pcb_ring_get(struct dt_pcb *, int);
 void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
@@ -219,7 +213,8 @@ struct dt_probe {
 
 	/* Provider specific fields. */
 	int			 dtp_sysnum;	/* [I] related # of syscall */
-	const char		*dtp_argtype[5];/* [I] type of arguments */
+	const char		*dtp_argtype[DTMAXARGTYPES];
+						/* [I] type of arguments */
 	int			 dtp_nargs;	/* [I] # of arguments */
 	vaddr_t			 dtp_addr;	/* [I] address of breakpoint */
 };
@@ -251,6 +246,7 @@ struct dt_probe *dt_dev_alloc_probe(const char *, const char *,
 		    struct dt_provider *);
 void		 dt_dev_register_probe(struct dt_probe *);
 
+void		 dt_clock(struct clockrequest *, void *, void *);
 
 extern volatile uint32_t	dt_tracing;	/* currently tracing? */
 

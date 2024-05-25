@@ -1,4 +1,4 @@
-/* $OpenBSD: input.c,v 1.212 2022/11/11 08:37:55 nicm Exp $ */
+/* $OpenBSD: input.c,v 1.224 2024/04/10 07:36:25 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -144,6 +144,7 @@ static void	input_osc_104(struct input_ctx *, const char *);
 static void	input_osc_110(struct input_ctx *, const char *);
 static void	input_osc_111(struct input_ctx *, const char *);
 static void	input_osc_112(struct input_ctx *, const char *);
+static void	input_osc_133(struct input_ctx *, const char *);
 
 /* Transition entry/exit handlers. */
 static void	input_clear(struct input_ctx *);
@@ -168,6 +169,7 @@ static void	input_csi_dispatch_rm(struct input_ctx *);
 static void	input_csi_dispatch_rm_private(struct input_ctx *);
 static void	input_csi_dispatch_sm(struct input_ctx *);
 static void	input_csi_dispatch_sm_private(struct input_ctx *);
+static void	input_csi_dispatch_sm_graphics(struct input_ctx *);
 static void	input_csi_dispatch_winops(struct input_ctx *);
 static void	input_csi_dispatch_sgr_256(struct input_ctx *, int, u_int *);
 static void	input_csi_dispatch_sgr_rgb(struct input_ctx *, int, u_int *);
@@ -202,7 +204,7 @@ enum input_esc_type {
 	INPUT_ESC_SCSG0_ON,
 	INPUT_ESC_SCSG1_OFF,
 	INPUT_ESC_SCSG1_ON,
-	INPUT_ESC_ST,
+	INPUT_ESC_ST
 };
 
 /* Escape command table. */
@@ -258,11 +260,12 @@ enum input_csi_type {
 	INPUT_CSI_SGR,
 	INPUT_CSI_SM,
 	INPUT_CSI_SM_PRIVATE,
+	INPUT_CSI_SM_GRAPHICS,
 	INPUT_CSI_SU,
 	INPUT_CSI_TBC,
 	INPUT_CSI_VPA,
 	INPUT_CSI_WINOPS,
-	INPUT_CSI_XDA,
+	INPUT_CSI_XDA
 };
 
 /* Control (CSI) command table. */
@@ -282,6 +285,7 @@ static const struct input_table_entry input_csi_table[] = {
 	{ 'M', "",  INPUT_CSI_DL },
 	{ 'P', "",  INPUT_CSI_DCH },
 	{ 'S', "",  INPUT_CSI_SU },
+	{ 'S', "?", INPUT_CSI_SM_GRAPHICS },
 	{ 'T', "",  INPUT_CSI_SD },
 	{ 'X', "",  INPUT_CSI_ECH },
 	{ 'Z', "",  INPUT_CSI_CBT },
@@ -305,7 +309,7 @@ static const struct input_table_entry input_csi_table[] = {
 	{ 'r', "",  INPUT_CSI_DECSTBM },
 	{ 's', "",  INPUT_CSI_SCP },
 	{ 't', "",  INPUT_CSI_WINOPS },
-	{ 'u', "",  INPUT_CSI_RCP },
+	{ 'u', "",  INPUT_CSI_RCP }
 };
 
 /* Input transition. */
@@ -971,6 +975,10 @@ input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
 	window_update_activity(wp->window);
 	wp->flags |= PANE_CHANGED;
 
+	/* Flag new input while in a mode. */
+	if (!TAILQ_EMPTY(&wp->modes))
+		wp->flags |= PANE_UNSEENCHANGES;
+
 	/* NULL wp if there is a mode set as don't want to update the tty. */
 	if (TAILQ_EMPTY(&wp->modes))
 		screen_write_start_pane(sctx, wp, &wp->base);
@@ -1086,6 +1094,7 @@ input_reply(struct input_ctx *ictx, const char *fmt, ...)
 	xvasprintf(&reply, fmt, ap);
 	va_end(ap);
 
+	log_debug("%s: %s", __func__, reply);
 	bufferevent_write(bev, reply, strlen(reply));
 	free(reply);
 }
@@ -1589,6 +1598,9 @@ input_csi_dispatch(struct input_ctx *ictx)
 	case INPUT_CSI_SM_PRIVATE:
 		input_csi_dispatch_sm_private(ictx);
 		break;
+	case INPUT_CSI_SM_GRAPHICS:
+		input_csi_dispatch_sm_graphics(ictx);
+		break;
 	case INPUT_CSI_SU:
 		n = input_get(ictx, 0, 1, 1);
 		if (n != -1)
@@ -1821,6 +1833,12 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 	}
 }
 
+/* Handle CSI graphics SM. */
+static void
+input_csi_dispatch_sm_graphics(__unused struct input_ctx *ictx)
+{
+}
+
 /* Handle CSI window operations. */
 static void
 input_csi_dispatch_winops(struct input_ctx *ictx)
@@ -1828,8 +1846,12 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 	struct screen_write_ctx	*sctx = &ictx->ctx;
 	struct screen		*s = sctx->s;
 	struct window_pane	*wp = ictx->wp;
+	struct window		*w = NULL;
 	u_int			 x = screen_size_x(s), y = screen_size_y(s);
 	int			 n, m;
+
+	if (wp != NULL)
+		w = wp->window;
 
 	m = 0;
 	while ((n = input_get(ictx, m, 0, -1)) != -1) {
@@ -1841,8 +1863,6 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 		case 7:
 		case 11:
 		case 13:
-		case 14:
-		case 19:
 		case 20:
 		case 21:
 		case 24:
@@ -1859,6 +1879,30 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 			m++;
 			if (input_get(ictx, m, 0, -1) == -1)
 				return;
+			break;
+		case 14:
+			if (w == NULL)
+				break;
+			input_reply(ictx, "\033[4;%u;%ut", y * w->ypixel,
+			    x * w->xpixel);
+			break;
+		case 15:
+			if (w == NULL)
+				break;
+			input_reply(ictx, "\033[5;%u;%ut", y * w->ypixel,
+			    x * w->xpixel);
+			break;
+		case 16:
+			if (w == NULL)
+				break;
+			input_reply(ictx, "\033[6;%u;%ut", w->ypixel,
+			    w->xpixel);
+			break;
+		case 18:
+			input_reply(ictx, "\033[8;%u;%ut", y, x);
+			break;
+		case 19:
+			input_reply(ictx, "\033[9;%u;%ut", y, x);
 			break;
 		case 22:
 			m++;
@@ -1882,13 +1926,10 @@ input_csi_dispatch_winops(struct input_ctx *ictx)
 				if (wp == NULL)
 					break;
 				notify_pane("pane-title-changed", wp);
-				server_redraw_window_borders(wp->window);
-				server_status_window(wp->window);
+				server_redraw_window_borders(w);
+				server_status_window(w);
 				break;
 			}
-			break;
-		case 18:
-			input_reply(ictx, "\033[8;%u;%ut", y, x);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);
@@ -2060,7 +2101,7 @@ static void
 input_csi_dispatch_sgr(struct input_ctx *ictx)
 {
 	struct grid_cell	*gc = &ictx->cell.cell;
-	u_int			 i;
+	u_int			 i, link;
 	int			 n;
 
 	if (ictx->param_list_len == 0) {
@@ -2092,7 +2133,9 @@ input_csi_dispatch_sgr(struct input_ctx *ictx)
 
 		switch (n) {
 		case 0:
+			link = gc->link;
 			memcpy(gc, &grid_default_cell, sizeof *gc);
+			gc->link = link;
 			break;
 		case 1:
 			gc->attr |= GRID_ATTR_BRIGHT;
@@ -2178,7 +2221,7 @@ input_csi_dispatch_sgr(struct input_ctx *ictx)
 			gc->attr &= ~GRID_ATTR_OVERLINE;
 			break;
 		case 59:
-			gc->us = 0;
+			gc->us = 8;
 			break;
 		case 90:
 		case 91:
@@ -2240,10 +2283,13 @@ input_dcs_dispatch(struct input_ctx *ictx)
 
 	if (wp == NULL)
 		return (0);
-	if (ictx->flags & INPUT_DISCARD)
+	if (ictx->flags & INPUT_DISCARD) {
+		log_debug("%s: %zu bytes (discard)", __func__, len);
 		return (0);
-	allow_passthrough = options_get_number(wp->options,
-	    "allow-passthrough");
+	}
+	log_debug("%s: %zu bytes", __func__, len);
+
+	allow_passthrough = options_get_number(wp->options, "allow-passthrough");
 	if (!allow_passthrough)
 		return (0);
 	log_debug("%s: \"%s\"", __func__, buf);
@@ -2295,7 +2341,9 @@ input_exit_osc(struct input_ctx *ictx)
 	switch (option) {
 	case 0:
 	case 2:
-		if (screen_set_title(sctx->s, p) && wp != NULL) {
+		if (wp != NULL &&
+		    options_get_number(wp->options, "allow-set-title") &&
+		    screen_set_title(sctx->s, p)) {
 			notify_pane("pane-title-changed", wp);
 			server_redraw_window_borders(wp->window);
 			server_status_window(wp->window);
@@ -2339,6 +2387,9 @@ input_exit_osc(struct input_ctx *ictx)
 		break;
 	case 112:
 		input_osc_112(ictx, p);
+		break;
+	case 133:
+		input_osc_133(ictx, p);
 		break;
 	default:
 		log_debug("%s: unknown '%u'", __func__, option);
@@ -2456,47 +2507,6 @@ input_top_bit_set(struct input_ctx *ictx)
 	return (0);
 }
 
-/* Parse colour from OSC. */
-static int
-input_osc_parse_colour(const char *p)
-{
-	double	 c, m, y, k = 0;
-	u_int	 r, g, b;
-	size_t	 len = strlen(p);
-	int	 colour = -1;
-	char	*copy;
-
-	if ((len == 12 && sscanf(p, "rgb:%02x/%02x/%02x", &r, &g, &b) == 3) ||
-	    (len == 7 && sscanf(p, "#%02x%02x%02x", &r, &g, &b) == 3) ||
-	    sscanf(p, "%d,%d,%d", &r, &g, &b) == 3)
-		colour = colour_join_rgb(r, g, b);
-	else if ((len == 18 &&
-	    sscanf(p, "rgb:%04x/%04x/%04x", &r, &g, &b) == 3) ||
-	    (len == 13 && sscanf(p, "#%04x%04x%04x", &r, &g, &b) == 3))
-		colour = colour_join_rgb(r >> 8, g >> 8, b >> 8);
-	else if ((sscanf(p, "cmyk:%lf/%lf/%lf/%lf", &c, &m, &y, &k) == 4 ||
-	    sscanf(p, "cmy:%lf/%lf/%lf", &c, &m, &y) == 3) &&
-	    c >= 0 && c <= 1 && m >= 0 && m <= 1 &&
-	    y >= 0 && y <= 1 && k >= 0 && k <= 1) {
-		colour = colour_join_rgb(
-		    (1 - c) * (1 - k) * 255,
-		    (1 - m) * (1 - k) * 255,
-		    (1 - y) * (1 - k) * 255);
-	} else {
-		while (len != 0 && *p == ' ') {
-			p++;
-			len--;
-		}
-		while (len != 0 && p[len - 1] == ' ')
-			len--;
-		copy = xstrndup(p, len);
-		colour = colour_byname(copy);
-		free(copy);
-	}
-	log_debug("%s: %s = %s", __func__, p, colour_tostring(colour));
-	return (colour);
-}
-
 /* Reply to a colour request. */
 static void
 input_osc_colour_reply(struct input_ctx *ictx, u_int n, int c)
@@ -2545,7 +2555,7 @@ input_osc_4(struct input_ctx *ictx, const char *p)
 				input_osc_colour_reply(ictx, 4, c);
 			continue;
 		}
-		if ((c = input_osc_parse_colour(s)) == -1) {
+		if ((c = colour_parseX11(s)) == -1) {
 			s = next;
 			continue;
 		}
@@ -2601,6 +2611,47 @@ bad:
 	free(id);
 }
 
+/*
+ * Get a client with a foreground for the pane. There isn't much to choose
+ * between them so just use the first.
+ */
+static int
+input_get_fg_client(struct window_pane *wp)
+{
+	struct window	*w = wp->window;
+	struct client	*loop;
+
+	TAILQ_FOREACH(loop, &clients, entry) {
+		if (loop->flags & CLIENT_UNATTACHEDFLAGS)
+			continue;
+		if (loop->session == NULL || !session_has(loop->session, w))
+			continue;
+		if (loop->tty.fg == -1)
+			continue;
+		return (loop->tty.fg);
+	}
+	return (-1);
+}
+
+/* Get a client with a background for the pane. */
+static int
+input_get_bg_client(struct window_pane *wp)
+{
+	struct window	*w = wp->window;
+	struct client	*loop;
+
+	TAILQ_FOREACH(loop, &clients, entry) {
+		if (loop->flags & CLIENT_UNATTACHEDFLAGS)
+			continue;
+		if (loop->session == NULL || !session_has(loop->session, w))
+			continue;
+		if (loop->tty.bg == -1)
+			continue;
+		return (loop->tty.bg);
+	}
+	return (-1);
+}
+
 /* Handle the OSC 10 sequence for setting and querying foreground colour. */
 static void
 input_osc_10(struct input_ctx *ictx, const char *p)
@@ -2610,14 +2661,18 @@ input_osc_10(struct input_ctx *ictx, const char *p)
 	int			 c;
 
 	if (strcmp(p, "?") == 0) {
-		if (wp != NULL) {
-			tty_default_colours(&defaults, wp);
-			input_osc_colour_reply(ictx, 10, defaults.fg);
-		}
+		if (wp == NULL)
+			return;
+		tty_default_colours(&defaults, wp);
+		if (COLOUR_DEFAULT(defaults.fg))
+			c = input_get_fg_client(wp);
+		else
+			c = defaults.fg;
+		input_osc_colour_reply(ictx, 10, c);
 		return;
 	}
 
-	if ((c = input_osc_parse_colour(p)) == -1) {
+	if ((c = colour_parseX11(p)) == -1) {
 		log_debug("bad OSC 10: %s", p);
 		return;
 	}
@@ -2654,14 +2709,18 @@ input_osc_11(struct input_ctx *ictx, const char *p)
 	int			 c;
 
 	if (strcmp(p, "?") == 0) {
-		if (wp != NULL) {
-			tty_default_colours(&defaults, wp);
-			input_osc_colour_reply(ictx, 11, defaults.bg);
-		}
+		if (wp == NULL)
+			return;
+		tty_default_colours(&defaults, wp);
+		if (COLOUR_DEFAULT(defaults.bg))
+			c = input_get_bg_client(wp);
+		else
+			c = defaults.bg;
+		input_osc_colour_reply(ictx, 11, c);
 		return;
 	}
 
-	if ((c = input_osc_parse_colour(p)) == -1) {
+	if ((c = colour_parseX11(p)) == -1) {
 		log_debug("bad OSC 11: %s", p);
 		return;
 	}
@@ -2706,7 +2765,7 @@ input_osc_12(struct input_ctx *ictx, const char *p)
 		return;
 	}
 
-	if ((c = input_osc_parse_colour(p)) == -1) {
+	if ((c = colour_parseX11(p)) == -1) {
 		log_debug("bad OSC 12: %s", p);
 		return;
 	}
@@ -2721,6 +2780,27 @@ input_osc_112(struct input_ctx *ictx, const char *p)
 		screen_set_cursor_colour(ictx->ctx.s, -1);
 }
 
+/* Handle the OSC 133 sequence. */
+static void
+input_osc_133(struct input_ctx *ictx, const char *p)
+{
+	struct grid		*gd = ictx->ctx.s->grid;
+	u_int			 line = ictx->ctx.s->cy + gd->hsize;
+	struct grid_line	*gl;
+
+	if (line > gd->hsize + gd->sy - 1)
+		return;
+	gl = grid_get_line(gd, line);
+
+	switch (*p) {
+	case 'A':
+		gl->flags |= GRID_LINE_START_PROMPT;
+		break;
+	case 'C':
+		gl->flags |= GRID_LINE_START_OUTPUT;
+		break;
+	}
+}
 
 /* Handle the OSC 52 sequence for setting the clipboard. */
 static void
@@ -2827,9 +2907,11 @@ input_reply_clipboard(struct bufferevent *bev, const char *buf, size_t len,
     const char *end)
 {
 	char	*out = NULL;
-	size_t	 outlen = 0;
+	int	 outlen = 0;
 
 	if (buf != NULL && len != 0) {
+		if (len >= ((size_t)INT_MAX * 3 / 4) - 1)
+			return;
 		outlen = 4 * ((len + 2) / 3) + 1;
 		out = xmalloc(outlen);
 		if ((outlen = b64_ntop(buf, len, out, outlen)) == -1) {

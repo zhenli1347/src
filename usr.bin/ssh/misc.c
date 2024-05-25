@@ -1,4 +1,4 @@
-/* $OpenBSD: misc.c,v 1.178 2022/11/09 09:01:52 dtucker Exp $ */
+/* $OpenBSD: misc.c,v 1.195 2024/05/17 06:11:17 deraadt Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  * Copyright (c) 2005-2020 Damien Miller.  All rights reserved.
@@ -40,10 +40,12 @@
 #include <pwd.h>
 #include <libgen.h>
 #include <limits.h>
+#include <nlist.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -80,7 +82,7 @@ rtrim(char *s)
 	if ((i = strlen(s)) == 0)
 		return;
 	for (i--; i > 0; i--) {
-		if (isspace((int)s[i]))
+		if (isspace((unsigned char)s[i]))
 			s[i] = '\0';
 	}
 }
@@ -267,19 +269,38 @@ set_sock_tos(int fd, int tos)
  * Returns 0 if fd ready or -1 on timeout or error (see errno).
  */
 static int
-waitfd(int fd, int *timeoutp, short events)
+waitfd(int fd, int *timeoutp, short events, volatile sig_atomic_t *stop)
 {
 	struct pollfd pfd;
-	struct timeval t_start;
+	struct timespec timeout;
 	int oerrno, r;
+	sigset_t nsigset, osigset;
 
+	if (timeoutp && *timeoutp == -1)
+		timeoutp = NULL;
 	pfd.fd = fd;
 	pfd.events = events;
-	for (; *timeoutp >= 0;) {
-		monotime_tv(&t_start);
-		r = poll(&pfd, 1, *timeoutp);
+	ptimeout_init(&timeout);
+	if (timeoutp != NULL)
+		ptimeout_deadline_ms(&timeout, *timeoutp);
+	if (stop != NULL)
+		sigfillset(&nsigset);
+	for (; timeoutp == NULL || *timeoutp >= 0;) {
+		if (stop != NULL) {
+			sigprocmask(SIG_BLOCK, &nsigset, &osigset);
+			if (*stop) {
+				sigprocmask(SIG_SETMASK, &osigset, NULL);
+				errno = EINTR;
+				return -1;
+			}
+		}
+		r = ppoll(&pfd, 1, ptimeout_get_tsp(&timeout),
+		    stop != NULL ? &osigset : NULL);
 		oerrno = errno;
-		ms_subtract_diff(&t_start, timeoutp);
+		if (stop != NULL)
+			sigprocmask(SIG_SETMASK, &osigset, NULL);
+		if (timeoutp)
+			*timeoutp = ptimeout_get_ms(&timeout);
 		errno = oerrno;
 		if (r > 0)
 			return 0;
@@ -299,8 +320,8 @@ waitfd(int fd, int *timeoutp, short events)
  * Returns 0 if fd ready or -1 on timeout or error (see errno).
  */
 int
-waitrfd(int fd, int *timeoutp) {
-	return waitfd(fd, timeoutp, POLLIN);
+waitrfd(int fd, int *timeoutp, volatile sig_atomic_t *stop) {
+	return waitfd(fd, timeoutp, POLLIN, stop);
 }
 
 /*
@@ -334,7 +355,7 @@ timeout_connect(int sockfd, const struct sockaddr *serv_addr,
 		break;
 	}
 
-	if (waitfd(sockfd, timeoutp, POLLIN | POLLOUT) == -1)
+	if (waitfd(sockfd, timeoutp, POLLIN | POLLOUT, NULL) == -1)
 		return -1;
 
 	/* Completed or failed */
@@ -490,6 +511,14 @@ a2tun(const char *s, int *remote)
 #define DAYS		(HOURS * 24)
 #define WEEKS		(DAYS * 7)
 
+static char *
+scandigits(char *s)
+{
+	while (isdigit((unsigned char)*s))
+		s++;
+	return s;
+}
+
 /*
  * Convert a time string into seconds; format is
  * a sequence of:
@@ -514,28 +543,31 @@ a2tun(const char *s, int *remote)
 int
 convtime(const char *s)
 {
-	long total, secs, multiplier;
-	const char *p;
-	char *endp;
+	int secs, total = 0, multiplier;
+	char *p, *os, *np, c = 0;
+	const char *errstr;
 
-	errno = 0;
-	total = 0;
-	p = s;
-
-	if (p == NULL || *p == '\0')
+	if (s == NULL || *s == '\0')
+		return -1;
+	p = os = strdup(s);	/* deal with const */
+	if (os == NULL)
 		return -1;
 
 	while (*p) {
-		secs = strtol(p, &endp, 10);
-		if (p == endp ||
-		    (errno == ERANGE && (secs == INT_MIN || secs == INT_MAX)) ||
-		    secs < 0)
-			return -1;
+		np = scandigits(p);
+		if (np) {
+			c = *np;
+			*np = '\0';
+		}
+		secs = (int)strtonum(p, 0, INT_MAX, &errstr);
+		if (errstr)
+			goto fail;
+		*np = c;
 
 		multiplier = 1;
-		switch (*endp++) {
+		switch (c) {
 		case '\0':
-			endp--;
+			np--;	/* back up */
 			break;
 		case 's':
 		case 'S':
@@ -557,20 +589,23 @@ convtime(const char *s)
 			multiplier = WEEKS;
 			break;
 		default:
-			return -1;
+			goto fail;
 		}
 		if (secs > INT_MAX / multiplier)
-			return -1;
+			goto fail;
 		secs *= multiplier;
 		if  (total > INT_MAX - secs)
-			return -1;
+			goto fail;
 		total += secs;
 		if (total < 0)
-			return -1;
-		p = endp;
+			goto fail;
+		p = ++np;
 	}
-
+	free(os);
 	return total;
+fail:
+	free(os);
+	return -1;
 }
 
 #define TF_BUFS	8
@@ -879,8 +914,11 @@ urldecode(const char *src)
 {
 	char *ret, *dst;
 	int ch;
+	size_t srclen;
 
-	ret = xmalloc(strlen(src) + 1);
+	if ((srclen = strlen(src)) >= SIZE_MAX)
+		fatal_f("input too large");
+	ret = xmalloc(srclen + 1);
 	for (dst = ret; *src != '\0'; src++) {
 		switch (*src) {
 		case '+':
@@ -1173,7 +1211,7 @@ static char *
 vdollar_percent_expand(int *parseerror, int dollar, int percent,
     const char *string, va_list ap)
 {
-#define EXPAND_MAX_KEYS	16
+#define EXPAND_MAX_KEYS	64
 	u_int num_keys = 0, i;
 	struct {
 		const char *key;
@@ -1752,9 +1790,9 @@ static const struct {
 int
 parse_ipqos(const char *cp)
 {
+	const char *errstr;
 	u_int i;
-	char *ep;
-	long val;
+	int val;
 
 	if (cp == NULL)
 		return -1;
@@ -1763,8 +1801,8 @@ parse_ipqos(const char *cp)
 			return ipqos[i].value;
 	}
 	/* Try parsing as an integer */
-	val = strtol(cp, &ep, 0);
-	if (*cp == '\0' || *ep != '\0' || val < 0 || val > 255)
+	val = (int)strtonum(cp, 0, 255, &errstr);
+	if (errstr)
 		return -1;
 	return val;
 }
@@ -1869,6 +1907,19 @@ forward_equals(const struct Forward *a, const struct Forward *b)
 		return 0;
 	/* allocated_port and handle are not checked */
 	return 1;
+}
+
+/* returns port number, FWD_PERMIT_ANY_PORT or -1 on error */
+int
+permitopen_port(const char *p)
+{
+	int port;
+
+	if (strcmp(p, "*") == 0)
+		return FWD_PERMIT_ANY_PORT;
+	if ((port = a2port(p)) > 0)
+		return port;
+	return -1;
 }
 
 /* returns 1 if process is already daemonized, 0 otherwise */
@@ -2283,13 +2334,10 @@ const char *
 atoi_err(const char *nptr, int *val)
 {
 	const char *errstr = NULL;
-	long long num;
 
 	if (nptr == NULL || *nptr == '\0')
 		return "missing";
-	num = strtonum(nptr, 0, INT_MAX, &errstr);
-	if (errstr == NULL)
-		*val = (int)num;
+	*val = strtonum(nptr, 0, INT_MAX, &errstr);
 	return errstr;
 }
 
@@ -2352,9 +2400,6 @@ parse_absolute_time(const char *s, uint64_t *tp)
 	return 0;
 }
 
-/* On OpenBSD time_t is int64_t which is long long. */
-#define SSH_TIME_T_MAX LLONG_MAX
-
 void
 format_absolute_time(uint64_t t, char *buf, size_t len)
 {
@@ -2363,6 +2408,43 @@ format_absolute_time(uint64_t t, char *buf, size_t len)
 
 	localtime_r(&tt, &tm);
 	strftime(buf, len, "%Y-%m-%dT%H:%M:%S", &tm);
+}
+
+/*
+ * Parse a "pattern=interval" clause (e.g. a ChannelTimeout).
+ * Returns 0 on success or non-zero on failure.
+ * Caller must free *typep.
+ */
+int
+parse_pattern_interval(const char *s, char **typep, int *secsp)
+{
+	char *cp, *sdup;
+	int secs;
+
+	if (typep != NULL)
+		*typep = NULL;
+	if (secsp != NULL)
+		*secsp = 0;
+	if (s == NULL)
+		return -1;
+	sdup = xstrdup(s);
+
+	if ((cp = strchr(sdup, '=')) == NULL || cp == sdup) {
+		free(sdup);
+		return -1;
+	}
+	*cp++ = '\0';
+	if ((secs = convtime(cp)) < 0) {
+		free(sdup);
+		return -1;
+	}
+	/* success */
+	if (typep != NULL)
+		*typep = xstrdup(sdup);
+	if (secsp != NULL)
+		*secsp = secs;
+	free(sdup);
+	return 0;
 }
 
 /* check if path is absolute */
@@ -2477,6 +2559,19 @@ opt_array_append(const char *file, const int line, const char *directive,
     char ***array, u_int *lp, const char *s)
 {
 	opt_array_append2(file, line, directive, array, NULL, lp, s, 0);
+}
+
+void
+opt_array_free2(char **array, int **iarray, u_int l)
+{
+	u_int i;
+
+	if (array == NULL || l == 0)
+		return;
+	for (i = 0; i < l; i++)
+		free(array[i]);
+	free(array);
+	free(iarray);
 }
 
 sshsig_t
@@ -2722,5 +2817,133 @@ lookup_setenv_in_list(const char *env, char * const *envs, size_t nenvs)
 	*cp = '\0';
 	ret = lookup_env_in_list(name, envs, nenvs);
 	free(name);
+	return ret;
+}
+
+/*
+ * Helpers for managing poll(2)/ppoll(2) timeouts
+ * Will remember the earliest deadline and return it for use in poll/ppoll.
+ */
+
+/* Initialise a poll/ppoll timeout with an indefinite deadline */
+void
+ptimeout_init(struct timespec *pt)
+{
+	/*
+	 * Deliberately invalid for ppoll(2).
+	 * Will be converted to NULL in ptimeout_get_tspec() later.
+	 */
+	pt->tv_sec = -1;
+	pt->tv_nsec = 0;
+}
+
+/* Specify a poll/ppoll deadline of at most 'sec' seconds */
+void
+ptimeout_deadline_sec(struct timespec *pt, long sec)
+{
+	if (pt->tv_sec == -1 || pt->tv_sec >= sec) {
+		pt->tv_sec = sec;
+		pt->tv_nsec = 0;
+	}
+}
+
+/* Specify a poll/ppoll deadline of at most 'p' (timespec) */
+static void
+ptimeout_deadline_tsp(struct timespec *pt, struct timespec *p)
+{
+	if (pt->tv_sec == -1 || timespeccmp(pt, p, >=))
+		*pt = *p;
+}
+
+/* Specify a poll/ppoll deadline of at most 'ms' milliseconds */
+void
+ptimeout_deadline_ms(struct timespec *pt, long ms)
+{
+	struct timespec p;
+
+	p.tv_sec = ms / 1000;
+	p.tv_nsec = (ms % 1000) * 1000000;
+	ptimeout_deadline_tsp(pt, &p);
+}
+
+/* Specify a poll/ppoll deadline at wall clock monotime 'when' (timespec) */
+void
+ptimeout_deadline_monotime_tsp(struct timespec *pt, struct timespec *when)
+{
+	struct timespec now, t;
+
+	monotime_ts(&now);
+
+	if (timespeccmp(&now, when, >=)) {
+		/* 'when' is now or in the past. Timeout ASAP */
+		pt->tv_sec = 0;
+		pt->tv_nsec = 0;
+	} else {
+		timespecsub(when, &now, &t);
+		ptimeout_deadline_tsp(pt, &t);
+	}
+}
+
+/* Specify a poll/ppoll deadline at wall clock monotime 'when' */
+void
+ptimeout_deadline_monotime(struct timespec *pt, time_t when)
+{
+	struct timespec t;
+
+	t.tv_sec = when;
+	t.tv_nsec = 0;
+	ptimeout_deadline_monotime_tsp(pt, &t);
+}
+
+/* Get a poll(2) timeout value in milliseconds */
+int
+ptimeout_get_ms(struct timespec *pt)
+{
+	if (pt->tv_sec == -1)
+		return -1;
+	if (pt->tv_sec >= (INT_MAX - (pt->tv_nsec / 1000000)) / 1000)
+		return INT_MAX;
+	return (pt->tv_sec * 1000) + (pt->tv_nsec / 1000000);
+}
+
+/* Get a ppoll(2) timeout value as a timespec pointer */
+struct timespec *
+ptimeout_get_tsp(struct timespec *pt)
+{
+	return pt->tv_sec == -1 ? NULL : pt;
+}
+
+/* Returns non-zero if a timeout has been set (i.e. is not indefinite) */
+int
+ptimeout_isset(struct timespec *pt)
+{
+	return pt->tv_sec != -1;
+}
+
+/*
+ * Returns zero if the library at 'path' contains symbol 's', nonzero
+ * otherwise.
+ */
+int
+lib_contains_symbol(const char *path, const char *s)
+{
+	struct nlist nl[2];
+	int ret = -1, r;
+
+	memset(nl, 0, sizeof(nl));
+	nl[0].n_name = xstrdup(s);
+	nl[1].n_name = NULL;
+	if ((r = nlist(path, nl)) == -1) {
+		error_f("nlist failed for %s", path);
+		goto out;
+	}
+	if (r != 0 || nl[0].n_value == 0 || nl[0].n_type == 0) {
+		error_f("library %s does not contain symbol %s", path, s);
+		goto out;
+	}
+	/* success */
+	ret = 0;
+ out:
+	free(nl[0].n_name);
 	return ret;
 }

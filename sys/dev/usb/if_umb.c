@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_umb.c,v 1.49 2022/01/11 10:34:13 claudio Exp $ */
+/*	$OpenBSD: if_umb.c,v 1.58 2024/05/23 03:21:09 jsg Exp $ */
 
 /*
  * Copyright (c) 2016 genua mbH
@@ -23,13 +23,15 @@
  * Compliance testing guide
  * https://www.usb.org/sites/default/files/MBIM-Compliance-1.0.pdf
  */
+
 #include "bpfilter.h"
+#include "kstat.h"
 
 #include <sys/param.h>
 #include <sys/mbuf.h>
-#include <sys/socket.h>
 #include <sys/systm.h>
 #include <sys/syslog.h>
+#include <sys/kstat.h>
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
@@ -41,12 +43,9 @@
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
-#include <netinet/ip.h>
 
 #ifdef INET6
-#include <netinet/ip6.h>
 #include <netinet6/in6_var.h>
-#include <netinet6/ip6_var.h>
 #include <netinet6/in6_ifattach.h>
 #include <netinet6/nd6.h>
 #endif
@@ -138,7 +137,6 @@ void		 umb_close_bulkpipes(struct umb_softc *);
 int		 umb_ioctl(struct ifnet *, u_long, caddr_t);
 int		 umb_output(struct ifnet *, struct mbuf *, struct sockaddr *,
 		    struct rtentry *);
-void		 umb_input(struct ifnet *, struct mbuf *);
 void		 umb_start(struct ifnet *);
 void		 umb_rtrequest(struct ifnet *, int, struct rtentry *);
 void		 umb_watchdog(struct ifnet *);
@@ -204,6 +202,17 @@ void		 umb_decode_qmi(struct umb_softc *, uint8_t *, int);
 
 void		 umb_intr(struct usbd_xfer *, void *, usbd_status);
 
+#if NKSTAT > 0
+void		 umb_kstat_attach(struct umb_softc *);
+void		 umb_kstat_detach(struct umb_softc *);
+
+struct umb_kstat_signal {
+	struct kstat_kv		rssi;
+	struct kstat_kv		error_rate;
+	struct kstat_kv		reports;
+};
+#endif
+
 int		 umb_xfer_tout = USBD_DEFAULT_TIMEOUT;
 
 uint8_t		 umb_uuid_basic_connect[] = MBIM_UUID_BASIC_CONNECT;
@@ -237,13 +246,6 @@ const struct umb_quirk umb_quirks[] = {
 	  2,
 	  UMATCH_VENDOR_PRODUCT
 	},
-
-	{ { USB_VENDOR_QUECTEL, USB_PRODUCT_QUECTEL_EC25 },
-	  0,
-	  1,
-	  UMATCH_VENDOR_PRODUCT
-	},
-
 
 	{ { USB_VENDOR_HUAWEI, USB_PRODUCT_HUAWEI_ME906S },
 	  UMBFLG_NDP_AT_END,
@@ -617,7 +619,8 @@ umb_attach(struct device *parent, struct device *self, void *aux)
 	    sizeof (struct ncm_pointer16);
 	ifp->if_mtu = 1500;		/* use a common default */
 	ifp->if_hardmtu = sc->sc_maxpktlen;
-	ifp->if_input = umb_input;
+	ifp->if_bpf_mtap = p2p_bpf_mtap;
+	ifp->if_input = p2p_input;
 	ifp->if_output = umb_output;
 	if_attach(ifp);
 	if_alloc_sadl(ifp);
@@ -625,6 +628,11 @@ umb_attach(struct device *parent, struct device *self, void *aux)
 #if NBPFILTER > 0
 	bpfattach(&ifp->if_bpf, ifp, DLT_LOOP, sizeof(uint32_t));
 #endif
+
+#if NKSTAT > 0
+	umb_kstat_attach(sc);
+#endif
+
 	/*
 	 * Open the device now so that we are able to query device information.
 	 * XXX maybe close when done?
@@ -651,6 +659,10 @@ umb_detach(struct device *self, int flags)
 	if (ifp->if_flags & IFF_RUNNING)
 		umb_down(sc, 1);
 	umb_close(sc);
+
+#if NKSTAT > 0
+	umb_kstat_detach(sc);
+#endif
 
 	usb_rem_wait_task(sc->sc_udev, &sc->sc_get_response_task);
 	if (timeout_initialized(&sc->sc_statechg_timer))
@@ -915,48 +927,6 @@ umb_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	}
 	m->m_pkthdr.ph_family = dst->sa_family;
 	return if_enqueue(ifp, m);
-}
-
-void
-umb_input(struct ifnet *ifp, struct mbuf *m)
-{
-	uint32_t af;
-
-	if ((ifp->if_flags & IFF_UP) == 0) {
-		m_freem(m);
-		return;
-	}
-	if (m->m_pkthdr.len < sizeof (struct ip) + sizeof(af)) {
-		ifp->if_ierrors++;
-		DPRINTFN(4, "%s: dropping short packet (len %d)\n", __func__,
-		    m->m_pkthdr.len);
-		m_freem(m);
-		return;
-	}
-	m->m_pkthdr.ph_rtableid = ifp->if_rdomain;
-
-	/* pop off DLT_LOOP header, no longer needed */
-	af = *mtod(m, uint32_t *);
-	m_adj(m, sizeof (af));
-	af = ntohl(af);
-
-	ifp->if_ibytes += m->m_pkthdr.len;
-	switch (af) {
-	case AF_INET:
-		ipv4_input(ifp, m);
-		return;
-#ifdef INET6
-	case AF_INET6:
-		ipv6_input(ifp, m);
-		return;
-#endif /* INET6 */
-	default:
-		ifp->if_ierrors++;
-		DPRINTFN(4, "%s: dropping packet with bad IP version (af %d)\n",
-		    __func__, af);
-		m_freem(m);
-		return;
-	}
 }
 
 static inline int
@@ -1719,6 +1689,9 @@ umb_decode_signal_state(struct umb_softc *sc, void *data, int len)
 	struct mbim_cid_signal_state *ss = data;
 	struct ifnet *ifp = GET_IFP(sc);
 	int	 rssi;
+#if NKSTAT > 0
+	struct kstat *ks;
+#endif
 
 	if (len < sizeof (*ss))
 		return 0;
@@ -1733,8 +1706,37 @@ umb_decode_signal_state(struct umb_softc *sc, void *data, int len)
 	}
 	sc->sc_info.rssi = rssi;
 	sc->sc_info.ber = letoh32(ss->err_rate);
-	if (sc->sc_info.ber == -99)
+	if (sc->sc_info.ber == 99)
 		sc->sc_info.ber = UMB_VALUE_UNKNOWN;
+
+#if NKSTAT > 0
+	ks = sc->sc_kstat_signal;
+	if (ks != NULL) {
+		struct umb_kstat_signal *uks = ks->ks_data;
+
+		rw_enter_write(&sc->sc_kstat_lock);
+		kstat_kv_u64(&uks->reports)++;
+
+		if (sc->sc_info.rssi == UMB_VALUE_UNKNOWN)
+			uks->rssi.kv_type = KSTAT_KV_T_NULL;
+		else {
+			uks->rssi.kv_type = KSTAT_KV_T_INT32;
+			kstat_kv_s32(&uks->rssi) = sc->sc_info.rssi;
+		}
+	
+		if (sc->sc_info.ber == UMB_VALUE_UNKNOWN)
+			uks->error_rate.kv_type = KSTAT_KV_T_NULL;
+		else {
+			uks->error_rate.kv_type = KSTAT_KV_T_INT32;
+			kstat_kv_s32(&uks->error_rate) = sc->sc_info.ber;
+		}
+
+		ks->ks_interval.tv_sec = letoh32(ss->ss_intvl);
+		getnanouptime(&ks->ks_updated);
+		rw_exit_write(&sc->sc_kstat_lock);
+	}
+#endif
+
 	return 1;
 }
 
@@ -1809,6 +1811,14 @@ umb_add_inet_config(struct umb_softc *sc, struct in_addr ip, u_int prefixlen,
 	int	 rv;
 
 	memset(&ifra, 0, sizeof (ifra));
+	rv = in_ioctl(SIOCDIFADDR, (caddr_t)&ifra, ifp, 1);
+	if (rv != 0 && rv != EADDRNOTAVAIL) {
+		printf("%s: unable to delete IPv4 address, error %d\n",
+		    DEVNAM(ifp->if_softc), rv);
+		return rv;
+	}
+
+	memset(&ifra, 0, sizeof (ifra));
 	sin = &ifra.ifra_addr;
 	sin->sin_family = AF_INET;
 	sin->sin_len = sizeof (*sin);
@@ -1836,6 +1846,7 @@ umb_add_inet_config(struct umb_softc *sc, struct in_addr ip, u_int prefixlen,
 	default_sin.sin_len = sizeof (default_sin);
 
 	memset(&info, 0, sizeof(info));
+	NET_LOCK();
 	info.rti_flags = RTF_GATEWAY /* maybe | RTF_STATIC */;
 	info.rti_ifa = ifa_ifwithaddr(sintosa(&ifra.ifra_addr),
 	    ifp->if_rdomain);
@@ -1843,9 +1854,7 @@ umb_add_inet_config(struct umb_softc *sc, struct in_addr ip, u_int prefixlen,
 	info.rti_info[RTAX_NETMASK] = sintosa(&default_sin);
 	info.rti_info[RTAX_GATEWAY] = sintosa(&ifra.ifra_dstaddr);
 
-	NET_LOCK();
 	rv = rtrequest(RTM_ADD, &info, 0, &rt, ifp->if_rdomain);
-	NET_UNLOCK();
 	if (rv) {
 		printf("%s: unable to set IPv4 default route, "
 		    "error %d\n", DEVNAM(ifp->if_softc), rv);
@@ -1856,6 +1865,7 @@ umb_add_inet_config(struct umb_softc *sc, struct in_addr ip, u_int prefixlen,
 		rtm_send(rt, RTM_ADD, rv, ifp->if_rdomain);
 		rtfree(rt);
 	}
+	NET_UNLOCK();
 
 	if (ifp->if_flags & IFF_DEBUG) {
 		char str[3][INET_ADDRSTRLEN];
@@ -1917,6 +1927,7 @@ umb_add_inet6_config(struct umb_softc *sc, struct in6_addr *ip, u_int prefixlen,
 	default_sin6.sin6_len = sizeof (default_sin6);
 
 	memset(&info, 0, sizeof(info));
+	NET_LOCK();
 	info.rti_flags = RTF_GATEWAY /* maybe | RTF_STATIC */;
 	info.rti_ifa = ifa_ifwithaddr(sin6tosa(&ifra.ifra_addr),
 	    ifp->if_rdomain);
@@ -1924,9 +1935,7 @@ umb_add_inet6_config(struct umb_softc *sc, struct in6_addr *ip, u_int prefixlen,
 	info.rti_info[RTAX_NETMASK] = sin6tosa(&default_sin6);
 	info.rti_info[RTAX_GATEWAY] = sin6tosa(&ifra.ifra_dstaddr);
 
-	NET_LOCK();
 	rv = rtrequest(RTM_ADD, &info, 0, &rt, ifp->if_rdomain);
-	NET_UNLOCK();
 	if (rv) {
 		printf("%s: unable to set IPv6 default route, "
 		    "error %d\n", DEVNAM(ifp->if_softc), rv);
@@ -1937,6 +1946,7 @@ umb_add_inet6_config(struct umb_softc *sc, struct in6_addr *ip, u_int prefixlen,
 		rtm_send(rt, RTM_ADD, rv, ifp->if_rdomain);
 		rtfree(rt);
 	}
+	NET_UNLOCK();
 
 	if (ifp->if_flags & IFF_DEBUG) {
 		char str[3][INET6_ADDRSTRLEN];
@@ -2383,7 +2393,7 @@ umb_decap(struct umb_softc *sc, struct usbd_xfer *xfer)
 	struct ifnet *ifp = GET_IFP(sc);
 	int	 s;
 	void	*buf;
-	uint32_t len, af = 0;
+	uint32_t len;
 	char	*dp;
 	struct ncm_header16 *hdr16;
 	struct ncm_header32 *hdr32;
@@ -2506,20 +2516,14 @@ umb_decap(struct umb_softc *sc, struct usbd_xfer *xfer)
 			ifp->if_iqdrops++;
 			continue;
 		}
-		m = m_prepend(m, sizeof(uint32_t), M_DONTWAIT);
-		if (m == NULL) {
-			ifp->if_iqdrops++;
-			continue;
-		}
 		switch (*dp & 0xf0) {
 		case 4 << 4:
-			af = htonl(AF_INET);
+			m->m_pkthdr.ph_family = AF_INET;
 			break;
 		case 6 << 4:
-			af = htonl(AF_INET6);
+			m->m_pkthdr.ph_family = AF_INET6;
 			break;
 		}
-		*mtod(m, uint32_t *) = af;
 		ml_enqueue(&ml, m);
 	}
 done:
@@ -3127,7 +3131,7 @@ umb_intr(struct usbd_xfer *xfer, void *priv, usbd_status status)
 	if (total_len < UCDC_NOTIFICATION_LENGTH) {
 		DPRINTF("%s: short notification (%d<%d)\n", DEVNAM(sc),
 		    total_len, UCDC_NOTIFICATION_LENGTH);
-		    return;
+		return;
 	}
 	if (sc->sc_intr_msg.bmRequestType != UCDC_NOTIFICATION) {
 		DPRINTF("%s: unexpected notification (type=0x%02x)\n",
@@ -3201,3 +3205,51 @@ umb_dump(void *buf, int len)
 	addlog("\n");
 }
 #endif /* UMB_DEBUG */
+
+#if NKSTAT > 0
+
+void
+umb_kstat_attach(struct umb_softc *sc)
+{
+	struct kstat *ks;
+	struct umb_kstat_signal *uks;
+
+	rw_init(&sc->sc_kstat_lock, "umbkstat");
+
+	ks = kstat_create(DEVNAM(sc), 0, "mbim-signal", 0, KSTAT_T_KV, 0);
+	if (ks == NULL)
+		return;
+
+	uks = malloc(sizeof(*uks), M_DEVBUF, M_WAITOK|M_ZERO);
+	kstat_kv_init(&uks->rssi, "rssi", KSTAT_KV_T_NULL);
+	kstat_kv_init(&uks->error_rate, "error rate", KSTAT_KV_T_NULL);
+	kstat_kv_init(&uks->reports, "reports", KSTAT_KV_T_COUNTER64);
+
+	kstat_set_rlock(ks, &sc->sc_kstat_lock);
+	ks->ks_data = uks;
+	ks->ks_datalen = sizeof(*uks);
+	ks->ks_read = kstat_read_nop;
+
+	ks->ks_softc = sc;
+	sc->sc_kstat_signal = ks;
+	kstat_install(ks);
+}
+
+void
+umb_kstat_detach(struct umb_softc *sc)
+{
+	struct kstat *ks = sc->sc_kstat_signal;
+	struct umb_kstat_signal *uks;
+
+	if (ks == NULL)
+		return;
+
+	kstat_remove(ks);
+	sc->sc_kstat_signal = NULL;
+
+	uks = ks->ks_data;
+	free(uks, M_DEVBUF, sizeof(*uks));
+
+	kstat_destroy(ks);
+}
+#endif /* NKSTAT > 0 */

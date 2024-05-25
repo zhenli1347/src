@@ -1,4 +1,4 @@
-/*	$OpenBSD: biosdev.c,v 1.100 2020/12/09 18:10:18 krw Exp $	*/
+/*	$OpenBSD: biosdev.c,v 1.102 2024/04/14 03:26:25 jsg Exp $	*/
 
 /*
  * Copyright (c) 1996 Michael Shalayeff
@@ -534,6 +534,8 @@ biosopen(struct open_file *f, ...)
 #ifdef SOFTRAID
 	/* Intercept softraid disks. */
 	if (strncmp("sr", dev, 2) == 0) {
+		/* We only support read-only softraid. */
+		f->f_flags |= F_NOWRITE;
 
 		/* Create a fake diskinfo for this softraid volume. */
 		SLIST_FOREACH(bv, &sr_volumes, sbv_link)
@@ -721,7 +723,8 @@ biosdisk_errno(u_int error)
 	if (error == 0)
 		return 0;
 
-	for (p = tab; p->error && p->error != error; p++);
+	for (p = tab; p->error && p->error != error; p++)
+		;
 
 	return p->errno;
 }

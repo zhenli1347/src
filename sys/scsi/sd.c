@@ -1,4 +1,4 @@
-/*	$OpenBSD: sd.c,v 1.333 2022/10/23 14:39:19 krw Exp $	*/
+/*	$OpenBSD: sd.c,v 1.336 2024/05/04 16:40:38 kn Exp $	*/
 /*	$NetBSD: sd.c,v 1.111 1997/04/02 02:29:41 mycroft Exp $	*/
 
 /*-
@@ -1115,13 +1115,19 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 		/* As long as it's not 0 - readdisklabel divides by it. */
 	}
 
-	lp->d_type = DTYPE_SCSI;
-	if ((link->inqdata.device & SID_TYPE) == T_OPTICAL)
-		strncpy(lp->d_typename, "SCSI optical",
+	if (ISSET(link->flags, SDEV_UFI)) {
+		lp->d_type = DTYPE_FLOPPY;
+		strncpy(lp->d_typename, "USB floppy disk",
 		    sizeof(lp->d_typename));
-	else
-		strncpy(lp->d_typename, "SCSI disk",
-		    sizeof(lp->d_typename));
+	} else {
+		lp->d_type = DTYPE_SCSI;
+		if ((link->inqdata.device & SID_TYPE) == T_OPTICAL)
+			strncpy(lp->d_typename, "SCSI optical",
+			    sizeof(lp->d_typename));
+		else
+			strncpy(lp->d_typename, "SCSI disk",
+			    sizeof(lp->d_typename));
+	}
 
 	/*
 	 * Try to fit '<vendor> <product>' into d_packname. If that doesn't fit
@@ -1326,12 +1332,11 @@ sddump(dev_t dev, daddr_t blkno, caddr_t va, size_t size)
 			nwrt = totwrt;
 
 #ifndef	SD_DUMP_NOT_TRUSTED
-		xs = scsi_xs_get(sc->sc_link, SCSI_NOSLEEP);
+		xs = scsi_xs_get(sc->sc_link, SCSI_NOSLEEP | SCSI_DATA_OUT);
 		if (xs == NULL)
 			return ENOMEM;
 
 		xs->timeout = 10000;
-		SET(xs->flags, SCSI_DATA_OUT);
 		xs->data = va;
 		xs->datalen = nwrt * sectorsize;
 
@@ -1766,7 +1771,7 @@ validate:
 	}
 
 	if (dp.disksize == 0)
-		goto die;
+		return -1;
 
 	/*
 	 * Restrict secsize values to powers of two between 512 and 64k.
@@ -1858,7 +1863,7 @@ sd_flush(struct sd_softc *sc, int flags)
 	 * that the command is not supported by the device.
 	 */
 
-	xs = scsi_xs_get(link, flags);
+	xs = scsi_xs_get(link, flags | SCSI_IGNORE_ILLEGAL_REQUEST);
 	if (xs == NULL) {
 		SC_DEBUG(link, SDEV_DB1, ("cache sync failed to get xs\n"));
 		return EIO;
@@ -1869,7 +1874,6 @@ sd_flush(struct sd_softc *sc, int flags)
 
 	xs->cmdlen = sizeof(*cmd);
 	xs->timeout = 100000;
-	SET(xs->flags, SCSI_IGNORE_ILLEGAL_REQUEST);
 
 	error = scsi_xs_sync(xs);
 

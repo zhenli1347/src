@@ -1,4 +1,4 @@
-/*	$OpenBSD: test-rrdp.c,v 1.3 2022/04/20 17:37:53 tb Exp $ */
+/*	$OpenBSD: test-rrdp.c,v 1.10 2024/04/22 05:54:01 claudio Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -35,7 +35,10 @@
 #include "extern.h"
 #include "rrdp.h"
 
+int filemode;
+int outformats;
 int verbose;
+int experimental;
 
 #define REGRESS_NOTIFY_URI	"https://rpki.example.com/notify.xml"
 
@@ -202,6 +205,7 @@ rrdp_finished(struct rrdp *s)
 
 	switch (s->task) {
 	case NOTIFICATION:
+		notification_done(s->nxml, NULL);
 		log_notification_xml(s->nxml);
 		break;
 	case SNAPSHOT:
@@ -337,4 +341,10 @@ usage:
 	fprintf(stderr, "usage: %s [-S session_id] [-N serial] [-H hash] "
 	    "-d | -n | -s\n", "test-rrdp");
 	exit(1);
+}
+
+time_t
+get_current_time(void)
+{
+	return time(NULL);
 }

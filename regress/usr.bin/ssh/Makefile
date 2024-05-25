@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.121 2022/12/01 02:22:13 dtucker Exp $
+#	$OpenBSD: Makefile,v 1.133 2024/01/11 04:50:28 djm Exp $
 
 OPENSSL?=	yes
 
@@ -10,10 +10,8 @@ SUBDIR+=	misc
 
 REGRESS_SETUP_ONCE=misc	# For sk-dummy.so
 
-REGRESS_FAIL_EARLY?=	yes
-
 # Key conversion operations are not supported when built w/out OpenSSL.
-.if ${OPENSSL:L} != no
+.if !defined(LTESTS_FROM) && ${OPENSSL:L} != no
 REGRESS_TARGETS=	t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12
 .endif
 
@@ -99,9 +97,15 @@ LTESTS= 	connect \
 		knownhosts \
 		knownhosts-command \
 		agent-restrict \
-		hostbased
+		hostbased \
+		channel-timeout \
+		connection-timeout \
+		match-subsystem \
+		agent-pkcs11-restrict \
+		agent-pkcs11-cert
 
 INTEROP_TESTS=	putty-transfer putty-ciphers putty-kex conch-ciphers
+INTEROP_TESTS+=	dropbear-ciphers dropbear-kex
 #INTEROP_TESTS+=ssh-com ssh-com-client ssh-com-keygen ssh-com-sftp
 
 EXTRA_TESTS=	agent-pkcs11
@@ -125,14 +129,15 @@ CLEANFILES+=	*.core actual agent-key.* authorized_keys_${USERNAME} \
 		rsa_ssh2_crnl.prv scp-ssh-wrapper.exe \
 		scp-ssh-wrapper.scp setuid-allowed sftp-server.log \
 		sftp-server.sh sftp.log ssh-log-wrapper.sh ssh.log \
-		ssh-agent.log ssh-add.log \
+		ssh-agent.log ssh-add.log slow-sftp-server.sh \
 		ssh-rsa_oldfmt knownhosts_command \
 		ssh_config ssh_config.* ssh_proxy ssh_proxy_bak \
 		ssh_proxy_* sshd.log sshd_config sshd_config.* \
 		sshd_proxy sshd_proxy.* sshd_proxy_bak sshd_proxy_orig \
 		t10.out t10.out.pub t12.out t12.out.pub t2.out t3.out \
 		t6.out1 t6.out2 t7.out t7.out.pub t8.out t8.out.pub \
-		t9.out t9.out.pub testdata user_*key* user_ca* user_key*
+		t9.out t9.out.pub \
+		timestamp testdata user_*key* user_ca* user_key*
 
 # Enable all malloc(3) randomisations and checks
 TEST_ENV=      "MALLOC_OPTIONS=CFGJRSUX"
@@ -163,24 +168,30 @@ t5:
 		awk '{print $$2}' | diff - ${.CURDIR}/t5.ok
 
 t6:
-	ssh-keygen -if ${.CURDIR}/dsa_ssh2.prv > t6.out1
-	ssh-keygen -if ${.CURDIR}/dsa_ssh2.pub > t6.out2
-	chmod 600 t6.out1
-	ssh-keygen -yf t6.out1 | diff - t6.out2
+	set -xe ; if ssh -Q key | grep -q ^ssh-dss ; then \
+		ssh-keygen -if ${.CURDIR}/dsa_ssh2.prv > t6.out1 ; \
+		ssh-keygen -if ${.CURDIR}/dsa_ssh2.pub > t6.out2 ; \
+		chmod 600 t6.out1 ; \
+		ssh-keygen -yf t6.out1 | diff - t6.out2 ; \
+	fi
 
 t7.out:
-	ssh-keygen -q -t rsa -N '' -f $@
+	ssh-keygen -q -t rsa -N '' -f $@ ; \
 
 t7: t7.out
 	ssh-keygen -lf t7.out > /dev/null
 	ssh-keygen -Bf t7.out > /dev/null
 
 t8.out:
-	ssh-keygen -q -t dsa -N '' -f $@
+	set -xe ; if ssh -Q key | grep -q ^ssh-dss ; then \
+		ssh-keygen -q -t dsa -N '' -f $@ ; \
+	fi
 
 t8: t8.out
-	ssh-keygen -lf t8.out > /dev/null
-	ssh-keygen -Bf t8.out > /dev/null
+	set -xe ; if ssh -Q key | grep -q ^ssh-dss ; then \
+		ssh-keygen -lf t8.out > /dev/null ; \
+		ssh-keygen -Bf t8.out > /dev/null ; \
+	fi
 
 t9.out:
 	ssh-keygen -q -t ecdsa -N '' -f $@
@@ -208,31 +219,53 @@ t12: t12.out
 
 modpipe: modpipe.c
 
+timestamp: timestamp.c
+
 t-integrity: modpipe
 
 .for t in ${LTESTS} ${INTEROP_TESTS} ${EXTRA_TESTS}
-t-${t}:
+t-${t}: timestamp
 	env SUDO="${SUDO}" ${TEST_ENV} \
 	    sh ${.CURDIR}/test-exec.sh ${.OBJDIR} ${.CURDIR}/${t}.sh
 .endfor
 
+.undef LTESTS_STARTED
 .for t in ${LTESTS}
+.if defined(LTESTS_FROM) && ${LTESTS_FROM} == t-${t}
+LTESTS_STARTED=yes
+.endif
+.if !defined(LTESTS_FROM) || defined(LTESTS_STARTED)
 REGRESS_TARGETS+=t-${t}
+.endif
 .endfor
+
+# Not run by default
+.if make(interop)
 
 .for t in ${INTEROP_TESTS}
 INTEROP_TARGETS+=t-${t}
 .endfor
 
+REGRESS_TARGETS=${INTEROP_TARGETS}
+SUBDIR=
+
+interop: regress
+
+.endif
+
 # Not run by default
-interop: ${INTEROP_TARGETS}
+.if make(extra)
 
 .for t in ${EXTRA_TESTS}
 EXTRA_TARGETS+=t-${t}
 .endfor
 
-# Not run by default
-extra: ${EXTRA_TARGETS}
+REGRESS_TARGETS=${EXTRA_TARGETS}
+SUBDIR=
+
+extra: regress
+
+.endif
 
 .for s in ${SUBDIR}
 CLEAN_SUBDIR+=c-${s}
@@ -243,5 +276,6 @@ c-${s}:
 clean: ${CLEAN_SUBDIR}
 	rm -f ${CLEANFILES}
 	rm -rf .putty
+	rm -rf .dropbear
 
 .include <bsd.regress.mk>

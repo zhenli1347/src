@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vio.c,v 1.22 2022/03/07 18:52:16 dv Exp $	*/
+/*	$OpenBSD: if_vio.c,v 1.35 2024/05/24 10:05:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 2012 Stefan Fritsch, Alexander Fiveg.
@@ -31,10 +31,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/mbuf.h>
-#include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/timeout.h>
 
@@ -43,11 +41,12 @@
 
 #include <net/if.h>
 #include <net/if_media.h>
+#include <net/route.h>
 
-#include <netinet/in.h>
 #include <netinet/if_ether.h>
-#include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
 #include <netinet/udp.h>
 
 #if NBPFILTER > 0
@@ -145,6 +144,7 @@ struct virtio_net_hdr {
 } __packed;
 
 #define VIRTIO_NET_HDR_F_NEEDS_CSUM	1 /* flags */
+#define VIRTIO_NET_HDR_F_DATA_VALID	2 /* flags */
 #define VIRTIO_NET_HDR_GSO_NONE		0 /* gso_type */
 #define VIRTIO_NET_HDR_GSO_TCPV4	1 /* gso_type */
 #define VIRTIO_NET_HDR_GSO_UDP		3 /* gso_type */
@@ -250,6 +250,7 @@ struct vio_softc {
 #define VIRTIO_NET_TX_MAXNSEGS		16 /* for larger chains, defrag */
 #define VIRTIO_NET_CTRL_MAC_MC_ENTRIES	64 /* for more entries, use ALLMULTI */
 #define VIRTIO_NET_CTRL_MAC_UC_ENTRIES	 1 /* one entry for own unicast addr */
+#define VIRTIO_NET_CTRL_TIMEOUT		(5*1000*1000*1000ULL) /* 5 seconds */
 
 #define VIO_CTRL_MAC_INFO_SIZE					\
 	(2*sizeof(struct virtio_net_ctrl_mac_tbl) +		\
@@ -265,8 +266,8 @@ int	vio_init(struct ifnet *);
 void	vio_stop(struct ifnet *, int);
 void	vio_start(struct ifnet *);
 int	vio_ioctl(struct ifnet *, u_long, caddr_t);
-void	vio_get_lladr(struct arpcom *ac, struct virtio_softc *vsc);
-void	vio_put_lladr(struct arpcom *ac, struct virtio_softc *vsc);
+void	vio_get_lladdr(struct arpcom *ac, struct virtio_softc *vsc);
+void	vio_put_lladdr(struct arpcom *ac, struct virtio_softc *vsc);
 
 /* rx */
 int	vio_add_rx_mbuf(struct vio_softc *, int);
@@ -491,7 +492,7 @@ err_hdr:
 }
 
 void
-vio_get_lladr(struct arpcom *ac, struct virtio_softc *vsc)
+vio_get_lladdr(struct arpcom *ac, struct virtio_softc *vsc)
 {
 	int i;
 	for (i = 0; i < ETHER_ADDR_LEN; i++) {
@@ -501,13 +502,24 @@ vio_get_lladr(struct arpcom *ac, struct virtio_softc *vsc)
 }
 
 void
-vio_put_lladr(struct arpcom *ac, struct virtio_softc *vsc)
+vio_put_lladdr(struct arpcom *ac, struct virtio_softc *vsc)
 {
 	int i;
 	for (i = 0; i < ETHER_ADDR_LEN; i++) {
 		virtio_write_device_config_1(vsc, VIRTIO_NET_CONFIG_MAC + i,
 		     ac->ac_enaddr[i]);
 	}
+}
+
+static int vio_needs_reset(struct vio_softc *sc)
+{
+	if (virtio_get_status(sc->sc_virtio) &
+	    VIRTIO_CONFIG_DEVICE_STATUS_DEVICE_NEEDS_RESET) {
+		printf("%s: device needs reset", sc->sc_dev.dv_xname);
+		vio_ctrl_wakeup(sc, RESET);
+		return 1;
+	}
+	return 0;
 }
 
 void
@@ -529,18 +541,21 @@ vio_attach(struct device *parent, struct device *self, void *aux)
 	vsc->sc_child = self;
 	vsc->sc_ipl = IPL_NET;
 	vsc->sc_vqs = &sc->sc_vq[0];
-	vsc->sc_config_change = 0;
+	vsc->sc_config_change = NULL;
 	vsc->sc_driver_features = VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS |
 	    VIRTIO_NET_F_CTRL_VQ | VIRTIO_NET_F_CTRL_RX |
 	    VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_CSUM |
-	    VIRTIO_F_RING_EVENT_IDX;
+	    VIRTIO_F_RING_EVENT_IDX | VIRTIO_NET_F_GUEST_CSUM;
+
+	vsc->sc_driver_features |= VIRTIO_NET_F_HOST_TSO4;
+	vsc->sc_driver_features |= VIRTIO_NET_F_HOST_TSO6;
 
 	virtio_negotiate_features(vsc, virtio_net_feature_names);
 	if (virtio_has_feature(vsc, VIRTIO_NET_F_MAC)) {
-		vio_get_lladr(&sc->sc_ac, vsc);
+		vio_get_lladdr(&sc->sc_ac, vsc);
 	} else {
 		ether_fakeaddr(ifp);
-		vio_put_lladr(&sc->sc_ac, vsc);
+		vio_put_lladdr(&sc->sc_ac, vsc);
 	}
 	printf(": address %s\n", ether_sprintf(sc->sc_ac.ac_enaddr));
 
@@ -551,9 +566,9 @@ vio_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_hdr_size = offsetof(struct virtio_net_hdr, num_buffers);
 	}
 	if (virtio_has_feature(vsc, VIRTIO_NET_F_MRG_RXBUF))
-		ifp->if_hardmtu = 16000; /* arbitrary limit */
+		ifp->if_hardmtu = MAXMCLBYTES;
 	else
-		ifp->if_hardmtu = MCLBYTES - sc->sc_hdr_size - ETHER_HDR_LEN;
+		ifp->if_hardmtu = MAXMCLBYTES - sc->sc_hdr_size - ETHER_HDR_LEN;
 
 	if (virtio_alloc_vq(vsc, &sc->sc_vq[VQRX], 0, MCLBYTES, 2, "rx") != 0)
 		goto err;
@@ -591,8 +606,13 @@ vio_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = vio_ioctl;
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 	if (virtio_has_feature(vsc, VIRTIO_NET_F_CSUM))
-		ifp->if_capabilities |= IFCAP_CSUM_TCPv4|IFCAP_CSUM_UDPv4;
-	ifq_set_maxlen(&ifp->if_snd, vsc->sc_vqs[1].vq_num - 1);
+		ifp->if_capabilities |= IFCAP_CSUM_TCPv4|IFCAP_CSUM_UDPv4|
+		    IFCAP_CSUM_TCPv6|IFCAP_CSUM_UDPv6;
+	if (virtio_has_feature(vsc, VIRTIO_NET_F_HOST_TSO4))
+		ifp->if_capabilities |= IFCAP_TSOv4;
+	if (virtio_has_feature(vsc, VIRTIO_NET_F_HOST_TSO6))
+		ifp->if_capabilities |= IFCAP_TSOv6;
+	ifq_init_maxlen(&ifp->if_snd, vsc->sc_vqs[1].vq_num - 1);
 	ifmedia_init(&sc->sc_media, 0, vio_media_change, vio_media_status);
 	ifmedia_add(&sc->sc_media, IFM_ETHER | IFM_AUTO, 0, NULL);
 	ifmedia_set(&sc->sc_media, IFM_ETHER | IFM_AUTO);
@@ -600,6 +620,7 @@ vio_attach(struct device *parent, struct device *self, void *aux)
 	timeout_set(&sc->sc_txtick, vio_txtick, &sc->sc_vq[VQTX]);
 	timeout_set(&sc->sc_rxtick, vio_rxtick, &sc->sc_vq[VQRX]);
 
+	virtio_set_status(vsc, VIRTIO_CONFIG_DEVICE_STATUS_DRIVER_OK);
 	if_attach(ifp);
 	ether_ifattach(ifp);
 
@@ -638,6 +659,7 @@ vio_config_change(struct virtio_softc *vsc)
 {
 	struct vio_softc *sc = (struct vio_softc *)vsc->sc_child;
 	vio_link_state(&sc->sc_ac.ac_if);
+	vio_needs_reset(sc);
 	return 1;
 }
 
@@ -692,7 +714,7 @@ vio_stop(struct ifnet *ifp, int disable)
 	virtio_reset(vsc);
 	vio_rxeof(sc);
 	if (vsc->sc_nvqs >= 3)
-		vio_ctrleof(&sc->sc_vq[VQCTL]);
+		vio_ctrl_wakeup(sc, RESET);
 	vio_tx_drain(sc);
 	if (disable)
 		vio_rx_drain(sc);
@@ -703,11 +725,87 @@ vio_stop(struct ifnet *ifp, int disable)
 	if (vsc->sc_nvqs >= 3)
 		virtio_start_vq_intr(vsc, &sc->sc_vq[VQCTL]);
 	virtio_reinit_end(vsc);
-	if (vsc->sc_nvqs >= 3) {
-		if (sc->sc_ctrl_inuse != FREE)
-			sc->sc_ctrl_inuse = RESET;
-		wakeup(&sc->sc_ctrl_inuse);
+	if (vsc->sc_nvqs >= 3)
+		vio_ctrl_wakeup(sc, FREE);
+}
+
+static inline uint16_t
+vio_cksum_update(uint32_t cksum, uint16_t paylen)
+{
+	/* Add payload length */
+	cksum += paylen;
+
+	/* Fold back to 16 bit */
+	cksum += cksum >> 16;
+
+	return (uint16_t)(cksum);
+}
+
+void
+vio_tx_offload(struct virtio_net_hdr *hdr, struct mbuf *m)
+{
+	struct ether_extracted ext;
+
+	/*
+	 * Checksum Offload
+	 */
+
+	if (!ISSET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT) &&
+	    !ISSET(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT))
+		return;
+
+	ether_extract_headers(m, &ext);
+
+	/* Consistency Checks */
+	if ((!ext.ip4 && !ext.ip6) || (!ext.tcp && !ext.udp))
+		return;
+
+	if ((ext.tcp && !ISSET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT)) ||
+	    (ext.udp && !ISSET(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT)))
+		return;
+
+	hdr->csum_start = sizeof(*ext.eh);
+#if NVLAN > 0
+	if (ext.evh)
+		hdr->csum_start = sizeof(*ext.evh);
+#endif
+	hdr->csum_start += ext.iphlen;
+
+	if (ext.tcp)
+		hdr->csum_offset = offsetof(struct tcphdr, th_sum);
+	else if (ext.udp)
+		hdr->csum_offset = offsetof(struct udphdr, uh_sum);
+
+	hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+
+	/*
+	 * TCP Segmentation Offload
+	 */
+
+	if (!ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO))
+		return;
+
+	if (!ext.tcp || m->m_pkthdr.ph_mss == 0) {
+		tcpstat_inc(tcps_outbadtso);
+		return;
 	}
+
+	hdr->hdr_len = hdr->csum_start + ext.tcphlen;
+	hdr->gso_size = m->m_pkthdr.ph_mss;
+
+	if (ext.ip4)
+		hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
+#ifdef INET6
+	else if (ext.ip6)
+		hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
+#endif
+
+	/* VirtIO-Net need pseudo header cksum with IP-payload length for TSO */
+	ext.tcp->th_sum = vio_cksum_update(ext.tcp->th_sum,
+	    htons(ext.iplen - ext.iphlen));
+
+	tcpstat_add(tcps_outpkttso,
+	    (ext.paylen + m->m_pkthdr.ph_mss - 1) / m->m_pkthdr.ph_mss);
 }
 
 void
@@ -746,30 +844,7 @@ again:
 
 		hdr = &sc->sc_tx_hdrs[slot];
 		memset(hdr, 0, sc->sc_hdr_size);
-		if (m->m_pkthdr.csum_flags & (M_TCP_CSUM_OUT|M_UDP_CSUM_OUT)) {
-			struct mbuf *mip;
-			struct ip *ip;
-			int ehdrlen = ETHER_HDR_LEN;
-			int ipoff;
-#if NVLAN > 0
-			struct ether_vlan_header *eh;
-
-			eh = mtod(m, struct ether_vlan_header *);
-			if (eh->evl_encap_proto == htons(ETHERTYPE_VLAN))
-				ehdrlen += ETHER_VLAN_ENCAP_LEN;
-#endif
-
-			if (m->m_pkthdr.csum_flags & M_TCP_CSUM_OUT)
-				hdr->csum_offset = offsetof(struct tcphdr, th_sum);
-			else
-				hdr->csum_offset = offsetof(struct udphdr, uh_sum);
-
-			mip = m_getptr(m, ehdrlen, &ipoff);
-			KASSERT(mip != NULL && mip->m_len - ipoff >= sizeof(*ip));
-			ip = (struct ip *)(mip->m_data + ipoff);
-			hdr->csum_start = ehdrlen + (ip->ip_hl << 2);
-			hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
-		}
+		vio_tx_offload(hdr, m);
 
 		r = vio_encap(sc, slot, m);
 		if (r != 0) {
@@ -985,6 +1060,31 @@ vio_populate_rx_mbufs(struct vio_softc *sc)
 	timeout_add_sec(&sc->sc_rxtick, 1);
 }
 
+void
+vio_rx_offload(struct mbuf *m, struct virtio_net_hdr *hdr)
+{
+	struct ether_extracted ext;
+
+	if (!ISSET(hdr->flags, VIRTIO_NET_HDR_F_DATA_VALID) &&
+	    !ISSET(hdr->flags, VIRTIO_NET_HDR_F_NEEDS_CSUM))
+		return;
+
+	ether_extract_headers(m, &ext);
+
+	if (ext.ip4)
+		SET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_IN_OK);
+
+	if (ext.tcp) {
+		SET(m->m_pkthdr.csum_flags, M_TCP_CSUM_IN_OK);
+		if (ISSET(hdr->flags, VIRTIO_NET_HDR_F_NEEDS_CSUM))
+			SET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT);
+	} else if (ext.udp) {
+		SET(m->m_pkthdr.csum_flags, M_UDP_CSUM_IN_OK);
+		if (ISSET(hdr->flags, VIRTIO_NET_HDR_F_NEEDS_CSUM))
+			SET(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT);
+	}
+}
+
 /* dequeue received packets */
 int
 vio_rxeof(struct vio_softc *sc)
@@ -1018,6 +1118,8 @@ vio_rxeof(struct vio_softc *sc)
 				bufs_left = hdr->num_buffers - 1;
 			else
 				bufs_left = 0;
+			if (virtio_has_feature(vsc, VIRTIO_NET_F_GUEST_CSUM))
+				vio_rx_offload(m, hdr);
 		} else {
 			m->m_flags &= ~M_PKTHDR;
 			m0->m_pkthdr.len += m->m_len;
@@ -1135,6 +1237,9 @@ vio_txeof(struct virtqueue *vq)
 	struct mbuf *m;
 	int r = 0;
 	int slot, len;
+
+	if (!ISSET(ifp->if_flags, IFF_RUNNING))
+		return 0;
 
 	while (virtio_dequeue(vsc, vq, &slot, &len) == 0) {
 		struct virtio_net_hdr *hdr = &sc->sc_tx_hdrs[slot];
@@ -1269,32 +1374,15 @@ out:
 	return r;
 }
 
-/*
- * XXXSMP As long as some per-ifp ioctl(2)s are executed with the
- * NET_LOCK() deadlocks are possible.  So release it here.
- */
-static inline int
-vio_sleep(struct vio_softc *sc, const char *wmesg)
-{
-	int status = rw_status(&netlock);
-
-	if (status != RW_WRITE && status != RW_READ)
-		return tsleep_nsec(&sc->sc_ctrl_inuse, PRIBIO|PCATCH, wmesg,
-		    INFSLP);
-
-	return rwsleep_nsec(&sc->sc_ctrl_inuse, &netlock, PRIBIO|PCATCH, wmesg,
-	    INFSLP);
-}
-
 int
 vio_wait_ctrl(struct vio_softc *sc)
 {
 	int r = 0;
 
 	while (sc->sc_ctrl_inuse != FREE) {
-		r = vio_sleep(sc, "viowait");
-		if (r == EINTR)
-			return r;
+		if (sc->sc_ctrl_inuse == RESET || vio_needs_reset(sc))
+			return ENXIO;
+		r = tsleep_nsec(&sc->sc_ctrl_inuse, PRIBIO, "viowait", INFSLP);
 	}
 	sc->sc_ctrl_inuse = INUSE;
 
@@ -1306,14 +1394,16 @@ vio_wait_ctrl_done(struct vio_softc *sc)
 {
 	int r = 0;
 
-	while (sc->sc_ctrl_inuse != DONE && sc->sc_ctrl_inuse != RESET) {
-		if (sc->sc_ctrl_inuse == RESET) {
-			r = 1;
-			break;
+	while (sc->sc_ctrl_inuse != DONE) {
+		if (sc->sc_ctrl_inuse == RESET || vio_needs_reset(sc))
+			return ENXIO;
+		r = tsleep_nsec(&sc->sc_ctrl_inuse, PRIBIO, "viodone",
+		    VIRTIO_NET_CTRL_TIMEOUT);
+		if (r == EWOULDBLOCK) {
+			printf("%s: ctrl queue timeout", sc->sc_dev.dv_xname);
+			vio_ctrl_wakeup(sc, RESET);
+			return ENXIO;
 		}
-		r = vio_sleep(sc, "viodone");
-		if (r == EINTR)
-			break;
 	}
 	return r;
 }

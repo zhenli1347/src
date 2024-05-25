@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.51 2021/05/11 18:21:12 kettenis Exp $	*/
+/*	$OpenBSD: trap.c,v 1.54 2023/04/13 02:19:05 jsg Exp $	*/
 
 /*
  * Copyright (c) 2020 Mark Kettenis <kettenis@openbsd.org>
@@ -23,7 +23,6 @@
 #include <sys/user.h>
 #include <sys/syscall.h>
 #include <sys/syscall_mi.h>
-#include <sys/systm.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -234,7 +233,7 @@ trap(struct trapframe *frame)
 		 * insert a new SLB entry.  Executing the faulting
 		 * instruction again should result in a Data Storage
 		 * Interrupt that does indicate whether we're dealing
-		 * with with a read or a write fault.
+		 * with a read or a write fault.
 		 */
 		map = &p->p_vmspace->vm_map;
 		vm_map_lock_read(map);
@@ -305,7 +304,7 @@ trap(struct trapframe *frame)
 
 		map = &p->p_vmspace->vm_map;
 		va = frame->srr0;
-		access_type = PROT_READ | PROT_EXEC;
+		access_type = PROT_EXEC;
 		error = uvm_fault(map, trunc_page(va), 0, access_type);
 		if (error == 0)
 			uvm_grow(p, va);

@@ -1,4 +1,4 @@
-/* $OpenBSD: errstr.c,v 1.8 2022/11/11 17:07:39 joshua Exp $ */
+/* $OpenBSD: errstr.c,v 1.11 2023/07/23 11:20:11 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -68,25 +68,14 @@
 #include <openssl/lhash.h>
 #include <openssl/ssl.h>
 
-struct {
-	int stats;
-} errstr_config;
-
 static const struct option errstr_options[] = {
-	{
-		.name = "stats",
-		.desc = "Print debugging statistics for the hash table",
-		.type = OPTION_FLAG,
-		.opt.flag = &errstr_config.stats,
-	},
 	{ NULL },
 };
 
 static void
-errstr_usage()
+errstr_usage(void)
 {
-	fprintf(stderr, "usage: errstr [-stats] errno ...\n");
-	options_usage(errstr_options);
+	fprintf(stderr, "usage: errstr errno ...\n");
 }
 
 int
@@ -103,27 +92,9 @@ errstr_main(int argc, char **argv)
 		exit(1);
 	}
 
-	memset(&errstr_config, 0, sizeof(errstr_config));
-
 	if (options_parse(argc, argv, errstr_options, NULL, &argsused) != 0) {
 		errstr_usage();
 		return (1);
-	}
-
-	if (errstr_config.stats) {
-		BIO *out;
-
-		if ((out = BIO_new_fp(stdout, BIO_NOCLOSE)) == NULL) {
-			fprintf(stderr, "Out of memory");
-			return (1);
-		}
-
-		lh_ERR_STRING_DATA_node_stats_bio(ERR_get_string_table(), out);
-		lh_ERR_STRING_DATA_stats_bio(ERR_get_string_table(), out);
-		lh_ERR_STRING_DATA_node_usage_stats_bio(
-			    ERR_get_string_table(), out);
-
-		BIO_free_all(out);
 	}
 
 	for (i = argsused; i < argc; i++) {

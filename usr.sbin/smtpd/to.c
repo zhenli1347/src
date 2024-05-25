@@ -1,4 +1,4 @@
-/*	$OpenBSD: to.c,v 1.48 2021/06/14 17:58:16 eric Exp $	*/
+/*	$OpenBSD: to.c,v 1.50 2023/05/31 16:51:46 op Exp $	*/
 
 /*
  * Copyright (c) 2009 Jacek Masiulaniec <jacekm@dobremiasto.net>
@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if IO_TLS
 #include <tls.h>
 #endif
@@ -140,10 +141,10 @@ time_to_text(time_t when)
 {
 	struct tm *lt;
 	static char buf[40];
-	char *day[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-	char *month[] = {"Jan","Feb","Mar","Apr","May","Jun",
+	const char *day[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+	const char *month[] = {"Jan","Feb","Mar","Apr","May","Jun",
 			 "Jul","Aug","Sep","Oct","Nov","Dec"};
-	char *tz;
+	const char *tz;
 	long offset;
 
 	lt = localtime(&when);

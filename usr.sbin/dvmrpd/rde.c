@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde.c,v 1.31 2021/01/19 12:29:46 claudio Exp $ */
+/*	$OpenBSD: rde.c,v 1.33 2024/02/26 09:50:42 jsg Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Claudio Jeker <claudio@openbsd.org>
@@ -352,7 +352,7 @@ rde_select_ds_ifs(struct mfc *mfc, struct iface *iface)
 
 	rn = rt_match_origin(mfc->origin.s_addr);
 	if (rn == NULL) {
-		log_debug("rde_selected_ds_iface: no informations about "
+		log_debug("rde_selected_ds_iface: no information about "
 		    "the origin %s", inet_ntoa(mfc->origin));
 		return (0);
 	}
@@ -418,14 +418,13 @@ rde_group_list_find(struct iface *iface, struct in_addr group)
 void
 rde_group_list_remove(struct iface *iface, struct in_addr group)
 {
-	struct rde_group	*rg;
+	struct rde_group	*rg, *nrg;
 	struct rt_node		*rn;
 
 	if (TAILQ_EMPTY(&iface->rde_group_list))
 		fatalx("rde_group_list_remove: group does not exist");
 
-	for (rg = TAILQ_FIRST(&iface->rde_group_list); rg != NULL;
-	    rg = TAILQ_NEXT(rg, entry)) {
+	TAILQ_FOREACH_SAFE(rg, &iface->rde_group_list, entry, nrg) {
 		if (rg->rde_group.s_addr == group.s_addr) {
 			log_debug("group_list_remove: interface %s, group %s",
 			    iface->name, inet_ntoa(rg->rde_group));

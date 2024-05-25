@@ -1,4 +1,4 @@
-/*	$OpenBSD: printconf.c,v 1.160 2022/11/18 10:17:23 claudio Exp $	*/
+/*	$OpenBSD: printconf.c,v 1.173 2024/05/22 08:41:14 claudio Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -38,6 +38,7 @@ void		 print_l3vpn_targets(struct filter_set_head *, const char *);
 void		 print_l3vpn(struct l3vpn *);
 const char	*print_af(uint8_t);
 void		 print_network(struct network_config *, const char *);
+void		 print_flowspec(struct flowspec_config *, const char *);
 void		 print_as_sets(struct as_set_head *);
 void		 print_prefixsets(struct prefixset_head *);
 void		 print_originsets(struct prefixset_head *);
@@ -218,6 +219,8 @@ print_community(struct community *c)
 		switch (type) {
 		case EXT_COMMUNITY_TRANS_TWO_AS:
 		case EXT_COMMUNITY_TRANS_FOUR_AS:
+		case EXT_COMMUNITY_GEN_TWO_AS:
+		case EXT_COMMUNITY_GEN_FOUR_AS:
 			if ((c->flags >> 8 & 0xff) == COMMUNITY_NEIGHBOR_AS)
 				printf("neighbor-as:");
 			else if ((c->flags >> 8 & 0xff) == COMMUNITY_LOCAL_AS)
@@ -226,6 +229,7 @@ print_community(struct community *c)
 				printf("%s:", log_as(c->data1));
 			break;
 		case EXT_COMMUNITY_TRANS_IPV4:
+		case EXT_COMMUNITY_GEN_IPV4:
 			addr.s_addr = htonl(c->data1);
 			printf("%s:", inet_ntoa(addr));
 			break;
@@ -235,6 +239,9 @@ print_community(struct community *c)
 		case EXT_COMMUNITY_TRANS_TWO_AS:
 		case EXT_COMMUNITY_TRANS_FOUR_AS:
 		case EXT_COMMUNITY_TRANS_IPV4:
+		case EXT_COMMUNITY_GEN_TWO_AS:
+		case EXT_COMMUNITY_GEN_FOUR_AS:
+		case EXT_COMMUNITY_GEN_IPV4:
 			if ((c->flags >> 16 & 0xff) == COMMUNITY_ANY)
 				printf("* ");
 			else if ((c->flags >> 16 & 0xff) ==
@@ -376,7 +383,7 @@ print_mainconf(struct bgpd_config *conf)
 	printf("AS %s", log_as(conf->as));
 	if (conf->as > USHRT_MAX && conf->short_as != AS_TRANS)
 		printf(" %u", conf->short_as);
-	ina.s_addr = conf->bgpid;
+	ina.s_addr = htonl(conf->bgpid);
 	printf("\nrouter-id %s\n", inet_ntoa(ina));
 
 	printf("socket \"%s\"\n", conf->csock);
@@ -461,12 +468,12 @@ print_af(uint8_t aid)
 {
 	/*
 	 * Hack around the fact that aid2str() will return "IPv4 unicast"
-	 * for AID_INET. AID_INET and AID_INET6 need special handling and
-	 * the other AID should never end up here (at least for now).
+	 * for AID_INET. AID_INET, AID_INET6 and the flowspec AID need
+	 * special handling and the other AID should never end up here.
 	 */
-	if (aid == AID_INET)
+	if (aid == AID_INET || aid == AID_FLOWSPECv4)
 		return ("inet");
-	if (aid == AID_INET6)
+	if (aid == AID_INET6 || aid == AID_FLOWSPECv6)
 		return ("inet6");
 	return (aid2str(aid));
 }
@@ -500,6 +507,115 @@ print_network(struct network_config *n, const char *c)
 	if (!TAILQ_EMPTY(&n->attrset))
 		printf(" ");
 	print_set(&n->attrset);
+	printf("\n");
+}
+
+static void
+print_flowspec_list(struct flowspec *f, int type, int is_v6)
+{
+	const uint8_t *comp;
+	const char *fmt;
+	int complen, off = 0;
+
+	if (flowspec_get_component(f->data, f->len, type, is_v6,
+	    &comp, &complen) != 1)
+		return;
+
+	printf("%s ", flowspec_fmt_label(type));
+	fmt = flowspec_fmt_num_op(comp, complen, &off);
+	if (off == -1) {
+		printf("%s ", fmt);
+	} else {
+		printf("{ %s ", fmt);
+		do {
+			fmt = flowspec_fmt_num_op(comp, complen, &off);
+			printf("%s ", fmt);
+		} while (off != -1);
+		printf("} ");
+	}
+}
+
+static void
+print_flowspec_flags(struct flowspec *f, int type, int is_v6)
+{
+	const uint8_t *comp;
+	const char *fmt, *flags;
+	int complen, off = 0;
+
+	switch (type) {
+	case FLOWSPEC_TYPE_TCP_FLAGS:
+		flags = FLOWSPEC_TCP_FLAG_STRING;
+		break;
+	case FLOWSPEC_TYPE_FRAG:
+		if (!is_v6)
+			flags = FLOWSPEC_FRAG_STRING4;
+		else
+			flags = FLOWSPEC_FRAG_STRING6;
+		break;
+	default:
+		printf("??? ");
+		return;
+	}
+
+	if (flowspec_get_component(f->data, f->len, type, is_v6,
+	    &comp, &complen) != 1)
+		return;
+
+	printf("%s ", flowspec_fmt_label(type));
+
+	fmt = flowspec_fmt_bin_op(comp, complen, &off, flags);
+	if (off == -1) {
+		printf("%s ", fmt);
+	} else {
+		printf("{ %s ", fmt);
+		do {
+			fmt = flowspec_fmt_bin_op(comp, complen, &off, flags);
+			printf("%s ", fmt);
+		} while (off != -1);
+		printf("} ");
+	}
+}
+
+static void
+print_flowspec_addr(struct flowspec *f, int type, int is_v6)
+{
+	struct bgpd_addr addr;
+	uint8_t plen;
+
+	flowspec_get_addr(f->data, f->len, type, is_v6, &addr, &plen, NULL);
+	if (plen == 0)
+		printf("%s any ", flowspec_fmt_label(type));
+	else
+		printf("%s %s/%u ", flowspec_fmt_label(type),
+		    log_addr(&addr), plen);
+}
+
+void
+print_flowspec(struct flowspec_config *fconf, const char *c)
+{
+	struct flowspec *f = fconf->flow;
+	int is_v6 = (f->aid == AID_FLOWSPECv6);
+
+	printf("%sflowspec %s ", c, print_af(f->aid));
+
+	print_flowspec_list(f, FLOWSPEC_TYPE_PROTO, is_v6);
+
+	print_flowspec_addr(f, FLOWSPEC_TYPE_SOURCE, is_v6);
+	print_flowspec_list(f, FLOWSPEC_TYPE_SRC_PORT, is_v6);
+
+	print_flowspec_addr(f, FLOWSPEC_TYPE_DEST, is_v6);
+	print_flowspec_list(f, FLOWSPEC_TYPE_DST_PORT, is_v6);
+
+	print_flowspec_list(f, FLOWSPEC_TYPE_DSCP, is_v6);
+	print_flowspec_list(f, FLOWSPEC_TYPE_PKT_LEN, is_v6);
+	print_flowspec_flags(f, FLOWSPEC_TYPE_TCP_FLAGS, is_v6);
+	print_flowspec_flags(f, FLOWSPEC_TYPE_FRAG, is_v6);
+
+	/* TODO: fixup the code handling to be like in the parser */
+	print_flowspec_list(f, FLOWSPEC_TYPE_ICMP_TYPE, is_v6);
+	print_flowspec_list(f, FLOWSPEC_TYPE_ICMP_CODE, is_v6);
+
+	print_set(&fconf->attrset);
 	printf("\n");
 }
 
@@ -571,22 +687,13 @@ void
 print_roa(struct roa_tree *r)
 {
 	struct roa	*roa;
-	struct bgpd_addr addr;
 
 	if (RB_EMPTY(r))
 		return;
 
 	printf("roa-set {");
 	RB_FOREACH(roa, roa_tree, r) {
-		printf("\n\t");
-		addr.aid = roa->aid;
-		addr.v6 = roa->prefix.inet6;
-		printf("%s/%u", log_addr(&addr), roa->prefixlen);
-		if (roa->prefixlen != roa->maxlen)
-			printf(" maxlen %u", roa->maxlen);
-		printf(" source-as %u", roa->asnum);
-		if (roa->expires != 0)
-			printf(" expires %lld", (long long)roa->expires);
+		printf("\n\t%s", log_roa(roa));
 	}
 	printf("\n}\n\n");
 }
@@ -595,25 +702,13 @@ void
 print_aspa(struct aspa_tree *a)
 {
 	struct aspa_set	*aspa;
-	uint32_t i;
 
 	if (RB_EMPTY(a))
 		return;
 
 	printf("aspa-set {");
 	RB_FOREACH(aspa, aspa_tree, a) {
-		printf("\n\t");
-		printf("customer-as %s", log_as(aspa->as));
-		if (aspa->expires != 0)
-			printf(" expires %lld", (long long)aspa->expires);
-		printf(" provider-as { ");
-		for (i = 0; i < aspa->num; i++) {
-			printf("%s ", log_as(aspa->tas[i]));
-			if (aspa->tas_aid != NULL &&
-			    aspa->tas_aid[i] != AID_UNSPEC)
-				printf("allow %s ", print_af(aspa->tas_aid[i]));
-		}
-		printf("}");
+		printf("\n\t%s", log_aspa(aspa));
 	}
 	printf("\n}\n\n");
 }
@@ -671,6 +766,8 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		    log_addr(&p->local_addr_v6));
 	if (p->remote_port != BGP_PORT)
 		printf("%s\tport %hu\n", c, p->remote_port);
+	if (p->role != ROLE_NONE)
+		printf("%s\trole %s\n", c, log_policy(p->role));
 	if (p->max_prefix) {
 		printf("%s\tmax-prefix %u", c, p->max_prefix);
 		if (p->max_prefix_restart)
@@ -703,7 +800,7 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		if (conf->clusterid == 0)
 			printf("%s\troute-reflector\n", c);
 		else {
-			ina.s_addr = conf->clusterid;
+			ina.s_addr = htonl(conf->clusterid);
 			printf("%s\troute-reflector %s\n", c,
 			    inet_ntoa(ina));
 		}
@@ -819,39 +916,64 @@ void
 print_announce(struct peer_config *p, const char *c)
 {
 	uint8_t	aid;
+	int match = 0;
 
-	if (p->announce_capa == 0)
-		printf("%s\tannounce capabilities no\n", c);
-
-	for (aid = 0; aid < AID_MAX; aid++)
-		if (p->capabilities.mp[aid])
+	for (aid = AID_MIN; aid < AID_MAX; aid++)
+		if (p->capabilities.mp[aid] == 2) {
+			printf("%s\tannounce %s enforce\n", c, aid2str(aid));
+			match = 1;
+		} else if (p->capabilities.mp[aid]) {
 			printf("%s\tannounce %s\n", c, aid2str(aid));
+			match = 1;
+		}
+	if (!match) {
+		printf("%s\tannounce IPv4 none\n", c);
+		printf("%s\tannounce IPv6 none\n", c);
+	}
 
-	if (p->capabilities.refresh == 0)
+	if (p->capabilities.refresh == 2)
+		printf("%s\tannounce refresh enforce\n", c);
+	else if (p->capabilities.refresh == 0)
 		printf("%s\tannounce refresh no\n", c);
-	if (p->capabilities.enhanced_rr == 1)
+
+	if (p->capabilities.enhanced_rr == 2)
+		printf("%s\tannounce enhanced refresh enforce\n", c);
+	else if (p->capabilities.enhanced_rr == 1)
 		printf("%s\tannounce enhanced refresh yes\n", c);
-	if (p->capabilities.grestart.restart == 0)
+
+	if (p->capabilities.grestart.restart == 2)
+		printf("%s\tannounce restart enforce\n", c);
+	else if (p->capabilities.grestart.restart == 0)
 		printf("%s\tannounce restart no\n", c);
-	if (p->capabilities.as4byte == 0)
+
+	if (p->capabilities.as4byte == 2)
+		printf("%s\tannounce as4byte enforce\n", c);
+	else if (p->capabilities.as4byte == 0)
 		printf("%s\tannounce as4byte no\n", c);
-	if (p->capabilities.add_path[0] & CAPA_AP_RECV)
+
+	if (p->capabilities.add_path[AID_MIN] & CAPA_AP_RECV_ENFORCE)
+		printf("%s\tannounce add-path recv enforce\n", c);
+	else if (p->capabilities.add_path[AID_MIN] & CAPA_AP_RECV)
 		printf("%s\tannounce add-path recv yes\n", c);
-	if (p->capabilities.add_path[0] & CAPA_AP_SEND) {
+
+	if (p->capabilities.add_path[AID_MIN] & CAPA_AP_SEND) {
 		printf("%s\tannounce add-path send %s", c,
 		    print_addpath_mode(p->eval.mode));
 		if (p->eval.extrapaths != 0)
 			printf(" plus %d", p->eval.extrapaths);
 		if (p->eval.maxpaths != 0)
 			printf(" max %d", p->eval.maxpaths);
+		if (p->capabilities.add_path[AID_MIN] & CAPA_AP_SEND_ENFORCE)
+			printf(" enforce");
 		printf("\n");
 	}
-	if (p->capabilities.role_ena) {
-		printf("%s\tannounce policy %s%s\n", c,
-		    log_policy(p->capabilities.role),
-		    p->capabilities.role_ena == 2 ? " enforce" : "");
-	}
 
+	if (p->capabilities.policy == 2)
+		printf("%s\tannounce policy enforce\n", c);
+	else if (p->capabilities.policy == 1)
+		printf("%s\tannounce policy yes\n", c);
+	else
+		printf("%s\tannounce policy no\n", c);
 }
 
 void
@@ -942,6 +1064,22 @@ print_rule(struct bgpd_config *conf, struct filter_rule *r)
 			break;
 		default:
 			printf("ovs ??? %d ??? ", r->match.ovs.validity);
+		}
+	}
+
+	if (r->match.avs.is_set) {
+		switch (r->match.avs.validity) {
+		case ASPA_VALID:
+			printf("avs valid ");
+			break;
+		case ASPA_INVALID:
+			printf("avs invalid ");
+			break;
+		case ASPA_UNKNOWN:
+			printf("avs unknown ");
+			break;
+		default:
+			printf("avs ??? %d ??? ", r->match.avs.validity);
 		}
 	}
 
@@ -1118,6 +1256,7 @@ print_config(struct bgpd_config *conf, struct rib_names *rib_l)
 {
 	struct filter_rule	*r;
 	struct network		*n;
+	struct flowspec_config	*f;
 	struct rde_rib		*rr;
 	struct l3vpn		*vpn;
 
@@ -1130,6 +1269,8 @@ print_config(struct bgpd_config *conf, struct rib_names *rib_l)
 	print_originsets(&conf->originsets);
 	TAILQ_FOREACH(n, &conf->networks, entry)
 		print_network(&n->net, "");
+	RB_FOREACH(f, flowspec_tree, &conf->flowspecs)
+		print_flowspec(f, "");
 	if (!SIMPLEQ_EMPTY(&conf->l3vpns))
 		printf("\n");
 	SIMPLEQ_FOREACH(vpn, &conf->l3vpns, entry)

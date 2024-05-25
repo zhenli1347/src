@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.5 2022/06/06 10:50:56 kettenis Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.7 2024/03/26 22:26:04 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -466,9 +466,10 @@ efi_dma_constraint(void)
 {
 	void *node;
 
-	/* StarFive JH7100 has peripherals that only support 32-bit DMA. */
+	/* StarFive JH71x0 has peripherals that only support 32-bit DMA. */
 	node = fdt_find_node("/");
-	if (fdt_node_is_compatible(node, "starfive,jh7100"))
+	if (fdt_node_is_compatible(node, "starfive,jh7100") ||
+	    fdt_node_is_compatible(node, "starfive,jh7110"))
 		dma_constraint[1] = htobe64(0xffffffff);
 
 	/* Pass DMA constraint. */
@@ -491,6 +492,7 @@ efi_makebootargs(char *bootargs, int howto)
 	u_char zero[8] = { 0 };
 	uint64_t uefi_system_table = htobe64((uintptr_t)ST);
 	uint32_t boothowto = htobe32(howto);
+	int32_t hartid;
 	EFI_PHYSICAL_ADDRESS addr;
 	void *node;
 	size_t len;
@@ -521,6 +523,12 @@ efi_makebootargs(char *bootargs, int howto)
 	node = fdt_find_node("/chosen");
 	if (!node)
 		return NULL;
+
+	hartid = efi_get_boot_hart_id();
+	if (hartid >= 0) {
+		hartid = htobe32(hartid);
+		fdt_node_add_property(node, "boot-hartid", &hartid, 4);
+	}
 
 	len = strlen(bootargs) + 1;
 	fdt_node_add_property(node, "bootargs", bootargs, len);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: refcnt.h,v 1.8 2022/08/29 07:51:45 bluhm Exp $ */
+/*	$OpenBSD: refcnt.h,v 1.12 2023/08/28 14:50:02 bluhm Exp $ */
 
 /*
  * Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
@@ -44,9 +44,13 @@ int	refcnt_shared(struct refcnt *);
 unsigned int	refcnt_read(struct refcnt *);
 
 /* sorted alphabetically, keep in sync with dev/dt/dt_prov_static.c */
-#define DT_REFCNT_IDX_IFADDR	1
-#define DT_REFCNT_IDX_INPCB	2
-#define DT_REFCNT_IDX_TDB	3
+#define DT_REFCNT_IDX_ETHMULTI	1
+#define DT_REFCNT_IDX_IFADDR	2
+#define DT_REFCNT_IDX_IFMADDR	3
+#define DT_REFCNT_IDX_INPCB	4
+#define DT_REFCNT_IDX_RTENTRY	5
+#define DT_REFCNT_IDX_SYNCACHE	6
+#define DT_REFCNT_IDX_TDB	7
 
 #endif /* _KERNEL */
 

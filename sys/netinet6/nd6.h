@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.h,v 1.93 2022/12/09 17:32:53 claudio Exp $	*/
+/*	$OpenBSD: nd6.h,v 1.99 2023/05/04 06:56:56 bluhm Exp $	*/
 /*	$KAME: nd6.h,v 1.95 2002/06/08 11:31:06 itojun Exp $	*/
 
 /*
@@ -44,7 +44,10 @@
 #define ND6_LLINFO_PROBE	4
 
 /*
- *  Locks used to protect struct members in this file:
+ * Locks used to protect struct members in this file:
+ *	I	immutable after creation
+ *	K	kernel lock
+ *	m	nd6 mutex, needed when net lock is shared
  *	N	net lock
  */
 
@@ -79,14 +82,19 @@ struct	in6_ndireq {
 #include <sys/queue.h>
 
 struct	llinfo_nd6 {
-	TAILQ_ENTRY(llinfo_nd6)	ln_list;
-	struct	rtentry *ln_rt;
-	struct	mbuf *ln_hold;	/* last packet until resolved/timeout */
+	TAILQ_ENTRY(llinfo_nd6)	 ln_list;	/* [mN] global nd6_list */
+	struct	rtentry		*ln_rt;		/* [I] backpointer to rtentry */
+	struct	mbuf_queue ln_mq;	/* hold packets until resolved */
+	struct	in6_addr ln_saddr6;	/* source of prompting packet */
 	long	ln_asked;	/* number of queries already sent for addr */
 	int	ln_byhint;	/* # of times we made it reachable by UL hint */
 	short	ln_state;	/* reachability state */
 	short	ln_router;	/* 2^0: ND6 router bit */
 };
+#define LN_HOLD_QUEUE 10
+#define LN_HOLD_TOTAL 100
+
+extern unsigned int ln_hold_total;
 
 #define ND6_LLINFO_PERMANENT(n)	((n)->ln_rt->rt_expire == 0)
 
@@ -111,17 +119,13 @@ extern int nd6_debug;
 struct nd_opts {
 	struct nd_opt_hdr *nd_opts_src_lladdr;
 	struct nd_opt_hdr *nd_opts_tgt_lladdr;
-	struct nd_opt_hdr *nd_opts_search;	/* multiple opts */
-	struct nd_opt_hdr *nd_opts_last;	/* multiple opts */
-	int nd_opts_done;
 };
 
 void nd6_init(void);
 void nd6_ifattach(struct ifnet *);
 void nd6_ifdetach(struct ifnet *);
 int nd6_is_addr_neighbor(const struct sockaddr_in6 *, struct ifnet *);
-void nd6_option_init(void *, int, struct nd_opts *);
-int nd6_options(struct nd_opts *);
+int nd6_options(void *, int, struct nd_opts *);
 struct	rtentry *nd6_lookup(const struct in6_addr *, int, struct ifnet *,
     u_int);
 void nd6_llinfo_settimer(const struct llinfo_nd6 *, unsigned int);
@@ -140,7 +144,7 @@ void nd6_na_output(struct ifnet *, const struct in6_addr *,
 	const struct in6_addr *, u_long, int, struct sockaddr *);
 void nd6_ns_input(struct mbuf *, int, int);
 void nd6_ns_output(struct ifnet *, const struct in6_addr *,
-	const struct in6_addr *, const struct llinfo_nd6 *, int);
+	const struct in6_addr *, const struct in6_addr *, int);
 caddr_t nd6_ifptomac(struct ifnet *);
 void nd6_dad_start(struct ifaddr *);
 void nd6_dad_stop(struct ifaddr *);

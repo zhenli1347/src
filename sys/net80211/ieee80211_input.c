@@ -1,4 +1,5 @@
-/*	$OpenBSD: ieee80211_input.c,v 1.247 2022/03/20 12:01:58 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_input.c,v 1.254 2024/05/23 11:19:13 stsp Exp $	*/
+/*	$NetBSD: ieee80211_input.c,v 1.24 2004/05/31 11:12:24 dyoung Exp $	*/
 
 /*-
  * Copyright (c) 2001 Atsushi Onoe
@@ -74,7 +75,6 @@ void	ieee80211_ba_move_window(struct ieee80211com *,
 	    struct ieee80211_node *, u_int8_t, u_int16_t, struct mbuf_list *);
 void	ieee80211_input_ba_seq(struct ieee80211com *,
 	    struct ieee80211_node *, uint8_t, uint16_t, struct mbuf_list *);
-struct	mbuf *ieee80211_align_mbuf(struct mbuf *);
 void	ieee80211_decap(struct ieee80211com *, struct mbuf *,
 	    struct ieee80211_node *, int, struct mbuf_list *);
 int	ieee80211_amsdu_decap_validate(struct ieee80211com *, struct mbuf *,
@@ -87,8 +87,8 @@ int	ieee80211_parse_edca_params_body(struct ieee80211com *,
 	    const u_int8_t *);
 int	ieee80211_parse_edca_params(struct ieee80211com *, const u_int8_t *);
 int	ieee80211_parse_wmm_params(struct ieee80211com *, const u_int8_t *);
-enum	ieee80211_cipher ieee80211_parse_rsn_cipher(const u_int8_t[]);
-enum	ieee80211_akm ieee80211_parse_rsn_akm(const u_int8_t[]);
+enum	ieee80211_cipher ieee80211_parse_rsn_cipher(const u_int8_t *);
+enum	ieee80211_akm ieee80211_parse_rsn_akm(const u_int8_t *);
 int	ieee80211_parse_rsn_body(struct ieee80211com *, const u_int8_t *,
 	    u_int, struct ieee80211_rsnparams *);
 int	ieee80211_save_ie(const u_int8_t *, u_int8_t **);
@@ -189,8 +189,10 @@ ieee80211_input_hwdecrypt(struct ieee80211com *ic, struct ieee80211_node *ni,
 			 */
 			break;
 		}
-		if (ieee80211_ccmp_get_pn(&pn, &prsc, m, k) != 0)
+		if (ieee80211_ccmp_get_pn(&pn, &prsc, m, k) != 0) {
+			ic->ic_stats.is_ccmp_dec_errs++;
 			return NULL;
+		}
 		if (rxi->rxi_flags & IEEE80211_RXI_HWDEC_SAME_PN) {
 			if (pn < *prsc) {
 				ic->ic_stats.is_ccmp_replays++;
@@ -1693,7 +1695,12 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 			htcaps = frm;
 			break;
 		case IEEE80211_ELEMID_HTOP:
+			if (frm[1] < 22) {
+				ic->ic_stats.is_rx_elem_toosmall++;
+				break;
+			}
 			htop = frm;
+			chan = frm[2];
 			break;
 		case IEEE80211_ELEMID_VHTCAPS:
 			vhtcaps = frm;
@@ -1895,7 +1902,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, struct mbuf *m,
 		 * This probe response indicates the AP is still serving us
 		 * so don't allow ieee80211_watchdog() to move us into SCAN.
 		 */
-		 if ((ic->ic_flags & IEEE80211_F_BGSCAN) == 0)
+		if ((ic->ic_flags & IEEE80211_F_BGSCAN) == 0)
 		 	ic->ic_mgt_timer = 0;
 	}
 	/*
@@ -2831,6 +2838,11 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, struct mbuf *m,
 	u_int16_t params, ssn, bufsz, timeout;
 	u_int8_t token, tid;
 	int err = 0;
+
+	/* Ignore if we are not ready to receive data frames. */
+	if (ic->ic_state != IEEE80211_S_RUN ||
+	    ((ic->ic_flags & IEEE80211_F_RSNON) && !ni->ni_port_valid))
+		return;
 
 	if (!(ni->ni_flags & IEEE80211_NODE_HT)) {
 		DPRINTF(("received ADDBA req from non-HT STA %s\n",

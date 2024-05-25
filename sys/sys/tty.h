@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.h,v 1.41 2022/07/02 08:50:42 visa Exp $	*/
+/*	$OpenBSD: tty.h,v 1.43 2024/05/12 08:21:56 jsg Exp $	*/
 /*	$NetBSD: tty.h,v 1.30.4.1 1996/06/02 09:08:13 mrg Exp $	*/
 
 /*-
@@ -244,10 +244,9 @@ TAILQ_HEAD(ttylist_head, tty);		/* the ttylist is a TAILQ */
 #ifdef _KERNEL
 
 extern	int tty_count;			/* number of ttys in global ttylist */
-extern	struct ttychars ttydefaults;
 
 /* Symbolic sleep message strings. */
-extern	 char ttyin[], ttyout[], ttopen[], ttclos[], ttybg[], ttybuf[];
+extern	 char ttyin[], ttyout[], ttopen[], ttclos[], ttybg[];
 
 extern int64_t tk_cancc, tk_nin, tk_nout, tk_rawcc;
 
@@ -256,7 +255,6 @@ int	sysctl_pty(int *, u_int, void *, size_t *, void *, size_t);
 
 int	 b_to_q(u_char *cp, int cc, struct clist *q);
 void	 catq(struct clist *from, struct clist *to);
-void	 clist_init(void);
 int	 getc(struct clist *q);
 void	 ndflush(struct clist *q, int cc);
 int	 ndqb(struct clist *q, int flag);

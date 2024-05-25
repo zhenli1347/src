@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.91 2022/08/29 02:58:13 jsg Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.94 2023/12/11 22:12:53 kettenis Exp $	*/
 /*	$NetBSD: pmap.h,v 1.44 2000/04/24 17:18:18 thorpej Exp $	*/
 
 /*
@@ -205,12 +205,12 @@ extern struct pool pmap_pv_pool;
 
 #define pmap_clear_modify(pg)		pmap_clear_attrs(pg, PG_M)
 #define pmap_clear_reference(pg)	pmap_clear_attrs(pg, PG_U)
-#define pmap_copy(DP,SP,D,L,S)
 #define pmap_is_modified(pg)		pmap_test_attrs(pg, PG_M)
 #define pmap_is_referenced(pg)		pmap_test_attrs(pg, PG_U)
 #define pmap_valid_entry(E) 		((E) & PG_V) /* is PDE or PTE valid? */
 
 #define pmap_proc_iflush(p,va,len)	/* nothing */
+#define pmap_init_percpu()		do { /* nothing */ } while (0)
 #define pmap_unuse_final(p)		/* nothing */
 #define	pmap_remove_holes(vm)		do { /* nothing */ } while (0)
 
@@ -358,6 +358,8 @@ void pmap_tmpunmap_pa_pae(void);
 void pmap_flush_cache(vaddr_t, vsize_t);
 void pmap_flush_page(paddr_t);
 void pmap_flush_page_pae(paddr_t);
+
+#define PMAP_CHECK_COPYIN	1
 
 #define PMAP_GROWKERNEL		/* turn on pmap_growkernel interface */
 

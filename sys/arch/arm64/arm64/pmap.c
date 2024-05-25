@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.91 2022/12/10 10:13:58 patrick Exp $ */
+/* $OpenBSD: pmap.c,v 1.102 2024/03/27 15:40:50 kurt Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -184,7 +184,7 @@ VP_IDX3(vaddr_t va)
 }
 
 const uint64_t ap_bits_user[8] = {
-	[PROT_NONE]				= ATTR_PXN|ATTR_UXN|ATTR_AP(2),
+	[PROT_NONE]				= 0,
 	[PROT_READ]				= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(3),
 	[PROT_WRITE]				= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(1),
 	[PROT_WRITE|PROT_READ]			= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(1),
@@ -195,7 +195,7 @@ const uint64_t ap_bits_user[8] = {
 };
 
 const uint64_t ap_bits_kern[8] = {
-	[PROT_NONE]				= ATTR_PXN|ATTR_UXN|ATTR_AP(2),
+	[PROT_NONE]				= 0,
 	[PROT_READ]				= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(2),
 	[PROT_WRITE]				= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(0),
 	[PROT_WRITE|PROT_READ]			= ATTR_PXN|ATTR_UXN|ATTR_AF|ATTR_AP(0),
@@ -792,7 +792,7 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	case PMAP_CACHE_DEV_NGNRE:
 		break;
 	default:
-		panic("pmap_fill_pte:invalid cache mode");
+		panic("%s: invalid cache mode", __func__);
 	}
 	pted->pted_va |= cache;
 
@@ -1220,10 +1220,13 @@ pmap_bootstrap(long kvo, paddr_t lpt1, long kernelstart, long kernelend,
 	vp1 = (struct pmapvp1 *)pt1pa;
 	pmap_kernel()->pm_vp.l1 = (struct pmapvp1 *)va;
 	pmap_kernel()->pm_privileged = 1;
+	pmap_kernel()->pm_guarded = ATTR_GP;
 	pmap_kernel()->pm_asid = 0;
 
+	mtx_init(&pmap_tramp.pm_mtx, IPL_VM);
 	pmap_tramp.pm_vp.l1 = (struct pmapvp1 *)va + 1;
 	pmap_tramp.pm_privileged = 1;
+	pmap_tramp.pm_guarded = ATTR_GP;
 	pmap_tramp.pm_asid = 0;
 
 	/* Mark ASID 0 as in-use. */
@@ -1446,6 +1449,10 @@ pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 
 	pted->pted_va &= ~PROT_WRITE;
 	pted->pted_pte &= ~PROT_WRITE;
+	if ((prot & PROT_READ) == 0) {
+		pted->pted_va &= ~PROT_READ;
+		pted->pted_pte &= ~PROT_READ;
+	}
 	if ((prot & PROT_EXEC) == 0) {
 		pted->pted_va &= ~PROT_EXEC;
 		pted->pted_pte &= ~PROT_EXEC;
@@ -1476,9 +1483,6 @@ pmap_page_rw(pmap_t pm, vaddr_t va)
 
 /*
  * Lower the protection on the specified physical page.
- *
- * There are only two cases, either the protection is going to 0,
- * or it is going to read-only.
  */
 void
 pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
@@ -1679,7 +1683,7 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 		attr |= ATTR_SH(SH_INNER);
 		break;
 	default:
-		panic("pmap_pte_insert: invalid cache mode");
+		panic("%s: invalid cache mode", __func__);
 	}
 
 	if (pm->pm_privileged)
@@ -1687,8 +1691,12 @@ pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 	else
 		access_bits = ap_bits_user[pted->pted_pte & PROT_MASK];
 
+#ifndef SMALL_KERNEL
+	access_bits |= pm->pm_guarded;
+#endif
+
 	pte = (pted->pted_pte & PTE_RPGN) | attr | access_bits | L3_P;
-	*pl3 = pte;
+	*pl3 = access_bits ? pte : 0;
 }
 
 void
@@ -1866,6 +1874,13 @@ pmap_postinit(void)
 }
 
 void
+pmap_init_percpu(void)
+{
+	pool_cache_init(&pmap_pted_pool);
+	pool_cache_init(&pmap_vp_pool);
+}
+
+void
 pmap_update(pmap_t pm)
 {
 }
@@ -1920,13 +1935,6 @@ pmap_clear_reference(struct vm_page *pg)
 	mtx_leave(&pg->mdpage.pv_mtx);
 
 	return 0;
-}
-
-void
-pmap_copy(pmap_t dst_pmap, pmap_t src_pmap, vaddr_t dst_addr,
-	vsize_t len, vaddr_t src_addr)
-{
-	/* NOOP */
 }
 
 void
@@ -2229,6 +2237,38 @@ pmap_show_mapping(uint64_t va)
 }
 
 void
+pmap_setpauthkeys(struct pmap *pm)
+{
+	if (ID_AA64ISAR1_APA(cpu_id_aa64isar1) >= ID_AA64ISAR1_APA_BASE ||
+	    ID_AA64ISAR1_API(cpu_id_aa64isar1) >= ID_AA64ISAR1_API_BASE) {
+		__asm volatile (".arch armv8.3-a; msr apiakeylo_el1, %0"
+		    :: "r"(pm->pm_apiakey[0]));
+		__asm volatile (".arch armv8.3-a; msr apiakeyhi_el1, %0"
+		    :: "r"(pm->pm_apiakey[1]));
+		__asm volatile (".arch armv8.3-a; msr apdakeylo_el1, %0"
+		    :: "r"(pm->pm_apdakey[0]));
+		__asm volatile (".arch armv8.3-a; msr apdakeyhi_el1, %0"
+		    :: "r"(pm->pm_apdakey[1]));
+		__asm volatile (".arch armv8.3-a; msr apibkeylo_el1, %0"
+		    :: "r"(pm->pm_apibkey[0]));
+		__asm volatile (".arch armv8.3-a; msr apibkeyhi_el1, %0"
+		    :: "r"(pm->pm_apibkey[1]));
+		__asm volatile (".arch armv8.3-a; msr apdbkeylo_el1, %0"
+		    :: "r"(pm->pm_apdbkey[0]));
+		__asm volatile (".arch armv8.3-a; msr apdbkeyhi_el1, %0"
+		    :: "r"(pm->pm_apdbkey[1]));
+	}
+
+	if (ID_AA64ISAR1_GPA(cpu_id_aa64isar1) >= ID_AA64ISAR1_GPA_IMPL ||
+	    ID_AA64ISAR1_GPI(cpu_id_aa64isar1) >= ID_AA64ISAR1_GPI_IMPL) {
+		__asm volatile (".arch armv8.3-a; msr apgakeylo_el1, %0"
+		    :: "r"(pm->pm_apgakey[0]));
+		__asm volatile (".arch armv8.3-a; msr apgakeyhi_el1, %0"
+		    :: "r"(pm->pm_apgakey[1]));
+	}
+}
+
+void
 pmap_setttb(struct proc *p)
 {
 	struct cpu_info *ci = curcpu();
@@ -2243,6 +2283,9 @@ pmap_setttb(struct proc *p)
 	if (pm != pmap_kernel() &&
 	    (pm->pm_asid & ~PMAP_ASID_MASK) != pmap_asid_gen)
 		pmap_allocate_asid(pm);
+
+	if (pm != pmap_kernel())
+		pmap_setpauthkeys(pm);
 
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");

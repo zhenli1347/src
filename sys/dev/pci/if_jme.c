@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_jme.c,v 1.56 2022/03/11 18:00:45 mpi Exp $	*/
+/*	$OpenBSD: if_jme.c,v 1.58 2024/05/24 06:02:53 jsg Exp $	*/
 /*-
  * Copyright (c) 2008, Pyun YongHyeon <yongari@FreeBSD.org>
  * All rights reserved.
@@ -38,10 +38,8 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/queue.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
-#include <sys/socket.h>
 
 #include <machine/bus.h>
 
@@ -662,7 +660,7 @@ jme_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = jme_ioctl;
 	ifp->if_start = jme_start;
 	ifp->if_watchdog = jme_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, JME_TX_RING_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, JME_TX_RING_CNT - 1);
 	strlcpy(ifp->if_xname, sc->sc_dev.dv_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |

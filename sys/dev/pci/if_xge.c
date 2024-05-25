@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_xge.c,v 1.82 2022/03/11 18:00:50 mpi Exp $	*/
+/*	$OpenBSD: if_xge.c,v 1.84 2024/05/24 06:02:57 jsg Exp $	*/
 /*	$NetBSD: if_xge.c,v 1.1 2005/09/09 10:30:27 ragge Exp $	*/
 
 /*
@@ -46,9 +46,6 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/device.h>
 #include <sys/endian.h>
 
@@ -68,8 +65,6 @@
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcidevs.h>
-
-#include <sys/lock.h>
 
 #include <dev/pci/if_xgereg.h>
 
@@ -679,7 +674,7 @@ xge_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = xge_ioctl;
 	ifp->if_start = xge_start;
 	ifp->if_hardmtu = XGE_MAX_MTU;
-	ifq_set_maxlen(&ifp->if_snd, NTXDESCS - 1);
+	ifq_init_maxlen(&ifp->if_snd, NTXDESCS - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4;

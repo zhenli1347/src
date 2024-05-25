@@ -1,4 +1,4 @@
-/*	$OpenBSD: traphandler.c,v 1.23 2022/06/30 09:42:19 martijn Exp $	*/
+/*	$OpenBSD: traphandler.c,v 1.27 2024/02/06 15:36:11 martijn Exp $	*/
 
 /*
  * Copyright (c) 2014 Bret Stephen Lambert <blambert@openbsd.org>
@@ -18,30 +18,26 @@
 
 #include <sys/queue.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/uio.h>
+#include <sys/tree.h>
 #include <sys/wait.h>
-
-#include <net/if.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include <ber.h>
 #include <errno.h>
-#include <event.h>
-#include <fcntl.h>
 #include <imsg.h>
 #include <netdb.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <syslog.h>
 #include <unistd.h>
-#include <pwd.h>
 
-#include "snmpd.h"
+#include "log.h"
 #include "mib.h"
+#include "smi.h"
+#include "snmp.h"
+#include "snmpd.h"
 
 int	 traphandler_priv_recvmsg(struct privsep_proc *, struct imsg *);
 int	 traphandler_fork_handler(struct privsep_proc *, struct imsg *);
@@ -194,7 +190,7 @@ traphandler_v1translate(struct snmp_message *msg, int proxy)
 		return NULL;
 	}
 
-	/* work aronud net-snmp's snmptrap: It adds an EOC element in vblist */
+	/* work around net-snmp's snmptrap: It adds an EOC element in vblist */
 	if (vblist->be_len != 0)
 		vb0 = ober_unlink_elements(vblist);
 
@@ -337,7 +333,8 @@ trapcmd_exec(struct trapcmd *cmd, struct sockaddr *sa,
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, s) == -1) {
 		log_warn("could not create pipe for OID '%s'",
-		    smi_oid2string(cmd->cmd_oid, oidbuf, sizeof(oidbuf), 0));
+		    mib_oid2string(&cmd->cmd_oid, oidbuf, sizeof(oidbuf),
+		    snmpd_env->sc_oidfmt));
 		return;
 	}
 
@@ -355,13 +352,15 @@ trapcmd_exec(struct trapcmd *cmd, struct sockaddr *sa,
 
 		/* this shouldn't happen */
 		log_warn("could not exec trap command for OID '%s'",
-		    smi_oid2string(cmd->cmd_oid, oidbuf, sizeof(oidbuf), 0));
+		    mib_oid2string(&cmd->cmd_oid, oidbuf, sizeof(oidbuf),
+		    snmpd_env->sc_oidfmt));
 		_exit(1);
 		/* NOTREACHED */
 
 	case -1:
 		log_warn("could not fork trap command for OID '%s'",
-		    smi_oid2string(cmd->cmd_oid, oidbuf, sizeof(oidbuf), 0));
+		    mib_oid2string(&cmd->cmd_oid, oidbuf, sizeof(oidbuf),
+		    snmpd_env->sc_oidfmt));
 		close(s[0]);
 		close(s[1]);
 		return;
@@ -428,7 +427,7 @@ trapcmd_lookup(struct ber_oid *oid)
 	struct trapcmd	key, *res;
 
 	bzero(&key, sizeof(key));
-	key.cmd_oid = oid;
+	key.cmd_oid = *oid;
 
 	if ((res = RB_FIND(trapcmd_tree, &trapcmd_tree, &key)) == NULL)
 		res = key.cmd_maybe;
@@ -440,7 +439,7 @@ trapcmd_cmp(struct trapcmd *cmd1, struct trapcmd *cmd2)
 {
 	int ret;
 
-	ret = ober_oid_cmp(cmd1->cmd_oid, cmd2->cmd_oid);
+	ret = ober_oid_cmp(&cmd1->cmd_oid, &cmd2->cmd_oid);
 	switch (ret) {
 	case 2:
 		/* cmd1 is a child of cmd2 */
@@ -463,6 +462,5 @@ trapcmd_free(struct trapcmd *cmd)
 {
 	RB_REMOVE(trapcmd_tree, &trapcmd_tree, cmd);
 	free(cmd->cmd_argv);
-	free(cmd->cmd_oid);
 	free(cmd);
 }

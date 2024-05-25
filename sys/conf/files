@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.719 2022/11/06 15:36:13 patrick Exp $
+#	$OpenBSD: files,v 1.731 2024/04/10 13:59:05 naddy Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -22,6 +22,7 @@ define	gpiobus {}
 define	onewirebus {}
 define	video {}
 define	intrmap {}
+define	fdt {[early = 0]}
 
 # filesystem firmware loading attribute
 define firmload
@@ -424,6 +425,14 @@ file	dev/ic/malo.c			malo
 device	bwi: ether, ifnet, ifmedia, firmload, wlan
 file	dev/ic/bwi.c			bwi
 
+# Qualcomm 802.11ax
+device	qwx: ether, ifnet, ifmedia, firmload, wlan
+file	dev/ic/qwx.c			qwx
+
+# Intel OnChip System Fabric
+device	iosf
+file	dev/ic/iosf.c			iosf	needs-flag
+
 # Attributes which machine-independent bus support can be attached to.
 # These should be defined here, because some of these busses can have
 # devices which provide these attributes, and we'd like to avoid hairy
@@ -530,11 +539,20 @@ file	dev/ic/dwiic.c			dwiic
 device	imxiic: i2cbus
 file	dev/ic/imxiic.c			imxiic
 
+# Synopsys DesignWare Ethernet QoS
+device	dwqe: ether, ifnet, ifmedia, mii
+file	dev/ic/dwqe.c			dwqe
+
 # Qualcomm GPIO controller
 device	qcgpio
 
 # Qualcomm I2C controller
 device	qciic: i2cbus
+
+# UFS HC
+device	ufshci: scsi
+#device	ufshci
+file	dev/ic/ufshci.c			ufshci
 
 # legitimate pseudo-devices
 pseudo-device vnd: disk
@@ -559,6 +577,7 @@ pseudo-device vlan: ifnet, ether
 pseudo-device carp: ifnet, ether
 pseudo-device sppp: ifnet
 pseudo-device gif: ifnet
+pseudo-device sec: ifnet
 pseudo-device gre: ifnet, ether, etherbridge
 pseudo-device crypto: ifnet
 pseudo-device trunk: ifnet, ether, ifmedia
@@ -587,7 +606,7 @@ file	miscfs/fuse/fuse_vfsops.c	fuse
 file	miscfs/fuse/fuse_vnops.c	fuse
 file	miscfs/fuse/fusebuf.c		fuse
 
-pseudo-device pf: ifnet
+pseudo-device pf: ifnet, stoeplitz
 file	net/pf.c			pf	needs-flag
 file	net/pf_norm.c			pf
 file	net/pf_ruleset.c		pf
@@ -738,7 +757,7 @@ file kern/subr_xxx.c
 file kern/sys_futex.c
 file kern/sys_generic.c
 file kern/sys_pipe.c
-file kern/sys_process.c			ptrace
+file kern/sys_process.c			ptrace | dt
 file kern/sys_socket.c
 file kern/syscalls.c			syscall_debug
 file kern/sysv_ipc.c			sysvshm | sysvsem | sysvmsg
@@ -941,11 +960,9 @@ file ufs/ffs/ffs_alloc.c		ffs | mfs
 file ufs/ffs/ffs_balloc.c		ffs | mfs
 file ufs/ffs/ffs_inode.c		ffs | mfs
 file ufs/ffs/ffs_subr.c			ffs | mfs
-file ufs/ffs/ffs_softdep_stub.c		ffs | mfs
 file ufs/ffs/ffs_tables.c		ffs | mfs
 file ufs/ffs/ffs_vfsops.c		ffs | mfs
 file ufs/ffs/ffs_vnops.c		ffs | mfs
-file ufs/ffs/ffs_softdep.c		ffs_softupdates
 file ufs/mfs/mfs_vfsops.c		mfs
 file ufs/mfs/mfs_vnops.c		mfs
 file ufs/ufs/ufs_bmap.c			ffs | mfs | ext2fs
@@ -993,6 +1010,7 @@ file uvm/uvm_vnode.c
 
 # IPv6
 file net/if_gif.c			gif			needs-count
+file net/if_sec.c			sec			needs-count
 file netinet/ip_ecn.c
 file netinet6/in6_pcb.c			inet6
 file netinet6/in6.c			inet6
@@ -1060,10 +1078,9 @@ file lib/libkern/arch/${MACHINE_ARCH}/strlen.S | lib/libkern/strlen.c
 file lib/libkern/arch/${MACHINE_ARCH}/strncmp.S | lib/libkern/strncmp.c
 file lib/libkern/arch/${MACHINE_ARCH}/strncpy.S | lib/libkern/strncpy.c
 file lib/libkern/arch/${MACHINE_ARCH}/strnlen.S | lib/libkern/strnlen.c
+file lib/libkern/arch/${MACHINE_ARCH}/strnstr.S | lib/libkern/strnstr.c
 file lib/libkern/arch/${MACHINE_ARCH}/scanc.S | lib/libkern/scanc.c
 file lib/libkern/arch/${MACHINE_ARCH}/skpc.S | lib/libkern/skpc.c
-file lib/libkern/arch/${MACHINE_ARCH}/htonl.S | lib/libkern/htonl.c
-file lib/libkern/arch/${MACHINE_ARCH}/htons.S | lib/libkern/htons.c
 file lib/libkern/arch/${MACHINE_ARCH}/strncasecmp.S | lib/libkern/strncasecmp.c
 
 file lib/libz/adler32.c			ppp_deflate | ipsec | crypto | ddb |

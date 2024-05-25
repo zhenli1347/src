@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.c,v 1.258 2021/07/12 15:09:19 beck Exp $	*/
+/*	$OpenBSD: sysctl.c,v 1.261 2024/05/09 08:35:40 florian Exp $	*/
 /*	$NetBSD: sysctl.c,v 1.9 1995/09/30 07:12:50 thorpej Exp $	*/
 
 /*
@@ -75,7 +75,6 @@
 
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
-#include <netinet6/ip6_var.h>
 #include <netinet6/ip6_divert.h>
 
 #include <netmpls/mpls.h>
@@ -132,6 +131,7 @@ struct ctlname ddbname[] = CTL_DDB_NAMES;
 struct ctlname audioname[] = CTL_KERN_AUDIO_NAMES;
 struct ctlname videoname[] = CTL_KERN_VIDEO_NAMES;
 struct ctlname witnessname[] = CTL_KERN_WITNESS_NAMES;
+struct ctlname batteryname[] = CTL_HW_BATTERY_NAMES;
 char names[BUFSIZ];
 int lastused;
 
@@ -223,6 +223,7 @@ int sysctl_chipset(char *, char **, int *, int, int *);
 int sysctl_audio(char *, char **, int *, int, int *);
 int sysctl_video(char *, char **, int *, int, int *);
 int sysctl_witness(char *, char **, int *, int, int *);
+int sysctl_battery(char *, char **, int *, int, int *);
 void vfsinit(void);
 
 char *equ = "=";
@@ -555,6 +556,11 @@ parse(char *string, int flags)
 		case HW_SENSORS:
 			special |= SENSORS;
 			len = sysctl_sensors(string, &bufp, mib, flags, &type);
+			if (len < 0)
+				return;
+			break;
+		case HW_BATTERY:
+			len = sysctl_battery(string, &bufp, mib, flags, &type);
 			if (len < 0)
 				return;
 			break;
@@ -931,8 +937,14 @@ parse(char *string, int flags)
 		struct timeval *btp = (struct timeval *)buf;
 
 		if (!nflag) {
+			char *ct;
 			boottime = btp->tv_sec;
-			(void)printf("%s%s%s", string, equ, ctime(&boottime));
+			ct = ctime(&boottime);
+			if (ct)
+				(void)printf("%s%s%s", string, equ, ct);
+			else
+				(void)printf("%s%s%lld\n", string, equ,
+				    boottime);
 		} else
 			(void)printf("%lld\n", (long long)btp->tv_sec);
 		return;
@@ -1782,6 +1794,7 @@ struct list tclist = { tcname, KERN_TIMECOUNTER_MAXID };
 struct list audiolist = { audioname, KERN_AUDIO_MAXID };
 struct list videolist = { videoname, KERN_VIDEO_MAXID };
 struct list witnesslist = { witnessname, KERN_WITNESS_MAXID };
+struct list batterylist = { batteryname, HW_BATTERY_MAXID };
 
 /*
  * handle vfs namei cache statistics
@@ -2848,9 +2861,11 @@ print_sensor(struct sensor *s)
 		time_t t = s->tv.tv_sec;
 		char ct[26];
 
-		ctime_r(&t, ct);
-		ct[19] = '\0';
-		printf(", %s.%03ld", ct, s->tv.tv_usec / 1000);
+		if (ctime_r(&t, ct)) {
+			ct[19] = '\0';
+			printf(", %s.%03ld", ct, s->tv.tv_usec / 1000);
+		} else
+			printf(", %lld.%03ld", t, s->tv.tv_usec / 1000);
 	}
 }
 
@@ -2908,6 +2923,26 @@ sysctl_witness(char *string, char **bufpp, int mib[], int flags, int *typep)
 		return (-1);
 	mib[2] = indx;
 	*typep = witnesslist.list[indx].ctl_type;
+	return (3);
+}
+
+/*
+ * Handle battery support
+ */
+int
+sysctl_battery(char *string, char **bufpp, int mib[], int flags,
+    int *typep)
+{
+	int indx;
+
+	if (*bufpp == NULL) {
+		listall(string, &batterylist);
+		return (-1);
+	}
+	if ((indx = findname(string, "third", bufpp, &batterylist)) == -1)
+		return (-1);
+	mib[2] = indx;
+	*typep = batterylist.list[indx].ctl_type;
 	return (3);
 }
 

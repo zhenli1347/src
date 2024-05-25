@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6.c,v 1.259 2022/12/06 22:19:39 mvs Exp $	*/
+/*	$OpenBSD: in6.c,v 1.266 2024/05/21 15:12:25 florian Exp $	*/
 /*	$KAME: in6.c,v 1.372 2004/06/14 08:14:21 itojun Exp $	*/
 
 /*
@@ -197,7 +197,6 @@ int
 in6_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 {
 	int privileged;
-	int error;
 
 	privileged = 0;
 	if ((so->so_state & SS_PRIV) != 0)
@@ -207,17 +206,11 @@ in6_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp)
 #ifdef MROUTING
 	case SIOCGETSGCNT_IN6:
 	case SIOCGETMIFCNT_IN6:
-		KERNEL_LOCK();
-		error = mrt6_ioctl(so, cmd, data);
-		KERNEL_UNLOCK();
-		break;
+		return mrt6_ioctl(so, cmd, data);
 #endif /* MROUTING */
 	default:
-		error = in6_ioctl(cmd, data, ifp, privileged);
-		break;
+		return in6_ioctl(cmd, data, ifp, privileged);
 	}
-
-	return error;
 }
 
 int
@@ -569,13 +562,19 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 		return (EINVAL);
 
 	/*
-	 * The destination address for a p2p link must have a family
-	 * of AF_UNSPEC or AF_INET6.
+	 * The destination address for a p2p link or the address of the
+	 * announcing router for an autoconf address must have a family of
+	 * AF_UNSPEC or AF_INET6.
 	 */
-	if ((ifp->if_flags & IFF_POINTOPOINT) != 0 &&
-	    ifra->ifra_dstaddr.sin6_family != AF_INET6 &&
-	    ifra->ifra_dstaddr.sin6_family != AF_UNSPEC)
-		return (EAFNOSUPPORT);
+	if ((ifp->if_flags & IFF_POINTOPOINT) ||
+	    (ifp->if_flags & IFF_LOOPBACK) ||
+	    (ifra->ifra_flags & IN6_IFF_AUTOCONF)) {
+		if (ifra->ifra_dstaddr.sin6_family != AF_INET6 &&
+		    ifra->ifra_dstaddr.sin6_family != AF_UNSPEC)
+			return (EAFNOSUPPORT);
+
+	} else if (ifra->ifra_dstaddr.sin6_family != AF_UNSPEC)
+			return (EINVAL);
 
 	/*
 	 * validate ifra_prefixmask.  don't check sin6_family, netmask
@@ -604,27 +603,15 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 		 */
 		plen = in6_mask2len(&ia6->ia_prefixmask.sin6_addr, NULL);
 	}
-	/*
-	 * If the destination address on a p2p interface is specified,
-	 * and the address is a scoped one, validate/set the scope
-	 * zone identifier.
-	 */
+
 	dst6 = ifra->ifra_dstaddr;
-	if ((ifp->if_flags & (IFF_POINTOPOINT|IFF_LOOPBACK)) != 0 &&
-	    (dst6.sin6_family == AF_INET6)) {
+	if (dst6.sin6_family == AF_INET6) {
 		error = in6_check_embed_scope(&dst6, ifp->if_index);
 		if (error)
 			return error;
-	}
-	/*
-	 * The destination address can be specified only for a p2p or a
-	 * loopback interface.  If specified, the corresponding prefix length
-	 * must be 128.
-	 */
-	if (ifra->ifra_dstaddr.sin6_family == AF_INET6) {
-		if ((ifp->if_flags & (IFF_POINTOPOINT|IFF_LOOPBACK)) == 0)
-			return (EINVAL);
-		if (plen != 128)
+
+		if (((ifp->if_flags & IFF_POINTOPOINT) ||
+		    (ifp->if_flags & IFF_LOOPBACK)) && plen != 128)
 			return (EINVAL);
 	}
 	/* lifetime consistency check */
@@ -659,7 +646,8 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 		ia6->ia_addr.sin6_family = AF_INET6;
 		ia6->ia_addr.sin6_len = sizeof(ia6->ia_addr);
 		ia6->ia6_updatetime = getuptime();
-		if ((ifp->if_flags & (IFF_POINTOPOINT | IFF_LOOPBACK)) != 0) {
+		if ((ifp->if_flags & IFF_POINTOPOINT) ||
+		    (ifp->if_flags & IFF_LOOPBACK)) {
 			/*
 			 * XXX: some functions expect that ifa_dstaddr is not
 			 * NULL for p2p interfaces.
@@ -693,10 +681,10 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 
 	/*
 	 * If a new destination address is specified, scrub the old one and
-	 * install the new destination.  Note that the interface must be
-	 * p2p or loopback (see the check above.)
+	 * install the new destination.
 	 */
-	if ((ifp->if_flags & IFF_POINTOPOINT) && dst6.sin6_family == AF_INET6 &&
+	if (((ifp->if_flags & IFF_POINTOPOINT)  ||
+	    (ifp->if_flags & IFF_LOOPBACK)) && dst6.sin6_family == AF_INET6 &&
 	    !IN6_ARE_ADDR_EQUAL(&dst6.sin6_addr, &ia6->ia_dstaddr.sin6_addr)) {
 		struct ifaddr *ifa = &ia6->ia_ifa;
 
@@ -711,6 +699,13 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 		} else
 			ia6->ia_flags &= ~IFA_ROUTE;
 		ia6->ia_dstaddr = dst6;
+	}
+
+	if ((ifra->ifra_flags & IN6_IFF_AUTOCONF) &&
+	    dst6.sin6_family == AF_INET6 &&
+	    !IN6_ARE_ADDR_EQUAL(&dst6.sin6_addr, &ia6->ia_gwaddr.sin6_addr)) {
+		/* Set or update announcing router */
+		ia6->ia_gwaddr = dst6;
 	}
 
 	/*
@@ -748,8 +743,12 @@ in6_update_ifa(struct ifnet *ifp, struct in6_aliasreq *ifra,
 	/*
 	 * We are done if we have simply modified an existing address.
 	 */
-	if (!hostIsNew)
+	if (!hostIsNew) {
+		/* DAD sends RTM_CHGADDRATTR when done. */
+		if (!(ia6->ia6_flags & IN6_IFF_TENTATIVE))
+			rtm_addr(RTM_CHGADDRATTR, &ia6->ia_ifa);
 		return (error);
+	}
 
 	/*
 	 * Beyond this point, we should call in6_purgeaddr upon an error,
@@ -1039,7 +1038,7 @@ in6_addmulti(struct in6_addr *maddr6, struct ifnet *ifp, int *errorp)
 		/*
 		 * Found it; just increment the reference count.
 		 */
-		in6m->in6m_refcnt++;
+		refcnt_take(&in6m->in6m_refcnt);
 	} else {
 		/*
 		 * New address; allocate a new multicast record
@@ -1054,7 +1053,7 @@ in6_addmulti(struct in6_addr *maddr6, struct ifnet *ifp, int *errorp)
 		in6m->in6m_sin.sin6_len = sizeof(struct sockaddr_in6);
 		in6m->in6m_sin.sin6_family = AF_INET6;
 		in6m->in6m_sin.sin6_addr = *maddr6;
-		in6m->in6m_refcnt = 1;
+		refcnt_init_trace(&in6m->in6m_refcnt, DT_REFCNT_IDX_IFMADDR);
 		in6m->in6m_ifidx = ifp->if_index;
 		in6m->in6m_ifma.ifma_addr = sin6tosa(&in6m->in6m_sin);
 
@@ -1095,7 +1094,7 @@ in6_delmulti(struct in6_multi *in6m)
 
 	NET_ASSERT_LOCKED();
 
-	if (--in6m->in6m_refcnt == 0) {
+	if (refcnt_rele(&in6m->in6m_refcnt) != 0) {
 		/*
 		 * No remaining claims to this record; let MLD6 know
 		 * that we are leaving the multicast group.
@@ -1336,13 +1335,21 @@ in6_prefixlen2mask(struct in6_addr *maskp, int len)
  * return the best address out of the same scope
  */
 struct in6_ifaddr *
-in6_ifawithscope(struct ifnet *oifp, struct in6_addr *dst, u_int rdomain)
+in6_ifawithscope(struct ifnet *oifp, struct in6_addr *dst, u_int rdomain,
+    struct rtentry *rt)
 {
 	int dst_scope =	in6_addrscope(dst), src_scope, best_scope = 0;
 	int blen = -1;
 	struct ifaddr *ifa;
 	struct ifnet *ifp;
 	struct in6_ifaddr *ia6_best = NULL;
+	struct in6_addr *gw6 = NULL;
+
+	if (rt) {
+		if (rt->rt_gateway != NULL &&
+		    rt->rt_gateway->sa_family == AF_INET6)
+			gw6 = &(satosin6(rt->rt_gateway)->sin6_addr);
+	}
 
 	if (oifp == NULL) {
 		printf("%s: output interface is not specified\n", __func__);
@@ -1467,8 +1474,16 @@ in6_ifawithscope(struct ifnet *oifp, struct in6_addr *dst, u_int rdomain)
 			/*
 			 * Rule 5.5: Prefer addresses in a prefix advertised
 			 * by the next-hop.
-			 * We do not track this information.
 			 */
+			if (gw6) {
+				struct in6_addr *in6_bestgw, *in6_newgw;
+
+				in6_bestgw = &ia6_best->ia_gwaddr.sin6_addr;
+				in6_newgw = &ifatoia6(ifa)->ia_gwaddr.sin6_addr;
+				if (!IN6_ARE_ADDR_EQUAL(in6_bestgw, gw6) &&
+				    IN6_ARE_ADDR_EQUAL(in6_newgw, gw6))
+					goto replace;
+			}
 
 			/*
 			 * Rule 6: Prefer matching label.

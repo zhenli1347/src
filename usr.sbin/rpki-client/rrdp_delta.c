@@ -1,4 +1,4 @@
-/*	$OpenBSD: rrdp_delta.c,v 1.8 2022/05/15 16:43:35 tb Exp $ */
+/*	$OpenBSD: rrdp_delta.c,v 1.13 2024/03/22 03:38:12 job Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -31,6 +31,7 @@
 
 enum delta_scope {
 	DELTA_SCOPE_NONE,
+	DELTA_SCOPE_EMPTY_DELTA,
 	DELTA_SCOPE_DELTA,
 	DELTA_SCOPE_PUBLISH,
 	DELTA_SCOPE_END
@@ -45,13 +46,6 @@ struct delta_xml {
 	long long		 serial;
 	int			 version;
 	enum delta_scope	 scope;
-};
-
-enum validate_return {
-	VALIDATE_RETURN_NO_FILE,
-	VALIDATE_RETURN_FILE_DEL,
-	VALIDATE_RETURN_HASH_MISMATCH,
-	VALIDATE_RETURN_HASH_MATCH
 };
 
 static void
@@ -77,7 +71,8 @@ start_delta_elem(struct delta_xml *dxml, const char **attr)
 			if (errstr == NULL)
 				continue;
 		}
-		if (strcmp("session_id", attr[i]) == 0) {
+		if (strcmp("session_id", attr[i]) == 0 &&
+		    valid_uuid(attr[i + 1])) {
 			dxml->session_id = xstrdup(attr[i + 1]);
 			continue;
 		}
@@ -97,7 +92,7 @@ start_delta_elem(struct delta_xml *dxml, const char **attr)
 	if (dxml->current->serial != dxml->serial)
 		PARSE_FAIL(p, "parse failed - serial mismatch");
 
-	dxml->scope = DELTA_SCOPE_DELTA;
+	dxml->scope = DELTA_SCOPE_EMPTY_DELTA;
 }
 
 static void
@@ -105,6 +100,8 @@ end_delta_elem(struct delta_xml *dxml)
 {
 	XML_Parser p = dxml->parser;
 
+	if (dxml->scope == DELTA_SCOPE_EMPTY_DELTA)
+		PARSE_FAIL(p, "parse failed - empty delta");
 	if (dxml->scope != DELTA_SCOPE_DELTA)
 		PARSE_FAIL(p, "parse failed - exited delta "
 		    "elem unexpectedely");
@@ -120,13 +117,14 @@ start_publish_withdraw_elem(struct delta_xml *dxml, const char **attr,
 	int i, hasUri = 0, hasHash = 0;
 	enum publish_type pub = PUB_UPD;
 
-	if (dxml->scope != DELTA_SCOPE_DELTA)
+	if (dxml->scope != DELTA_SCOPE_EMPTY_DELTA &&
+	    dxml->scope != DELTA_SCOPE_DELTA)
 		PARSE_FAIL(p, "parse failed - entered publish/withdraw "
 		    "elem unexpectedely");
 	for (i = 0; attr[i]; i += 2) {
 		if (strcmp("uri", attr[i]) == 0 && hasUri++ == 0) {
 			if (valid_uri(attr[i + 1], strlen(attr[i + 1]),
-			    "rsync://")) {
+			    RSYNC_PROTO)) {
 				uri = xstrdup(attr[i + 1]);
 				continue;
 			}
@@ -269,6 +267,7 @@ free_delta_xml(struct delta_xml *dxml)
 	free(dxml);
 }
 
+/* Used in regress. */
 void
 log_delta_xml(struct delta_xml *dxml)
 {

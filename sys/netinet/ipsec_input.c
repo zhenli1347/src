@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsec_input.c,v 1.203 2022/02/22 01:35:40 guenther Exp $	*/
+/*	$OpenBSD: ipsec_input.c,v 1.206 2023/09/16 09:33:27 mpi Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -36,6 +36,7 @@
  */
 
 #include "pf.h"
+#include "sec.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -61,6 +62,10 @@
 
 #if NPF > 0
 #include <net/pfvar.h>
+#endif
+
+#if NSEC > 0
+#include <net/if_sec.h>
 #endif
 
 #ifdef INET6
@@ -389,8 +394,7 @@ ipsec_common_input_cb(struct mbuf **mp, struct tdb *tdbp, int skip, int protoff)
 
 		ip = mtod(m, struct ip *);
 		ip->ip_len = htons(m->m_pkthdr.len);
-		ip->ip_sum = 0;
-		ip->ip_sum = in_cksum(m, ip->ip_hl << 2);
+		in_hdr_cksum_out(m, NULL);
 		prot = ip->ip_p;
 	}
 
@@ -546,6 +550,22 @@ ipsec_common_input_cb(struct mbuf **mp, struct tdb *tdbp, int skip, int protoff)
 	}
 #endif
 
+	if (ISSET(tdbp->tdb_flags, TDBF_IFACE)) {
+#if NSEC > 0
+		if (ISSET(tdbp->tdb_flags, TDBF_TUNNELING) &&
+		    tdbp->tdb_iface_dir == IPSP_DIRECTION_IN) {
+			struct sec_softc *sc = sec_get(tdbp->tdb_iface);
+			if (sc == NULL)
+				goto baddone;
+
+			sec_input(sc, af, prot, m);
+			sec_put(sc);
+			return IPPROTO_DONE;
+		}
+#endif /* NSEC > 0 */
+		goto baddone;
+	}
+
 #if NPF > 0
 	/*
 	 * The ip_deliver() shortcut avoids running through ip_input() with the
@@ -644,7 +664,7 @@ esp_sysctl_espstat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(espstat) == (esps_ncounters * sizeof(uint64_t)));
 	memset(&espstat, 0, sizeof espstat);
-	counters_read(espcounters, (uint64_t *)&espstat, esps_ncounters);
+	counters_read(espcounters, (uint64_t *)&espstat, esps_ncounters, NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &espstat,
 	    sizeof(espstat)));
 }
@@ -678,7 +698,7 @@ ah_sysctl_ahstat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(ahstat) == (ahs_ncounters * sizeof(uint64_t)));
 	memset(&ahstat, 0, sizeof ahstat);
-	counters_read(ahcounters, (uint64_t *)&ahstat, ahs_ncounters);
+	counters_read(ahcounters, (uint64_t *)&ahstat, ahs_ncounters, NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &ahstat, sizeof(ahstat)));
 }
 
@@ -713,7 +733,7 @@ ipcomp_sysctl_ipcompstat(void *oldp, size_t *oldlenp, void *newp)
 	CTASSERT(sizeof(ipcompstat) == (ipcomps_ncounters * sizeof(uint64_t)));
 	memset(&ipcompstat, 0, sizeof ipcompstat);
 	counters_read(ipcompcounters, (uint64_t *)&ipcompstat,
-	    ipcomps_ncounters);
+	    ipcomps_ncounters, NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &ipcompstat,
 	    sizeof(ipcompstat)));
 }
@@ -725,7 +745,8 @@ ipsec_sysctl_ipsecstat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(ipsecstat) == (ipsec_ncounters * sizeof(uint64_t)));
 	memset(&ipsecstat, 0, sizeof ipsecstat);
-	counters_read(ipseccounters, (uint64_t *)&ipsecstat, ipsec_ncounters);
+	counters_read(ipseccounters, (uint64_t *)&ipsecstat, ipsec_ncounters,
+	    NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp, &ipsecstat,
 	    sizeof(ipsecstat)));
 }

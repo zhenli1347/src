@@ -2,6 +2,7 @@
 package ExtUtils::MakeMaker;
 
 use strict;
+use warnings;
 
 BEGIN {require 5.006;}
 
@@ -24,7 +25,7 @@ my %Recognized_Att_Keys;
 our %macro_fsentity; # whether a macro is a filesystem name
 our %macro_dep; # whether a macro is a dependency
 
-our $VERSION = '7.44';
+our $VERSION = '7.70';
 $VERSION =~ tr/_//d;
 
 # Emulate something resembling CVS $Revision$
@@ -392,7 +393,7 @@ sub full_setup {
     # we will use all these variables in the Makefile
     @Get_from_Config =
         qw(
-           ar cc cccdlflags ccdlflags dlext dlsrc exe_ext full_ar ld
+           ar cc cccdlflags ccdlflags cpprun dlext dlsrc exe_ext full_ar ld
            lddlflags ldflags libc lib_ext obj_ext osname osvers ranlib
            sitelibexp sitearchexp so
           );
@@ -425,7 +426,10 @@ sub _has_cpan_meta_requirements {
     return eval {
       require CPAN::Meta::Requirements;
       CPAN::Meta::Requirements->VERSION(2.130);
-      require B; # CMR requires this, for core we have to too.
+      # Make sure vstrings can be handled. Some versions of CMR require B to
+      # do this, which won't be available in miniperl.
+      CPAN::Meta::Requirements->new->add_string_requirement('Module' => v1.2);
+      1;
     };
 }
 
@@ -510,50 +514,46 @@ sub new {
 
     check_hints($self);
 
-    if ( defined $self->{MIN_PERL_VERSION}
-          && $self->{MIN_PERL_VERSION} !~ /^v?[\d_\.]+$/ ) {
-      require version;
-      my $normal = eval {
-        local $SIG{__WARN__} = sub {
-            # simulate "use warnings FATAL => 'all'" for vintage perls
-            die @_;
-        };
-        version->new( $self->{MIN_PERL_VERSION} )
-      };
-      $self->{MIN_PERL_VERSION} = $normal if defined $normal && !$@;
-    }
+    if ( $self->{MIN_PERL_VERSION}) {
+        my $perl_version = $self->{MIN_PERL_VERSION};
+        if (ref $perl_version) {
+            # assume a version object
+        }
+        else {
+            $perl_version = eval {
+                local $SIG{__WARN__} = sub {
+                    # simulate "use warnings FATAL => 'all'" for vintage perls
+                    die @_;
+                };
+                my $v = version->new($perl_version);
+                # we care about parse issues, not numify warnings
+                no warnings;
+                $v->numify;
+            };
+            $perl_version =~ tr/_//d
+                if defined $perl_version;
+        }
 
-    # Translate X.Y.Z to X.00Y00Z
-    if( defined $self->{MIN_PERL_VERSION} ) {
-        $self->{MIN_PERL_VERSION} =~ s{ ^v? (\d+) \. (\d+) \. (\d+) $ }
-                                      {sprintf "%d.%03d%03d", $1, $2, $3}ex;
-    }
-
-    my $perl_version_ok = eval {
-        local $SIG{__WARN__} = sub {
-            # simulate "use warnings FATAL => 'all'" for vintage perls
-            die @_;
-        };
-        !$self->{MIN_PERL_VERSION} or $self->{MIN_PERL_VERSION} <= "$]"
-    };
-    if (!$perl_version_ok) {
-        if (!defined $perl_version_ok) {
-            die <<'END';
-Warning: MIN_PERL_VERSION is not in a recognized format.
+        if (!defined $perl_version) {
+            # should this be a warning?
+            die sprintf <<'END', $self->{MIN_PERL_VERSION};
+MakeMaker FATAL: MIN_PERL_VERSION (%s) is not in a recognized format.
 Recommended is a quoted numerical value like '5.005' or '5.008001'.
 END
         }
-        elsif ($self->{PREREQ_FATAL}) {
-            die sprintf <<"END", $self->{MIN_PERL_VERSION}, $];
-MakeMaker FATAL: perl version too low for this distribution.
-Required is %s. We run %s.
+        elsif ($perl_version > "$]") {
+            my $message = sprintf <<'END', $perl_version, $];
+Perl version %s or higher required. We run %s.
 END
+            if ($self->{PREREQ_FATAL}) {
+                die "MakeMaker FATAL: $message";
+            }
+            else {
+                warn "Warning: $message";
+            }
         }
-        else {
-            warn sprintf
-                "Warning: Perl version %s or higher required. We run %s.\n",
-                $self->{MIN_PERL_VERSION}, $];
-        }
+
+        $self->{MIN_PERL_VERSION} = $perl_version;
     }
 
     my %configure_att;         # record &{$self->{CONFIGURE}} attributes
@@ -637,7 +637,7 @@ END
 
     if (%unsatisfied && $self->{PREREQ_FATAL}){
         my $failedprereqs = join "\n", map {"    $_ $unsatisfied{$_}"}
-                            sort { $a cmp $b } keys %unsatisfied;
+                            sort { lc $a cmp lc $b } keys %unsatisfied;
         die <<"END";
 MakeMaker FATAL: prerequisites not found.
 $failedprereqs
@@ -723,7 +723,7 @@ END
     # RT#91540 PREREQ_FATAL not recognized on command line
     if (%unsatisfied && $self->{PREREQ_FATAL}){
         my $failedprereqs = join "\n", map {"    $_ $unsatisfied{$_}"}
-                            sort { $a cmp $b } keys %unsatisfied;
+                            sort { lc $a cmp lc $b } keys %unsatisfied;
         die <<"END";
 MakeMaker FATAL: prerequisites not found.
 $failedprereqs
@@ -1038,7 +1038,7 @@ sub _parse_line {
 }
 
 sub check_manifest {
-    print "Checking if your kit is complete...\n";
+    print STDOUT "Checking if your kit is complete...\n";
     require ExtUtils::Manifest;
     # avoid warning
     $ExtUtils::Manifest::Quiet = $ExtUtils::Manifest::Quiet = 1;
@@ -1237,15 +1237,15 @@ sub flush {
     my $self = shift;
 
     my $finalname = $self->{MAKEFILE};
-    printf "Generating a %s %s\n", $self->make_type, $finalname if $Verbose || !$self->{PARENT};
-    print "Writing $finalname for $self->{NAME}\n" if $Verbose || !$self->{PARENT};
+    printf STDOUT "Generating a %s %s\n", $self->make_type, $finalname if $Verbose || !$self->{PARENT};
+    print STDOUT "Writing $finalname for $self->{NAME}\n" if $Verbose || !$self->{PARENT};
 
     unlink($finalname, "MakeMaker.tmp", $Is_VMS ? 'Descrip.MMS' : ());
 
     write_file_via_tmp($finalname, $self->{RESULT});
 
     # Write MYMETA.yml to communicate metadata up to the CPAN clients
-    print "Writing MYMETA.yml and MYMETA.json\n"
+    print STDOUT "Writing MYMETA.yml and MYMETA.json\n"
       if !$self->{NO_MYMETA} and $self->write_mymeta( $self->mymeta );
 
     # save memory
@@ -1266,6 +1266,7 @@ sub write_file_via_tmp {
     die "write_file_via_tmp: 2nd arg must be ref" unless ref $contents;
     for my $chunk (@$contents) {
         my $to_write = $chunk;
+        $to_write = '' unless defined $to_write;
         utf8::encode $to_write if !$CAN_DECODE && "$]" > 5.008;
         print $fh "$to_write\n" or die "Can't write to MakeMaker.tmp: $!";
     }
@@ -1333,26 +1334,6 @@ sub neatvalue {
         push @m,"$key=>".neatvalue($v->{$key});
     }
     return "{ ".join(', ',@m)." }";
-}
-
-sub _find_magic_vstring {
-    my $value = shift;
-    return $value if $UNDER_CORE;
-    my $tvalue = '';
-    require B;
-    my $sv = B::svref_2object(\$value);
-    my $magic = ref($sv) eq 'B::PVMG' ? $sv->MAGIC : undef;
-    while ( $magic ) {
-        if ( $magic->TYPE eq 'V' ) {
-            $tvalue = $magic->PTR;
-            $tvalue =~ s/^v?(.+)$/v$1/;
-            last;
-        }
-        else {
-            $magic = $magic->MOREMAGIC;
-        }
-    }
-    return $tvalue;
 }
 
 sub selfdocument {
@@ -1840,7 +1821,11 @@ currently used by MakeMaker but may be handy in Makefile.PLs.
 =item CCFLAGS
 
 String that will be included in the compiler call command line between
-the arguments INC and OPTIMIZE.
+the arguments INC and OPTIMIZE. Note that setting this will overwrite its
+default value (C<$Config::Config{ccflags}>); to preserve that, include
+the default value directly, e.g.:
+
+    CCFLAGS => "$Config::Config{ccflags} ..."
 
 =item CONFIG
 
@@ -1850,6 +1835,7 @@ ar
 cc
 cccdlflags
 ccdlflags
+cpprun
 dlext
 dlsrc
 ld
@@ -2675,10 +2661,9 @@ instead. See above, or the L<ExtUtils::MakeMaker::FAQ> entry.
 
 =item POLLUTE
 
-Release 5.005 grandfathered old global symbol names by providing preprocessor
-macros for extension source compatibility.  As of release 5.6, these
-preprocessor definitions are not available by default.  The POLLUTE flag
-specifies that the old names should still be defined:
+Prior to 5.6 various interpreter variables were available without a C<PL_>
+prefix, eg. C<PL_undef> was available as C<undef>. As of release 5.6, these
+are only defined if the POLLUTE flag is enabled:
 
   perl Makefile.PL POLLUTE=1
 
@@ -2976,7 +2961,7 @@ that purpose.
 
 =item XSPROTOARG
 
-May be set to C<-protoypes>, C<-noprototypes> or the empty string.  The
+May be set to C<-prototypes>, C<-noprototypes> or the empty string.  The
 empty string is equivalent to the xsubpp default, or C<-noprototypes>.
 See the xsubpp documentation for details.  MakeMaker
 defaults to the empty string.
@@ -3297,7 +3282,7 @@ are generated when F<Makefile.PL> generates a F<Makefile> (if L<CPAN::Meta>
 is installed).  Clients like L<CPAN> or L<CPANPLUS> will read these
 files to see what prerequisites must be fulfilled before building or testing
 the distribution.  If you wish to shut this feature off, set the C<NO_MYMETA>
-C<WriteMakeFile()> flag to true.
+C<WriteMakefile()> flag to true.
 
 =head2 Disabling an extension
 

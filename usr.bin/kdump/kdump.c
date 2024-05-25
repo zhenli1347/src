@@ -1,4 +1,4 @@
-/*	$OpenBSD: kdump.c,v 1.150 2022/09/08 16:04:31 mbuhl Exp $	*/
+/*	$OpenBSD: kdump.c,v 1.163 2024/05/18 05:20:22 guenther Exp $	*/
 
 /*-
  * Copyright (c) 1988, 1993
@@ -88,6 +88,8 @@ int needtid, tail, basecol;
 char *tracefile = DEF_TRACEFILE;
 struct ktr_header ktr_header;
 pid_t pid_opt = -1;
+const char *program;
+char* utracefilter;
 
 #define eqs(s1, s2)	(strcmp((s1), (s2)) == 0)
 
@@ -131,6 +133,7 @@ static void ktrsysret(struct ktr_sysret *, size_t);
 static void ktruser(struct ktr_user *, size_t);
 static void ktrexec(const char*, size_t);
 static void ktrpledge(struct ktr_pledge *, size_t);
+static void ktrpinsyscall(struct ktr_pinsyscall *, size_t);
 static void usage(void);
 static void ioctldecode(int);
 static void ptracedecode(int);
@@ -145,6 +148,7 @@ static void flagsandmodename(int);
 static void clockname(int);
 static void sockoptlevelname(int);
 static void ktraceopname(int);
+static void idtypeandid(int);
 
 static int screenwidth;
 
@@ -167,7 +171,7 @@ main(int argc, char *argv[])
 			screenwidth = 80;
 	}
 
-	while ((ch = getopt(argc, argv, "f:dHlm:np:RTt:xX")) != -1)
+	while ((ch = getopt(argc, argv, "f:dHlm:nP:p:RTt:u:xX")) != -1)
 		switch (ch) {
 		case 'f':
 			tracefile = optarg;
@@ -188,6 +192,9 @@ main(int argc, char *argv[])
 			break;
 		case 'n':
 			fancy = 0;
+			break;
+		case 'P':
+			program = optarg;
 			break;
 		case 'p':
 			pid_opt = strtonum(optarg, 1, INT_MAX, &errstr);
@@ -210,6 +217,11 @@ main(int argc, char *argv[])
 			trpoints = getpoints(optarg, DEF_POINTS);
 			if (trpoints < 0)
 				errx(1, "unknown trace point in %s", optarg);
+			utracefilter = NULL;
+			break;
+		case 'u':
+			utracefilter = optarg;
+			trpoints = KTRFAC_USER;
 			break;
 		case 'x':
 			iohex = 1;
@@ -245,7 +257,11 @@ main(int argc, char *argv[])
 		silent = 0;
 		if (pid_opt != -1 && pid_opt != ktr_header.ktr_pid)
 			silent = 1;
-		if (silent == 0 && trpoints & (1<<ktr_header.ktr_type))
+		if (program != NULL &&
+		    strcmp(ktr_header.ktr_comm, program) != 0)
+			silent = 1;
+		if (utracefilter == NULL && silent == 0 &&
+		    trpoints & (1<<ktr_header.ktr_type))
 			dumpheader(&ktr_header);
 		ktrlen = ktr_header.ktr_len;
 		if (ktrlen > size) {
@@ -293,6 +309,9 @@ main(int argc, char *argv[])
 			break;
 		case KTR_PLEDGE:
 			ktrpledge(m, ktrlen);
+			break;
+		case KTR_PINSYSCALL:
+			ktrpinsyscall(m, ktrlen);
 			break;
 		default:
 			printf("\n");
@@ -353,6 +372,9 @@ dumpheader(struct ktr_header *kth)
 		break;
 	case KTR_PLEDGE:
 		type = "PLDG";
+		break;
+	case KTR_PINSYSCALL:
+		type = "PINS";
 		break;
 	default:
 		/* htobe32() not guaranteed to work as case label */
@@ -588,6 +610,8 @@ static void (*formatters[])(int) = {
 	gidname,
 	syslogflagname,
 	futexflagname,
+	waitidoptname,
+	idtypeandid,
 };
 
 enum {
@@ -672,6 +696,8 @@ enum {
 	Gidname,
 	Syslogflagname,
 	Futexflagname,
+	Waitidoptname,
+	Idtypeandid,
 };
 
 #define Pptr		Phexlong
@@ -695,6 +721,7 @@ enum {
 #define Msgflgname	Phexlong	/* to be added */
 
 
+/* includes relevant entries as of syscalls.master rev 1.238 */
 typedef signed char formatter;
 static const formatter scargs[][8] = {
     [SYS_exit]		= { Pdecint },
@@ -720,8 +747,6 @@ static const formatter scargs[][8] = {
     [SYS_ptrace]	= { Ptracedecode, Ppid_t, Pptr, Pdecint },
     [SYS_recvmsg]	= { Pfd, Pptr, Sendrecvflagsname },
     [SYS_sendmsg]	= { Pfd, Pptr, Sendrecvflagsname },
-    [SYS_recvmmsg]	= { Pfd, Pptr, Pucount, Sendrecvflagsname, Pptr },
-    [SYS_sendmmsg]	= { Pfd, Pptr, Pucount, Sendrecvflagsname },
     [SYS_recvfrom]	= { Pfd, Pptr, Pbigsize, Sendrecvflagsname },
     [SYS_accept]	= { Pfd, Pptr, Pptr },
     [SYS_getpeername]	= { Pfd, Pptr, Pptr },
@@ -729,7 +754,6 @@ static const formatter scargs[][8] = {
     [SYS_access]	= { Ppath, Accessmodename },
     [SYS_chflags]	= { Ppath, Chflagsname },
     [SYS_fchflags]	= { Pfd, Chflagsname },
-    [SYS_kill]		= { Ppgid, Signame },
     [SYS_stat]		= { Ppath, Pptr },
     [SYS_lstat]		= { Ppath, Pptr },
     [SYS_dup]		= { Pfd },
@@ -738,7 +762,7 @@ static const formatter scargs[][8] = {
     [SYS_ktrace]	= { Ppath, Ktraceopname, Ktracefacname, Ppgid },
     [SYS_sigaction]	= { Signame, Pptr, Pptr },
     [SYS_sigprocmask]	= { Sigprocmaskhowname, Sigset },
-    [SYS_getlogin_r]	= { Pptr, Psize },
+    [SYS_mmap]		= { Pptr, Pbigsize, Mmapprotname, Mmapflagsname, Pfd, Poff_t, END64 },
     [SYS_setlogin]	= { Pptr },
     [SYS_acct]		= { Ppath },
     [SYS_fstat]		= { Pfd, Pptr },
@@ -765,14 +789,14 @@ static const formatter scargs[][8] = {
     [SYS_madvise]	= { Pptr, Pbigsize, Madvisebehavname },
     [SYS_utimes]	= { Ppath, Pptr },
     [SYS_futimes]	= { Pfd, Pptr },
-    [SYS_kbind]		= { Pptr, Psize, Phexlonglong },
+    [SYS_mquery]	= { Pptr, Pbigsize, Mmapprotname, Mmapflagsname, Pfd, Poff_t, END64 },
     [SYS_getgroups]	= { Pcount, Pptr },
     [SYS_setgroups]	= { Pcount, Pptr },
     [SYS_setpgid]	= { Ppid_t, Ppid_t },
     [SYS_futex]		= { Pptr, Futexflagname, Pcount, Pptr, Pptr },
-    [SYS_sendsyslog]	= { Pptr, Psize, Syslogflagname },
     [SYS_utimensat]	= { Atfd, Ppath, Pptr, Atflagsname },
     [SYS_futimens]	= { Pfd, Pptr },
+    [SYS_kbind]		= { Pptr, Psize, Phexlonglong },
     [SYS_clock_gettime]	= { Clockname, Pptr },
     [SYS_clock_settime]	= { Clockname, Pptr },
     [SYS_clock_getres]	= { Clockname, Pptr },
@@ -794,13 +818,20 @@ static const formatter scargs[][8] = {
     [SYS_setsockopt]	= { Pfd, PASS_TWO, Sockoptlevelname, Pptr, Pdecint },
     [SYS_listen]	= { Pfd, Pdecint },
     [SYS_chflagsat]	= { Atfd, Ppath, Chflagsname, Atflagsname },
+    [SYS_pledge]	= { Pptr, Pptr },
     [SYS_ppoll]		= { Pptr, Pucount, Pptr, Pptr },
     [SYS_pselect]	= { Pcount, Pptr, Pptr, Pptr, Pptr, Pptr },
     [SYS_sigsuspend]	= { Sigset },
+    [SYS_sendsyslog]	= { Pptr, Psize, Syslogflagname },
+    [SYS_unveil]	= { Ppath, Pptr },
+    [SYS___realpath]	= { Ppath, Pptr },
+    [SYS_recvmmsg]	= { Pfd, Pptr, Pucount, Sendrecvflagsname, Pptr },
+    [SYS_sendmmsg]	= { Pfd, Pptr, Pucount, Sendrecvflagsname },
     [SYS_getsockopt]	= { Pfd, PASS_TWO, Sockoptlevelname, Pptr, Pptr },
     [SYS_thrkill]	= { Ppid_t, Signame, Pptr },
     [SYS_readv]		= { Pfd, Pptr, Pcount },
     [SYS_writev]	= { Pfd, Pptr, Pcount },
+    [SYS_kill]		= { Ppgid, Signame },
     [SYS_fchown]	= { Pfd, Uidname, Gidname },
     [SYS_fchmod]	= { Pfd, Modename },
     [SYS_setreuid]	= { Uidname, Uidname },
@@ -814,24 +845,33 @@ static const formatter scargs[][8] = {
     [SYS_mkdir]		= { Ppath, Modename },
     [SYS_rmdir]		= { Ppath },
     [SYS_adjtime]	= { Pptr, Pptr },
+    [SYS_getlogin_r]	= { Pptr, Psize },
+    [SYS_getthrname]	= { Ppid_t, Pptr, Psize },
+    [SYS_setthrname]	= { Ppid_t, Pptr },
     [SYS_quotactl]	= { Ppath, Quotactlname, Uidname, Pptr },
+    [SYS_ypconnect]	= { Socktypename },
     [SYS_nfssvc]	= { Phexint, Pptr },
+    [SYS_mimmutable]	= { Pptr, Pbigsize },
+    [SYS_waitid]	= { PASS_TWO, Idtypeandid, Pptr, Waitidoptname },
     [SYS_getfh]		= { Ppath, Pptr },
+    [SYS___tmpfd]	= { Openflagsname },
     [SYS_sysarch]	= { Pdecint, Pptr },
+    [SYS_lseek]		= { Pfd, Poff_t, Whencename, END64 },
+    [SYS_truncate]	= { Ppath, Poff_t, END64 },
+    [SYS_ftruncate]	= { Pfd, Poff_t, END64 },
     [SYS_pread]		= { Pfd, Pptr, Pbigsize, Poff_t, END64 },
     [SYS_pwrite]        = { Pfd, Pptr, Pbigsize, Poff_t, END64 },
+    [SYS_preadv]	= { Pfd, Pptr, Pcount, Poff_t, END64 },
+    [SYS_pwritev]	= { Pfd, Pptr, Pcount, Poff_t, END64 },
     [SYS_setgid]	= { Gidname },
     [SYS_setegid]	= { Gidname },
     [SYS_seteuid]	= { Uidname },
+    [SYS_pathconfat]	= { Atfd, Ppath, Pathconfname, Atflagsname },
     [SYS_pathconf]	= { Ppath, Pathconfname },
     [SYS_fpathconf]	= { Pfd, Pathconfname },
     [SYS_swapctl]	= { Swapctlname, Pptr, Pdecint },
     [SYS_getrlimit]	= { Rlimitname, Pptr },
     [SYS_setrlimit]	= { Rlimitname, Pptr },
-    [SYS_mmap]		= { Pptr, Pbigsize, Mmapprotname, Mmapflagsname, Pfd, Poff_t, END64 },
-    [SYS_lseek]		= { Pfd, Poff_t, Whencename, END64 },
-    [SYS_truncate]	= { Ppath, Poff_t, END64 },
-    [SYS_ftruncate]	= { Pfd, Poff_t, END64 },
     [SYS_sysctl]	= { Pptr, Pcount, Pptr, Pptr, Pptr, Psize },
     [SYS_mlock]		= { Pptr, Pbigsize },
     [SYS_munlock]	= { Pptr, Pbigsize },
@@ -850,14 +890,12 @@ static const formatter scargs[][8] = {
     [SYS_msync]		= { Pptr, Pbigsize, Msyncflagsname },
     [SYS_pipe]		= { Pptr },
     [SYS_fhopen]	= { Pptr, Openflagsname },
-    [SYS_preadv]	= { Pfd, Pptr, Pcount, Poff_t, END64 },
-    [SYS_pwritev]	= { Pfd, Pptr, Pcount, Poff_t, END64 },
+    [SYS_kqueue1]	= { Flagsname },
     [SYS_mlockall]	= { Mlockallname },
     [SYS_getresuid]	= { Pptr, Pptr, Pptr },
     [SYS_setresuid]	= { Uidname, Uidname, Uidname },
     [SYS_getresgid]	= { Pptr, Pptr, Pptr },
     [SYS_setresgid]	= { Gidname, Gidname, Gidname },
-    [SYS_mquery]	= { Pptr, Pbigsize, Mmapprotname, Mmapflagsname, Pfd, Poff_t, END64 },
     [SYS_closefrom]	= { Pfd },
     [SYS_sigaltstack]	= { Pptr, Pptr },
     [SYS_shmget]	= { Pkey_t, Pbigsize, Semgetname },
@@ -892,7 +930,7 @@ static void
 ktrsyscall(struct ktr_syscall *ktr, size_t ktrlen)
 {
 	register_t *ap;
-	int narg;
+	int narg, code;
 	char sep;
 
 	if (ktr->ktr_argsize > ktrlen)
@@ -902,14 +940,15 @@ ktrsyscall(struct ktr_syscall *ktr, size_t ktrlen)
 	narg = ktr->ktr_argsize / sizeof(register_t);
 	sep = '\0';
 
-	if (ktr->ktr_code >= SYS_MAXSYSCALL || ktr->ktr_code < 0)
-		(void)printf("[%d]", ktr->ktr_code);
+	code = ktr->ktr_code;
+	if (code >= SYS_MAXSYSCALL || code < 0)
+		(void)printf("[%d]", code);
 	else
-		(void)printf("%s", syscallnames[ktr->ktr_code]);
+		(void)printf("%s", syscallnames[code]);
 	ap = (register_t *)((char *)ktr + sizeof(struct ktr_syscall));
 	(void)putchar('(');
 
-	if (ktr->ktr_code == SYS_sysctl && fancy) {
+	if (code == SYS_sysctl && fancy) {
 		const char *s;
 		int n, i, *top;
 
@@ -938,8 +977,8 @@ ktrsyscall(struct ktr_syscall *ktr, size_t ktrlen)
 		sep = ',';
 		ap += 2;
 		narg -= 2;
-	} else if (ktr->ktr_code < nitems(scargs)) {
-		const formatter *fmts = scargs[ktr->ktr_code];
+	} else if (code < nitems(scargs)) {
+		const formatter *fmts = scargs[code];
 		int fmt;
 		int arg = 0;
 
@@ -1152,6 +1191,8 @@ doerr:
 			/* syscalls that return errno values */
 			case SYS_getlogin_r:
 			case SYS___thrsleep:
+			case SYS_getthrname:
+			case SYS_setthrname:
 				if ((error = ret) != 0)
 					goto doerr;
 				/* FALLTHROUGH */
@@ -1233,10 +1274,16 @@ showbufc(int col, unsigned char *dp, size_t datalen, int flags)
 static void
 showbuf(unsigned char *dp, size_t datalen)
 {
-	int i, j;
+	size_t i, j;
 	int col = 0, bpl;
 	unsigned char c;
+	char visbuf[4 * KTR_USER_MAXLEN + 1];
 
+	if (utracefilter != NULL) {
+		strvisx(visbuf, dp, datalen, VIS_SAFE | VIS_OCTAL);
+		printf("%s", visbuf);
+		return;
+	}
 	if (iohex == 1) {
 		putchar('\t');
 		col = 8;
@@ -1259,7 +1306,7 @@ showbuf(unsigned char *dp, size_t datalen)
 		if (bpl <= 0)
 			bpl = 1;
 		for (i = 0; i < datalen; i += bpl) {
-			printf("   %04x:  ", i);
+			printf("   %04zx:  ", i);
 			for (j = 0; j < bpl; j++) {
 				if (i+j >= datalen)
 					printf("   ");
@@ -1306,60 +1353,84 @@ ktrgenio(struct ktr_genio *ktr, size_t len)
 	showbuf(dp, datalen);
 }
 
+void
+siginfo(const siginfo_t *si, int show_signo)
+{
+	if (show_signo) {
+		printf("signo=");
+		signame(si->si_signo);
+	}
+	if (si->si_code) {
+		printf(" code=");
+		if (!fancy)
+			printf("<%d>", si->si_code);
+		else {
+			switch (si->si_signo) {
+			case SIGILL:
+				sigill_name(si->si_code);
+				break;
+			case SIGTRAP:
+				sigtrap_name(si->si_code);
+				break;
+			case SIGEMT:
+				sigemt_name(si->si_code);
+				break;
+			case SIGFPE:
+				sigfpe_name(si->si_code);
+				break;
+			case SIGBUS:
+				sigbus_name(si->si_code);
+				break;
+			case SIGSEGV:
+				sigsegv_name(si->si_code);
+				break;
+			case SIGCHLD:
+				sigchld_name(si->si_code);
+				break;
+			default:
+				printf("<%d>", si->si_code);
+				break;
+			}
+		}
+	}
+
+	switch (si->si_signo) {
+	case SIGSEGV:
+	case SIGILL:
+	case SIGBUS:
+	case SIGFPE:
+		printf(" addr=%p trapno=%d", si->si_addr, si->si_trapno);
+		break;
+	case SIGCHLD:
+		if (si->si_code == CLD_EXITED) {
+			printf(" status=%d", si->si_status);
+			if (si->si_status < 0 || si->si_status > 9)
+				(void)printf("/%#x", si->si_status);
+		} else {
+			printf(" status=");
+			signame(si->si_status);
+		}
+		printf(" pid=%d uid=", si->si_pid);
+		uidname(si->si_uid);
+		break;
+	default:
+		break;
+	}
+}
+
 static void
 ktrpsig(struct ktr_psig *psig)
 {
 	signame(psig->signo);
 	printf(" ");
 	if (psig->action == SIG_DFL)
-		(void)printf("SIG_DFL");
+		printf("SIG_DFL");
 	else {
-		(void)printf("caught handler=0x%lx mask=",
-		    (u_long)psig->action);
+		printf("caught handler=0x%lx mask=", (u_long)psig->action);
 		sigset(psig->mask);
 	}
-	if (psig->code) {
-		printf(" code ");
-		if (fancy) {
-			switch (psig->signo) {
-			case SIGILL:
-				sigill_name(psig->code);
-				break;
-			case SIGTRAP:
-				sigtrap_name(psig->code);
-				break;
-			case SIGEMT:
-				sigemt_name(psig->code);
-				break;
-			case SIGFPE:
-				sigfpe_name(psig->code);
-				break;
-			case SIGBUS:
-				sigbus_name(psig->code);
-				break;
-			case SIGSEGV:
-				sigsegv_name(psig->code);
-				break;
-			case SIGCHLD:
-				sigchld_name(psig->code);
-				break;
-			}
-		}
-		printf("<%d>", psig->code);
-	}
-
-	switch (psig->signo) {
-	case SIGSEGV:
-	case SIGILL:
-	case SIGBUS:
-	case SIGFPE:
-		printf(" addr=%p trapno=%d", psig->si.si_addr,
-		    psig->si.si_trapno);
-		break;
-	default:
-		break;
-	}
-	printf("\n");
+	siginfo(&psig->si, 0);
+	putchar('\n');
 }
 
 static void
@@ -1368,9 +1439,12 @@ ktruser(struct ktr_user *usr, size_t len)
 	if (len < sizeof(struct ktr_user))
 		errx(1, "invalid ktr user length %zu", len);
 	len -= sizeof(struct ktr_user);
-	printf("%.*s:", KTR_USER_MAXIDLEN, usr->ktr_id);
-	printf(" %zu bytes\n", len);
-	showbuf((unsigned char *)(usr + 1), len);
+	if (utracefilter == NULL) {
+		printf("%.*s:", KTR_USER_MAXIDLEN, usr->ktr_id);
+		printf(" %zu bytes\n", len);
+		showbuf((unsigned char *)(usr + 1), len);
+	} else if (strncmp(usr->ktr_id, utracefilter, KTR_USER_MAXIDLEN) == 0)
+		showbuf((unsigned char *)(usr + 1), len);
 }
 
 static void
@@ -1423,13 +1497,34 @@ ktrpledge(struct ktr_pledge *pledge, size_t len)
 }
 
 static void
+ktrpinsyscall(struct ktr_pinsyscall *pinsyscall, size_t len)
+{
+	const char *name = "";
+	int i;
+
+	if (len < sizeof(struct ktr_pinsyscall))
+		errx(1, "invalid ktr pinsyscall length %zu", len);
+
+	if (pinsyscall->syscall >= SYS_MAXSYSCALL || pinsyscall->syscall < 0)
+		(void)printf("[%d]", pinsyscall->syscall);
+	else
+		(void)printf("%s", syscallnames[pinsyscall->syscall]);
+	(void)printf(", addr %lx, errno %d", pinsyscall->addr,
+	    pinsyscall->error);
+	(void)printf(", errno %d", pinsyscall->error);
+	if (fancy)
+		(void)printf(" %s", strerror(pinsyscall->error));
+	printf("\n");
+}
+
+static void
 usage(void)
 {
 
 	extern char *__progname;
 	fprintf(stderr, "usage: %s "
-	    "[-dHlnRTXx] [-f file] [-m maxdata] [-p pid] [-t trstr]\n",
-	    __progname);
+	    "[-dHlnRTXx] [-f file] [-m maxdata] [-P program] [-p pid] "
+	    "[-t trstr]\n\t[-u label]\n", __progname);
 	exit(1);
 }
 
@@ -1722,4 +1817,22 @@ ktraceopname(int ops)
 	printf(">");
 	if (invalid || (ops & ~(KTROP((unsigned)-1) | KTRFLAG_DESCEND)))
 		(void)printf("<invalid>%d", ops);
+}
+
+static void
+idtypeandid(int id)
+{
+	switch (arg1) {
+	case P_PID:
+		printf("P_PID,%d", id);
+		break;
+	case P_PGID:
+		printf("P_PGID,%d", id);
+		break;
+	case P_ALL:
+		printf("P_ALL,<unused>%d", id);
+		break;
+	default: /* Should not reach */
+		printf("<invalid=%d>, <unused>%d", arg1, id);
+	}
 }

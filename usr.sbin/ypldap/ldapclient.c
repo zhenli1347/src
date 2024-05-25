@@ -1,4 +1,4 @@
-/* $OpenBSD: ldapclient.c,v 1.46 2022/10/13 04:55:33 jmatthew Exp $ */
+/* $OpenBSD: ldapclient.c,v 1.50 2024/05/21 05:00:48 jsg Exp $ */
 
 /*
  * Copyright (c) 2008 Alexander Schrijver <aschrijver@openbsd.org>
@@ -46,56 +46,15 @@ void    client_sig_handler(int, short, void *);
 void	client_dispatch_dns(int, short, void *);
 void    client_dispatch_parent(int, short, void *);
 void    client_shutdown(void);
-void    client_connect(int, short, void *);
 void    client_configure(struct env *);
 void    client_periodic_update(int, short, void *);
 int	client_build_req(struct idm *, struct idm_req *, struct aldap_message *,
 	    int, int);
 int	client_search_idm(struct env *, struct idm *, struct aldap *,
 	    char **, char *, int, int, enum imsg_type);
-int	client_try_idm(struct env *, struct idm *);
+int	client_try_idm(struct env *, struct idm *, struct ypldap_addr *);
 void	client_addr_init(struct idm *);
 int	client_addr_free(struct idm *);
-
-struct aldap	*client_aldap_open(struct ypldap_addr_list *);
-
-/*
- * dummy wrapper to provide aldap_init with its fd's.
- */
-struct aldap *
-client_aldap_open(struct ypldap_addr_list *addr)
-{
-	int			 fd = -1;
-	struct ypldap_addr	*p;
-	struct aldap		*al;
-
-	TAILQ_FOREACH(p, addr, next) {
-		char			 hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
-		struct sockaddr		*sa = (struct sockaddr *)&p->ss;
-
-		if (getnameinfo(sa, SA_LEN(sa), hbuf, sizeof(hbuf), sbuf,
-			sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV))
-				errx(1, "could not get numeric hostname");
-
-		if ((fd = socket(sa->sa_family, SOCK_STREAM, 0)) == -1)
-			return NULL;
-
-		if (connect(fd, sa, SA_LEN(sa)) == 0)
-			break;
-
-		log_warn("connect to %s port %s failed", hbuf, sbuf);
-		close(fd);
-		fd = -1;
-	}
-
-	if (fd == -1)
-		return NULL;
-
-	al = aldap_init(fd);
-	if (al == NULL)
-		close(fd);
-	return al;
-}
 
 void
 client_addr_init(struct idm *idm)
@@ -154,6 +113,9 @@ client_sig_handler(int sig, short event, void *p)
 	case SIGINT:
 	case SIGTERM:
 		client_shutdown();
+		break;
+	case SIGHUP:
+		/* ingore */
 		break;
 	default:
 		fatalx("unexpected signal");
@@ -241,8 +203,12 @@ client_dispatch_dns(int fd, short events, void *p)
 	}
 
 	TAILQ_FOREACH(idm, &env->sc_idms, idm_entry) {
-		if (client_try_idm(env, idm) == -1)
-			idm->idm_state = STATE_LDAP_FAIL;
+		TAILQ_FOREACH(h, &idm->idm_addr, next) {
+			if (client_try_idm(env, idm, h) == -1)
+				idm->idm_state = STATE_LDAP_FAIL;
+			else
+				break;
+		}
 
 		if (idm->idm_state < STATE_LDAP_DONE)
 			wait_cnt++;
@@ -362,6 +328,7 @@ ldapclient(int pipe_main2client[2])
 	struct passwd	*pw;
 	struct event	 ev_sigint;
 	struct event	 ev_sigterm;
+	struct event	 ev_sighup;
 	struct env	 env;
 
 	switch (pid = fork()) {
@@ -413,8 +380,10 @@ ldapclient(int pipe_main2client[2])
 	signal(SIGPIPE, SIG_IGN);
 	signal_set(&ev_sigint, SIGINT, client_sig_handler, NULL);
 	signal_set(&ev_sigterm, SIGTERM, client_sig_handler, NULL);
+	signal_set(&ev_sighup, SIGHUP, client_sig_handler, NULL);
 	signal_add(&ev_sigint, NULL);
 	signal_add(&ev_sigterm, NULL);
+	signal_add(&ev_sighup, NULL);
 
 	close(pipe_main2client[0]);
 	if ((env.sc_iev = calloc(1, sizeof(*env.sc_iev))) == NULL)
@@ -567,7 +536,8 @@ client_search_idm(struct env *env, struct idm *idm, struct aldap *al,
 
 			if (client_build_req(idm, &ir, m, min_attr, max_attr) == 0)
 				imsg_compose_event(env->sc_iev, type, 0, 0, -1,
-				    &ir, sizeof(ir));
+				    &ir, sizeof(ir.ir_key) +
+				    strlen(ir.ir_line) + 1);
 
 			aldap_freemsg(m);	
 		}
@@ -585,17 +555,36 @@ fail:
 }
 
 int
-client_try_idm(struct env *env, struct idm *idm)
+client_try_idm(struct env *env, struct idm *idm, struct ypldap_addr *addr)
 {
 	const char		*where;
+	char			 hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
 	char			*attrs[ATTR_MAX+1];
+	int			 fd = -1;
 	int			 i, j;
+	struct sockaddr		*sa = (struct sockaddr *)&addr->ss;
 	struct aldap_message	*m;
 	struct aldap		*al;
 
+	if (getnameinfo(sa, SA_LEN(sa), hbuf, sizeof(hbuf), sbuf,
+	    sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV))
+		errx(1, "could not get numeric hostname");
+
 	where = "connect";
-	if ((al = client_aldap_open(&idm->idm_addr)) == NULL)
+	if ((fd = socket(sa->sa_family, SOCK_STREAM, 0)) == -1)
 		return (-1);
+
+	if (connect(fd, sa, SA_LEN(sa)) != 0) {
+		log_warn("connect to %s port %s failed", hbuf, sbuf);
+		close(fd);
+		return (-1);
+	}
+
+	al = aldap_init(fd);
+	if (al == NULL) {
+		close(fd);
+		return (-1);
+	}
 
 	if (idm->idm_flags & F_STARTTLS) {
 		log_debug("requesting starttls");
@@ -625,8 +614,8 @@ client_try_idm(struct env *env, struct idm *idm)
 		if (aldap_tls(al, idm->idm_tls_config, idm->idm_name) < 0) {
 			const char *err;
 			aldap_get_errno(al, &err);
-			log_warnx("TLS handshake with %s failed: %s",
-			    idm->idm_name, err);
+			log_warnx("TLS handshake with %s(%s) failed: %s",
+			    idm->idm_name, hbuf, err);
 			goto bad;
 		}
 	}
@@ -653,8 +642,8 @@ client_try_idm(struct env *env, struct idm *idm)
 		where = "bind response";
 		rc = aldap_get_resultcode(m);
 		if (rc != LDAP_SUCCESS) {
-			log_warnx("LDAP bind with %s failed: result code %d",
-			    idm->idm_name, rc);
+			log_warnx("LDAP bind with %s(%s) failed: result code"
+			    " %d", idm->idm_name, hbuf, rc);
 			aldap_freemsg(m);
 			goto bad;
 		}
@@ -703,7 +692,8 @@ client_try_idm(struct env *env, struct idm *idm)
 	return (0);
 bad:
 	aldap_close(al);
-	log_debug("directory %s errored out in %s", idm->idm_name, where);
+	log_debug("directory %s(%s) errored out in %s", idm->idm_name, hbuf,
+	    where);
 	return (-1);
 }
 

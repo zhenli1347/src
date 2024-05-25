@@ -1,4 +1,4 @@
-/*	$OpenBSD: ixgbe_type.h,v 1.36 2022/01/09 05:42:56 jsg Exp $	*/
+/*	$OpenBSD: ixgbe_type.h,v 1.38 2023/08/15 08:27:30 miod Exp $	*/
 
 /******************************************************************************
   SPDX-License-Identifier: BSD-3-Clause
@@ -3355,6 +3355,7 @@ struct ixgbe_adv_tx_context_desc {
 /* 1st&Last TSO-full iSCSI PDU */
 #define IXGBE_ADVTXD_POPTS_ISCO_FULL	0x00001800
 #define IXGBE_ADVTXD_POPTS_RSV		0x00002000 /* POPTS Reserved */
+#define IXGBE_ADVTXD_PAYLEN_MASK	0x0003FFFF /* Adv desc PAYLEN */
 #define IXGBE_ADVTXD_PAYLEN_SHIFT	14 /* Adv desc PAYLEN shift */
 #define IXGBE_ADVTXD_MACLEN_SHIFT	9  /* Adv ctxt desc mac len shift */
 #define IXGBE_ADVTXD_VLAN_SHIFT		16  /* Adv ctxt vlan tag shift */
@@ -4453,7 +4454,7 @@ struct ixgbe_bypass_eeprom {
 #define IXGBE_KRM_LINK_CTRL_1_TETH_EEE_CAP_KR		(1 << 26)
 #define IXGBE_KRM_LINK_S1_MAC_AN_COMPLETE		(1 << 28)
 #define IXGBE_KRM_LINK_CTRL_1_TETH_AN_ENABLE		(1 << 29)
-#define IXGBE_KRM_LINK_CTRL_1_TETH_AN_RESTART		(1 << 31)
+#define IXGBE_KRM_LINK_CTRL_1_TETH_AN_RESTART		(1U << 31)
 
 #define IXGBE_KRM_AN_CNTL_1_SYM_PAUSE			(1 << 28)
 #define IXGBE_KRM_AN_CNTL_1_ASM_PAUSE			(1 << 29)
@@ -4483,7 +4484,7 @@ struct ixgbe_bypass_eeprom {
 #define IXGBE_KRM_TX_COEFF_CTRL_1_CMINUS1_OVRRD_EN	(1 << 1)
 #define IXGBE_KRM_TX_COEFF_CTRL_1_CPLUS1_OVRRD_EN	(1 << 2)
 #define IXGBE_KRM_TX_COEFF_CTRL_1_CZERO_EN		(1 << 3)
-#define IXGBE_KRM_TX_COEFF_CTRL_1_OVRRD_EN		(1 << 31)
+#define IXGBE_KRM_TX_COEFF_CTRL_1_OVRRD_EN		(1U << 31)
 
 #define IXGBE_SB_IOSF_INDIRECT_CTRL	0x00011144
 #define IXGBE_SB_IOSF_INDIRECT_DATA	0x00011148

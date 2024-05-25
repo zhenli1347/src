@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2_pld.c,v 1.127 2022/12/06 09:07:33 tobhe Exp $	*/
+/*	$OpenBSD: ikev2_pld.c,v 1.135 2024/04/02 19:58:28 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -685,7 +685,7 @@ ikev2_pld_ke(struct iked *env, struct ikev2_payload *pld,
 	print_hex(buf, 0, len);
 
 	if (ikev2_msg_frompeer(msg)) {
-		if (ibuf_length(msg->msg_parent->msg_ke)) {
+		if (msg->msg_parent->msg_ke != NULL) {
 			log_info("%s: duplicate KE payload", __func__);
 			return (-1);
 		}
@@ -748,7 +748,7 @@ ikev2_pld_id(struct iked *env, struct ikev2_payload *pld,
 		return (-1);
 
 	if (ikev2_print_id(&idb, idstr, sizeof(idstr)) == -1) {
-		ibuf_release(idb.id_buf);
+		ibuf_free(idb.id_buf);
 		log_debug("%s: malformed id", __func__);
 		return (-1);
 	}
@@ -756,7 +756,7 @@ ikev2_pld_id(struct iked *env, struct ikev2_payload *pld,
 	log_debug("%s: id %s length %zu", __func__, idstr, len);
 
 	if (!ikev2_msg_frompeer(msg)) {
-		ibuf_release(idb.id_buf);
+		ibuf_free(idb.id_buf);
 		return (0);
 	}
 
@@ -766,13 +766,13 @@ ikev2_pld_id(struct iked *env, struct ikev2_payload *pld,
 	else if (!sa->sa_hdr.sh_initiator && payload == IKEV2_PAYLOAD_IDr)
 		idp = &msg->msg_parent->msg_localid;
 	else {
-		ibuf_release(idb.id_buf);
+		ibuf_free(idb.id_buf);
 		log_debug("%s: unexpected id payload", __func__);
 		return (0);
 	}
 
 	if (idp->id_type) {
-		ibuf_release(idb.id_buf);
+		ibuf_free(idb.id_buf);
 		log_debug("%s: duplicate id payload", __func__);
 		return (-1);
 	}
@@ -796,6 +796,10 @@ ikev2_validate_cert(struct iked_message *msg, size_t offset, size_t left,
 		return (-1);
 	}
 	memcpy(cert, msgbuf + offset, sizeof(*cert));
+	if (cert->cert_type == IKEV2_CERT_NONE) {
+		log_debug("%s: malformed payload: invalid cert type", __func__);
+		return (-1);
+	}
 
 	return (0);
 }
@@ -810,6 +814,7 @@ ikev2_pld_cert(struct iked *env, struct ikev2_payload *pld,
 	struct iked_id			*certid;
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 	const struct iked_sa		*sa = msg->msg_sa;
+	int				 i;
 
 	if (ikev2_validate_cert(msg, offset, left, &cert))
 		return (-1);
@@ -826,11 +831,26 @@ ikev2_pld_cert(struct iked *env, struct ikev2_payload *pld,
 	if (!ikev2_msg_frompeer(msg))
 		return (0);
 
-	certid = &msg->msg_parent->msg_cert;
-	if (certid->id_type) {
-		log_debug("%s: multiple cert payloads, ignoring",
+	/* do not accept internal encoding in the wire */
+	if (cert.cert_type == IKEV2_CERT_BUNDLE) {
+		log_debug("%s: ignoring IKEV2_CERT_BUNDLE",
 		   SPI_SA(sa, __func__));
 		return (0);
+	}
+
+	certid = &msg->msg_parent->msg_cert;
+	if (certid->id_type) {
+		/* try to set supplemental certs */
+		for (i = 0; i < IKED_SCERT_MAX; i++) {
+			certid = &msg->msg_parent->msg_scert[i];
+			if (!certid->id_type)
+				break;
+		}
+		if (certid->id_type) {
+			log_debug("%s: too many cert payloads, ignoring",
+			   SPI_SA(sa, __func__));
+			return (0);
+		}
 	}
 
 	if ((certid->id_buf = ibuf_new(buf, len)) == NULL) {
@@ -964,7 +984,7 @@ ikev2_pld_auth(struct iked *env, struct ikev2_payload *pld,
 		return (-1);
 	}
 
-	ibuf_release(idp->id_buf);
+	ibuf_free(idp->id_buf);
 	idp->id_type = auth.auth_method;
 	idp->id_offset = 0;
 	if ((idp->id_buf = ibuf_new(buf, len)) == NULL)
@@ -992,7 +1012,7 @@ ikev2_pld_nonce(struct iked *env, struct ikev2_payload *pld,
 	print_hex(buf, 0, len);
 
 	if (ikev2_msg_frompeer(msg)) {
-		if (ibuf_length(msg->msg_parent->msg_nonce)) {
+		if (msg->msg_parent->msg_nonce != NULL) {
 			log_info("%s: duplicate NONCE payload", __func__);
 			return (-1);
 		}
@@ -1279,7 +1299,7 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 			    " notification: %zu", __func__, left);
 			return (0);
 		}
-		ibuf_release(msg->msg_cookie2);	/* should not happen */
+		ibuf_free(msg->msg_cookie2);	/* should not happen */
 		if ((msg->msg_cookie2 = ibuf_new(buf, left)) == NULL) {
 			log_debug("%s: failed to get peer cookie2", __func__);
 			return (-1);
@@ -1300,7 +1320,7 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 		log_debug("%s: received cookie, len %zu", __func__, left);
 		print_hex(buf, 0, left);
 
-		ibuf_release(msg->msg_cookie);
+		ibuf_free(msg->msg_cookie);
 		if ((msg->msg_cookie = ibuf_new(buf, left)) == NULL) {
 			log_debug("%s: failed to get peer cookie", __func__);
 			return (-1);
@@ -1522,12 +1542,12 @@ int
 ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
     struct iked_message *msg, size_t offset, size_t left, unsigned int type)
 {
-	struct sockaddr_in		 s4;
-	struct sockaddr_in6		 s6;
-	uint8_t				 buf[2][128];
+	struct sockaddr_in		 start4, end4;
+	struct sockaddr_in6		 start6, end6;
+	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 	uint8_t				*ptr;
 
-	ptr = ibuf_data(msg->msg_data) + offset;
+	ptr = msgbuf + offset;
 
 	switch (type) {
 	case IKEV2_TS_IPV4_ADDR_RANGE:
@@ -1538,22 +1558,21 @@ ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
 			return (-1);
 		}
 
-		bzero(&s4, sizeof(s4));
-		s4.sin_family = AF_INET;
-		s4.sin_len = sizeof(s4);
-		memcpy(&s4.sin_addr.s_addr, ptr, 4);
+		bzero(&start4, sizeof(start4));
+		start4.sin_family = AF_INET;
+		start4.sin_len = sizeof(start4);
+		memcpy(&start4.sin_addr.s_addr, ptr, 4);
 		ptr += 4;
 		left -= 4;
-		print_host((struct sockaddr *)&s4,
-		    (char *)buf[0], sizeof(buf[0]));
 
-		memcpy(&s4.sin_addr.s_addr, ptr, 4);
+		bzero(&end4, sizeof(end4));
+		end4.sin_family = AF_INET;
+		end4.sin_len = sizeof(end4);
+		memcpy(&end4.sin_addr.s_addr, ptr, 4);
 		left -= 4;
-		print_host((struct sockaddr *)&s4,
-		    (char *)buf[1], sizeof(buf[1]));
 
 		log_debug("%s: start %s end %s", __func__,
-		    buf[0], buf[1]);
+		    print_addr(&start4), print_addr(&end4));
 		break;
 	case IKEV2_TS_IPV6_ADDR_RANGE:
 		if (left < 2 * 16) {
@@ -1562,21 +1581,21 @@ ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
 			    __func__, left, 2 * 16);
 			return (-1);
 		}
-		bzero(&s6, sizeof(s6));
-		s6.sin6_family = AF_INET6;
-		s6.sin6_len = sizeof(s6);
-		memcpy(&s6.sin6_addr, ptr, 16);
+		bzero(&start6, sizeof(start6));
+		start6.sin6_family = AF_INET6;
+		start6.sin6_len = sizeof(start6);
+		memcpy(&start6.sin6_addr, ptr, 16);
 		ptr += 16;
 		left -= 16;
-		print_host((struct sockaddr *)&s6,
-		    (char *)buf[0], sizeof(buf[0]));
 
-		memcpy(&s6.sin6_addr, ptr, 16);
+		bzero(&end6, sizeof(end6));
+		end6.sin6_family = AF_INET6;
+		end6.sin6_len = sizeof(end6);
+		memcpy(&end6.sin6_addr, ptr, 16);
 		left -= 16;
-		print_host((struct sockaddr *)&s6,
-		    (char *)buf[1], sizeof(buf[1]));
+
 		log_debug("%s: start %s end %s", __func__,
-		    buf[0], buf[1]);
+		    print_addr(&start6), print_addr(&end6));
 		break;
 	default:
 		log_debug("%s: ignoring unknown TS type %u", __func__, type);
@@ -1650,7 +1669,7 @@ ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
 		    __func__, frag_num, frag_total);
 		goto done;
 	}
-	elen = ibuf_length(e);
+	elen = ibuf_size(e);
 
 	/* Check new fragmented message */
 	if (sa_frag->frag_arr == NULL) {
@@ -1710,12 +1729,12 @@ ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
 done:
 	if (!processed)
 		ikestat_inc(env, ikes_frag_rcvd_drop);
-	ibuf_release(e);
+	ibuf_free(e);
 	return (ret);
 dropall:
 	ikestat_add(env, ikes_frag_rcvd_drop, sa_frag->frag_count + 1);
 	config_free_fragments(sa_frag);
-	ibuf_release(e);
+	ibuf_free(e);
 	return -1;
 }
 
@@ -1782,7 +1801,7 @@ done:
 	else
 		ikestat_add(env, ikes_frag_reass_drop, sa_frag->frag_total);
 	config_free_fragments(sa_frag);
-	ibuf_release(e);
+	ibuf_free(e);
 
 	return (ret);
 }
@@ -1837,7 +1856,7 @@ ikev2_pld_e(struct iked *env, struct ikev2_payload *pld,
 	    pld->pld_nextpayload);
 
  done:
-	ibuf_release(e);
+	ibuf_free(e);
 
 	return (ret);
 }
@@ -1867,15 +1886,15 @@ ikev2_pld_cp(struct iked *env, struct ikev2_payload *pld,
 	struct iked_addr	*addr;
 	struct sockaddr_in	*in4;
 	struct sockaddr_in6	*in6;
+	uint8_t			*msgbuf = ibuf_data(msg->msg_data);
 	uint8_t			*ptr;
 	size_t			 len;
-	uint8_t			 buf[128];
 	int			 cfg_type;
 
 	if (ikev2_validate_cp(msg, offset, left, &cp))
 		return (-1);
 
-	ptr = ibuf_data(msg->msg_data) + offset + sizeof(cp);
+	ptr = msgbuf + offset + sizeof(cp);
 	len = left - sizeof(cp);
 
 	log_debug("%s: type %s length %zu",
@@ -1947,17 +1966,20 @@ ikev2_pld_cp(struct iked *env, struct ikev2_payload *pld,
 			in4->sin_family = AF_INET;
 			in4->sin_len = sizeof(*in4);
 			memcpy(&in4->sin_addr.s_addr, ptr, 4);
-			print_host((struct sockaddr *)in4, (char *)buf,
-			    sizeof(buf));
-			log_debug("%s: cfg %s", __func__, buf);
 			switch(cfg_type) {
 			case IKEV2_CFG_INTERNAL_IP4_ADDRESS:
 				msg->msg_parent->msg_cp_addr = addr;
-				log_debug("%s: IP4_ADDRESS %s", __func__, buf);
+				log_debug("%s: IP4_ADDRESS %s", __func__,
+				    print_addr(&addr->addr));
 				break;
 			case IKEV2_CFG_INTERNAL_IP4_DNS:
 				msg->msg_parent->msg_cp_dns = addr;
-				log_debug("%s: IP4_DNS %s", __func__, buf);
+				log_debug("%s: IP4_DNS %s", __func__,
+				    print_addr(&addr->addr));
+				break;
+			default:
+				log_debug("%s: cfg %s", __func__,
+				    print_addr(&addr->addr));
 				break;
 			}
 			break;
@@ -1997,17 +2019,20 @@ ikev2_pld_cp(struct iked *env, struct ikev2_payload *pld,
 			in6->sin6_family = AF_INET6;
 			in6->sin6_len = sizeof(*in6);
 			memcpy(&in6->sin6_addr, ptr, 16);
-			print_host((struct sockaddr *)in6, (char *)buf,
-			    sizeof(buf));
-			log_debug("%s: cfg %s/%d", __func__, buf, ptr[16]);
 			switch(cfg_type) {
 			case IKEV2_CFG_INTERNAL_IP6_ADDRESS:
 				msg->msg_parent->msg_cp_addr6 = addr;
-				log_debug("%s: IP6_ADDRESS %s", __func__, buf);
+				log_debug("%s: IP6_ADDRESS %s", __func__,
+				    print_addr(&addr->addr));
 				break;
 			case IKEV2_CFG_INTERNAL_IP6_DNS:
 				msg->msg_parent->msg_cp_dns = addr;
-				log_debug("%s: IP6_DNS %s", __func__, buf);
+				log_debug("%s: IP6_DNS %s", __func__,
+				    print_addr(&addr->addr));
+				break;
+			default:
+				log_debug("%s: cfg %s/%d", __func__,
+				    print_addr(&addr->addr), ptr[16]);
 				break;
 			}
 			break;
@@ -2049,19 +2074,25 @@ ikev2_pld_eap(struct iked *env, struct ikev2_payload *pld,
 	struct eap_header		 hdr;
 	struct eap_message		*eap = NULL;
 	const struct iked_sa		*sa = msg->msg_sa;
-	size_t				 len;
+	size_t				 eap_len;
 
 	if (ikev2_validate_eap(msg, offset, left, &hdr))
 		return (-1);
-	len = betoh16(hdr.eap_length);
 
-	if (len < sizeof(*eap)) {
+	eap_len = betoh16(hdr.eap_length);
+	if (left != eap_len) {
+		log_info("%s: malformed payload: EAP length does not match"
+		    " payload length (%zu != %zu)", __func__, left, eap_len);
+		return (-1);
+	}
+
+	if (eap_len < sizeof(*eap)) {
 		log_info("%s: %s id %d length %d", SPI_SA(sa, __func__),
 		    print_map(hdr.eap_code, eap_code_map),
 		    hdr.eap_id, betoh16(hdr.eap_length));
 	} else {
 		/* Now try to get the indicated length */
-		if ((eap = ibuf_seek(msg->msg_data, offset, len)) == NULL) {
+		if ((eap = ibuf_seek(msg->msg_data, offset, eap_len)) == NULL) {
 			log_debug("%s: invalid EAP length", __func__);
 			return (-1);
 		}
@@ -2074,6 +2105,82 @@ ikev2_pld_eap(struct iked *env, struct ikev2_payload *pld,
 		if (eap_parse(env, sa, msg, eap, msg->msg_response) == -1)
 			return (-1);
 		msg->msg_parent->msg_eap.eam_found = 1;
+	}
+
+	return (0);
+}
+
+/* parser for the initial IKE_AUTH payload, does not require msg_sa */
+int
+ikev2_pld_parse_quick(struct iked *env, struct ike_header *hdr,
+    struct iked_message *msg, size_t offset)
+{
+	struct ikev2_payload	 pld;
+	struct ikev2_frag_payload frag;
+	uint8_t			*msgbuf = ibuf_data(msg->msg_data);
+	uint8_t			*buf;
+	size_t			 len, total, left;
+	size_t			 length;
+	unsigned int		 payload;
+
+	log_debug("%s: header ispi %s rspi %s"
+	    " nextpayload %s version 0x%02x exchange %s flags 0x%02x"
+	    " msgid %d length %u response %d", __func__,
+	    print_spi(betoh64(hdr->ike_ispi), 8),
+	    print_spi(betoh64(hdr->ike_rspi), 8),
+	    print_map(hdr->ike_nextpayload, ikev2_payload_map),
+	    hdr->ike_version,
+	    print_map(hdr->ike_exchange, ikev2_exchange_map),
+	    hdr->ike_flags,
+	    betoh32(hdr->ike_msgid),
+	    betoh32(hdr->ike_length),
+	    msg->msg_response);
+
+	length = betoh32(hdr->ike_length);
+
+	if (ibuf_size(msg->msg_data) < length) {
+		log_debug("%s: short message", __func__);
+		return (-1);
+	}
+
+	offset += sizeof(*hdr);
+
+	/* Bytes left in datagram. */
+	total = length - offset;
+
+	payload = hdr->ike_nextpayload;
+
+	while (payload != 0 && offset < length) {
+		if (ikev2_validate_pld(msg, offset, total, &pld))
+			return (-1);
+
+		log_debug("%s: %spayload %s"
+		    " nextpayload %s critical 0x%02x length %d",
+		    __func__, msg->msg_e ? "decrypted " : "",
+		    print_map(payload, ikev2_payload_map),
+		    print_map(pld.pld_nextpayload, ikev2_payload_map),
+		    pld.pld_reserved & IKEV2_CRITICAL_PAYLOAD,
+		    betoh16(pld.pld_length));
+
+		/* Skip over generic payload header. */
+		offset += sizeof(pld);
+		total -= sizeof(pld);
+		left = betoh16(pld.pld_length) - sizeof(pld);
+
+		switch (payload) {
+		case IKEV2_PAYLOAD_SKF:
+			len = left;
+			buf = msgbuf + offset;
+			if (len < sizeof(frag))
+				return (-1);
+			memcpy(&frag, buf, sizeof(frag));
+			msg->msg_frag_num = betoh16(frag.frag_num);
+			break;
+		}
+
+		payload = pld.pld_nextpayload;
+		offset += left;
+		total -= left;
 	}
 
 	return (0);

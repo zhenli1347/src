@@ -1,4 +1,4 @@
-/*	$OpenBSD: lapic.c,v 1.53 2022/12/06 01:56:44 cheloha Exp $	*/
+/*	$OpenBSD: lapic.c,v 1.58 2023/09/17 14:50:51 cheloha Exp $	*/
 /* $NetBSD: lapic.c,v 1.1.2.8 2000/02/23 06:10:50 sommerfeld Exp $ */
 
 /*-
@@ -40,13 +40,10 @@
 
 #include <uvm/uvm_extern.h>
 
-#include <machine/cpu.h>
 #include <machine/cpufunc.h>
 #include <machine/cpuvar.h>
 #include <machine/pmap.h>
-#include <machine/vmparam.h>
 #include <machine/mpbiosvar.h>
-#include <machine/pcb.h>
 #include <machine/specialreg.h>
 #include <machine/segments.h>
 
@@ -274,7 +271,11 @@ lapic_timer_rearm(void *unused, uint64_t nsecs)
 void
 lapic_timer_trigger(void *unused)
 {
+	u_long s;
+
+	s = intr_disable();
 	lapic_timer_oneshot(0, 1);
+	intr_restore(s);
 }
 
 /*
@@ -325,9 +326,7 @@ lapic_initclocks(void)
 
 	stathz = hz;
 	profhz = stathz * 10;
-	clockintr_init(CL_RNDSTAT);
-
-	lapic_startclock();
+	statclock_is_randomized = 1;
 }
 
 extern int gettick(void);	/* XXX put in header file */
@@ -421,6 +420,7 @@ lapic_calibrate_timer(struct cpu_info *ci)
 	    lapic_per_second * (1ULL << 32) / 1000000000;
 	lapic_timer_nsec_max = UINT64_MAX / lapic_timer_nsec_cycle_ratio;
 	initclock_func = lapic_initclocks;
+	startclock_func = lapic_startclock;
 }
 
 /*

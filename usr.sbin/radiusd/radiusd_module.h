@@ -35,8 +35,13 @@ struct module_handlers {
 
 	void (*access_request)(void *ctx, u_int query_id, const u_char *pkt,
 	    size_t pktlen);
-
 	/* User-Password Attribute is encrypted if the module has the secret */
+
+	void (*request_decoration)(void *ctx, u_int query_id, const u_char *pkt,
+	    size_t pktlen);
+
+	void (*response_decoration)(void *ctx, u_int query_id,
+	    const u_char *req, size_t reqlen, const u_char *res, size_t reslen);
 };
 
 #define SYNTAX_ASSERT(_cond, _msg)				\
@@ -51,10 +56,11 @@ __BEGIN_DECLS
 
 struct module_base	*module_create(int, void *, struct module_handlers *);
 void			 module_start(struct module_base *);
+void			 module_stop(struct module_base *);
 int			 module_run(struct module_base *);
 void			 module_destroy(struct module_base *);
 void			 module_load(struct module_base *);
-void			 module_drop_privilege(struct module_base *);
+void			 module_drop_privilege(struct module_base *, int);
 int			 module_notify_secret(struct module_base *,
 			    const char *);
 int			 module_send_message(struct module_base *, uint32_t,
@@ -67,6 +73,10 @@ int			 module_userpass_fail(struct module_base *, u_int,
 int			 module_accsreq_answer(struct module_base *, u_int,
 			    const u_char *, size_t);
 int			 module_accsreq_aborted(struct module_base *, u_int);
+int			 module_reqdeco_done(struct module_base *, u_int,
+			    const u_char *, size_t);
+int			 module_resdeco_done(struct module_base *, u_int,
+			    const u_char *, size_t);
 
 __END_DECLS
 

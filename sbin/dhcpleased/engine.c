@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.38 2022/05/05 14:44:59 tb Exp $	*/
+/*	$OpenBSD: engine.c,v 1.43 2024/02/13 12:53:05 florian Exp $	*/
 
 /*
  * Copyright (c) 2017, 2021 Florian Obser <florian@openbsd.org>
@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
+#include <sys/mbuf.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -70,6 +71,7 @@ enum if_state {
 	IF_REBINDING,
 	/* IF_INIT_REBOOT, */
 	IF_REBOOTING,
+	IF_IPV6_ONLY,
 };
 
 const char* if_state_name[] = {
@@ -82,6 +84,7 @@ const char* if_state_name[] = {
 	"Rebinding",
 	/* "Init-Reboot", */
 	"Rebooting",
+	"IPv6 only",
 };
 
 struct dhcpleased_iface {
@@ -113,6 +116,7 @@ struct dhcpleased_iface {
 	uint32_t			 lease_time;
 	uint32_t			 renewal_time;
 	uint32_t			 rebinding_time;
+	uint32_t			 ipv6_only_time;
 };
 
 LIST_HEAD(, dhcpleased_iface) dhcpleased_interfaces;
@@ -339,6 +343,7 @@ engine_dispatch_frontend(int fd, short event, void *bula)
 				case IF_REBINDING:
 				case IF_REBOOTING:
 				case IF_BOUND:
+				case IF_IPV6_ONLY:
 					state_transition(iface, IF_REBOOTING);
 					break;
 				}
@@ -426,7 +431,7 @@ engine_dispatch_main(int fd, short event, void *bula)
 				fatalx("%s: received unexpected imsg fd "
 				    "to engine", __func__);
 
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg fd to "
 				   "engine but didn't receive any", __func__);
 
@@ -727,6 +732,7 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 	size_t			 rem, i;
 	uint32_t		 sum, usum, lease_time = 0, renewal_time = 0;
 	uint32_t		 rebinding_time = 0;
+	uint32_t		 ipv6_only_time = 0;
 	uint8_t			*p, dho = DHO_PAD, dho_len, slen;
 	uint8_t			 dhcp_message_type = 0;
 	int			 routes_len = 0, routers = 0, csr = 0;
@@ -783,7 +789,8 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 	if (rem < (size_t)ip->ip_hl << 2)
 		goto too_short;
 
-	if (wrapsum(checksum((uint8_t *)ip, ip->ip_hl << 2, 0)) != 0) {
+	if ((dhcp->csumflags & M_IPV4_CSUM_IN_OK) == 0 &&
+	    wrapsum(checksum((uint8_t *)ip, ip->ip_hl << 2, 0)) != 0) {
 		log_warnx("%s: bad IP checksum", __func__);
 		return;
 	}
@@ -829,16 +836,19 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 	p += sizeof(*udp);
 	rem -= sizeof(*udp);
 
-	usum = udp->uh_sum;
-	udp->uh_sum = 0;
+	if ((dhcp->csumflags & M_UDP_CSUM_IN_OK) == 0) {
+		usum = udp->uh_sum;
+		udp->uh_sum = 0;
 
-	sum = wrapsum(checksum((uint8_t *)udp, sizeof(*udp), checksum(p, rem,
-	    checksum((uint8_t *)&ip->ip_src, 2 * sizeof(ip->ip_src),
-	    IPPROTO_UDP + ntohs(udp->uh_ulen)))));
+		sum = wrapsum(checksum((uint8_t *)udp, sizeof(*udp),
+		    checksum(p, rem,
+		    checksum((uint8_t *)&ip->ip_src, 2 * sizeof(ip->ip_src),
+		    IPPROTO_UDP + ntohs(udp->uh_ulen)))));
 
-	if (usum != 0 && usum != sum) {
-		log_warnx("%s: bad UDP checksum", __func__);
-		return;
+		if (usum != 0 && usum != sum) {
+			log_warnx("%s: bad UDP checksum", __func__);
+			return;
+		}
 	}
 
 	if (log_getverbose() > 1) {
@@ -860,7 +870,7 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 		log_dhcp_hdr(dhcp_hdr);
 
 	if (dhcp_hdr->op != DHCP_BOOTREPLY) {
-		log_warnx("%s: ignorning non-reply packet", __func__);
+		log_warnx("%s: ignoring non-reply packet", __func__);
 		return;
 	}
 
@@ -1173,6 +1183,18 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 			}
 			break;
 		}
+		case DHO_IPV6_ONLY_PREFERRED:
+			if (dho_len != sizeof(ipv6_only_time))
+				goto wrong_length;
+			memcpy(&ipv6_only_time, p, sizeof(ipv6_only_time));
+			ipv6_only_time = ntohl(ipv6_only_time);
+			if (log_getverbose() > 1) {
+				log_debug("DHO_IPV6_ONLY_PREFERRED %us",
+				    ipv6_only_time);
+			}
+			p += dho_len;
+			rem -= dho_len;
+			break;
 		default:
 			if (log_getverbose() > 1)
 				log_debug("DHO_%u, len: %u", dho, dho_len);
@@ -1207,6 +1229,14 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 			    "offered IP address", __func__);
 			return;
 		}
+#ifndef SMALL
+		if (iface_conf != NULL && iface_conf->prefer_ipv6 &&
+		    ipv6_only_time > 0) {
+			iface->ipv6_only_time = ipv6_only_time;
+			state_transition(iface, IF_IPV6_ONLY);
+			break;
+		}
+#endif
 		iface->server_identifier = server_identifier;
 		iface->dhcp_server = server_identifier;
 		iface->requested_ip = dhcp_hdr->yiaddr;
@@ -1307,6 +1337,14 @@ parse_dhcp(struct dhcpleased_iface *iface, struct imsg_dhcp *dhcp)
 		strlcpy(iface->domainname, domainname,
 		    sizeof(iface->domainname));
 		strlcpy(iface->hostname, hostname, sizeof(iface->hostname));
+#ifndef SMALL
+		if (iface_conf != NULL && iface_conf->prefer_ipv6 &&
+		    ipv6_only_time > 0) {
+			iface->ipv6_only_time = ipv6_only_time;
+			state_transition(iface, IF_IPV6_ONLY);
+			break;
+		}
+#endif
 		state_transition(iface, IF_BOUND);
 		break;
 	case DHCPNAK:
@@ -1347,8 +1385,6 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 	char		 ifnamebuf[IF_NAMESIZE], *if_name;
 
 	iface->state = new_state;
-	if (new_state != old_state)
-		iface->xid = arc4random();
 
 	switch (new_state) {
 	case IF_DOWN:
@@ -1386,7 +1422,9 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 			send_deconfigure_interface(iface);
 			/* fall through */
 		case IF_DOWN:
+		case IF_IPV6_ONLY:
 			iface->timo.tv_sec = START_EXP_BACKOFF;
+			iface->xid = arc4random();
 			break;
 		case IF_BOUND:
 			fatal("invalid transition Bound -> Init");
@@ -1397,8 +1435,10 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 	case IF_REBOOTING:
 		if (old_state == IF_REBOOTING)
 			iface->timo.tv_sec *= 2;
-		else
+		else {
 			iface->timo.tv_sec = START_EXP_BACKOFF;
+			iface->xid = arc4random();
+		}
 		request_dhcp_request(iface);
 		break;
 	case IF_REQUESTING:
@@ -1419,6 +1459,7 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 		if (old_state == IF_BOUND) {
 			iface->timo.tv_sec = (iface->rebinding_time -
 			    iface->renewal_time) / 2; /* RFC 2131 4.4.5 */
+			iface->xid = arc4random();
 		} else
 			iface->timo.tv_sec /= 2;
 
@@ -1434,6 +1475,25 @@ state_transition(struct dhcpleased_iface *iface, enum if_state new_state)
 			iface->timo.tv_sec /= 2;
 		request_dhcp_request(iface);
 		break;
+	case IF_IPV6_ONLY:
+		switch (old_state) {
+		case IF_REQUESTING:
+		case IF_RENEWING:
+		case IF_REBINDING:
+		case IF_REBOOTING:
+			/* going IPv6 only: delete legacy IP */
+			send_rdns_withdraw(iface);
+			send_deconfigure_interface(iface);
+			/* fall through */
+		case IF_INIT:
+		case IF_DOWN:
+		case IF_IPV6_ONLY:
+			iface->timo.tv_sec = iface->ipv6_only_time;
+			break;
+		case IF_BOUND:
+			fatal("invalid transition Bound -> IPv6 only");
+			break;
+		}
 	}
 
 	if_name = if_indextoname(iface->if_index, ifnamebuf);
@@ -1498,6 +1558,9 @@ iface_timeout(int fd, short events, void *arg)
 			state_transition(iface, IF_INIT);
 		else
 			state_transition(iface, IF_REBINDING);
+		break;
+	case IF_IPV6_ONLY:
+		state_transition(iface, IF_REQUESTING);
 		break;
 	}
 }
@@ -1583,6 +1646,9 @@ request_dhcp_request(struct dhcpleased_iface *iface)
 		imsg.server_identifier.s_addr = INADDR_ANY;	/* MUST NOT */
 		imsg.requested_ip.s_addr = INADDR_ANY;		/* MUST NOT */
 		imsg.ciaddr = iface->requested_ip;		/* IP address */
+		break;
+	case IF_IPV6_ONLY:
+		fatalx("invalid state IF_IPV6_ONLY in %s", __func__);
 		break;
 	}
 

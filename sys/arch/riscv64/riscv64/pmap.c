@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.27 2022/11/13 16:14:06 jca Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.41 2024/04/29 10:07:37 jsg Exp $	*/
 
 /*
  * Copyright (c) 2019-2020 Brian Bamsch <bbamsch@google.com>
@@ -216,6 +216,8 @@ vaddr_t zero_page;
 vaddr_t copy_src_page;
 vaddr_t copy_dst_page;
 
+#define CPU_VENDOR_THEAD	0x5b7
+
 struct pool pmap_pmap_pool;
 struct pool pmap_pted_pool;
 struct pool pmap_vp_pool;
@@ -270,31 +272,39 @@ VP_IDX3(vaddr_t va)
 	return (va >> VP_IDX3_POS) & VP_IDX3_MASK;
 }
 
-// For RISC-V Machines, write without read permission is not a valid
-// combination of permission bits. These cases are mapped to R+W instead.
-// PROT_NONE grants read permissions because r = 0 | w = 0 | x = 0 is
-// reserved for non-leaf page table entries.
+/*
+ * On RISC-V, the encodings for write permission without read
+ * permission (r=0, w=1, x=0, or r=0, w=1, x=1) are reserved, so
+ * PROT_WRITE implies PROT_READ.  We need to handle PROT_NONE
+ * seperately (see pmap_pte_update()) since r=0, w=0, x=0 is reserved
+ * for non-leaf page table entries.
+ */
 const pt_entry_t ap_bits_user[8] = {
-	[PROT_NONE]				= PTE_U|PTE_A|PTE_R,
+	[PROT_NONE]				= 0,
 	[PROT_READ]				= PTE_U|PTE_A|PTE_R,
 	[PROT_WRITE]				= PTE_U|PTE_A|PTE_R|PTE_D|PTE_W,
 	[PROT_WRITE|PROT_READ]			= PTE_U|PTE_A|PTE_R|PTE_D|PTE_W,
-	[PROT_EXEC]				= PTE_U|PTE_A|PTE_X|PTE_R,
+	[PROT_EXEC]				= PTE_U|PTE_A|PTE_X,
 	[PROT_EXEC|PROT_READ]			= PTE_U|PTE_A|PTE_X|PTE_R,
 	[PROT_EXEC|PROT_WRITE]			= PTE_U|PTE_A|PTE_X|PTE_R|PTE_D|PTE_W,
 	[PROT_EXEC|PROT_WRITE|PROT_READ]	= PTE_U|PTE_A|PTE_X|PTE_R|PTE_D|PTE_W,
 };
 
 const pt_entry_t ap_bits_kern[8] = {
-	[PROT_NONE]				= PTE_A|PTE_R,
+	[PROT_NONE]				= 0,
 	[PROT_READ]				= PTE_A|PTE_R,
 	[PROT_WRITE]				= PTE_A|PTE_R|PTE_D|PTE_W,
 	[PROT_WRITE|PROT_READ]			= PTE_A|PTE_R|PTE_D|PTE_W,
-	[PROT_EXEC]				= PTE_A|PTE_X|PTE_R,
+	[PROT_EXEC]				= PTE_A|PTE_X,
 	[PROT_EXEC|PROT_READ]			= PTE_A|PTE_X|PTE_R,
 	[PROT_EXEC|PROT_WRITE]			= PTE_A|PTE_X|PTE_R|PTE_D|PTE_W,
 	[PROT_EXEC|PROT_WRITE|PROT_READ]	= PTE_A|PTE_X|PTE_R|PTE_D|PTE_W,
 };
+
+/* PBMT encodings for the Svpmbt modes. */
+uint64_t pmap_pma;
+uint64_t pmap_nc;
+uint64_t pmap_io;
 
 /*
  * This is used for pmap_kernel() mappings, they are not to be removed
@@ -332,36 +342,6 @@ pmap_vp_lookup(pmap_t pm, vaddr_t va, pt_entry_t **pl3entry)
 
 	return pted;
 }
-
-/*
- * Remove, and return, pted at specified address, NULL if not present
- */
-struct pte_desc *
-pmap_vp_remove(pmap_t pm, vaddr_t va)
-{
-	struct pmapvp1 *vp1;
-	struct pmapvp2 *vp2;
-	struct pmapvp3 *vp3;
-	struct pte_desc *pted;
-
-	vp1 = pm->pm_vp.l1;
-
-	vp2 = vp1->vp[VP_IDX1(va)];
-	if (vp2 == NULL) {
-		return NULL;
-	}
-
-	vp3 = vp2->vp[VP_IDX2(va)];
-	if (vp3 == NULL) {
-		return NULL;
-	}
-
-	pted = vp3->vp[VP_IDX3(va)];
-	vp3->vp[VP_IDX3(va)] = NULL;
-
-	return pted;
-}
-
 
 /*
  * Create a V -> P mapping for the given pmap and virtual address
@@ -428,23 +408,19 @@ pmap_vp_page_free(struct pool *pp, void *v)
 	km_free(v, pp->pr_pgsize, &kv_any, &kp_dirty);
 }
 
-u_int32_t PTED_MANAGED(struct pte_desc *pted);
-u_int32_t PTED_WIRED(struct pte_desc *pted);
-u_int32_t PTED_VALID(struct pte_desc *pted);
-
-u_int32_t
+static inline u_int32_t
 PTED_MANAGED(struct pte_desc *pted)
 {
 	return (pted->pted_va & PTED_VA_MANAGED_M);
 }
 
-u_int32_t
+static inline u_int32_t
 PTED_WIRED(struct pte_desc *pted)
 {
 	return (pted->pted_va & PTED_VA_WIRED_M);
 }
 
-u_int32_t
+static inline u_int32_t
 PTED_VALID(struct pte_desc *pted)
 {
 	return (pted->pted_pte != 0);
@@ -578,9 +554,8 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	 */
 	if (flags & (PROT_READ|PROT_WRITE|PROT_EXEC|PMAP_WIRED)) {
 		pmap_pte_insert(pted);
+		tlb_flush_page(pm, va & ~PAGE_MASK);
 	}
-
-	tlb_flush_page(pm, va & ~PAGE_MASK);
 
 	error = 0;
 out:
@@ -605,7 +580,7 @@ pmap_remove(pmap_t pm, vaddr_t sva, vaddr_t eva)
 		if (pted == NULL)
 			continue;
 
-		if (pted->pted_va & PTED_VA_WIRED_M) {
+		if (PTED_WIRED(pted)) {
 			pm->pm_stats.wired_count--;
 			pted->pted_va &= ~PTED_VA_WIRED_M;
 		}
@@ -624,13 +599,12 @@ pmap_remove_pted(pmap_t pm, struct pte_desc *pted)
 {
 	pm->pm_stats.resident_count--;
 
-	if (pted->pted_va & PTED_VA_WIRED_M) {
+	if (PTED_WIRED(pted)) {
 		pm->pm_stats.wired_count--;
 		pted->pted_va &= ~PTED_VA_WIRED_M;
 	}
 
 	pmap_pte_remove(pted, pm != pmap_kernel());
-
 	tlb_flush_page(pm, pted->pted_va & ~PAGE_MASK);
 
 	if (pted->pted_va & PTED_VA_EXEC_M) {
@@ -687,7 +661,6 @@ _pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot, int flags, int cache)
 	 * so map the page!
 	 */
 	pmap_pte_insert(pted);
-
 	tlb_flush_page(pm, va & ~PAGE_MASK);
 
 	pg = PHYS_TO_VM_PAGE(pa);
@@ -735,7 +708,6 @@ pmap_kremove_pg(vaddr_t va)
 	 * or that the mapping is not present in the hash table.
 	 */
 	pmap_pte_remove(pted, 0);
-
 	tlb_flush_page(pm, pted->pted_va & ~PAGE_MASK);
 
 	if (pted->pted_va & PTED_VA_EXEC_M)
@@ -744,7 +716,7 @@ pmap_kremove_pg(vaddr_t va)
 	if (PTED_MANAGED(pted))
 		pmap_remove_pv(pted);
 
-	if (pted->pted_va & PTED_VA_WIRED_M)
+	if (PTED_WIRED(pted))
 		pm->pm_stats.wired_count--;
 
 	/* invalidate pted; */
@@ -774,8 +746,6 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	switch (cache) {
 	case PMAP_CACHE_WB:
 		break;
-	case PMAP_CACHE_WT:
-		break;
 	case PMAP_CACHE_CI:
 		if (pa >= pmap_cached_start && pa <= pmap_cached_end)
 			pa += (pmap_uncached_start - pmap_cached_start);
@@ -783,7 +753,7 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	case PMAP_CACHE_DEV:
 		break;
 	default:
-		panic("pmap_fill_pte:invalid cache mode");
+		panic("%s: invalid cache mode", __func__);
 	}
 	pted->pted_va |= cache;
 
@@ -849,15 +819,9 @@ pmap_pinit(pmap_t pm)
 	/* Fill kernel PTEs. */
 	kvp1 = pmap_kernel()->pm_vp.l1;
 	memcpy(&vp1->l1[L1_KERN_BASE], &kvp1->l1[L1_KERN_BASE],
-			L1_KERN_ENTRIES * sizeof(pt_entry_t));
+	    L1_KERN_ENTRIES * sizeof(pt_entry_t));
 	memcpy(&vp1->vp[L1_KERN_BASE], &kvp1->vp[L1_KERN_BASE],
-			L1_KERN_ENTRIES * sizeof(struct pmapvp2 *));
-
-	/* Fill DMAP PTEs. */
-	memcpy(&vp1->l1[L1_DMAP_BASE], &kvp1->l1[L1_DMAP_BASE],
-			L1_DMAP_ENTRIES * sizeof(pt_entry_t));
-	memcpy(&vp1->vp[L1_DMAP_BASE], &kvp1->vp[L1_DMAP_BASE],
-			L1_DMAP_ENTRIES * sizeof(struct pmapvp2 *));
+	    L1_KERN_ENTRIES * sizeof(struct pmapvp2 *));
 
 	pmap_extract(pmap_kernel(), l1va, (paddr_t *)&l1pa);
 	pm->pm_satp |= SATP_FORMAT_PPN(PPN(l1pa));
@@ -1160,8 +1124,6 @@ extern char __text_start[], _etext[];
 extern char __rodata_start[], _erodata[];
 
 paddr_t dmap_phys_base;
-paddr_t dmap_phys_max;
-vaddr_t dmap_virt_max;
 
 void
 pmap_bootstrap_dmap(vaddr_t kern_l1, paddr_t min_pa, paddr_t max_pa)
@@ -1184,21 +1146,17 @@ pmap_bootstrap_dmap(vaddr_t kern_l1, paddr_t min_pa, paddr_t max_pa)
 
 		/* gigapages */
 		pn = (pa / PAGE_SIZE);
-		entry = PTE_KERN;
+		entry = PTE_KERN | pmap_pma;
 		entry |= (pn << PTE_PPN0_S);
-		atomic_store_64(&l1[l1_slot], entry);
+		l1[l1_slot] = entry;
 	}
-
-	/* set the upper limit of the dmap region */
-	dmap_phys_max = pa;
-	dmap_virt_max = va;
 
 	sfence_vma();
 }
 
 vaddr_t
 pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
-    paddr_t memstart, paddr_t memend, paddr_t ramstart, paddr_t ramend)
+    paddr_t memstart, paddr_t memend)
 {
 	void  *va;
 	paddr_t pa, pt1pa;
@@ -1209,14 +1167,24 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 	vaddr_t vstart;
 	int i, j, k;
 	int lb_idx2, ub_idx2;
-	void *node;
+	uint64_t marchid, mimpid;
+	uint32_t mvendorid;
 
-	node = fdt_find_node("/");
-	if (fdt_is_compatible(node, "starfive,jh7100")) {
-		pmap_cached_start = 0x0080000000ULL;
-		pmap_cached_end = 0x087fffffffULL;
-		pmap_uncached_start = 0x1000000000ULL;
-		pmap_uncached_end = 0x17ffffffffULL;
+	mvendorid = sbi_get_mvendorid();
+	marchid = sbi_get_marchid();
+	mimpid = sbi_get_mimpid();
+
+	/*
+	 * The T-Head cores implement a page attributes extension that
+	 * violates the RISC-V privileged architecture specification.
+	 * Work around this as best as we can by adding the
+	 * appropriate page attributes in a way that is mostly
+	 * compatible with the Svpbmt extension.
+	 */
+	if (mvendorid == CPU_VENDOR_THEAD && marchid == 0 && mimpid == 0) {
+		pmap_pma = PTE_THEAD_C | PTE_THEAD_B | PTE_THEAD_SH;
+		pmap_nc = PTE_THEAD_B | PTE_THEAD_SH;
+		pmap_io = PTE_THEAD_SO | PTE_THEAD_SH;
 	}
 
 	pmap_setup_avail(memstart, memend, kvo);
@@ -1229,8 +1197,8 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 	 * via physical pointers
 	 */
 
-	// Map the entire Physical Address Space to Direct Mapped Region
-	pmap_bootstrap_dmap(l1pt, ramstart, ramend);
+	/* Map the initial 64MB block to the Direct Mapped Region. */
+	pmap_bootstrap_dmap(l1pt, memstart, memend);
 
 	pt1pa = pmap_steal_avail(2 * sizeof(struct pmapvp1), Lx_TABLE_ALIGN,
 	    &va);
@@ -1247,7 +1215,7 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 		mappings_allocated++;
 		pa = pmap_steal_avail(sizeof(struct pmapvp2), Lx_TABLE_ALIGN,
 		    &va);
-		vp2 = (struct pmapvp2 *) PHYS_TO_DMAP(pa);
+		vp2 = (struct pmapvp2 *)PHYS_TO_DMAP(pa);
 		vp1->vp[i] = va;
 		vp1->l1[i] = VP_Lx(pa);
 
@@ -1265,7 +1233,7 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 			mappings_allocated++;
 			pa = pmap_steal_avail(sizeof(struct pmapvp3),
 			    Lx_TABLE_ALIGN, &va);
-			vp3 = (struct pmapvp3 *) PHYS_TO_DMAP(pa);
+			vp3 = (struct pmapvp3 *)PHYS_TO_DMAP(pa);
 			vp2->vp[j] = va;
 			vp2->l2[j] = VP_Lx(pa);
 		}
@@ -1274,7 +1242,7 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 	for (i = VP_IDX1(VM_MIN_KERNEL_ADDRESS);
 	    i <= VP_IDX1(pmap_maxkvaddr - 1);
 	    i++) {
-		vp2 = (void *) PHYS_TO_DMAP((long)vp1->vp[i] + kvo);
+		vp2 = (void *)PHYS_TO_DMAP((long)vp1->vp[i] + kvo);
 
 		if (i == VP_IDX1(VM_MIN_KERNEL_ADDRESS)) {
 			lb_idx2 = VP_IDX2(VM_MIN_KERNEL_ADDRESS);
@@ -1287,7 +1255,7 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 			ub_idx2 = VP_IDX2_CNT - 1;
 		}
 		for (j = lb_idx2; j <= ub_idx2; j++) {
-			vp3 = (void *) PHYS_TO_DMAP((long)vp2->vp[j] + kvo);
+			vp3 = (void *)PHYS_TO_DMAP((long)vp2->vp[j] + kvo);
 
 			for (k = 0; k <= VP_IDX3_CNT - 1; k++) {
 				pted_allocated++;
@@ -1298,46 +1266,6 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 			}
 		}
 	}
-
-	/* now that we have mapping-space for everything, lets map it */
-	/* all of these mappings are ram -> kernel va */
-
-#if 0	// XXX This block does not appear to do anything useful?
-	/*
-	 * enable mappings for existing 'allocated' mapping in the bootstrap
-	 * page tables
-	 */
-	extern pt_entry_t *pagetable_l2;
-	extern char _end[];
-	vp2 = (void *) PHYS_TO_DMAP((long)&pagetable_l2 + kvo);
-	struct mem_region *mp;
-	ssize_t size;
-	for (mp = pmap_allocated; mp->size != 0; mp++) {
-		/* bounds may be kinda messed up */
-		for (pa = mp->start, size = mp->size & ~(PAGE_SIZE-1);
-		    size > 0;
-		    pa+= L2_SIZE, size -= L2_SIZE)
-		{
-			paddr_t mappa = pa & ~(L2_SIZE-1);
-			vaddr_t mapva = mappa - kvo;
-			int prot = PROT_READ | PROT_WRITE;
-
-			if (mapva < (vaddr_t)_end)
-				continue;
-
-			if (mapva >= (vaddr_t)__text_start &&
-			    mapva < (vaddr_t)_etext)
-				prot = PROT_READ | PROT_EXEC;
-			else if (mapva >= (vaddr_t)__rodata_start &&
-			    mapva < (vaddr_t)_erodata)
-				prot = PROT_READ;
-
-			// XXX What does ATTR_nG in arm64 mean?
-			vp2->l2[VP_IDX2(mapva)] = VP_Lx(mappa) |
-			    ap_bits_kern[prot];
-		}
-	}
-#endif
 
 	pmap_avail_fixup();
 
@@ -1350,16 +1278,17 @@ pmap_bootstrap(long kvo, vaddr_t l1pt, vaddr_t kernelstart, vaddr_t kernelend,
 	 */
 	vstart = pmap_map_stolen(kernelstart);
 
-	// Include the Direct Map in Kernel PMAP
-	// as gigapages, only populated the pmapvp1->l1 field,
-	// pmap->va field is not used
-	pmap_bootstrap_dmap((vaddr_t) pmap_kernel()->pm_vp.l1, ramstart, ramend);
+	/*
+	 * Temporarily add the Direct Map Area into the kernel pmap
+	 * such that we can continue to access stolen memory by
+	 * physical address.
+	 */
+	pmap_bootstrap_dmap((vaddr_t)pmap_kernel()->pm_vp.l1, memstart, memend);
 
-	//switching to new page table
+	/* Switch to the new page tables. */
 	uint64_t satp = pmap_kernel()->pm_satp;
 	__asm volatile("csrw satp, %0" :: "r" (satp) : "memory");
-
-	printf("all mapped\n");
+	sfence_vma();
 
 	curcpu()->ci_curpm = pmap_kernel();
 
@@ -1487,15 +1416,16 @@ pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 
 	pted->pted_va &= ~PROT_WRITE;
 	pted->pted_pte &= ~PROT_WRITE;
+	if ((prot & PROT_READ) == 0) {
+		pted->pted_va &= ~PROT_READ;
+		pted->pted_pte &= ~PROT_READ;
+	}
 	if ((prot & PROT_EXEC) == 0) {
 		pted->pted_va &= ~PROT_EXEC;
 		pted->pted_pte &= ~PROT_EXEC;
 	}
 	pmap_pte_update(pted, pl3);
-
 	tlb_flush_page(pm, pted->pted_va & ~PAGE_MASK);
-
-	return;
 }
 
 /*
@@ -1516,6 +1446,7 @@ pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
 			pmap_page_ro(pted->pted_pmap, pted->pted_va, prot);
 		}
 		mtx_leave(&pg->mdpage.pv_mtx);
+		return;
 	}
 
 	mtx_enter(&pg->mdpage.pv_mtx);
@@ -1575,6 +1506,25 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 void
 pmap_init(void)
 {
+	struct pmapvp1 *kvp1;
+	void *node;
+
+	node = fdt_find_node("/");
+	if (fdt_is_compatible(node, "starfive,jh7100")) {
+		pmap_cached_start = 0x0080000000ULL;
+		pmap_cached_end = 0x087fffffffULL;
+		pmap_uncached_start = 0x1000000000ULL;
+		pmap_uncached_end = 0x17ffffffffULL;
+	}
+
+	/* Clear DMAP PTEs. */
+	kvp1 = pmap_kernel()->pm_vp.l1;
+	memset(&kvp1->l1[L1_DMAP_BASE], 0,
+	    L1_DMAP_ENTRIES * sizeof(pt_entry_t));
+	memset(&kvp1->vp[L1_DMAP_BASE], 0,
+	    L1_DMAP_ENTRIES * sizeof(struct pmapvp2 *));
+	sfence_vma();
+
 	pool_init(&pmap_pmap_pool, sizeof(struct pmap), 0, IPL_NONE, 0,
 	    "pmap", NULL);
 	pool_setlowat(&pmap_pmap_pool, 2);
@@ -1613,16 +1563,31 @@ pmap_pte_insert(struct pte_desc *pted)
 void
 pmap_pte_update(struct pte_desc *pted, uint64_t *pl3)
 {
-	pt_entry_t pte, access_bits;
+	uint64_t pte, access_bits;
 	pmap_t pm = pted->pted_pmap;
+	uint64_t attr = 0;
+
+	switch (pted->pted_va & PMAP_CACHE_BITS) {
+	case PMAP_CACHE_WB:
+		attr |= pmap_pma;
+		break;
+	case PMAP_CACHE_CI:
+		attr |= pmap_nc;
+		break;
+	case PMAP_CACHE_DEV:
+		attr |= pmap_io;
+		break;
+	default:
+		panic("%s: invalid cache mode", __func__);
+	}
 
 	if (pm->pm_privileged)
 		access_bits = ap_bits_kern[pted->pted_pte & PROT_MASK];
 	else
 		access_bits = ap_bits_user[pted->pted_pte & PROT_MASK];
 
-	pte = VP_Lx(pted->pted_pte) | access_bits | PTE_V;
-	*pl3 = pte;
+	pte = VP_Lx(pted->pted_pte) | attr | access_bits | PTE_V;
+	*pl3 = access_bits ? pte : 0;
 }
 
 void
@@ -1651,8 +1616,6 @@ pmap_pte_remove(struct pte_desc *pted, int remove_pted)
 	vp3->l3[VP_IDX3(pted->pted_va)] = 0;
 	if (remove_pted)
 		vp3->vp[VP_IDX3(pted->pted_va)] = NULL;
-
-	tlb_flush_page(pm, pted->pted_va);
 }
 
 /*
@@ -1682,13 +1645,6 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 	/* If it's unmanaged, it must not fault. */
 	pg = PHYS_TO_VM_PAGE(pa);
 	if (pg == NULL)
-		goto done;
-
-	/*
-	 * Check based on fault type for mod/ref emulation.
-	 * if L3 entry is zero, it is not a possible fixup
-	 */
-	if (*pl3 == 0)
 		goto done;
 
 	/*
@@ -1754,8 +1710,6 @@ pmap_fault_fixup(pmap_t pm, vaddr_t va, vm_prot_t ftype)
 
 	/* We actually made a change, so flush it and sync. */
 	pmap_pte_update(pted, pl3);
-
-	/* Flush tlb. */
 	tlb_flush_page(pm, va & ~PAGE_MASK);
 
 	retcode = 1;
@@ -1794,6 +1748,13 @@ pmap_postinit(void)
 }
 
 void
+pmap_init_percpu(void)
+{
+	pool_cache_init(&pmap_pted_pool);
+	pool_cache_init(&pmap_vp_pool);
+}
+
+void
 pmap_update(pmap_t pm)
 {
 }
@@ -1814,17 +1775,13 @@ int
 pmap_clear_modify(struct vm_page *pg)
 {
 	struct pte_desc *pted;
-	pt_entry_t *pl3 = NULL;
 
 	atomic_clearbits_int(&pg->pg_flags, PG_PMAP_MOD);
 
 	mtx_enter(&pg->mdpage.pv_mtx);
 	LIST_FOREACH(pted, &(pg->mdpage.pv_list), pted_pv_list) {
-		if (pmap_vp_lookup(pted->pted_pmap, pted->pted_va & ~PAGE_MASK, &pl3) == NULL)
-			panic("failed to look up pte");
-		*pl3 &= ~PTE_W;
 		pted->pted_pte &= ~PROT_WRITE;
-
+		pmap_pte_insert(pted);
 		tlb_flush_page(pted->pted_pmap, pted->pted_va & ~PAGE_MASK);
 	}
 	mtx_leave(&pg->mdpage.pv_mtx);
@@ -1855,20 +1812,13 @@ pmap_clear_reference(struct vm_page *pg)
 }
 
 void
-pmap_copy(pmap_t dst_pmap, pmap_t src_pmap, vaddr_t dst_addr,
-	vsize_t len, vaddr_t src_addr)
-{
-	/* NOOP */
-}
-
-void
 pmap_unwire(pmap_t pm, vaddr_t va)
 {
 	struct pte_desc *pted;
 
 	pmap_lock(pm);
 	pted = pmap_vp_lookup(pm, va, NULL);
-	if ((pted != NULL) && (pted->pted_va & PTED_VA_WIRED_M)) {
+	if (pted != NULL && PTED_WIRED(pted)) {
 		pm->pm_stats.wired_count--;
 		pted->pted_va &= ~PTED_VA_WIRED_M;
 	}

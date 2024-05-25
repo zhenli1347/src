@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.72 2022/11/10 07:08:01 jmatthew Exp $	*/
+/*	$OpenBSD: clock.c,v 1.87 2024/04/08 20:05:51 miod Exp $	*/
 /*	$NetBSD: clock.c,v 1.41 2001/07/24 19:29:25 eeh Exp $ */
 
 /*
@@ -66,14 +66,11 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/device.h>
-#include <sys/proc.h>
-#include <sys/resourcevar.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
-#ifdef GPROF
-#include <sys/gmon.h>
-#endif
+#include <sys/clockintr.h>
 #include <sys/sched.h>
+#include <sys/stdint.h>
 #include <sys/timetc.h>
 #include <sys/atomic.h>
 
@@ -85,8 +82,6 @@
 #include <dev/clock_subr.h>
 #include <dev/ic/mk48txxreg.h>
 
-#include <sparc64/sparc64/intreg.h>
-#include <sparc64/sparc64/timerreg.h>
 #include <sparc64/dev/iommureg.h>
 #include <sparc64/dev/sbusreg.h>
 #include <dev/sbus/sbusvar.h>
@@ -110,7 +105,6 @@ u_int tick_get_timecount(struct timecounter *);
 
 struct timecounter tick_timecounter = {
 	.tc_get_timecount = tick_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 0,
 	.tc_name = "tick",
@@ -123,7 +117,6 @@ u_int sys_tick_get_timecount(struct timecounter *);
 
 struct timecounter sys_tick_timecounter = {
 	.tc_get_timecount = sys_tick_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 0,
 	.tc_name = "sys_tick",
@@ -132,20 +125,6 @@ struct timecounter sys_tick_timecounter = {
 	.tc_user = TC_SYS_TICK,
 };
 
-/*
- * Statistics clock interval and variance, in usec.  Variance must be a
- * power of two.  Since this gives us an even number, not an odd number,
- * we discard one case and compensate.  That is, a variance of 1024 would
- * give us offsets in [0..1023].  Instead, we take offsets in [1..1023].
- * This is symmetric about the point 512, or statvar/2, and thus averages
- * to that value (assuming uniform random numbers).
- */
-/* XXX fix comment to match value */
-int statvar = 8192;
-int statmin;			/* statclock interval - 1/2*variance */
-
-static long tick_increment;
-
 void	tick_start(void);
 void	sys_tick_start(void);
 void	stick_start(void);
@@ -153,12 +132,51 @@ void	stick_start(void);
 int	tickintr(void *);
 int	sys_tickintr(void *);
 int	stickintr(void *);
-int	schedintr(void *);
 
-static struct intrhand level10 = { clockintr };
-static struct intrhand level0 = { tickintr };
-static struct intrhand level14 = { statintr };
-static struct intrhand schedint = { schedintr };
+/* %TICK is at most a 63-bit counter. */
+#define TICK_COUNT_MASK 0x7fffffffffffffff
+
+uint64_t tick_nsec_cycle_ratio;
+uint64_t tick_nsec_max;
+
+void tick_rearm(void *, uint64_t);
+void tick_trigger(void *);
+
+const struct intrclock tick_intrclock = {
+	.ic_rearm = tick_rearm,
+	.ic_trigger = tick_trigger
+};
+
+/* %STICK is at most a 63-bit counter. */
+#define STICK_COUNT_MASK 0x7fffffffffffffff
+
+uint64_t sys_tick_nsec_cycle_ratio;
+uint64_t sys_tick_nsec_max;
+
+void sys_tick_rearm(void *, uint64_t);
+void sys_tick_trigger(void *);
+
+const struct intrclock sys_tick_intrclock = {
+	.ic_rearm = sys_tick_rearm,
+	.ic_trigger = sys_tick_trigger
+};
+
+void stick_rearm(void *, uint64_t);
+void stick_trigger(void *);
+
+const struct intrclock stick_intrclock = {
+	.ic_rearm = stick_rearm,
+	.ic_trigger = stick_trigger
+};
+
+void sparc64_raise_clockintr(void);
+
+static struct intrhand level10 = {
+	.ih_fun = tickintr,
+	.ih_number = 1,
+	.ih_pil = 10,
+	.ih_name = "clock"
+};
 
 /*
  * clock (eeprom) attaches at the sbus or the ebus (PCI)
@@ -187,28 +205,9 @@ const struct cfattach clock_fhc_ca = {
 extern todr_chip_handle_t todr_handle;
 static struct idprom *idprom;
 
-static int	timermatch(struct device *, void *, void *);
-static void	timerattach(struct device *, struct device *, void *);
-
-struct timerreg_4u	timerreg_4u;	/* XXX - need more cleanup */
-
-const struct cfattach timer_ca = {
-	sizeof(struct device), timermatch, timerattach
-};
-
-struct cfdriver timer_cd = {
-	NULL, "timer", DV_DULL
-};
-
 int clock_bus_wenable(struct todr_chip_handle *, int);
-struct chiptime;
 void myetheraddr(u_char *);
 struct idprom *getidprom(void);
-int chiptotime(int, int, int, int, int, int);
-void timetochip(struct chiptime *);
-void stopcounter(struct timer_4u *);
-
-int timerblurb = 10; /* Guess a value; used before clock is attached */
 
 /*
  * The OPENPROM calls the clock the "eeprom", so we have to have our
@@ -332,14 +331,7 @@ clockattach_ebus(struct device *parent, struct device *self, void *aux)
 	/* hard code to 8K? */
 	sz = ea->ea_regs[0].size;
 
-	if (ea->ea_nvaddrs) {
-		if (bus_space_map(ea->ea_memtag, ea->ea_vaddrs[0], 0,
-		    BUS_SPACE_MAP_PROMADDRESS, &cwi.cwi_bh) != 0) {
-			printf("%s: can't map register\n", self->dv_xname);
-			return;
-		}
-		bt = ea->ea_memtag;
-	} else if (ebus_bus_map(ea->ea_iotag, 0,
+	if (ebus_bus_map(ea->ea_iotag, 0,
 	    EBUS_PADDR_FROM_REG(&ea->ea_regs[0]), sz, 0, 0, &cwi.cwi_bh) == 0) {
 		bt = ea->ea_iotag;
 	} else if (ebus_bus_map(ea->ea_memtag, 0,
@@ -441,65 +433,6 @@ getidprom(void)
 }
 
 /*
- * The sun4u OPENPROMs call the timer the "counter-timer", except for
- * the lame UltraSPARC IIi PCI machines that don't have them.
- */
-static int
-timermatch(struct device *parent, void *cf, void *aux)
-{
-#ifndef MULTIPROCESSOR
-	struct mainbus_attach_args *ma = aux;
-
-	if (!timerreg_4u.t_timer || !timerreg_4u.t_clrintr)
-		return (strcmp("counter-timer", ma->ma_name) == 0);
-	else
-#endif
-		return (0);
-}
-
-static void
-timerattach(struct device *parent, struct device *self, void *aux)
-{
-	struct mainbus_attach_args *ma = aux;
-	u_int *va = ma->ma_address;
-	
-	/*
-	 * What we should have are 3 sets of registers that reside on
-	 * different parts of SYSIO or PSYCHO.  We'll use the prom
-	 * mappings cause we can't get rid of them and set up appropriate
-	 * pointers on the timerreg_4u structure.
-	 */
-	timerreg_4u.t_timer = (struct timer_4u *)(u_long)va[0];
-	timerreg_4u.t_clrintr = (int64_t *)(u_long)va[1];
-	timerreg_4u.t_mapintr = (int64_t *)(u_long)va[2];
-
-	/* Install the appropriate interrupt vector here */
-	level10.ih_number = INTVEC(ma->ma_interrupts[0]);
-	level10.ih_clr = (void *)&timerreg_4u.t_clrintr[0];
-	level10.ih_map = (void *)&timerreg_4u.t_mapintr[0];
-	strlcpy(level10.ih_name, "clock", sizeof(level10.ih_name));
-	intr_establish(10, &level10);
-
-	level14.ih_number = INTVEC(ma->ma_interrupts[1]);
-	level14.ih_clr = (void *)&timerreg_4u.t_clrintr[1];
-	level14.ih_map = (void *)&timerreg_4u.t_mapintr[1];
-	strlcpy(level14.ih_name, "prof", sizeof(level14.ih_name));
-	intr_establish(14, &level14);
-
-	printf(" ivec 0x%llx, 0x%llx\n", INTVEC(level10.ih_number),
-	    INTVEC(level14.ih_number));
-}
-
-void
-stopcounter(struct timer_4u *creg)
-{
-	/* Stop the clock */
-	volatile int discard;
-	discard = creg->t_limit;
-	creg->t_limit = 0;
-}
-
-/*
  * XXX this belongs elsewhere
  */
 void
@@ -530,30 +463,15 @@ myetheraddr(u_char *cp)
 }
 
 /*
- * Set up the real-time and statistics clocks.  Leave stathz 0 only if
- * no alternative timer is available.
+ * Set up the real-time and statistics clocks.
  *
  * The frequencies of these clocks must be an even number of microseconds.
  */
 void
 cpu_initclocks(void)
 {
-	int statint, minint;
-#ifdef DEBUG
-	extern int intrdebug;
-#endif
 	u_int sys_tick_rate;
 	int impl = 0;
-
-#ifdef DEBUG
-	/* Set a 1s clock */
-	if (intrdebug) {
-		hz = 1;
-		tick = 1000000 / hz;
-		tick_nsec = 1000000000 / hz;
-		printf("intrdebug set: 1Hz clock\n");
-	}
-#endif
 
 	if (1000000 % hz) {
 		printf("cannot get %d Hz clock; using 100 Hz\n", hz);
@@ -561,6 +479,10 @@ cpu_initclocks(void)
 		tick = 1000000 / hz;
 		tick_nsec = 1000000000 / hz;
 	}
+
+	stathz = hz;
+	profhz = stathz * 10;
+	statclock_is_randomized = 1;
 
 	/* Make sure we have a sane cpu_clockrate -- we'll need it */
 	if (!cpu_clockrate) 
@@ -584,158 +506,49 @@ cpu_initclocks(void)
 		tc_init(&sys_tick_timecounter);
 	}
 
-	/*
-	 * Now handle machines w/o counter-timers.
-	 */
-
-	if (!timerreg_4u.t_timer || !timerreg_4u.t_clrintr) {
-		struct cpu_info *ci;
-
-		/* We don't have a counter-timer -- use %tick */
-		level0.ih_clr = 0;
-
-		/* 
-		 * Establish a level 10 interrupt handler 
-		 *
-		 * We will have a conflict with the softint handler,
-		 * so we set the ih_number to 1.
-		 */
-		level0.ih_number = 1;
-		strlcpy(level0.ih_name, "clock", sizeof(level0.ih_name));
-		intr_establish(10, &level0);
-		evcount_percpu(&level0.ih_count);
-
-		/* We only have one timer so we have no statclock */
-		stathz = 0;	
-
-		if (sys_tick_rate > 0) {
-			tick_increment = sys_tick_rate / hz;
-			if (impl == IMPL_HUMMINGBIRD) {
-				level0.ih_fun = stickintr;
-				cpu_start_clock = stick_start;
-			} else {
-				level0.ih_fun = sys_tickintr;
-				cpu_start_clock = sys_tick_start;
-			}
-		} else {
-			/* set the next interrupt time */
-			tick_increment = cpu_clockrate / hz;
-			level0.ih_fun = tickintr;
-			cpu_start_clock = tick_start;
-		}
-
-		for (ci = cpus; ci != NULL; ci = ci->ci_next)
-			memcpy(&ci->ci_tickintr, &level0, sizeof(level0));
-
-		cpu_start_clock();
-
-		return;
-	}
-
-	if (stathz == 0)
-		stathz = hz;
-	if (1000000 % stathz) {
-		printf("cannot get %d Hz statclock; using 100 Hz\n", stathz);
-		stathz = 100;
-	}
-
-	profhz = stathz;		/* always */
-
-	statint = 1000000 / stathz;
-	minint = statint / 2 + 100;
-	while (statvar > minint)
-		statvar >>= 1;
+	struct cpu_info *ci;
 
 	/* 
-	 * Establish scheduler softint.
-	 */
-	schedint.ih_pil = PIL_SCHED;
-	schedint.ih_clr = NULL;
-	schedint.ih_arg = 0;
-	schedint.ih_pending = 0;
-	schedhz = stathz/4;
-
-	/* 
-	 * Enable timers 
+	 * Establish a level 10 interrupt handler 
 	 *
-	 * Also need to map the interrupts cause we're not a child of the sbus.
-	 * N.B. By default timer[0] is disabled and timer[1] is enabled.
+	 * We will have a conflict with the softint handler,
+	 * so we set the ih_number to 1.
 	 */
-	stxa((vaddr_t)&timerreg_4u.t_timer[0].t_limit, ASI_NUCLEUS,
-	     tmr_ustolim(tick)|TMR_LIM_IEN|TMR_LIM_PERIODIC|TMR_LIM_RELOAD); 
-	stxa((vaddr_t)&timerreg_4u.t_mapintr[0], ASI_NUCLEUS, 
-	     timerreg_4u.t_mapintr[0]|INTMAP_V); 
+	intr_establish(&level10);
+	evcount_percpu(&level10.ih_count);
 
-#ifdef DEBUG
-	if (intrdebug)
-		/* Neglect to enable timer */
-		stxa((vaddr_t)&timerreg_4u.t_timer[1].t_limit, ASI_NUCLEUS, 
-		     tmr_ustolim(statint)|TMR_LIM_RELOAD); 
-	else
-#endif
-		stxa((vaddr_t)&timerreg_4u.t_timer[1].t_limit, ASI_NUCLEUS, 
-		     tmr_ustolim(statint)|TMR_LIM_IEN|TMR_LIM_RELOAD); 
-	stxa((vaddr_t)&timerreg_4u.t_mapintr[1], ASI_NUCLEUS, 
-	     timerreg_4u.t_mapintr[1]|INTMAP_V); 
+	if (sys_tick_rate > 0) {
+		sys_tick_nsec_cycle_ratio =
+		    sys_tick_rate * (1ULL << 32) / 1000000000;
+		sys_tick_nsec_max = UINT64_MAX / sys_tick_nsec_cycle_ratio;
+		if (impl == IMPL_HUMMINGBIRD) {
+			level10.ih_fun = stickintr;
+			cpu_start_clock = stick_start;
+		} else {
+			level10.ih_fun = sys_tickintr;
+			cpu_start_clock = sys_tick_start;
+		}
+	} else {
+		tick_nsec_cycle_ratio =
+		    cpu_clockrate * (1ULL << 32) / 1000000000;
+		tick_nsec_max = UINT64_MAX / tick_nsec_cycle_ratio;
+		level10.ih_fun = tickintr;
+		cpu_start_clock = tick_start;
+	}
 
-	statmin = statint - (statvar >> 1);
-
-	tick_enable();
+	for (ci = cpus; ci != NULL; ci = ci->ci_next)
+		memcpy(&ci->ci_tickintr, &level10, sizeof(level10));
 }
 
-/*
- * Dummy setstatclockrate(), since we know profhz==hz.
- */
+void
+cpu_startclock(void)
+{
+	cpu_start_clock();
+}
+
 void
 setstatclockrate(int newhz)
 {
-	/* nothing */
-}
-
-/*
- * Level 10 (clock) interrupts.  If we are using the FORTH PROM for
- * console input, we need to check for that here as well, and generate
- * a software interrupt to read it.
- */
-#ifdef	DEBUG
-static int clockcheck = 0;
-#endif
-int
-clockintr(void *cap)
-{
-#ifdef DEBUG
-	static int64_t tick_base = 0;
-	struct timeval ctime;
-	int64_t t;
-
-	t = tick() & TICK_TICKS;
-
-	microtime(&ctime);
-	if (!tick_base) {
-		tick_base = (ctime.tv_sec * 1000000LL + ctime.tv_usec) 
-			* 1000000LL / cpu_clockrate;
-		tick_base -= t;
-	} else if (clockcheck) {
-		int64_t tk = t;
-		int64_t clk = (ctime.tv_sec * 1000000LL + ctime.tv_usec);
-		t -= tick_base;
-		t = t * 1000000LL / cpu_clockrate;
-		if (t - clk > hz) {
-			printf("Clock lost an interrupt!\n");
-			printf("Actual: %llx Expected: %llx tick %llx "
-			    "tick_base %llx\n", (long long)t, (long long)clk,
-			    (long long)tk, (long long)tick_base);
-#ifdef DDB
-			db_enter();
-#endif
-			tick_base = 0;
-		}
-	}	
-#endif
-	/* Let locore.s clear the interrupt for us. */
-	hardclock((struct clockframe *)cap);
-
-	return (1);
 }
 
 /*
@@ -749,180 +562,127 @@ clockintr(void *cap)
 int
 tickintr(void *cap)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
-	/*
-	 * No need to worry about overflow; %tick is architecturally
-	 * defined not to do that for at least 10 years.
-	 */
-	while (ci->ci_tick < tick()) {
-		ci->ci_tick += tick_increment;
-		hardclock((struct clockframe *)cap);
-		evcount_inc(&level0.ih_count);
-	}
-
-	/* Reset the interrupt. */
-	s = intr_disable();
-	tickcmpr_set(ci->ci_tick);
-	intr_restore(s);
-
+	clockintr_dispatch(cap);
+	evcount_inc(&level10.ih_count);
 	return (1);
 }
 
 int
 sys_tickintr(void *cap)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
-	/*
-	 * Do we need to worry about overflow here?
-	 */
-	while (ci->ci_tick < sys_tick()) {
-		ci->ci_tick += tick_increment;
-		hardclock((struct clockframe *)cap);
-		evcount_inc(&level0.ih_count);
-	}
-
-	/* Reset the interrupt. */
-	s = intr_disable();
-	sys_tickcmpr_set(ci->ci_tick);
-	intr_restore(s);
-
+	clockintr_dispatch(cap);
+	evcount_inc(&level10.ih_count);
 	return (1);
 }
 
 int
 stickintr(void *cap)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
-	/*
-	 * Do we need to worry about overflow here?
-	 */
-	while (ci->ci_tick < stick()) {
-		ci->ci_tick += tick_increment;
-		hardclock((struct clockframe *)cap);
-		evcount_inc(&level0.ih_count);
-	}
-
-	/* Reset the interrupt. */
-	s = intr_disable();
-	stickcmpr_set(ci->ci_tick);
-	intr_restore(s);
-
-	return (1);
-}
-
-/*
- * Level 14 (stat clock) interrupt handler.
- */
-int
-statintr(void *cap)
-{
-	u_long newint, r, var;
-	struct cpu_info *ci = curcpu();
-
-#ifdef NOT_DEBUG
-	printf("statclock: count %x:%x, limit %x:%x\n", 
-	       timerreg_4u.t_timer[1].t_count, timerreg_4u.t_timer[1].t_limit);
-#endif
-#ifdef NOT_DEBUG
-	prom_printf("!");
-#endif
-	statclock((struct clockframe *)cap);
-#ifdef NOTDEF_DEBUG
-	/* Don't re-schedule the IRQ */
-	return 1;
-#endif
-	/*
-	 * Compute new randomized interval.  The intervals are uniformly
-	 * distributed on [statint - statvar / 2, statint + statvar / 2],
-	 * and therefore have mean statint, giving a stathz frequency clock.
-	 */
-	var = statvar;
-	do {
-		r = random() & (var - 1);
-	} while (r == 0);
-	newint = statmin + r;
-
-	if (schedhz)
-		if ((++ci->ci_schedstate.spc_schedticks & 3) == 0)
-			send_softint(-1, PIL_SCHED, &schedint);
-	stxa((vaddr_t)&timerreg_4u.t_timer[1].t_limit, ASI_NUCLEUS, 
-	     tmr_ustolim(newint)|TMR_LIM_IEN|TMR_LIM_RELOAD);
-
-	return (1);
-}
-
-int
-schedintr(void *arg)
-{
-	if (curproc)
-		schedclock(curproc);
+	clockintr_dispatch(cap);
+	evcount_inc(&level10.ih_count);
 	return (1);
 }
 
 void
 tick_start(void)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
 	tick_enable();
 
-	/*
-	 * Try to make the tick interrupts as synchronously as possible on
-	 * all CPUs to avoid inaccuracies for migrating processes.
-	 */
+	clockintr_cpu_init(&tick_intrclock);
+	clockintr_trigger();
+}
+
+void
+tick_rearm(void *unused, uint64_t nsecs)
+{
+	uint64_t s, t0;
+	uint32_t cycles;
+
+	if (nsecs > tick_nsec_max)
+		nsecs = tick_nsec_max;
+	cycles = (nsecs * tick_nsec_cycle_ratio) >> 32;
 
 	s = intr_disable();
-	ci->ci_tick = roundup(tick(), tick_increment);
-	tickcmpr_set(ci->ci_tick);
+	t0 = tick();
+	tickcmpr_set((t0 + cycles) & TICK_COUNT_MASK);
+	if (cycles <= ((tick() - t0) & TICK_COUNT_MASK))
+		sparc64_raise_clockintr();
 	intr_restore(s);
+}
+
+void
+tick_trigger(void *unused)
+{
+	sparc64_raise_clockintr();
 }
 
 void
 sys_tick_start(void)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
 	if (CPU_ISSUN4U || CPU_ISSUN4US) {
 		tick_enable();
 		sys_tick_enable();
 	}
 
-	/*
-	 * Try to make the tick interrupts as synchronously as possible on
-	 * all CPUs to avoid inaccuracies for migrating processes.
-	 */
+	clockintr_cpu_init(&sys_tick_intrclock);
+	clockintr_trigger();
+}
+
+void
+sys_tick_rearm(void *unused, uint64_t nsecs)
+{
+	uint64_t s, t0;
+	uint32_t cycles;
+
+	if (nsecs > sys_tick_nsec_max)
+		nsecs = sys_tick_nsec_max;
+	cycles = (nsecs * sys_tick_nsec_cycle_ratio) >> 32;
 
 	s = intr_disable();
-	ci->ci_tick = roundup(sys_tick(), tick_increment);
-	sys_tickcmpr_set(ci->ci_tick);
+	t0 = sys_tick();
+	sys_tickcmpr_set((t0 + cycles) & STICK_COUNT_MASK);
+	if (cycles <= ((sys_tick() - t0) & STICK_COUNT_MASK))
+		sparc64_raise_clockintr();
 	intr_restore(s);
+}
+
+void
+sys_tick_trigger(void *unused)
+{
+	sparc64_raise_clockintr();
 }
 
 void
 stick_start(void)
 {
-	struct cpu_info *ci = curcpu();
-	u_int64_t s;
-
 	tick_enable();
 
-	/*
-	 * Try to make the tick interrupts as synchronously as possible on
-	 * all CPUs to avoid inaccuracies for migrating processes.
-	 */
+	clockintr_cpu_init(&stick_intrclock);
+	clockintr_trigger();
+}
+
+void
+stick_rearm(void *unused, uint64_t nsecs)
+{
+	uint64_t s, t0;
+	uint32_t cycles;
+
+	if (nsecs > sys_tick_nsec_max)
+		nsecs = sys_tick_nsec_max;
+	cycles = (nsecs * sys_tick_nsec_cycle_ratio) >> 32;
 
 	s = intr_disable();
-	ci->ci_tick = roundup(stick(), tick_increment);
-	stickcmpr_set(ci->ci_tick);
+	t0 = stick();
+	stickcmpr_set((t0 + cycles) & STICK_COUNT_MASK);
+	if (cycles <= ((stick() - t0) & STICK_COUNT_MASK))
+		sparc64_raise_clockintr();
 	intr_restore(s);
+}
+
+void
+stick_trigger(void *unused)
+{
+	sparc64_raise_clockintr();
 }
 
 u_int
@@ -943,4 +703,10 @@ sys_tick_get_timecount(struct timecounter *tc)
 	__asm volatile("rd %%sys_tick, %0" : "=r" (tick));
 
 	return (tick & ~0u);
+}
+
+void
+sparc64_raise_clockintr(void)
+{
+	send_softint(PIL_CLOCK, &curcpu()->ci_tickintr);
 }

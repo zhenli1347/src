@@ -1,4 +1,4 @@
-/*	$OpenBSD: i2c.h,v 1.6 2022/03/01 11:50:37 jsg Exp $	*/
+/*	$OpenBSD: i2c.h,v 1.8 2023/03/21 09:44:35 jsg Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -20,9 +20,19 @@
 
 #include <sys/stdint.h>
 #include <sys/rwlock.h>
-#include <linux/workqueue.h>
+/*
+ * normally seq_file.h is indirectly included via
+ *
+ * linux/regulator/consumer.h
+ * linux/suspend.h
+ * linux/swap.h
+ * linux/memcontrol.h
+ * linux/cgroup.h
+ * linux/seq_file.h
+ */
 #include <linux/seq_file.h>
 #include <linux/acpi.h>
+#include <linux/device.h>
 
 #include <dev/i2c/i2cvar.h>
 

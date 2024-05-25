@@ -1,8 +1,8 @@
-/*	$OpenBSD: fdt.c,v 1.33 2022/09/19 16:12:19 patrick Exp $	*/
+/*	$OpenBSD: fdt.c,v 1.35 2024/03/27 23:05:27 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2009 Dariusz Swiderski <sfires@sfires.net>
- * Copyright (c) 2009 Mark Kettenis <kettenis@sfires.net>
+ * Copyright (c) 2009 Mark Kettenis <kettenis@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -501,6 +501,7 @@ fdt_find_node(char *name)
 	while (*p) {
 		void *child;
 		const char *q;
+		const char *s;
 
 		while (*p == '/')
 			p++;
@@ -510,18 +511,33 @@ fdt_find_node(char *name)
 		if (q == NULL)
 			q = p + strlen(p);
 
+		/* Check for a complete match. */
 		for (child = fdt_child_node(node); child;
 		     child = fdt_next_node(child)) {
-			if (strncmp(p, fdt_node_name(child), q - p) == 0) {
-				node = child;
+			s = fdt_node_name(child);
+			if (strncmp(p, s, q - p) == 0 && s[q - p] == '\0')
 				break;
-			}
+		}
+		if (child) {
+			node = child;
+			p = q;
+			continue;
 		}
 
-		if (child == NULL)
-			return NULL; /* No match found. */
+		/* Check for a match without the unit name. */
+		for (child = fdt_child_node(node); child;
+		     child = fdt_next_node(child)) {
+			s = fdt_node_name(child);
+			if (strncmp(p, s, q - p) == 0 && s[q - p] == '@')
+				break;
+		}
+		if (child) {
+			node = child;
+			p = q;
+			continue;
+		}
 
-		p = q;
+		return NULL;	/* No match found. */
 	}
 
 	return node;

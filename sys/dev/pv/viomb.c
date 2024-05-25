@@ -1,4 +1,4 @@
-/* $OpenBSD: viomb.c,v 1.8 2021/11/05 11:38:29 mpi Exp $	 */
+/* $OpenBSD: viomb.c,v 1.10 2024/05/24 10:05:55 jsg Exp $	 */
 /* $NetBSD: viomb.c,v 1.1 2011/10/30 12:12:21 hannken Exp $	 */
 
 /*
@@ -29,7 +29,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/task.h>
 #include <sys/pool.h>
@@ -220,6 +219,7 @@ viomb_attach(struct device *parent, struct device *self, void *aux)
 	sensordev_install(&sc->sc_sensdev);
 
 	printf("\n");
+	virtio_set_status(vsc, VIRTIO_CONFIG_DEVICE_STATUS_DRIVER_OK);
 	return;
 err_dmamap:
 	bus_dmamap_destroy(vsc->sc_dmat, sc->sc_req.bl_dmamap);

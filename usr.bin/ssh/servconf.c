@@ -1,5 +1,4 @@
-
-/* $OpenBSD: servconf.c,v 1.388 2022/11/07 10:05:39 dtucker Exp $ */
+/* $OpenBSD: servconf.c,v 1.407 2024/05/17 01:17:40 djm Exp $ */
 /*
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -41,7 +40,6 @@
 #include "sshbuf.h"
 #include "misc.h"
 #include "servconf.h"
-#include "compat.h"
 #include "pathnames.h"
 #include "cipher.h"
 #include "sshkey.h"
@@ -66,8 +64,6 @@ static void parse_server_config_depth(ServerOptions *options,
     const char *filename, struct sshbuf *conf, struct include_list *includes,
     struct connection_info *connectinfo, int flags, int *activep, int depth);
 
-/* Use of privilege separation or not */
-extern int use_privsep;
 extern struct sshbuf *cfg;
 
 /* Initializes the server options to their default values. */
@@ -178,6 +174,10 @@ initialize_server_options(ServerOptions *options)
 	options->disable_forwarding = -1;
 	options->expose_userauth_info = -1;
 	options->required_rsa_size = -1;
+	options->channel_timeouts = NULL;
+	options->num_channel_timeouts = 0;
+	options->unused_connection_timeout = -1;
+	options->sshd_session_path = NULL;
 }
 
 /* Returns 1 if a string option is unset or set to "none" or 0 otherwise. */
@@ -419,12 +419,12 @@ fill_default_server_options(ServerOptions *options)
 		options->sk_provider = xstrdup("internal");
 	if (options->required_rsa_size == -1)
 		options->required_rsa_size = SSH_RSA_MINIMUM_MODULUS_SIZE;
+	if (options->unused_connection_timeout == -1)
+		options->unused_connection_timeout = 0;
+	if (options->sshd_session_path == NULL)
+		options->sshd_session_path = xstrdup(_PATH_SSHD_SESSION);
 
 	assemble_algorithms(options);
-
-	/* Turn privilege separation and sandboxing on by default */
-	if (use_privsep == -1)
-		use_privsep = PRIVSEP_ON;
 
 #define CLEAR_ON_NONE(v) \
 	do { \
@@ -433,6 +433,16 @@ fill_default_server_options(ServerOptions *options)
 			v = NULL; \
 		} \
 	} while(0)
+#define CLEAR_ON_NONE_ARRAY(v, nv, none) \
+	do { \
+		if (options->nv == 1 && \
+		    strcasecmp(options->v[0], none) == 0) { \
+			free(options->v[0]); \
+			free(options->v); \
+			options->v = NULL; \
+			options->nv = 0; \
+		} \
+	} while (0)
 	CLEAR_ON_NONE(options->pid_file);
 	CLEAR_ON_NONE(options->xauth_location);
 	CLEAR_ON_NONE(options->banner);
@@ -444,19 +454,16 @@ fill_default_server_options(ServerOptions *options)
 	CLEAR_ON_NONE(options->chroot_directory);
 	CLEAR_ON_NONE(options->routing_domain);
 	CLEAR_ON_NONE(options->host_key_agent);
+
 	for (i = 0; i < options->num_host_key_files; i++)
 		CLEAR_ON_NONE(options->host_key_files[i]);
 	for (i = 0; i < options->num_host_cert_files; i++)
 		CLEAR_ON_NONE(options->host_cert_files[i]);
-#undef CLEAR_ON_NONE
 
-	/* Similar handling for AuthenticationMethods=any */
-	if (options->num_auth_methods == 1 &&
-	    strcmp(options->auth_methods[0], "any") == 0) {
-		free(options->auth_methods[0]);
-		options->auth_methods[0] = NULL;
-		options->num_auth_methods = 0;
-	}
+	CLEAR_ON_NONE_ARRAY(channel_timeouts, num_channel_timeouts, "none");
+	CLEAR_ON_NONE_ARRAY(auth_methods, num_auth_methods, "any");
+#undef CLEAR_ON_NONE
+#undef CLEAR_ON_NONE_ARRAY
 }
 
 /* Keyword tokens. */
@@ -492,7 +499,8 @@ typedef enum {
 	sStreamLocalBindMask, sStreamLocalBindUnlink,
 	sAllowStreamLocalForwarding, sFingerprintHash, sDisableForwarding,
 	sExposeAuthInfo, sRDomain, sPubkeyAuthOptions, sSecurityKeyProvider,
-	sRequiredRSASize,
+	sRequiredRSASize, sChannelTimeout, sUnusedConnectionTimeout,
+	sSshdSessionPath,
 	sDeprecated, sIgnore, sUnsupported
 } ServerOpCodes;
 
@@ -589,7 +597,7 @@ static struct {
 	{ "macs", sMacs, SSHCFG_GLOBAL },
 	{ "protocol", sIgnore, SSHCFG_GLOBAL },
 	{ "gatewayports", sGatewayPorts, SSHCFG_ALL },
-	{ "subsystem", sSubsystem, SSHCFG_GLOBAL },
+	{ "subsystem", sSubsystem, SSHCFG_ALL },
 	{ "maxstartups", sMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcemaxstartups", sPerSourceMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcenetblocksize", sPerSourceNetBlockSize, SSHCFG_GLOBAL },
@@ -637,6 +645,9 @@ static struct {
 	{ "casignaturealgorithms", sCASignatureAlgorithms, SSHCFG_ALL },
 	{ "securitykeyprovider", sSecurityKeyProvider, SSHCFG_GLOBAL },
 	{ "requiredrsasize", sRequiredRSASize, SSHCFG_ALL },
+	{ "channeltimeout", sChannelTimeout, SSHCFG_ALL },
+	{ "unusedconnectiontimeout", sUnusedConnectionTimeout, SSHCFG_ALL },
+	{ "sshdsessionpath", sSshdSessionPath, SSHCFG_GLOBAL },
 	{ NULL, sBadOption, 0 }
 };
 
@@ -837,75 +848,6 @@ process_queued_listen_addrs(ServerOptions *options)
 	free(options->queued_listen_addrs);
 	options->queued_listen_addrs = NULL;
 	options->num_queued_listens = 0;
-}
-
-/*
- * Inform channels layer of permitopen options for a single forwarding
- * direction (local/remote).
- */
-static void
-process_permitopen_list(struct ssh *ssh, ServerOpCodes opcode,
-    char **opens, u_int num_opens)
-{
-	u_int i;
-	int port;
-	char *host, *arg, *oarg;
-	int where = opcode == sPermitOpen ? FORWARD_LOCAL : FORWARD_REMOTE;
-	const char *what = lookup_opcode_name(opcode);
-
-	channel_clear_permission(ssh, FORWARD_ADM, where);
-	if (num_opens == 0)
-		return; /* permit any */
-
-	/* handle keywords: "any" / "none" */
-	if (num_opens == 1 && strcmp(opens[0], "any") == 0)
-		return;
-	if (num_opens == 1 && strcmp(opens[0], "none") == 0) {
-		channel_disable_admin(ssh, where);
-		return;
-	}
-	/* Otherwise treat it as a list of permitted host:port */
-	for (i = 0; i < num_opens; i++) {
-		oarg = arg = xstrdup(opens[i]);
-		host = hpdelim(&arg);
-		if (host == NULL)
-			fatal_f("missing host in %s", what);
-		host = cleanhostname(host);
-		if (arg == NULL || ((port = permitopen_port(arg)) < 0))
-			fatal_f("bad port number in %s", what);
-		/* Send it to channels layer */
-		channel_add_permission(ssh, FORWARD_ADM,
-		    where, host, port);
-		free(oarg);
-	}
-}
-
-/*
- * Inform channels layer of permitopen options from configuration.
- */
-void
-process_permitopen(struct ssh *ssh, ServerOptions *options)
-{
-	process_permitopen_list(ssh, sPermitOpen,
-	    options->permitted_opens, options->num_permitted_opens);
-	process_permitopen_list(ssh, sPermitListen,
-	    options->permitted_listens,
-	    options->num_permitted_listens);
-}
-
-struct connection_info *
-get_connection_info(struct ssh *ssh, int populate, int use_dns)
-{
-	static struct connection_info ci;
-
-	if (ssh == NULL || !populate)
-		return &ci;
-	ci.host = auth_get_canonical_hostname(ssh, use_dns);
-	ci.address = ssh_remote_ipaddr(ssh);
-	ci.laddress = ssh_local_ipaddr(ssh);
-	ci.lport = ssh_local_port(ssh);
-	ci.rdomain = ssh_packet_rdomain_in(ssh);
-	return &ci;
 }
 
 /*
@@ -1215,11 +1157,12 @@ process_server_config_line_depth(ServerOptions *options, char *line,
     struct include_list *includes)
 {
 	char *str, ***chararrayptr, **charptr, *arg, *arg2, *p, *keyword;
-	int cmdline = 0, *intptr, value, value2, n, port, oactive, r, found;
+	int cmdline = 0, *intptr, value, value2, n, port, oactive, r;
+	int ca_only = 0, found = 0;
 	SyslogFacility *log_facility_ptr;
 	LogLevel *log_level_ptr;
 	ServerOpCodes opcode;
-	u_int i, *uintptr, uvalue, flags = 0;
+	u_int i, *uintptr, flags = 0;
 	size_t len;
 	long long val64;
 	const struct multistate *multistate_ptr;
@@ -1229,6 +1172,8 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	char **oav = NULL, **av;
 	int oac = 0, ac;
 	int ret = -1;
+	char **strs = NULL; /* string array arguments; freed implicitly */
+	u_int nstrs = 0;
 
 	/* Strip trailing whitespace. Allow \f (form feed) at EOL only */
 	if ((len = strlen(line)) == 0)
@@ -1451,6 +1396,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 
 	case sHostbasedAcceptedAlgorithms:
 		charptr = &options->hostbased_accepted_algos;
+		ca_only = 0;
  parse_pubkey_algos:
 		arg = argv_next(&ac, &av);
 		if (!arg || *arg == '\0')
@@ -1458,7 +1404,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			    filename, linenum);
 		if (*arg != '-' &&
 		    !sshkey_names_valid2(*arg == '+' || *arg == '^' ?
-		    arg + 1 : arg, 1))
+		    arg + 1 : arg, 1, ca_only))
 			fatal("%s line %d: Bad key types '%s'.",
 			    filename, linenum, arg ? arg : "<NONE>");
 		if (*activep && *charptr == NULL)
@@ -1467,18 +1413,22 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 
 	case sHostKeyAlgorithms:
 		charptr = &options->hostkeyalgorithms;
+		ca_only = 0;
 		goto parse_pubkey_algos;
 
 	case sCASignatureAlgorithms:
 		charptr = &options->ca_sign_algorithms;
+		ca_only = 1;
 		goto parse_pubkey_algos;
 
 	case sPubkeyAuthentication:
 		intptr = &options->pubkey_authentication;
+		ca_only = 0;
 		goto parse_flag;
 
 	case sPubkeyAcceptedAlgorithms:
 		charptr = &options->pubkey_accepted_algos;
+		ca_only = 0;
 		goto parse_pubkey_algos;
 
 	case sPubkeyAuthOptions:
@@ -1680,7 +1630,6 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 
 	case sLogVerbose:
 		found = options->num_log_verbose == 0;
-		i = 0;
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0') {
 				error("%s line %d: keyword %s empty argument",
@@ -1689,19 +1638,25 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			}
 			/* Allow "none" only in first position */
 			if (strcasecmp(arg, "none") == 0) {
-				if (i > 0 || ac > 0) {
+				if (nstrs > 0 || ac > 0) {
 					error("%s line %d: keyword %s \"none\" "
 					    "argument must appear alone.",
 					    filename, linenum, keyword);
 					goto out;
 				}
 			}
-			i++;
-			if (!found || !*activep)
-				continue;
 			opt_array_append(filename, linenum, keyword,
-			    &options->log_verbose, &options->num_log_verbose,
-			    arg);
+			    &strs, &nstrs, arg);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			options->log_verbose = strs;
+			options->num_log_verbose = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
 		}
 		break;
 
@@ -1727,15 +1682,21 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		chararrayptr = &options->allow_users;
 		uintptr = &options->num_allow_users;
  parse_allowdenyusers:
+		/* XXX appends to list; doesn't respect first-match-wins */
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0' ||
 			    match_user(NULL, NULL, NULL, arg) == -1)
 				fatal("%s line %d: invalid %s pattern: \"%s\"",
 				    filename, linenum, keyword, arg);
+			found = 1;
 			if (!*activep)
 				continue;
 			opt_array_append(filename, linenum, keyword,
 			    chararrayptr, uintptr, arg);
+		}
+		if (!found) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
 		}
 		break;
 
@@ -1747,15 +1708,21 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	case sAllowGroups:
 		chararrayptr = &options->allow_groups;
 		uintptr = &options->num_allow_groups;
+		/* XXX appends to list; doesn't respect first-match-wins */
  parse_allowdenygroups:
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0')
 				fatal("%s line %d: empty %s pattern",
 				    filename, linenum, keyword);
+			found = 1;
 			if (!*activep)
 				continue;
 			opt_array_append(filename, linenum, keyword,
 			    chararrayptr, uintptr, arg);
+		}
+		if (!found) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
 		}
 		break;
 
@@ -1805,39 +1772,54 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		break;
 
 	case sSubsystem:
-		if (options->num_subsystems >= MAX_SUBSYSTEMS) {
-			fatal("%s line %d: too many subsystems defined.",
-			    filename, linenum);
-		}
 		arg = argv_next(&ac, &av);
 		if (!arg || *arg == '\0')
 			fatal("%s line %d: %s missing argument.",
 			    filename, linenum, keyword);
 		if (!*activep) {
-			arg = argv_next(&ac, &av);
+			argv_consume(&ac);
 			break;
 		}
-		for (i = 0; i < options->num_subsystems; i++)
-			if (strcmp(arg, options->subsystem_name[i]) == 0)
-				fatal("%s line %d: Subsystem '%s' "
-				    "already defined.", filename, linenum, arg);
+		found = 0;
+		for (i = 0; i < options->num_subsystems; i++) {
+			if (strcmp(arg, options->subsystem_name[i]) == 0) {
+				found = 1;
+				break;
+			}
+		}
+		if (found) {
+			debug("%s line %d: Subsystem '%s' already defined.",
+			    filename, linenum, arg);
+			argv_consume(&ac);
+			break;
+		}
+		options->subsystem_name = xrecallocarray(
+		    options->subsystem_name, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_name));
+		options->subsystem_command = xrecallocarray(
+		    options->subsystem_command, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_command));
+		options->subsystem_args = xrecallocarray(
+		    options->subsystem_args, options->num_subsystems,
+		    options->num_subsystems + 1,
+		    sizeof(*options->subsystem_args));
 		options->subsystem_name[options->num_subsystems] = xstrdup(arg);
 		arg = argv_next(&ac, &av);
-		if (!arg || *arg == '\0')
+		if (!arg || *arg == '\0') {
 			fatal("%s line %d: Missing subsystem command.",
 			    filename, linenum);
-		options->subsystem_command[options->num_subsystems] = xstrdup(arg);
-
-		/* Collect arguments (separate to executable) */
-		p = xstrdup(arg);
-		len = strlen(p) + 1;
-		while ((arg = argv_next(&ac, &av)) != NULL) {
-			len += 1 + strlen(arg);
-			p = xreallocarray(p, 1, len);
-			strlcat(p, " ", len);
-			strlcat(p, arg, len);
 		}
-		options->subsystem_args[options->num_subsystems] = p;
+		options->subsystem_command[options->num_subsystems] =
+		    xstrdup(arg);
+		/* Collect arguments (separate to executable) */
+		arg = argv_assemble(1, &arg); /* quote command correctly */
+		arg2 = argv_assemble(ac, av); /* rest of command */
+		xasprintf(&options->subsystem_args[options->num_subsystems],
+		    "%s%s%s", arg, *arg2 == '\0' ? "" : " ", arg2);
+		free(arg2);
+		argv_consume(&ac);
 		options->num_subsystems++;
 		break;
 
@@ -1902,7 +1884,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 				fatal("%s line %d: %s integer value %s.",
 				    filename, linenum, keyword, errstr);
 		}
-		if (*activep)
+		if (*activep && options->per_source_max_startups == -1)
 			options->per_source_max_startups = value;
 		break;
 
@@ -1925,7 +1907,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	 * AuthorizedKeysFile	/etc/ssh_keys/%u
 	 */
 	case sAuthorizedKeysFile:
-		uvalue = options->num_authkeys_files;
+		found = options->num_authkeys_files == 0;
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0') {
 				error("%s line %d: keyword %s empty argument",
@@ -1933,12 +1915,19 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 				goto out;
 			}
 			arg2 = tilde_expand_filename(arg, getuid());
-			if (*activep && uvalue == 0) {
-				opt_array_append(filename, linenum, keyword,
-				    &options->authorized_keys_files,
-				    &options->num_authkeys_files, arg2);
-			}
+			opt_array_append(filename, linenum, keyword,
+			    &strs, &nstrs, arg2);
 			free(arg2);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			options->authorized_keys_files = strs;
+			options->num_authkeys_files = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
 		}
 		break;
 
@@ -1965,34 +1954,47 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		goto parse_int;
 
 	case sAcceptEnv:
+		/* XXX appends to list; doesn't respect first-match-wins */
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0' || strchr(arg, '=') != NULL)
 				fatal("%s line %d: Invalid environment name.",
 				    filename, linenum);
+			found = 1;
 			if (!*activep)
 				continue;
 			opt_array_append(filename, linenum, keyword,
 			    &options->accept_env, &options->num_accept_env,
 			    arg);
 		}
+		if (!found) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
 		break;
 
 	case sSetEnv:
-		uvalue = options->num_setenv;
+		found = options->num_setenv == 0;
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (*arg == '\0' || strchr(arg, '=') == NULL)
 				fatal("%s line %d: Invalid environment.",
 				    filename, linenum);
-			if (!*activep || uvalue != 0)
-				continue;
-			if (lookup_setenv_in_list(arg, options->setenv,
-			    options->num_setenv) != NULL) {
+			if (lookup_setenv_in_list(arg, strs, nstrs) != NULL) {
 				debug2("%s line %d: ignoring duplicate env "
 				    "name \"%.64s\"", filename, linenum, arg);
 				continue;
 			}
 			opt_array_append(filename, linenum, keyword,
-			    &options->setenv, &options->num_setenv, arg);
+			    &strs, &nstrs, arg);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			options->setenv = strs;
+			options->num_setenv = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
 		}
 		break;
 
@@ -2143,21 +2145,20 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			uintptr = &options->num_permitted_opens;
 			chararrayptr = &options->permitted_opens;
 		}
-		arg = argv_next(&ac, &av);
-		if (!arg || *arg == '\0')
-			fatal("%s line %d: %s missing argument.",
-			    filename, linenum, keyword);
-		uvalue = *uintptr;	/* modified later */
-		if (strcmp(arg, "any") == 0 || strcmp(arg, "none") == 0) {
-			if (*activep && uvalue == 0) {
-				*uintptr = 1;
-				*chararrayptr = xcalloc(1,
-				    sizeof(**chararrayptr));
-				(*chararrayptr)[0] = xstrdup(arg);
+		found = *uintptr == 0;
+		while ((arg = argv_next(&ac, &av)) != NULL) {
+			if (strcmp(arg, "any") == 0 ||
+			    strcmp(arg, "none") == 0) {
+				if (nstrs != 0) {
+					fatal("%s line %d: %s must appear "
+					    "alone on a %s line.",
+					    filename, linenum, arg, keyword);
+				}
+				opt_array_append(filename, linenum, keyword,
+				    &strs, &nstrs, arg);
+				continue;
 			}
-			break;
-		}
-		for (; arg != NULL && *arg != '\0'; arg = argv_next(&ac, &av)) {
+
 			if (opcode == sPermitListen &&
 			    strchr(arg, ':') == NULL) {
 				/*
@@ -2179,11 +2180,19 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 				fatal("%s line %d: %s bad port number",
 				    filename, linenum, keyword);
 			}
-			if (*activep && uvalue == 0) {
-				opt_array_append(filename, linenum, keyword,
-				    chararrayptr, uintptr, arg2);
-			}
+			opt_array_append(filename, linenum, keyword,
+			    &strs, &nstrs, arg2);
 			free(arg2);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: %s missing argument.",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			*chararrayptr = strs;
+			*uintptr = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
 		}
 		break;
 
@@ -2281,7 +2290,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 			fatal("%.200s line %d: %s must be an absolute path",
 			    filename, linenum, keyword);
 		}
-		if (*activep && options->authorized_keys_command == NULL)
+		if (*activep && *charptr == NULL)
 			*charptr = xstrdup(str + len);
 		argv_consume(&ac);
 		break;
@@ -2309,10 +2318,9 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	case sAuthenticationMethods:
 		found = options->num_auth_methods == 0;
 		value = 0; /* seen "any" pseudo-method */
-		value2 = 0; /* successfully parsed any method */
 		while ((arg = argv_next(&ac, &av)) != NULL) {
 			if (strcmp(arg, "any") == 0) {
-				if (options->num_auth_methods > 0) {
+				if (nstrs > 0) {
 					fatal("%s line %d: \"any\" must "
 					    "appear alone in %s",
 					    filename, linenum, keyword);
@@ -2325,16 +2333,18 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 				fatal("%s line %d: invalid %s method list.",
 				    filename, linenum, keyword);
 			}
-			value2 = 1;
-			if (!found || !*activep)
-				continue;
 			opt_array_append(filename, linenum, keyword,
-			    &options->auth_methods,
-			    &options->num_auth_methods, arg);
+			    &strs, &nstrs, arg);
 		}
-		if (value2 == 0) {
+		if (nstrs == 0) {
 			fatal("%s line %d: no %s specified",
 			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			options->auth_methods = strs;
+			options->num_auth_methods = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
 		}
 		break;
 
@@ -2390,6 +2400,52 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		intptr = &options->required_rsa_size;
 		goto parse_int;
 
+	case sChannelTimeout:
+		found = options->num_channel_timeouts == 0;
+		while ((arg = argv_next(&ac, &av)) != NULL) {
+			/* Allow "none" only in first position */
+			if (strcasecmp(arg, "none") == 0) {
+				if (nstrs > 0 || ac > 0) {
+					error("%s line %d: keyword %s \"none\" "
+					    "argument must appear alone.",
+					    filename, linenum, keyword);
+					goto out;
+				}
+			} else if (parse_pattern_interval(arg,
+			    NULL, NULL) != 0) {
+				fatal("%s line %d: invalid channel timeout %s",
+				    filename, linenum, arg);
+			}
+			opt_array_append(filename, linenum, keyword,
+			    &strs, &nstrs, arg);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			options->channel_timeouts = strs;
+			options->num_channel_timeouts = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
+		}
+		break;
+
+	case sUnusedConnectionTimeout:
+		intptr = &options->unused_connection_timeout;
+		/* peek at first arg for "none" so we can reuse parse_time */
+		if (av[0] != NULL && strcasecmp(av[0], "none") == 0) {
+			(void)argv_next(&ac, &av); /* consume arg */
+			if (*activep)
+				*intptr = 0;
+			break;
+		}
+		goto parse_time;
+
+	case sSshdSessionPath:
+		charptr = &options->sshd_session_path;
+		goto parse_filename;
+
 	case sDeprecated:
 	case sIgnore:
 	case sUnsupported:
@@ -2415,6 +2471,7 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	/* success */
 	ret = 0;
  out:
+	opt_array_free2(strs, NULL, nstrs);
 	argv_free(oav, oac);
 	return ret;
 }
@@ -2512,6 +2569,47 @@ int parse_server_match_testspec(struct connection_info *ci, char *spec)
 	return 0;
 }
 
+void
+servconf_merge_subsystems(ServerOptions *dst, ServerOptions *src)
+{
+	u_int i, j, found;
+
+	for (i = 0; i < src->num_subsystems; i++) {
+		found = 0;
+		for (j = 0; j < dst->num_subsystems; j++) {
+			if (strcmp(src->subsystem_name[i],
+			    dst->subsystem_name[j]) == 0) {
+				found = 1;
+				break;
+			}
+		}
+		if (found) {
+			debug_f("override \"%s\"", dst->subsystem_name[j]);
+			free(dst->subsystem_command[j]);
+			free(dst->subsystem_args[j]);
+			dst->subsystem_command[j] =
+			    xstrdup(src->subsystem_command[i]);
+			dst->subsystem_args[j] =
+			    xstrdup(src->subsystem_args[i]);
+			continue;
+		}
+		debug_f("add \"%s\"", src->subsystem_name[i]);
+		dst->subsystem_name = xrecallocarray(
+		    dst->subsystem_name, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_name));
+		dst->subsystem_command = xrecallocarray(
+		    dst->subsystem_command, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_command));
+		dst->subsystem_args = xrecallocarray(
+		    dst->subsystem_args, dst->num_subsystems,
+		    dst->num_subsystems + 1, sizeof(*dst->subsystem_args));
+		j = dst->num_subsystems++;
+		dst->subsystem_name[j] = xstrdup(src->subsystem_name[i]);
+		dst->subsystem_command[j] = xstrdup(src->subsystem_command[i]);
+		dst->subsystem_args[j] = xstrdup(src->subsystem_args[i]);
+	}
+}
+
 /*
  * Copy any supported values that are set.
  *
@@ -2562,6 +2660,7 @@ copy_set_server_options(ServerOptions *dst, ServerOptions *src, int preauth)
 	M_CP_INTOPT(rekey_interval);
 	M_CP_INTOPT(log_level);
 	M_CP_INTOPT(required_rsa_size);
+	M_CP_INTOPT(unused_connection_timeout);
 
 	/*
 	 * The bind_mask is a mode_t that may be unsigned, so we can't use
@@ -2617,6 +2716,9 @@ copy_set_server_options(ServerOptions *dst, ServerOptions *src, int preauth)
 		free(dst->chroot_directory);
 		dst->chroot_directory = NULL;
 	}
+
+	/* Subsystems require merging. */
+	servconf_merge_subsystems(dst, src);
 }
 
 #undef M_CP_INTOPT
@@ -2714,6 +2816,10 @@ fmt_intarg(ServerOpCodes code, int val)
 static void
 dump_cfg_int(ServerOpCodes code, int val)
 {
+	if (code == sUnusedConnectionTimeout && val == 0) {
+		printf("%s none\n", lookup_opcode_name(code));
+		return;
+	}
 	printf("%s %d\n", lookup_opcode_name(code), val);
 }
 
@@ -2750,13 +2856,23 @@ dump_cfg_strarray_oneline(ServerOpCodes code, u_int count, char **vals)
 {
 	u_int i;
 
-	if (count <= 0 && code != sAuthenticationMethods)
-		return;
+	switch (code) {
+	case sAuthenticationMethods:
+	case sChannelTimeout:
+		break;
+	default:
+		if (count <= 0)
+			return;
+		break;
+	}
+
 	printf("%s", lookup_opcode_name(code));
 	for (i = 0; i < count; i++)
 		printf(" %s",  vals[i]);
 	if (code == sAuthenticationMethods && count == 0)
 		printf(" any");
+	else if (code == sChannelTimeout && count == 0)
+		printf(" none");
 	printf("\n");
 }
 
@@ -2825,6 +2941,7 @@ dump_config(ServerOptions *o)
 	dump_cfg_int(sClientAliveCountMax, o->client_alive_count_max);
 	dump_cfg_int(sRequiredRSASize, o->required_rsa_size);
 	dump_cfg_oct(sStreamLocalBindMask, o->fwd_opts.streamlocal_bind_mask);
+	dump_cfg_int(sUnusedConnectionTimeout, o->unused_connection_timeout);
 
 	/* formatted integer arguments */
 	dump_cfg_fmtint(sPermitRootLogin, o->permit_root_login);
@@ -2894,6 +3011,7 @@ dump_config(ServerOptions *o)
 	dump_cfg_string(sHostKeyAlgorithms, o->hostkeyalgorithms);
 	dump_cfg_string(sPubkeyAcceptedAlgorithms, o->pubkey_accepted_algos);
 	dump_cfg_string(sRDomain, o->routing_domain);
+	dump_cfg_string(sSshdSessionPath, o->sshd_session_path);
 
 	/* string arguments requiring a lookup */
 	dump_cfg_string(sLogLevel, log_level_name(o->log_level));
@@ -2916,6 +3034,8 @@ dump_config(ServerOptions *o)
 	    o->num_auth_methods, o->auth_methods);
 	dump_cfg_strarray_oneline(sLogVerbose,
 	    o->num_log_verbose, o->log_verbose);
+	dump_cfg_strarray_oneline(sChannelTimeout,
+	    o->num_channel_timeouts, o->channel_timeouts);
 
 	/* other arguments */
 	for (i = 0; i < o->num_subsystems; i++)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.104 2022/10/26 00:40:40 millert Exp $	*/
+/*	$OpenBSD: main.c,v 1.106 2023/11/11 02:52:55 gkoehler Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -699,7 +699,8 @@ dodecompress(const char *in, char *out, struct stat *sb)
 		close (ifd);
 		return (FAILURE);
 	}
-	if (storename && oldname[0] != '\0') {
+	/* Ignore -N when decompressing to stdout. */
+	if (storename && (!cat || list) && oldname[0] != '\0') {
 		const char *oldbase = basename(oldname);
 		char *cp = strrchr(out, '/');
 		if (cp != NULL) {
@@ -707,7 +708,6 @@ dodecompress(const char *in, char *out, struct stat *sb)
 			strlcat(out, oldbase, PATH_MAX);
 		} else
 			strlcpy(out, oldbase, PATH_MAX);
-		cat = 0;			/* XXX should -c override? */
 	}
 
 	if (testmode) {
@@ -756,10 +756,8 @@ dodecompress(const char *in, char *out, struct stat *sb)
 	}
 	if (storename && !cat) {
 		if (info.mtime != 0) {
-			sb->st_mtimespec.tv_sec =
-			    sb->st_atimespec.tv_sec = info.mtime;
-			sb->st_mtimespec.tv_nsec =
-			    sb->st_atimespec.tv_nsec = 0;
+			sb->st_mtim.tv_sec = sb->st_atim.tv_sec = info.mtime;
+			sb->st_mtim.tv_nsec = sb->st_atim.tv_nsec = 0;
 		}
 	}
 	if (error != FAILURE)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.61 2021/07/06 09:34:06 kettenis Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.66 2024/02/25 19:15:50 cheloha Exp $	*/
 /*	$NetBSD: cpu.h,v 1.34 2003/06/23 11:01:08 martin Exp $	*/
 
 /*
@@ -149,6 +149,7 @@ void	arm32_vector_init(vaddr_t, int);
  * Per-CPU information.  For now we assume one CPU.
  */
 
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
@@ -197,8 +198,9 @@ struct cpu_info {
 
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
+	struct clockintr ci_gmonclock;
 #endif
-
+	struct clockqueue	ci_queue;
 	char			ci_panicbuf[512];
 };
 
@@ -326,8 +328,6 @@ intr_restore(u_long cpsr)
 {
 	__asm volatile ("msr cpsr_c, %0" :: "r"(cpsr));
 }
-
-void	cpu_startclock(void);
 
 #endif /* _KERNEL */
 

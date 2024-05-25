@@ -1,4 +1,4 @@
-/*	$OpenBSD: deroff.c,v 1.15 2016/09/04 15:29:21 tb Exp $	*/
+/*	$OpenBSD: deroff.c,v 1.18 2023/09/27 21:06:33 millert Exp $	*/
 
 /*-
  * Copyright (c) 1988, 1993
@@ -135,7 +135,8 @@ int	keepblock;	/* keep blocks of text; normally false when msflag */
 
 char chars[128];  /* SPECIAL, PUNCT, APOS, DIGIT, or LETTER */
 
-char line[LINE_MAX];
+size_t linesz;
+char *line;
 char *lp;
 
 int c;
@@ -342,6 +343,10 @@ main(int ac, char **av)
 	files[0] = infile;
 	filesp = &files[0];
 
+	linesz = LINE_MAX;
+	if ((line = malloc(linesz)) == NULL)
+		err(1, NULL);
+
 	for (i = 'a'; i <= 'z'; ++i)
 		chars[i] = LETTER;
 	for (i = 'A'; i <= 'Z'; ++i)
@@ -444,7 +449,6 @@ getfname(void)
 	namechain = q;
 }
 
-/*ARGSUSED*/
 void
 textline(char *str, int constant)
 {
@@ -478,7 +482,15 @@ regline(void (*pfunc)(char *, int), int constant)
 
 	line[0] = c;
 	lp = line;
-	while (lp - line < sizeof(line)) {
+	for (;;) {
+		if (lp - line == linesz - 1) {
+			char *newline = reallocarray(line, linesz, 2);
+			if (newline == NULL)
+				err(1, NULL);
+			lp = newline + (lp - line);
+			line = newline;
+			linesz *= 2;
+		}
 		if (c == '\\') {
 			*lp = ' ';
 			backsl();
@@ -984,7 +996,7 @@ meputmac(char *cp, int constant)
 		 */
 		if (((np - cp) > constant) &&
 		    (inquote || (chars[(unsigned char)cp[0]] == LETTER))) {
-			for (cp = cp; cp < np; cp++)
+			for (; cp < np; cp++)
 				putchar(*cp);
 			last = np[-1];
 			found++;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: brk.S,v 1.10 2022/12/08 01:25:44 guenther Exp $	*/
+/*	$OpenBSD: brk.S,v 1.12 2023/12/10 16:45:52 deraadt Exp $	*/
 /*	$NetBSD: brk.S,v 1.9 2000/07/25 20:15:40 mycroft Exp $	*/
 
 /*
@@ -51,7 +51,7 @@ __minbrk:
 
 ENTRY_NB(brk)
 #ifdef __PIC__
-	PIC_PROLOGUE(%o5,%o4)
+	PIC_PROLOGUE(%o5, %o4)
 	set	__minbrk, %o4
 	ldx	[%o5 + %o4], %o4
 	ldx	[%o4], %o1		/* %o1 = minbrk */
@@ -59,7 +59,8 @@ ENTRY_NB(brk)
 	movgu	%xcc, %o1, %o0		/*	%o0 = minbrk */
 	mov	%o0, %o2		/* save argument to syscall */
 	mov	SYS_break, %g1
-	t	ST_SYSCALL
+99:	t	ST_SYSCALL
+	PINSYSCALL(SYS_break, 99b)
 	set	__curbrk, %o3
 	bcc,a,pt	%icc, 1f
 	 ldx	[%o5 + %o3], %o4
@@ -74,7 +75,8 @@ ENTRY_NB(brk)
 	movgu	%xcc, %o1, %o0		/*	%o0 = minbrk */
 	mov	%o0, %o2		/* save argument to syscall */
 	mov	SYS_break, %g1
-	t	ST_SYSCALL
+98:	t	ST_SYSCALL
+	PINSYSCALL(SYS_break, 98b)
 	bcc,a,pt	%icc,1f
 	 sethi	%hi(__curbrk), %g1
 	ERROR()

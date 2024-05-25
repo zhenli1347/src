@@ -1,4 +1,4 @@
-/*	$OpenBSD: qcspmi.c,v 1.2 2022/11/10 12:16:06 patrick Exp $	*/
+/*	$OpenBSD: qcspmi.c,v 1.4 2024/05/13 01:15:50 jsg Exp $	*/
 /*
  * Copyright (c) 2022 Patrick Wildt <patrick@blueri.se>
  *
@@ -165,7 +165,6 @@ void	qcspmi_intr_disestablish(void *);
 void	qcspmi_intr_enable(void *);
 void	qcspmi_intr_disable(void *);
 void	qcspmi_intr_barrier(void *);
-int	qcspmi_pin_intr(struct qcspmi_softc *, int);
 int	qcspmi_intr(void *);
 
 const struct cfattach qcspmi_ca = {
@@ -496,6 +495,9 @@ qcspmi_intr_establish(void *cookie, int *cells, int ipl,
 	HWRITE4(sc, QCSPMI_REG_CHNLS, SPMI_CHAN_OFF(ih->ih_apid) +
 	    SPMI_IRQ_CLEAR, (1U << ih->ih_pin));
 	qcspmi_intr_enable(ih);
+
+	if (ipl & IPL_WAKEUP)
+		intr_set_wakeup(sc->sc_ih);
 
 	return ih;
 }

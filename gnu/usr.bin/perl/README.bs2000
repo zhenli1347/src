@@ -1,3 +1,5 @@
+# vim: syntax=pod
+
 This document is written in pod format hence there are punctuation
 characters in odd places.  Do not worry, you've apparently got the
 ASCII->EBCDIC translation worked out correctly.  You can read more
@@ -137,7 +139,7 @@ instead:
 
 : # use perl
     eval 'exec /usr/local/bin/perl -S $0 ${1+"$@"}'
-        if $running_under_some_shell;
+        if 0; # ^ Run only under a shell
 
 =head2 Using Perl in "native" BS2000
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: output-bgpd.c,v 1.24 2022/08/30 18:56:49 job Exp $ */
+/*	$OpenBSD: output-bgpd.c,v 1.31 2024/04/08 14:02:13 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -21,9 +21,11 @@
 
 int
 output_bgpd(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
-    struct vap_tree *vaps, struct stats *st)
+    struct vap_tree *vaps, struct vsp_tree *vsps, struct stats *st)
 {
-	struct vrp	*v;
+	struct vrp	*vrp;
+	struct vap	*vap;
+	size_t		 i;
 
 	if (outputheader(out, st) < 0)
 		return -1;
@@ -31,23 +33,50 @@ output_bgpd(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
 	if (fprintf(out, "roa-set {\n") < 0)
 		return -1;
 
-	RB_FOREACH(v, vrp_tree, vrps) {
+	RB_FOREACH(vrp, vrp_tree, vrps) {
 		char ipbuf[64], maxlenbuf[100];
 
-		ip_addr_print(&v->addr, v->afi, ipbuf, sizeof(ipbuf));
-		if (v->maxlength > v->addr.prefixlen) {
+		ip_addr_print(&vrp->addr, vrp->afi, ipbuf, sizeof(ipbuf));
+		if (vrp->maxlength > vrp->addr.prefixlen) {
 			int ret = snprintf(maxlenbuf, sizeof(maxlenbuf),
-			    "maxlen %u ", v->maxlength);
+			    "maxlen %u ", vrp->maxlength);
 			if (ret < 0 || (size_t)ret > sizeof(maxlenbuf))
 				return -1;
 		} else
 			maxlenbuf[0] = '\0';
 		if (fprintf(out, "\t%s %ssource-as %u expires %lld\n",
-		    ipbuf, maxlenbuf, v->asid, (long long)v->expires) < 0)
+		    ipbuf, maxlenbuf, vrp->asid, (long long)vrp->expires) < 0)
 			return -1;
 	}
 
 	if (fprintf(out, "}\n") < 0)
 		return -1;
+
+	if (excludeaspa)
+		return 0;
+
+	if (fprintf(out, "\naspa-set {\n") < 0)
+		return -1;
+	RB_FOREACH(vap, vap_tree, vaps) {
+		if (vap->overflowed)
+			continue;
+		if (fprintf(out, "\tcustomer-as %d expires %lld "
+		    "provider-as { ", vap->custasid,
+		    (long long)vap->expires) < 0)
+			return -1;
+		for (i = 0; i < vap->providersz; i++) {
+			if (fprintf(out, "%u", vap->providers[i]) < 0)
+				return -1;
+			if (i + 1 < vap->providersz)
+				if (fprintf(out, ", ") < 0)
+					return -1;
+		}
+
+		if (fprintf(out, " }\n") < 0)
+			return -1;
+	}
+	if (fprintf(out, "}\n") < 0)
+		return -1;
+
 	return 0;
 }

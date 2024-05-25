@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_anon.c,v 1.54 2021/03/26 13:40:05 mpi Exp $	*/
+/*	$OpenBSD: uvm_anon.c,v 1.58 2024/04/06 10:59:52 mpi Exp $	*/
 /*	$NetBSD: uvm_anon.c,v 1.10 2000/11/25 06:27:59 chs Exp $	*/
 
 /*
@@ -103,7 +103,7 @@ uvm_anfree_list(struct vm_anon *anon, struct pglist *pgl)
 		pmap_page_protect(pg, PROT_NONE);
 		if (pgl != NULL) {
 			/*
-			 * clean page, and put on on pglist
+			 * clean page, and put it on pglist
 			 * for later freeing.
 			 */
 			uvm_lock_pageq();
@@ -116,7 +116,7 @@ uvm_anfree_list(struct vm_anon *anon, struct pglist *pgl)
 			uvm_unlock_pageq();	/* free the daemon */
 		}
 	} else {
-		if (anon->an_swslot != 0) {
+		if (anon->an_swslot != 0 && anon->an_swslot != SWSLOT_BAD) {
 			/* This page is no longer only in swap. */
 			KASSERT(uvmexp.swpgonly > 0);
 			atomic_dec_int(&uvmexp.swpgonly);
@@ -255,11 +255,13 @@ uvm_anon_release(struct vm_anon *anon)
 	KASSERT(anon->an_ref == 0);
 
 	uvm_lock_pageq();
+	pmap_page_protect(pg, PROT_NONE);
 	uvm_pagefree(pg);
 	uvm_unlock_pageq();
 	KASSERT(anon->an_page == NULL);
 	lock = anon->an_lock;
-	uvm_anfree(anon);
+	uvm_anon_dropswap(anon);
+	pool_put(&uvm_anon_pool, anon);
 	rw_exit(lock);
 	/* Note: extra reference is held for PG_RELEASED case. */
 	rw_obj_free(lock);

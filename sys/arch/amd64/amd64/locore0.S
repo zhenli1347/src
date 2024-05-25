@@ -1,4 +1,4 @@
-/*	$OpenBSD: locore0.S,v 1.21 2022/12/01 00:26:15 guenther Exp $	*/
+/*	$OpenBSD: locore0.S,v 1.23 2024/05/12 16:49:38 guenther Exp $	*/
 /*	$NetBSD: locore.S,v 1.13 2004/03/25 18:33:17 drochner Exp $	*/
 
 /*
@@ -235,7 +235,7 @@ bi_size_ok:
 	/* IA32_ARCH_CAPABILITIES MSR available, use it to check CPU security */
 	movl	$MSR_ARCH_CAPABILITIES, %ecx
 	rdmsr
-	testl	$ARCH_CAPABILITIES_RDCL_NO, %eax
+	testl	$ARCH_CAP_RDCL_NO, %eax
 	jz	.Lcpu_check_finished
 
 .Lcpu_secure:
@@ -249,12 +249,6 @@ bi_size_ok:
 	movl	%ebx,RELOC(cpu_ebxfeature)
 	movl	%ecx,RELOC(cpu_ecxfeature)
 	movl	%edx,RELOC(cpu_feature)
-
-	movl	$0x0a,%eax
-	cpuid
-	movl	%eax,RELOC(cpu_perf_eax)
-	movl	%ebx,RELOC(cpu_perf_ebx)
-	movl	%edx,RELOC(cpu_perf_edx)
 
 	movl	$0x80000001, %eax
 	cpuid
@@ -273,10 +267,6 @@ bi_size_ok:
 	popl	%edx
 cont:
 	orl	%edx, RELOC(cpu_feature)
-
-	movl	$0x80000007,%eax
-	cpuid
-	movl	%edx,RELOC(cpu_apmi_edx)
 
 	/*
 	 * Finished with old stack; load new %esp now instead of later so we

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.27 2022/09/10 20:35:28 miod Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.31 2024/02/14 06:16:53 miod Exp $	*/
 /*
  * Mach Operating System
  * Copyright (c) 1991 Carnegie Mellon University
@@ -51,7 +51,6 @@ extern	apr_t		kernel_apr, userland_apr;
 #define pmap_resident_count(pmap)	((pmap)->pm_stats.resident_count)
 #define	pmap_wired_count(pmap)		((pmap)->pm_stats.wired_count)
 
-#define pmap_copy(dp,sp,d,l,s)		do { /* nothing */ } while (0)
 #define pmap_update(pmap)		do { /* nothing */ } while (0)
 
 #define	pmap_clear_modify(pg)		pmap_unsetbit(pg, PG_M)
@@ -65,6 +64,7 @@ int	pmap_set_modify(pmap_t, vaddr_t);
 void	pmap_unmap_firmware(void);
 boolean_t pmap_unsetbit(struct vm_page *, int);
 
+#define pmap_init_percpu()		do { /* nothing */ } while (0)
 #define pmap_unuse_final(p)		/* nothing */
 #define	pmap_remove_holes(vm)		do { /* nothing */ } while (0)
 
@@ -77,7 +77,10 @@ int	pmap_translation_info(pmap_t, vaddr_t, paddr_t *, uint32_t *);
 #define	PTI_BATC	2
 
 #define	pmap_map_direct(pg)		((vaddr_t)VM_PAGE_TO_PHYS(pg))
-#define	pmap_unmap_direct(va)		PHYS_TO_VM_PAGE((paddr_t)va)
+vm_page_t pmap_unmap_direct(vaddr_t);
+
+#define	PMAP_CHECK_COPYIN	1
+
 #define	__HAVE_PMAP_DIRECT
 #define	PMAP_STEAL_MEMORY
 #define	__HAVE_PMAP_COLLECT

@@ -1,4 +1,4 @@
-/*	$OpenBSD: x509_asid.c,v 1.38 2022/11/26 16:08:54 tb Exp $ */
+/*	$OpenBSD: x509_asid.c,v 1.43 2024/02/20 14:58:16 tb Exp $ */
 /*
  * Contributed to the OpenSSL Project by the American Registry for
  * Internet Numbers ("ARIN").
@@ -69,7 +69,6 @@
 #include <openssl/bn.h>
 #include <openssl/conf.h>
 #include <openssl/err.h>
-#include <openssl/x509.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
@@ -191,28 +190,28 @@ d2i_ASRange(ASRange **a, const unsigned char **in, long len)
 	return (ASRange *)ASN1_item_d2i((ASN1_VALUE **)a, in, len,
 	    &ASRange_it);
 }
-LCRYPTO_ALIAS(d2i_ASRange)
+LCRYPTO_ALIAS(d2i_ASRange);
 
 int
 i2d_ASRange(ASRange *a, unsigned char **out)
 {
 	return ASN1_item_i2d((ASN1_VALUE *)a, out, &ASRange_it);
 }
-LCRYPTO_ALIAS(i2d_ASRange)
+LCRYPTO_ALIAS(i2d_ASRange);
 
 ASRange *
 ASRange_new(void)
 {
 	return (ASRange *)ASN1_item_new(&ASRange_it);
 }
-LCRYPTO_ALIAS(ASRange_new)
+LCRYPTO_ALIAS(ASRange_new);
 
 void
 ASRange_free(ASRange *a)
 {
 	ASN1_item_free((ASN1_VALUE *)a, &ASRange_it);
 }
-LCRYPTO_ALIAS(ASRange_free)
+LCRYPTO_ALIAS(ASRange_free);
 
 ASIdOrRange *
 d2i_ASIdOrRange(ASIdOrRange **a, const unsigned char **in, long len)
@@ -220,28 +219,28 @@ d2i_ASIdOrRange(ASIdOrRange **a, const unsigned char **in, long len)
 	return (ASIdOrRange *)ASN1_item_d2i((ASN1_VALUE **)a, in, len,
 	    &ASIdOrRange_it);
 }
-LCRYPTO_ALIAS(d2i_ASIdOrRange)
+LCRYPTO_ALIAS(d2i_ASIdOrRange);
 
 int
 i2d_ASIdOrRange(ASIdOrRange *a, unsigned char **out)
 {
 	return ASN1_item_i2d((ASN1_VALUE *)a, out, &ASIdOrRange_it);
 }
-LCRYPTO_ALIAS(i2d_ASIdOrRange)
+LCRYPTO_ALIAS(i2d_ASIdOrRange);
 
 ASIdOrRange *
 ASIdOrRange_new(void)
 {
 	return (ASIdOrRange *)ASN1_item_new(&ASIdOrRange_it);
 }
-LCRYPTO_ALIAS(ASIdOrRange_new)
+LCRYPTO_ALIAS(ASIdOrRange_new);
 
 void
 ASIdOrRange_free(ASIdOrRange *a)
 {
 	ASN1_item_free((ASN1_VALUE *)a, &ASIdOrRange_it);
 }
-LCRYPTO_ALIAS(ASIdOrRange_free)
+LCRYPTO_ALIAS(ASIdOrRange_free);
 
 ASIdentifierChoice *
 d2i_ASIdentifierChoice(ASIdentifierChoice **a, const unsigned char **in,
@@ -250,28 +249,28 @@ d2i_ASIdentifierChoice(ASIdentifierChoice **a, const unsigned char **in,
 	return (ASIdentifierChoice *)ASN1_item_d2i((ASN1_VALUE **)a, in, len,
 	    &ASIdentifierChoice_it);
 }
-LCRYPTO_ALIAS(d2i_ASIdentifierChoice)
+LCRYPTO_ALIAS(d2i_ASIdentifierChoice);
 
 int
 i2d_ASIdentifierChoice(ASIdentifierChoice *a, unsigned char **out)
 {
 	return ASN1_item_i2d((ASN1_VALUE *)a, out, &ASIdentifierChoice_it);
 }
-LCRYPTO_ALIAS(i2d_ASIdentifierChoice)
+LCRYPTO_ALIAS(i2d_ASIdentifierChoice);
 
 ASIdentifierChoice *
 ASIdentifierChoice_new(void)
 {
 	return (ASIdentifierChoice *)ASN1_item_new(&ASIdentifierChoice_it);
 }
-LCRYPTO_ALIAS(ASIdentifierChoice_new)
+LCRYPTO_ALIAS(ASIdentifierChoice_new);
 
 void
 ASIdentifierChoice_free(ASIdentifierChoice *a)
 {
 	ASN1_item_free((ASN1_VALUE *)a, &ASIdentifierChoice_it);
 }
-LCRYPTO_ALIAS(ASIdentifierChoice_free)
+LCRYPTO_ALIAS(ASIdentifierChoice_free);
 
 ASIdentifiers *
 d2i_ASIdentifiers(ASIdentifiers **a, const unsigned char **in, long len)
@@ -279,28 +278,28 @@ d2i_ASIdentifiers(ASIdentifiers **a, const unsigned char **in, long len)
 	return (ASIdentifiers *)ASN1_item_d2i((ASN1_VALUE **)a, in, len,
 	    &ASIdentifiers_it);
 }
-LCRYPTO_ALIAS(d2i_ASIdentifiers)
+LCRYPTO_ALIAS(d2i_ASIdentifiers);
 
 int
 i2d_ASIdentifiers(ASIdentifiers *a, unsigned char **out)
 {
 	return ASN1_item_i2d((ASN1_VALUE *)a, out, &ASIdentifiers_it);
 }
-LCRYPTO_ALIAS(i2d_ASIdentifiers)
+LCRYPTO_ALIAS(i2d_ASIdentifiers);
 
 ASIdentifiers *
 ASIdentifiers_new(void)
 {
 	return (ASIdentifiers *)ASN1_item_new(&ASIdentifiers_it);
 }
-LCRYPTO_ALIAS(ASIdentifiers_new)
+LCRYPTO_ALIAS(ASIdentifiers_new);
 
 void
 ASIdentifiers_free(ASIdentifiers *a)
 {
 	ASN1_item_free((ASN1_VALUE *)a, &ASIdentifiers_it);
 }
-LCRYPTO_ALIAS(ASIdentifiers_free)
+LCRYPTO_ALIAS(ASIdentifiers_free);
 
 /*
  * i2r method for an ASIdentifierChoice.
@@ -407,8 +406,12 @@ int
 X509v3_asid_add_inherit(ASIdentifiers *asid, int which)
 {
 	ASIdentifierChoice **choice;
+	ASIdentifierChoice *aic = NULL;
+	int ret = 0;
+
 	if (asid == NULL)
-		return 0;
+		goto err;
+
 	switch (which) {
 	case V3_ASID_ASNUM:
 		choice = &asid->asnum;
@@ -417,18 +420,75 @@ X509v3_asid_add_inherit(ASIdentifiers *asid, int which)
 		choice = &asid->rdi;
 		break;
 	default:
-		return 0;
+		goto err;
 	}
-	if (*choice == NULL) {
-		if ((*choice = ASIdentifierChoice_new()) == NULL)
-			return 0;
-		if (((*choice)->u.inherit = ASN1_NULL_new()) == NULL)
-			return 0;
-		(*choice)->type = ASIdentifierChoice_inherit;
+
+	if (*choice != NULL) {
+		if ((*choice)->type != ASIdentifierChoice_inherit)
+			goto err;
+	} else {
+		if ((aic = ASIdentifierChoice_new()) == NULL)
+			goto err;
+		if ((aic->u.inherit = ASN1_NULL_new()) == NULL)
+			goto err;
+		aic->type = ASIdentifierChoice_inherit;
+
+		*choice = aic;
+		aic = NULL;
 	}
-	return (*choice)->type == ASIdentifierChoice_inherit;
+
+	ret = 1;
+
+ err:
+	ASIdentifierChoice_free(aic);
+
+	return ret;
 }
-LCRYPTO_ALIAS(X509v3_asid_add_inherit)
+LCRYPTO_ALIAS(X509v3_asid_add_inherit);
+
+static int
+ASIdOrRanges_add_id_or_range(ASIdOrRanges *aors, ASN1_INTEGER *min,
+    ASN1_INTEGER *max)
+{
+	ASIdOrRange *aor = NULL;
+	ASRange *asr = NULL;
+	int ret = 0;
+
+	/* Preallocate since we must not fail after sk_ASIdOrRange_push(). */
+	if (max != NULL) {
+		if ((asr = ASRange_new()) == NULL)
+			goto err;
+	}
+
+	if ((aor = ASIdOrRange_new()) == NULL)
+		goto err;
+	if (sk_ASIdOrRange_push(aors, aor) <= 0)
+		goto err;
+
+	if (max == NULL) {
+		aor->type = ASIdOrRange_id;
+		aor->u.id = min;
+	} else {
+		ASN1_INTEGER_free(asr->min);
+		asr->min = min;
+		ASN1_INTEGER_free(asr->max);
+		asr->max = max;
+
+		aor->type = ASIdOrRange_range;
+		aor->u.range = asr;
+		asr = NULL;
+	}
+
+	aor = NULL;
+
+	ret = 1;
+
+ err:
+	ASIdOrRange_free(aor);
+	ASRange_free(asr);
+
+	return ret;
+}
 
 /*
  * Add an ID or range to an ASIdentifierChoice.
@@ -438,9 +498,12 @@ X509v3_asid_add_id_or_range(ASIdentifiers *asid, int which, ASN1_INTEGER *min,
     ASN1_INTEGER *max)
 {
 	ASIdentifierChoice **choice;
-	ASIdOrRange *aor;
+	ASIdentifierChoice *aic = NULL, *new_aic = NULL;
+	int ret = 0;
+
 	if (asid == NULL)
-		return 0;
+		goto err;
+
 	switch (which) {
 	case V3_ASID_ASNUM:
 		choice = &asid->asnum;
@@ -449,41 +512,35 @@ X509v3_asid_add_id_or_range(ASIdentifiers *asid, int which, ASN1_INTEGER *min,
 		choice = &asid->rdi;
 		break;
 	default:
-		return 0;
-	}
-	if (*choice != NULL && (*choice)->type == ASIdentifierChoice_inherit)
-		return 0;
-	if (*choice == NULL) {
-		if ((*choice = ASIdentifierChoice_new()) == NULL)
-			return 0;
-		(*choice)->u.asIdsOrRanges = sk_ASIdOrRange_new(ASIdOrRange_cmp);
-		if ((*choice)->u.asIdsOrRanges == NULL)
-			return 0;
-		(*choice)->type = ASIdentifierChoice_asIdsOrRanges;
-	}
-	if ((aor = ASIdOrRange_new()) == NULL)
-		return 0;
-	if (max == NULL) {
-		aor->type = ASIdOrRange_id;
-		aor->u.id = min;
-	} else {
-		aor->type = ASIdOrRange_range;
-		if ((aor->u.range = ASRange_new()) == NULL)
-			goto err;
-		ASN1_INTEGER_free(aor->u.range->min);
-		aor->u.range->min = min;
-		ASN1_INTEGER_free(aor->u.range->max);
-		aor->u.range->max = max;
-	}
-	if (!(sk_ASIdOrRange_push((*choice)->u.asIdsOrRanges, aor)))
 		goto err;
-	return 1;
+	}
+
+	if ((aic = *choice) != NULL) {
+		if (aic->type != ASIdentifierChoice_asIdsOrRanges)
+			goto err;
+	} else {
+		if ((aic = new_aic = ASIdentifierChoice_new()) == NULL)
+			goto err;
+		aic->u.asIdsOrRanges = sk_ASIdOrRange_new(ASIdOrRange_cmp);
+		if (aic->u.asIdsOrRanges == NULL)
+			goto err;
+		aic->type = ASIdentifierChoice_asIdsOrRanges;
+	}
+
+	if (!ASIdOrRanges_add_id_or_range(aic->u.asIdsOrRanges, min, max))
+		goto err;
+
+	*choice = aic;
+	aic = new_aic = NULL;
+
+	ret = 1;
 
  err:
-	ASIdOrRange_free(aor);
-	return 0;
+	ASIdentifierChoice_free(new_aic);
+
+	return ret;
 }
-LCRYPTO_ALIAS(X509v3_asid_add_id_or_range)
+LCRYPTO_ALIAS(X509v3_asid_add_id_or_range);
 
 /*
  * Extract min and max values from an ASIdOrRange.
@@ -501,6 +558,8 @@ extract_min_max(ASIdOrRange *aor, ASN1_INTEGER **min, ASN1_INTEGER **max)
 		*max = aor->u.range->max;
 		return 1;
 	}
+	*min = NULL;
+	*max = NULL;
 
 	return 0;
 }
@@ -511,6 +570,8 @@ extract_min_max(ASIdOrRange *aor, ASN1_INTEGER **min, ASN1_INTEGER **max)
 static int
 ASIdentifierChoice_is_canonical(ASIdentifierChoice *choice)
 {
+	ASIdOrRange *a, *b;
+	ASN1_INTEGER *a_min = NULL, *a_max = NULL, *b_min = NULL, *b_max = NULL;
 	ASN1_INTEGER *a_max_plus_one = NULL;
 	ASN1_INTEGER *orig;
 	BIGNUM *bn = NULL;
@@ -533,15 +594,8 @@ ASIdentifierChoice_is_canonical(ASIdentifierChoice *choice)
 	 * It's a list, check it.
 	 */
 	for (i = 0; i < sk_ASIdOrRange_num(choice->u.asIdsOrRanges) - 1; i++) {
-		ASIdOrRange *a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i);
-		ASIdOrRange *b = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i + 1);
-		ASN1_INTEGER *a_min = NULL,
-		*a_max = NULL,
-		*b_min = NULL,
-		*b_max =
-		    NULL;
+		a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i);
+		b = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i + 1);
 
 		if (!extract_min_max(a, &a_min, &a_max) ||
 		    !extract_min_max(b, &b_min, &b_max))
@@ -583,15 +637,11 @@ ASIdentifierChoice_is_canonical(ASIdentifierChoice *choice)
 	 * Check for inverted range.
 	 */
 	i = sk_ASIdOrRange_num(choice->u.asIdsOrRanges) - 1;
-	{
-		ASIdOrRange *a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i);
-		ASN1_INTEGER *a_min, *a_max;
-		if (a != NULL && a->type == ASIdOrRange_range) {
-			if (!extract_min_max(a, &a_min, &a_max) ||
-			    ASN1_INTEGER_cmp(a_min, a_max) > 0)
-				goto done;
-		}
+	a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i);
+	if (a != NULL && a->type == ASIdOrRange_range) {
+		if (!extract_min_max(a, &a_min, &a_max) ||
+		    ASN1_INTEGER_cmp(a_min, a_max) > 0)
+			goto done;
 	}
 
 	ret = 1;
@@ -612,7 +662,7 @@ X509v3_asid_is_canonical(ASIdentifiers *asid)
 	    (ASIdentifierChoice_is_canonical(asid->asnum) &&
 	     ASIdentifierChoice_is_canonical(asid->rdi)));
 }
-LCRYPTO_ALIAS(X509v3_asid_is_canonical)
+LCRYPTO_ALIAS(X509v3_asid_is_canonical);
 
 /*
  * Whack an ASIdentifierChoice into canonical form.
@@ -620,6 +670,8 @@ LCRYPTO_ALIAS(X509v3_asid_is_canonical)
 static int
 ASIdentifierChoice_canonize(ASIdentifierChoice *choice)
 {
+	ASIdOrRange *a, *b;
+	ASN1_INTEGER *a_min = NULL, *a_max = NULL, *b_min = NULL, *b_max = NULL;
 	ASN1_INTEGER *a_max_plus_one = NULL;
 	ASN1_INTEGER *orig;
 	BIGNUM *bn = NULL;
@@ -650,15 +702,8 @@ ASIdentifierChoice_canonize(ASIdentifierChoice *choice)
 	 * former and fixing the latter.
 	 */
 	for (i = 0; i < sk_ASIdOrRange_num(choice->u.asIdsOrRanges) - 1; i++) {
-		ASIdOrRange *a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i);
-		ASIdOrRange *b = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i + 1);
-		ASN1_INTEGER *a_min = NULL,
-		*a_max = NULL,
-		*b_min = NULL,
-		*b_max =
-		    NULL;
+		a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i);
+		b = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i + 1);
 
 		if (!extract_min_max(a, &a_min, &a_max) ||
 		    !extract_min_max(b, &b_min, &b_max))
@@ -743,15 +788,11 @@ ASIdentifierChoice_canonize(ASIdentifierChoice *choice)
 	 * Check for final inverted range.
 	 */
 	i = sk_ASIdOrRange_num(choice->u.asIdsOrRanges) - 1;
-	{
-		ASIdOrRange *a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges,
-		    i);
-		ASN1_INTEGER *a_min, *a_max;
-		if (a != NULL && a->type == ASIdOrRange_range) {
-			if (!extract_min_max(a, &a_min, &a_max) ||
-			    ASN1_INTEGER_cmp(a_min, a_max) > 0)
-				goto done;
-		}
+	a = sk_ASIdOrRange_value(choice->u.asIdsOrRanges, i);
+	if (a != NULL && a->type == ASIdOrRange_range) {
+		if (!extract_min_max(a, &a_min, &a_max) ||
+		    ASN1_INTEGER_cmp(a_min, a_max) > 0)
+			goto done;
 	}
 
 	/* Paranoia */
@@ -780,7 +821,7 @@ X509v3_asid_canonize(ASIdentifiers *asid)
 
 	return ASIdentifierChoice_canonize(asid->rdi);
 }
-LCRYPTO_ALIAS(X509v3_asid_canonize)
+LCRYPTO_ALIAS(X509v3_asid_canonize);
 
 /*
  * v2i method for an ASIdentifier extension.
@@ -939,7 +980,7 @@ X509v3_asid_inherits(ASIdentifiers *asid)
 
 	return 0;
 }
-LCRYPTO_ALIAS(X509v3_asid_inherits)
+LCRYPTO_ALIAS(X509v3_asid_inherits);
 
 /*
  * Figure out whether parent contains child.
@@ -1013,7 +1054,7 @@ X509v3_asid_subset(ASIdentifiers *child, ASIdentifiers *parent)
 
 	return 1;
 }
-LCRYPTO_ALIAS(X509v3_asid_subset)
+LCRYPTO_ALIAS(X509v3_asid_subset);
 
 /*
  * Validation error handling via callback.
@@ -1181,7 +1222,7 @@ X509v3_asid_validate_path(X509_STORE_CTX *ctx)
 	}
 	return asid_validate_path_internal(ctx, ctx->chain, NULL);
 }
-LCRYPTO_ALIAS(X509v3_asid_validate_path)
+LCRYPTO_ALIAS(X509v3_asid_validate_path);
 
 /*
  * RFC 3779 3.3 path validation of an extension.
@@ -1199,6 +1240,6 @@ X509v3_asid_validate_resource_set(STACK_OF(X509) *chain, ASIdentifiers *ext,
 		return 0;
 	return asid_validate_path_internal(NULL, chain, ext);
 }
-LCRYPTO_ALIAS(X509v3_asid_validate_resource_set)
+LCRYPTO_ALIAS(X509v3_asid_validate_resource_set);
 
 #endif                          /* OPENSSL_NO_RFC3779 */

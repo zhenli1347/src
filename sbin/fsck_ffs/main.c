@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.53 2021/01/27 05:03:25 deraadt Exp $	*/
+/*	$OpenBSD: main.c,v 1.55 2024/02/03 18:51:57 beck Exp $	*/
 /*	$NetBSD: main.c,v 1.22 1996/10/11 20:15:48 thorpej Exp $	*/
 
 /*
@@ -77,7 +77,6 @@ char	yflag;			/* assume a yes response */
 daddr_t	bflag;			/* location of alternate super block */
 int	debug;			/* output debugging info */
 int	cvtlevel;		/* convert to newer file system format */
-char    usedsoftdep;            /* just fix soft dependency inconsistencies */
 int	preen;			/* just fix normal inconsistencies */
 char    resolved;               /* cleared if unresolved changes => not clean */
 char	havesb;			/* superblock has been read */
@@ -204,7 +203,6 @@ argtoi(int flag, char *req, char *str, int base)
 /*
  * Check the specified filesystem.
  */
-/* ARGSUSED */
 int
 checkfilesys(char *filesys, char *mntpt, long auxdata, int child)
 {
@@ -258,7 +256,7 @@ checkfilesys(char *filesys, char *mntpt, long auxdata, int child)
 	 * 1b: locate first references to duplicates, if any
 	 */
 	if (duplist) {
-		if (preen || usedsoftdep)
+		if (preen)
 			pfatal("INTERNAL ERROR: dups with -p");
 		printf("** Phase 1b - Rescan For More DUPS\n");
 		pass1b();

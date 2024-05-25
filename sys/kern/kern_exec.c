@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.240 2022/11/23 11:00:27 mbuhl Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.255 2024/04/02 08:39:16 deraadt Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -37,6 +37,7 @@
 #include <sys/systm.h>
 #include <sys/filedesc.h>
 #include <sys/proc.h>
+#include <sys/user.h>
 #include <sys/mount.h>
 #include <sys/malloc.h>
 #include <sys/pool.h>
@@ -66,6 +67,8 @@
 #include <sys/timetc.h>
 
 struct uvm_object *sigobject;		/* shared sigcode object */
+vaddr_t sigcode_va;
+vsize_t sigcode_sz;
 struct uvm_object *timekeep_object;
 struct timekeep *timekeep;
 
@@ -267,12 +270,15 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 #endif
 	char *stack;
 	struct ps_strings arginfo;
-	struct vmspace *vm;
+	struct vmspace *vm = p->p_vmspace;
 	struct vnode *otvp;
 
-	/* get other threads to stop */
-	if ((error = single_thread_set(p, SINGLE_UNWIND, 1)))
-		return (error);
+	/*
+	 * Get other threads to stop, if contested return ERESTART,
+	 * so the syscall is restarted after halting in userret.
+	 */
+	if (single_thread_set(p, SINGLE_UNWIND | SINGLE_DEEP))
+		return (ERESTART);
 
 	/*
 	 * Cheap solution to complicated problems.
@@ -298,6 +304,8 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	VMCMDSET_INIT(&pack.ep_vmcmds);
 	pack.ep_vap = &attr;
 	pack.ep_flags = 0;
+	pack.ep_pins = NULL;
+	pack.ep_npins = 0;
 
 	/* see if we can run it. */
 	if ((error = check_exec(p, &pack)) != 0) {
@@ -431,7 +439,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	 * we're committed: any further errors will kill the process, so
 	 * kill the other threads now.
 	 */
-	single_thread_set(p, SINGLE_EXIT, 1);
+	single_thread_set(p, SINGLE_EXIT);
 
 	/*
 	 * Prepare vmspace for remapping. Note that uvmspace_exec can replace
@@ -498,6 +506,30 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	if (copyout(&arginfo, (char *)pr->ps_strings, sizeof(arginfo)))
 		goto exec_abort;
 
+	free(pr->ps_pin.pn_pins, M_PINSYSCALL,
+	    pr->ps_pin.pn_npins * sizeof(u_int));
+	if (pack.ep_npins) {
+		pr->ps_pin.pn_start = pack.ep_pinstart;
+		pr->ps_pin.pn_end = pack.ep_pinend;
+		pr->ps_pin.pn_pins = pack.ep_pins;
+		pack.ep_pins = NULL;
+		pr->ps_pin.pn_npins = pack.ep_npins;
+		pr->ps_flags |= PS_PIN;
+	} else {
+		pr->ps_pin.pn_start = pr->ps_pin.pn_end = 0;
+		pr->ps_pin.pn_pins = NULL;
+		pr->ps_pin.pn_npins = 0;
+		pr->ps_flags &= ~PS_PIN;
+	}
+	if (pr->ps_libcpin.pn_pins) {
+		free(pr->ps_libcpin.pn_pins, M_PINSYSCALL,
+		    pr->ps_libcpin.pn_npins * sizeof(u_int));
+		pr->ps_libcpin.pn_start = pr->ps_libcpin.pn_end = 0;
+		pr->ps_libcpin.pn_pins = NULL;
+		pr->ps_libcpin.pn_npins = 0;
+		pr->ps_flags &= ~PS_LIBCPIN;
+	}
+
 	stopprofclock(pr);	/* stop profiling */
 	fdcloseexec(p);		/* handle close on exec */
 	execsigs(p);		/* reset caught signals */
@@ -517,6 +549,11 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	pr->ps_textvp = pack.ep_vp;
 	if (otvp)
 		vrele(otvp);
+
+	if (pack.ep_flags & EXEC_NOBTCFI)
+		atomic_setbits_int(&p->p_p->ps_flags, PS_NOBTCFI);
+	else
+		atomic_clearbits_int(&p->p_p->ps_flags, PS_NOBTCFI);
 
 	atomic_setbits_int(&pr->ps_flags, PS_EXEC);
 	if (pr->ps_flags & PS_PPWAIT) {
@@ -663,6 +700,8 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	timespecclear(&p->p_tu.tu_runtime);
 	p->p_tu.tu_uticks = p->p_tu.tu_sticks = p->p_tu.tu_iticks = 0;
 
+	memset(p->p_name, 0, sizeof p->p_name);
+
 	km_free(argp, NCARGS, &kv_exec, &kp_pageable);
 
 	pool_put(&namei_pool, nid.ni_cnd.cn_pnbuf);
@@ -671,7 +710,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	/*
 	 * notify others that we exec'd
 	 */
-	KNOTE(&pr->ps_klist, NOTE_EXEC);
+	knote_locked(&pr->ps_klist, NOTE_EXEC);
 
 	/* map the process's timekeep page, needs to be before exec_elf_fixup */
 	if (exec_timekeep_map(pr))
@@ -729,6 +768,7 @@ bad:
 	if (pack.ep_interp != NULL)
 		pool_put(&namei_pool, pack.ep_interp);
 	free(pack.ep_args, M_TEMP, sizeof *pack.ep_args);
+	free(pack.ep_pins, M_PINSYSCALL, pack.ep_npins * sizeof(u_int));
 	/* close and put the exec'd file */
 	vn_close(pack.ep_vp, FREAD, cred, p);
 	pool_put(&namei_pool, nid.ni_cnd.cn_pnbuf);
@@ -826,9 +866,8 @@ exec_sigcode_map(struct process *pr)
 	 * memory) that we keep a permanent reference to and that we map
 	 * in all processes that need this sigcode. The creation is simple,
 	 * we create an object, add a permanent reference to it, map it in
-	 * kernel space, copy out the sigcode to it and unmap it.
-	 * Then we map it with PROT_READ|PROT_EXEC into the process just
-	 * the way sys_mmap would map it.
+	 * kernel space, copy out the sigcode to it and unmap it.  Then we map
+	 * it with PROT_EXEC into the process just the way sys_mmap would map it.
 	 */
 	if (sigobject == NULL) {
 		extern int sigfillsiz;
@@ -854,15 +893,19 @@ exec_sigcode_map(struct process *pr)
 			left -= chunk;
 		}
 		memcpy((caddr_t)va, sigcode, sz);
-		uvm_unmap(kernel_map, va, va + round_page(sz));
+
+		(void) uvm_map_protect(kernel_map, va, round_page(sz),
+		    PROT_READ, 0, FALSE, FALSE);
+		sigcode_va = va;
+		sigcode_sz = round_page(sz);
 	}
 
 	pr->ps_sigcode = 0; /* no hint */
 	uao_reference(sigobject);
 	if (uvm_map(&pr->ps_vmspace->vm_map, &pr->ps_sigcode, round_page(sz),
-	    sigobject, 0, 0, UVM_MAPFLAG(PROT_READ | PROT_EXEC,
+	    sigobject, 0, 0, UVM_MAPFLAG(PROT_EXEC,
 	    PROT_READ | PROT_WRITE | PROT_EXEC, MAP_INHERIT_COPY,
-	    MADV_RANDOM, UVM_FLAG_COPYONW | UVM_FLAG_SYSCALL))) {
+	    MADV_RANDOM, UVM_FLAG_COPYONW))) {
 		uao_detach(sigobject);
 		return (ENOMEM);
 	}

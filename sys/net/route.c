@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.414 2022/08/29 07:51:45 bluhm Exp $	*/
+/*	$OpenBSD: route.c,v 1.436 2024/03/31 15:53:12 bluhm Exp $	*/
 /*	$NetBSD: route.c,v 1.14 1996/02/13 22:00:46 christos Exp $	*/
 
 /*
@@ -113,6 +113,7 @@
 #include <sys/queue.h>
 #include <sys/pool.h>
 #include <sys/atomic.h>
+#include <sys/mutex.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -137,6 +138,14 @@
 #include <net/bfd.h>
 #endif
 
+/*
+ * Locks used to protect struct members:
+ *      a       atomic operations
+ *      I       immutable after creation
+ *      L       rtlabel_mtx
+ *      T       rttimer_mtx
+ */
+
 #define ROUNDUP(a) (a>0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
 
 /* Give some jitter to hash, to avoid synchronization between routers. */
@@ -144,32 +153,37 @@ static uint32_t		rt_hashjitter;
 
 extern unsigned int	rtmap_limit;
 
-struct cpumem *		rtcounters;
-int			rttrash;	/* routes not in table but not freed */
+struct cpumem	*rtcounters;
+int		 rttrash;	/* [a] routes not in table but not freed */
+u_long		 rtgeneration;	/* [a] generation number, routes changed */
 
 struct pool	rtentry_pool;		/* pool for rtentry structures */
 struct pool	rttimer_pool;		/* pool for rttimer structures */
 
-int	rt_setgwroute(struct rtentry *, u_int);
-void	rt_putgwroute(struct rtentry *);
+int	rt_setgwroute(struct rtentry *, const struct sockaddr *, u_int);
+void	rt_putgwroute(struct rtentry *, struct rtentry *);
 int	rtflushclone1(struct rtentry *, void *, u_int);
 int	rtflushclone(struct rtentry *, unsigned int);
 int	rt_ifa_purge_walker(struct rtentry *, void *, unsigned int);
-struct rtentry *rt_match(struct sockaddr *, uint32_t *, int, unsigned int);
-int	rt_clone(struct rtentry **, struct sockaddr *, unsigned int);
+struct rtentry *rt_match(const struct sockaddr *, uint32_t *, int,
+    unsigned int);
+int	rt_clone(struct rtentry **, const struct sockaddr *, unsigned int);
 struct sockaddr *rt_plentosa(sa_family_t, int, struct sockaddr_in6 *);
-static int rt_copysa(struct sockaddr *, struct sockaddr *, struct sockaddr **);
+static int rt_copysa(const struct sockaddr *, const struct sockaddr *,
+    struct sockaddr **);
 
 #define	LABELID_MAX	50000
 
 struct rt_label {
-	TAILQ_ENTRY(rt_label)	rtl_entry;
-	char			rtl_name[RTLABEL_LEN];
-	u_int16_t		rtl_id;
-	int			rtl_ref;
+	TAILQ_ENTRY(rt_label)	rtl_entry;		/* [L] */
+	char			rtl_name[RTLABEL_LEN];	/* [I] */
+	u_int16_t		rtl_id;			/* [I] */
+	int			rtl_ref;		/* [L] */
 };
 
-TAILQ_HEAD(rt_labels, rt_label)	rt_labels = TAILQ_HEAD_INITIALIZER(rt_labels);
+TAILQ_HEAD(rt_labels, rt_label)	rt_labels =
+    TAILQ_HEAD_INITIALIZER(rt_labels);		/* [L] */
+struct mutex rtlabel_mtx = MUTEX_INITIALIZER(IPL_NET);
 
 void
 route_init(void)
@@ -186,6 +200,116 @@ route_init(void)
 	bfdinit();
 #endif
 }
+
+int
+route_cache(struct route *ro, const struct in_addr *dst,
+    const struct in_addr *src, u_int rtableid)
+{
+	u_long gen;
+
+	gen = atomic_load_long(&rtgeneration);
+	membar_consumer();
+
+	if (rtisvalid(ro->ro_rt) &&
+	    ro->ro_generation == gen &&
+	    ro->ro_tableid == rtableid &&
+	    ro->ro_dstsa.sa_family == AF_INET &&
+	    ro->ro_dstsin.sin_addr.s_addr == dst->s_addr) {
+		if (src == NULL || !ipmultipath ||
+		    !ISSET(ro->ro_rt->rt_flags, RTF_MPATH) ||
+		    (ro->ro_srcin.s_addr != INADDR_ANY &&
+		    ro->ro_srcin.s_addr == src->s_addr)) {
+			ipstat_inc(ips_rtcachehit);
+			return (0);
+		}
+	}
+
+	ipstat_inc(ips_rtcachemiss);
+	rtfree(ro->ro_rt);
+	memset(ro, 0, sizeof(*ro));
+	ro->ro_generation = gen;
+	ro->ro_tableid = rtableid;
+
+	ro->ro_dstsin.sin_family = AF_INET;
+	ro->ro_dstsin.sin_len = sizeof(struct sockaddr_in);
+	ro->ro_dstsin.sin_addr = *dst;
+	if (src != NULL)
+		ro->ro_srcin = *src;
+
+	return (ESRCH);
+}
+
+/*
+ * Check cache for route, else allocate a new one, potentially using multipath
+ * to select the peer.  Update cache and return valid route or NULL.
+ */
+struct rtentry *
+route_mpath(struct route *ro, const struct in_addr *dst,
+    const struct in_addr *src, u_int rtableid)
+{
+	if (route_cache(ro, dst, src, rtableid)) {
+		uint32_t *s = NULL;
+
+		if (ro->ro_srcin.s_addr != INADDR_ANY)
+			s = &ro->ro_srcin.s_addr;
+		ro->ro_rt = rtalloc_mpath(&ro->ro_dstsa, s, ro->ro_tableid);
+	}
+	return (ro->ro_rt);
+}
+
+#ifdef INET6
+int
+route6_cache(struct route *ro, const struct in6_addr *dst,
+    const struct in6_addr *src, u_int rtableid)
+{
+	u_long gen;
+
+	gen = atomic_load_long(&rtgeneration);
+	membar_consumer();
+
+	if (rtisvalid(ro->ro_rt) &&
+	    ro->ro_generation == gen &&
+	    ro->ro_tableid == rtableid &&
+	    ro->ro_dstsa.sa_family == AF_INET6 &&
+	    IN6_ARE_ADDR_EQUAL(&ro->ro_dstsin6.sin6_addr, dst)) {
+		if (src == NULL || !ip6_multipath ||
+		    !ISSET(ro->ro_rt->rt_flags, RTF_MPATH) ||
+		    (!IN6_IS_ADDR_UNSPECIFIED(&ro->ro_srcin6) &&
+		    IN6_ARE_ADDR_EQUAL(&ro->ro_srcin6, src))) {
+			ip6stat_inc(ip6s_rtcachehit);
+			return (0);
+		}
+	}
+
+	ip6stat_inc(ip6s_rtcachemiss);
+	rtfree(ro->ro_rt);
+	memset(ro, 0, sizeof(*ro));
+	ro->ro_generation = gen;
+	ro->ro_tableid = rtableid;
+
+	ro->ro_dstsin6.sin6_family = AF_INET6;
+	ro->ro_dstsin6.sin6_len = sizeof(struct sockaddr_in6);
+	ro->ro_dstsin6.sin6_addr = *dst;
+	if (src != NULL)
+		ro->ro_srcin6 = *src;
+
+	return (ESRCH);
+}
+
+struct rtentry *
+route6_mpath(struct route *ro, const struct in6_addr *dst,
+    const struct in6_addr *src, u_int rtableid)
+{
+	if (route6_cache(ro, dst, src, rtableid)) {
+		uint32_t *s = NULL;
+
+		if (!IN6_IS_ADDR_UNSPECIFIED(&ro->ro_srcin6))
+			s = &ro->ro_srcin6.s6_addr32[0];
+		ro->ro_rt = rtalloc_mpath(&ro->ro_dstsa, s, ro->ro_tableid);
+	}
+	return (ro->ro_rt);
+}
+#endif
 
 /*
  * Returns 1 if the (cached) ``rt'' entry is still valid, 0 otherwise.
@@ -219,7 +343,8 @@ rtisvalid(struct rtentry *rt)
  * NDP), if it does not exist.
  */
 struct rtentry *
-rt_match(struct sockaddr *dst, uint32_t *src, int flags, unsigned int tableid)
+rt_match(const struct sockaddr *dst, uint32_t *src, int flags,
+    unsigned int tableid)
 {
 	struct rtentry		*rt = NULL;
 
@@ -237,7 +362,8 @@ rt_match(struct sockaddr *dst, uint32_t *src, int flags, unsigned int tableid)
 }
 
 int
-rt_clone(struct rtentry **rtp, struct sockaddr *dst, unsigned int rtableid)
+rt_clone(struct rtentry **rtp, const struct sockaddr *dst,
+    unsigned int rtableid)
 {
 	struct rt_addrinfo	 info;
 	struct rtentry		*rt = *rtp;
@@ -284,7 +410,7 @@ rt_clone(struct rtentry **rtp, struct sockaddr *dst, unsigned int rtableid)
 } while (0)
 
 int
-rt_hash(struct rtentry *rt, struct sockaddr *dst, uint32_t *src)
+rt_hash(struct rtentry *rt, const struct sockaddr *dst, uint32_t *src)
 {
 	uint32_t a, b, c;
 
@@ -297,12 +423,12 @@ rt_hash(struct rtentry *rt, struct sockaddr *dst, uint32_t *src)
 	switch (dst->sa_family) {
 	case AF_INET:
 	    {
-		struct sockaddr_in *sin;
+		const struct sockaddr_in *sin;
 
 		if (!ipmultipath)
 			return (-1);
 
-		sin = satosin(dst);
+		sin = satosin_const(dst);
 		a += sin->sin_addr.s_addr;
 		b += src[0];
 		mix(a, b, c);
@@ -311,12 +437,12 @@ rt_hash(struct rtentry *rt, struct sockaddr *dst, uint32_t *src)
 #ifdef INET6
 	case AF_INET6:
 	    {
-		struct sockaddr_in6 *sin6;
+		const struct sockaddr_in6 *sin6;
 
 		if (!ip6_multipath)
 			return (-1);
 
-		sin6 = satosin6(dst);
+		sin6 = satosin6_const(dst);
 		a += sin6->sin6_addr.s6_addr32[0];
 		b += sin6->sin6_addr.s6_addr32[2];
 		c += src[0];
@@ -345,7 +471,7 @@ rt_hash(struct rtentry *rt, struct sockaddr *dst, uint32_t *src)
  * Allocate a route, potentially using multipath to select the peer.
  */
 struct rtentry *
-rtalloc_mpath(struct sockaddr *dst, uint32_t *src, unsigned int rtableid)
+rtalloc_mpath(const struct sockaddr *dst, uint32_t *src, unsigned int rtableid)
 {
 	return (rt_match(dst, src, RT_RESOLVE, rtableid));
 }
@@ -358,7 +484,7 @@ rtalloc_mpath(struct sockaddr *dst, uint32_t *src, unsigned int rtableid)
  * longer valid, try to cache it.
  */
 struct rtentry *
-rtalloc(struct sockaddr *dst, int flags, unsigned int rtableid)
+rtalloc(const struct sockaddr *dst, int flags, unsigned int rtableid)
 {
 	return (rt_match(dst, NULL, flags, rtableid));
 }
@@ -368,7 +494,7 @@ rtalloc(struct sockaddr *dst, int flags, unsigned int rtableid)
  * the gateway entry ``rt''.
  */
 int
-rt_setgwroute(struct rtentry *rt, u_int rtableid)
+rt_setgwroute(struct rtentry *rt, const struct sockaddr *gate, u_int rtableid)
 {
 	struct rtentry *prt, *nhrt;
 	unsigned int rdomain = rtable_l2(rtableid);
@@ -376,10 +502,8 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
 
 	NET_ASSERT_LOCKED();
 
-	KASSERT(ISSET(rt->rt_flags, RTF_GATEWAY));
-
 	/* If we cannot find a valid next hop bail. */
-	nhrt = rt_match(rt->rt_gateway, NULL, RT_RESOLVE, rdomain);
+	nhrt = rt_match(gate, NULL, RT_RESOLVE, rdomain);
 	if (nhrt == NULL)
 		return (ENOENT);
 
@@ -412,7 +536,7 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
 			return (EHOSTUNREACH);
 		}
 
-		error = rt_clone(&prt, rt->rt_gateway, rdomain);
+		error = rt_clone(&prt, gate, rdomain);
 		if (error) {
 			rtfree(prt);
 			return (error);
@@ -428,10 +552,6 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
 		rtfree(nhrt);
 		return (ENETUNREACH);
 	}
-
-	/* Next hop is valid so remove possible old cache. */
-	rt_putgwroute(rt);
-	KASSERT(rt->rt_gwroute == NULL);
 
 	/*
 	 * If the MTU of next hop is 0, this will reset the MTU of the
@@ -449,7 +569,8 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
 	nhrt->rt_flags |= RTF_CACHED;
 	nhrt->rt_cachecnt++;
 
-	rt->rt_gwroute = nhrt;
+	/* commit */
+	rt_putgwroute(rt, nhrt);
 
 	return (0);
 }
@@ -458,24 +579,29 @@ rt_setgwroute(struct rtentry *rt, u_int rtableid)
  * Invalidate the cached route entry of the gateway entry ``rt''.
  */
 void
-rt_putgwroute(struct rtentry *rt)
+rt_putgwroute(struct rtentry *rt, struct rtentry *nhrt)
 {
-	struct rtentry *nhrt = rt->rt_gwroute;
+	struct rtentry *onhrt;
 
 	NET_ASSERT_LOCKED();
 
-	if (!ISSET(rt->rt_flags, RTF_GATEWAY) || nhrt == NULL)
+	if (!ISSET(rt->rt_flags, RTF_GATEWAY))
 		return;
 
-	KASSERT(ISSET(nhrt->rt_flags, RTF_CACHED));
-	KASSERT(nhrt->rt_cachecnt > 0);
+	/* this is protected as per [X] in route.h */
+	onhrt = rt->rt_gwroute;
+	rt->rt_gwroute = nhrt;
 
-	--nhrt->rt_cachecnt;
-	if (nhrt->rt_cachecnt == 0)
-		nhrt->rt_flags &= ~RTF_CACHED;
+	if (onhrt != NULL) {
+		KASSERT(onhrt->rt_cachecnt > 0);
+		KASSERT(ISSET(onhrt->rt_flags, RTF_CACHED));
 
-	rtfree(rt->rt_gwroute);
-	rt->rt_gwroute = NULL;
+		--onhrt->rt_cachecnt;
+		if (onhrt->rt_cachecnt == 0)
+			CLR(onhrt->rt_flags, RTF_CACHED);
+
+		rtfree(onhrt);
+	}
 }
 
 void
@@ -497,16 +623,17 @@ rtfree(struct rtentry *rt)
 	KASSERT(!RT_ROOT(rt));
 	atomic_dec_int(&rttrash);
 
-	KERNEL_LOCK();
 	rt_timer_remove_all(rt);
 	ifafree(rt->rt_ifa);
 	rtlabel_unref(rt->rt_labelid);
 #ifdef MPLS
 	rt_mpls_clear(rt);
 #endif
-	free(rt->rt_gateway, M_RTABLE, ROUNDUP(rt->rt_gateway->sa_len));
+	if (rt->rt_gateway != NULL) {
+		free(rt->rt_gateway, M_RTABLE,
+		    ROUNDUP(rt->rt_gateway->sa_len));
+	}
 	free(rt_key(rt), M_RTABLE, rt_key(rt)->sa_len);
-	KERNEL_UNLOCK();
 
 	pool_put(&rtentry_pool, rt);
 }
@@ -788,7 +915,7 @@ rtrequest_delete(struct rt_addrinfo *info, u_int8_t prio, struct ifnet *ifp,
 	}
 
 	/* Release next hop cache before flushing cloned entries. */
-	rt_putgwroute(rt);
+	rt_putgwroute(rt, NULL);
 
 	/* Clean up any cloned children. */
 	if (ISSET(rt->rt_flags, RTF_CLONING))
@@ -808,6 +935,9 @@ rtrequest_delete(struct rt_addrinfo *info, u_int8_t prio, struct ifnet *ifp,
 		*ret_nrt = rt;
 	else
 		rtfree(rt);
+
+	membar_producer();
+	atomic_inc_long(&rtgeneration);
 
 	return (0);
 }
@@ -867,7 +997,7 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 			return (ENOBUFS);
 		}
 
-		refcnt_init(&rt->rt_refcnt);
+		refcnt_init_trace(&rt->rt_refcnt, DT_REFCNT_IDX_RTENTRY);
 		rt->rt_flags = info->rti_flags | RTF_UP;
 		rt->rt_priority = prio;	/* init routing priority */
 		LIST_INIT(&rt->rt_timer);
@@ -924,9 +1054,11 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 		    tableid))) {
 			ifafree(ifa);
 			rtfree(rt->rt_parent);
-			rt_putgwroute(rt);
-			free(rt->rt_gateway, M_RTABLE,
-			    ROUNDUP(rt->rt_gateway->sa_len));
+			rt_putgwroute(rt, NULL);
+			if (rt->rt_gateway != NULL) {
+				free(rt->rt_gateway, M_RTABLE,
+				    ROUNDUP(rt->rt_gateway->sa_len));
+			}
 			free(ndst, M_RTABLE, ndst->sa_len);
 			pool_put(&rtentry_pool, rt);
 			return (error);
@@ -957,9 +1089,11 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 		if (error != 0) {
 			ifafree(ifa);
 			rtfree(rt->rt_parent);
-			rt_putgwroute(rt);
-			free(rt->rt_gateway, M_RTABLE,
-			    ROUNDUP(rt->rt_gateway->sa_len));
+			rt_putgwroute(rt, NULL);
+			if (rt->rt_gateway != NULL) {
+				free(rt->rt_gateway, M_RTABLE,
+				    ROUNDUP(rt->rt_gateway->sa_len));
+			}
 			free(ndst, M_RTABLE, ndst->sa_len);
 			pool_put(&rtentry_pool, rt);
 			return (EEXIST);
@@ -973,6 +1107,10 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 			*ret_nrt = rt;
 		else
 			rtfree(rt);
+
+		membar_producer();
+		atomic_inc_long(&rtgeneration);
+
 		break;
 	}
 
@@ -980,27 +1118,35 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 }
 
 int
-rt_setgate(struct rtentry *rt, struct sockaddr *gate, u_int rtableid)
+rt_setgate(struct rtentry *rt, const struct sockaddr *gate, u_int rtableid)
 {
 	int glen = ROUNDUP(gate->sa_len);
-	struct sockaddr *sa;
+	struct sockaddr *sa, *osa;
+	int error = 0;
 
-	if (rt->rt_gateway == NULL || glen != ROUNDUP(rt->rt_gateway->sa_len)) {
-		sa = malloc(glen, M_RTABLE, M_NOWAIT);
-		if (sa == NULL)
-			return (ENOBUFS);
-		if (rt->rt_gateway != NULL) {
-			free(rt->rt_gateway, M_RTABLE,
-			    ROUNDUP(rt->rt_gateway->sa_len));
-		}
-		rt->rt_gateway = sa;
-	}
-	memmove(rt->rt_gateway, gate, glen);
+	KASSERT(gate != NULL);
+	if (rt->rt_gateway == gate) {
+		/* nop */
+		return (0);
+	};
+
+	sa = malloc(glen, M_RTABLE, M_NOWAIT | M_ZERO);
+	if (sa == NULL)
+		return (ENOBUFS);
+	memcpy(sa, gate, gate->sa_len);
+
+	KERNEL_LOCK(); /* see [X] in route.h */
+	osa = rt->rt_gateway;
+	rt->rt_gateway = sa;
 
 	if (ISSET(rt->rt_flags, RTF_GATEWAY))
-		return (rt_setgwroute(rt, rtableid));
+		error = rt_setgwroute(rt, gate, rtableid);
+	KERNEL_UNLOCK();
 
-	return (0);
+	if (osa != NULL)
+		free(osa, M_RTABLE, ROUNDUP(osa->sa_len));
+
+	return (error);
 }
 
 /*
@@ -1043,7 +1189,8 @@ rt_maskedcopy(struct sockaddr *src, struct sockaddr *dst,
  * that is useable for the routing table.
  */
 static int
-rt_copysa(struct sockaddr *src, struct sockaddr *mask, struct sockaddr **dst)
+rt_copysa(const struct sockaddr *src, const struct sockaddr *mask,
+    struct sockaddr **dst)
 {
 	static const u_char maskarray[] = {
 	    0x0, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe };
@@ -1341,7 +1488,7 @@ rt_ifa_purge_walker(struct rtentry *rt, void *vifa, unsigned int rtableid)
 }
 
 /*
- * Route timer routines.  These routes allow functions to be called
+ * Route timer routines.  These routines allow functions to be called
  * for various routes at any time.  This is useful in supporting
  * path MTU discovery and redirect route deletion.
  *
@@ -1375,13 +1522,6 @@ struct rttimer {
 		if_put(ifp);						\
 	}								\
 }
-
-/*
- * Some subtle order problems with domain initialization mean that
- * we cannot count on this being run from rt_init before various
- * protocol initializations are done.  Therefore, we make sure
- * that this is run when the first queue is added...
- */
 
 void
 rt_timer_init(void)
@@ -1486,7 +1626,7 @@ rt_timer_get_expire(const struct rtentry *rt)
 {
 	const struct rttimer	*r;
 	time_t			 expire = 0;
-	
+
 	mtx_enter(&rttimer_mtx);
 	LIST_FOREACH(r, &rt->rt_timer, rtt_link) {
 		if (expire == 0 || expire > r->rtt_expire)
@@ -1562,7 +1702,7 @@ rt_timer_timer(void *arg)
 
 #ifdef MPLS
 int
-rt_mpls_set(struct rtentry *rt, struct sockaddr *src, uint8_t op)
+rt_mpls_set(struct rtentry *rt, const struct sockaddr *src, uint8_t op)
 {
 	struct sockaddr_mpls	*psa_mpls = (struct sockaddr_mpls *)src;
 	struct rt_mpls		*rt_mpls;
@@ -1600,18 +1740,20 @@ rt_mpls_clear(struct rtentry *rt)
 #endif
 
 u_int16_t
-rtlabel_name2id(char *name)
+rtlabel_name2id(const char *name)
 {
 	struct rt_label		*label, *p;
-	u_int16_t		 new_id = 1;
+	u_int16_t		 new_id = 1, id = 0;
 
 	if (!name[0])
 		return (0);
 
+	mtx_enter(&rtlabel_mtx);
 	TAILQ_FOREACH(label, &rt_labels, rtl_entry)
 		if (strcmp(name, label->rtl_name) == 0) {
 			label->rtl_ref++;
-			return (label->rtl_id);
+			id = label->rtl_id;
+			goto out;
 		}
 
 	/*
@@ -1625,11 +1767,11 @@ rtlabel_name2id(char *name)
 		new_id = p->rtl_id + 1;
 	}
 	if (new_id > LABELID_MAX)
-		return (0);
+		goto out;
 
 	label = malloc(sizeof(*label), M_RTABLE, M_NOWAIT|M_ZERO);
 	if (label == NULL)
-		return (0);
+		goto out;
 	strlcpy(label->rtl_name, name, sizeof(label->rtl_name));
 	label->rtl_id = new_id;
 	label->rtl_ref++;
@@ -1639,13 +1781,19 @@ rtlabel_name2id(char *name)
 	else		/* either list empty or no free slot in between */
 		TAILQ_INSERT_TAIL(&rt_labels, label, rtl_entry);
 
-	return (label->rtl_id);
+	id = label->rtl_id;
+out:
+	mtx_leave(&rtlabel_mtx);
+
+	return (id);
 }
 
 const char *
-rtlabel_id2name(u_int16_t id)
+rtlabel_id2name_locked(u_int16_t id)
 {
 	struct rt_label	*label;
+
+	MUTEX_ASSERT_LOCKED(&rtlabel_mtx);
 
 	TAILQ_FOREACH(label, &rt_labels, rtl_entry)
 		if (label->rtl_id == id)
@@ -1654,18 +1802,44 @@ rtlabel_id2name(u_int16_t id)
 	return (NULL);
 }
 
+const char *
+rtlabel_id2name(u_int16_t id, char *rtlabelbuf, size_t sz)
+{
+	const char *label;
+
+	if (id == 0)
+		return (NULL);
+
+	mtx_enter(&rtlabel_mtx);
+	if ((label = rtlabel_id2name_locked(id)) != NULL)
+		strlcpy(rtlabelbuf, label, sz);
+	mtx_leave(&rtlabel_mtx);
+
+	if (label == NULL)
+		return (NULL);
+
+	return (rtlabelbuf);
+}
+
 struct sockaddr *
 rtlabel_id2sa(u_int16_t labelid, struct sockaddr_rtlabel *sa_rl)
 {
 	const char	*label;
 
-	if (labelid == 0 || (label = rtlabel_id2name(labelid)) == NULL)
+	if (labelid == 0)
 		return (NULL);
 
-	bzero(sa_rl, sizeof(*sa_rl));
-	sa_rl->sr_len = sizeof(*sa_rl);
-	sa_rl->sr_family = AF_UNSPEC;
-	strlcpy(sa_rl->sr_label, label, sizeof(sa_rl->sr_label));
+	mtx_enter(&rtlabel_mtx);
+	if ((label = rtlabel_id2name_locked(labelid)) != NULL) {
+		bzero(sa_rl, sizeof(*sa_rl));
+		sa_rl->sr_len = sizeof(*sa_rl);
+		sa_rl->sr_family = AF_UNSPEC;
+		strlcpy(sa_rl->sr_label, label, sizeof(sa_rl->sr_label));
+	}
+	mtx_leave(&rtlabel_mtx);
+
+	if (label == NULL)
+		return (NULL);
 
 	return ((struct sockaddr *)sa_rl);
 }
@@ -1678,6 +1852,7 @@ rtlabel_unref(u_int16_t id)
 	if (id == 0)
 		return;
 
+	mtx_enter(&rtlabel_mtx);
 	TAILQ_FOREACH_SAFE(p, &rt_labels, rtl_entry, next) {
 		if (id == p->rtl_id) {
 			if (--p->rtl_ref == 0) {
@@ -1687,6 +1862,7 @@ rtlabel_unref(u_int16_t id)
 			break;
 		}
 	}
+	mtx_leave(&rtlabel_mtx);
 }
 
 int
@@ -1771,6 +1947,9 @@ rt_if_linkstate_change(struct rtentry *rt, void *arg, u_int id)
 		    rt->rt_priority | RTP_DOWN, rt);
 	}
 	if_group_routechange(rt_key(rt), rt_plen2mask(rt, &sa_mask));
+
+	membar_producer();
+	atomic_inc_long(&rtgeneration);
 
 	return (error);
 }

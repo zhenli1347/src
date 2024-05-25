@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_process.c,v 1.90 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: sys_process.c,v 1.97 2024/04/02 08:27:22 deraadt Exp $	*/
 /*	$NetBSD: sys_process.c,v 1.55 1996/05/15 06:17:47 tls Exp $	*/
 
 /*-
@@ -77,7 +77,6 @@ static inline struct process *process_tprfind(pid_t _tpid, struct proc **_tp);
 int	ptrace_ctrl(struct proc *, int, pid_t, caddr_t, int);
 int	ptrace_ustate(struct proc *, int, pid_t, void *, int, register_t *);
 int	ptrace_kstate(struct proc *, int, pid_t, void *);
-int	process_auxv_offset(struct proc *, struct process *, struct uio *);
 
 int	global_ptrace;	/* permit tracing of not children */
 
@@ -105,6 +104,7 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		struct ptrace_event u_pe;
 		struct ptrace_state u_ps;
 		register_t u_wcookie;
+		register_t u_pacmask[2];
 	} u;
 	int size = 0;
 	enum { NONE, IN, IN_ALLOC, OUT, OUT_ALLOC, IN_OUT } mode;
@@ -199,6 +199,12 @@ sys_ptrace(struct proc *p, void *v, register_t *retval)
 		mode = OUT;
 		size = sizeof u.u_wcookie;
 		data = size;	/* suppress the data == size check */
+		break;
+#endif
+#ifdef PT_PACMASK
+	case PT_PACMASK:
+		mode = OUT;
+		size = sizeof u.u_pacmask;
 		break;
 #endif
 	default:
@@ -369,7 +375,7 @@ ptrace_ctrl(struct proc *p, int req, pid_t pid, caddr_t addr, int data)
 		 *	(5) it's not owned by you, or the last exec
 		 *	    gave us setuid/setgid privs (unless
 		 *	    you're root), or...
-		 * 
+		 *
 		 *      [Note: once PS_SUGID or PS_SUGIDEXEC gets set in
 		 *	execve(), they stay set until the process does
 		 *	another execve().  Hence this prevents a setuid
@@ -487,6 +493,7 @@ ptrace_ctrl(struct proc *p, int req, pid_t pid, caddr_t addr, int data)
 		if (t->p_stat == SSTOP) {
 			tr->ps_xsig = data;
 			SCHED_LOCK(s);
+			unsleep(t);
 			setrunnable(t);
 			SCHED_UNLOCK(s);
 		} else {
@@ -557,11 +564,9 @@ ptrace_kstate(struct proc *p, int req, pid_t pid, void *addr)
 		struct proc *t;
 
 		if (req == PT_GET_THREAD_NEXT) {
-			t = tfind(pts->pts_tid - THREAD_PID_OFFSET);
+			t = tfind_user(pts->pts_tid, tr);
 			if (t == NULL || ISSET(t->p_flag, P_WEXIT))
 				return ESRCH;
-			if (t->p_p != tr)
-				return EINVAL;
 			t = TAILQ_NEXT(t, p_thr_link);
 		} else {
 			t = TAILQ_FIRST(&tr->ps_threads);
@@ -688,9 +693,18 @@ ptrace_ustate(struct proc *p, int req, pid_t pid, void *addr, int data,
 			if (uio.uio_resid > temp - uio.uio_offset)
 				uio.uio_resid = temp - uio.uio_offset;
 			piod->piod_len = iov.iov_len = uio.uio_resid;
-			error = process_auxv_offset(p, tr, &uio);
-			if (error)
-				return error;
+			uio.uio_offset += tr->ps_auxinfo;
+#ifdef MACHINE_STACK_GROWS_UP
+			if (uio.uio_offset < (off_t)tr->ps_strings)
+				return EIO;
+#else
+			if (uio.uio_offset > (off_t)tr->ps_strings)
+				return EIO;
+			if ((uio.uio_offset + uio.uio_resid) >
+			    (off_t)tr->ps_strings)
+				uio.uio_resid = (off_t)tr->ps_strings -
+				    uio.uio_offset;
+#endif
 			break;
 		default:
 			return EINVAL;
@@ -724,6 +738,12 @@ ptrace_ustate(struct proc *p, int req, pid_t pid, void *addr, int data,
 #ifdef PT_WCOOKIE
 	case PT_WCOOKIE:
 		*(register_t *)addr = process_get_wcookie(t);
+		return 0;
+#endif
+#ifdef PT_PACMASK
+	case PT_PACMASK:
+		((register_t *)addr)[0] = process_get_pacmask(t);
+		((register_t *)addr)[1] = process_get_pacmask(t);
 		return 0;
 #endif
 	default:
@@ -799,6 +819,7 @@ process_checktracestate(struct process *curpr, struct process *tr,
 	return 0;
 }
 
+#endif /* PTRACE */
 
 /*
  * Check if a process is allowed to fiddle with the memory of another.
@@ -858,8 +879,7 @@ process_domem(struct proc *curp, struct process *tr, struct uio *uio, int req)
 
 	uvmspace_addref(vm);
 
-	error = uvm_io(&vm->vm_map, uio,
-	    (uio->uio_rw == UIO_WRITE) ? UVM_IO_FIXPROT : 0);
+	error = uvm_io(&vm->vm_map, uio, UVM_IO_FIXPROT);
 
 	uvmspace_free(vm);
 
@@ -868,51 +888,3 @@ process_domem(struct proc *curp, struct process *tr, struct uio *uio, int req)
 
 	return error;
 }
-
-int
-process_auxv_offset(struct proc *curp, struct process *tr, struct uio *uiop)
-{
-	struct vmspace *vm;
-	struct ps_strings pss;
-	struct iovec iov;
-	struct uio uio;
-	int error;
-
-	iov.iov_base = &pss;
-	iov.iov_len = sizeof(pss);
-	uio.uio_iov = &iov;
-	uio.uio_iovcnt = 1;
-	uio.uio_offset = (off_t)tr->ps_strings;
-	uio.uio_resid = sizeof(pss);
-	uio.uio_segflg = UIO_SYSSPACE;
-	uio.uio_rw = UIO_READ;
-	uio.uio_procp = curp;
-
-	vm = tr->ps_vmspace;
-	if ((tr->ps_flags & PS_EXITING) || (vm->vm_refcnt < 1))
-		return EFAULT;
-
-	uvmspace_addref(vm);
-	error = uvm_io(&vm->vm_map, &uio, 0);
-	uvmspace_free(vm);
-
-	if (error != 0)
-		return error;
-
-	if (pss.ps_envstr == NULL)
-		return EIO;
-
-	uiop->uio_offset += (off_t)(vaddr_t)(pss.ps_envstr + pss.ps_nenvstr + 1);
-#ifdef MACHINE_STACK_GROWS_UP
-	if (uiop->uio_offset < (off_t)tr->ps_strings)
-		return EIO;
-#else
-	if (uiop->uio_offset > (off_t)tr->ps_strings)
-		return EIO;
-	if ((uiop->uio_offset + uiop->uio_resid) > (off_t)tr->ps_strings)
-		uiop->uio_resid = (off_t)tr->ps_strings - uiop->uio_offset;
-#endif
-
-	return 0;
-}
-#endif

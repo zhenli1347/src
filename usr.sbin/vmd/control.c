@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.39 2022/01/04 15:22:53 claudio Exp $	*/
+/*	$OpenBSD: control.c,v 1.42 2024/01/18 14:49:59 claudio Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -265,7 +265,6 @@ control_listen(struct control_sock *cs)
 	return (0);
 }
 
-/* ARGSUSED */
 void
 control_accept(int listenfd, short event, void *arg)
 {
@@ -369,7 +368,6 @@ control_close(int fd, struct control_sock *cs)
 	free(c);
 }
 
-/* ARGSUSED */
 void
 control_dispatch_imsg(int fd, short event, void *arg)
 {
@@ -442,7 +440,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 		case IMSG_VMDOP_RELOAD:
 		case IMSG_CTL_RESET:
 			if (proc_compose_imsg(ps, PROC_PARENT, -1,
-			    imsg.hdr.type, fd, imsg.fd,
+			    imsg.hdr.type, fd, imsg_get_fd(&imsg),
 			    imsg.data, IMSG_DATA_SIZE(&imsg)) == -1)
 				goto fail;
 			break;
@@ -453,8 +451,10 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			vmc.vmc_owner.uid = c->peercred.uid;
 			vmc.vmc_owner.gid = -1;
 
+			/* imsg.fd may contain kernel image fd. */
 			if (proc_compose_imsg(ps, PROC_PARENT, -1,
-			    imsg.hdr.type, fd, -1, &vmc, sizeof(vmc)) == -1) {
+			    imsg.hdr.type, fd, imsg_get_fd(&imsg), &vmc,
+			    sizeof(vmc)) == -1) {
 				control_close(fd, cs);
 				return;
 			}
@@ -508,7 +508,7 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			    vid.vid_uid);
 
 			if (proc_compose_imsg(ps, PROC_PARENT, -1,
-			    imsg.hdr.type, fd, imsg.fd,
+			    imsg.hdr.type, fd, imsg_get_fd(&imsg),
 			    &vid, sizeof(vid)) == -1)
 				goto fail;
 			break;

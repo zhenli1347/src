@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_syscalls.c,v 1.207 2022/12/07 01:02:28 deraadt Exp $	*/
+/*	$OpenBSD: uipc_syscalls.c,v 1.219 2024/04/25 17:32:53 bluhm Exp $	*/
 /*	$NetBSD: uipc_syscalls.c,v 1.19 1996/02/09 19:00:48 christos Exp $	*/
 
 /*
@@ -185,9 +185,9 @@ sys_bind(struct proc *p, void *v, register_t *retval)
 	if (KTRPOINT(p, KTR_STRUCT))
 		ktrsockaddr(p, mtod(nam, caddr_t), SCARG(uap, namelen));
 #endif
-	solock(so);
+	solock_shared(so);
 	error = sobind(so, nam, p);
-	sounlock(so);
+	sounlock_shared(so);
 	m_freem(nam);
 out:
 	FRELE(fp, p);
@@ -288,19 +288,19 @@ doaccept(struct proc *p, int sock, struct sockaddr *name, socklen_t *anamelen,
 		goto out_unlock;
 	}
 	if ((headfp->f_flag & FNONBLOCK) && head->so_qlen == 0) {
-		if (head->so_state & SS_CANTRCVMORE)
+		if (head->so_rcv.sb_state & SS_CANTRCVMORE)
 			error = ECONNABORTED;
 		else
 			error = EWOULDBLOCK;
 		goto out_unlock;
 	}
 	while (head->so_qlen == 0 && head->so_error == 0) {
-		if (head->so_state & SS_CANTRCVMORE) {
+		if (head->so_rcv.sb_state & SS_CANTRCVMORE) {
 			head->so_error = ECONNABORTED;
 			break;
 		}
 		error = sosleep_nsec(head, &head->so_timeo, PSOCK | PCATCH,
-		    "netcon", INFSLP);
+		    "netacc", INFSLP);
 		if (error)
 			goto out_unlock;
 	}
@@ -326,7 +326,7 @@ doaccept(struct proc *p, int sock, struct sockaddr *name, socklen_t *anamelen,
 	    : (flags & SOCK_NONBLOCK ? FNONBLOCK : 0);
 
 	/* connection has been removed from the listen queue */
-	KNOTE(&head->so_rcv.sb_sel.si_note, 0);
+	knote(&head->so_rcv.sb_klist, 0);
 
 	if (persocket)
 		sounlock(head);
@@ -409,7 +409,7 @@ sys_connect(struct proc *p, void *v, register_t *retval)
 	if (KTRPOINT(p, KTR_STRUCT))
 		ktrsockaddr(p, mtod(nam, caddr_t), SCARG(uap, namelen));
 #endif
-	solock(so);
+	solock_shared(so);
 	if (isdnssocket(so)) {
 		error = dns_portcheck(p, so, mtod(nam, void *), nam->m_len);
 		if (error)
@@ -428,7 +428,7 @@ sys_connect(struct proc *p, void *v, register_t *retval)
 	}
 	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0) {
 		error = sosleep_nsec(so, &so->so_timeo, PSOCK | PCATCH,
-		    "netcon2", INFSLP);
+		    "netcon", INFSLP);
 		if (error) {
 			if (error == EINTR || error == ERESTART)
 				interrupted = 1;
@@ -443,7 +443,7 @@ bad:
 	if (!interrupted)
 		so->so_state &= ~SS_ISCONNECTING;
 unlock:
-	sounlock(so);
+	sounlock_shared(so);
 	m_freem(nam);
 out:
 	FRELE(fp, p);
@@ -1214,15 +1214,11 @@ sys_setsockopt(struct proc *p, void *v, register_t *retval)
 	if (SCARG(uap, val)) {
 		m = m_get(M_WAIT, MT_SOOPTS);
 		if (SCARG(uap, valsize) > MLEN) {
-			MCLGET(m, M_DONTWAIT);
+			MCLGET(m, M_WAIT);
 			if ((m->m_flags & M_EXT) == 0) {
 				error = ENOBUFS;
 				goto bad;
 			}
-		}
-		if (m == NULL) {
-			error = ENOBUFS;
-			goto bad;
 		}
 		error = copyin(SCARG(uap, val), mtod(m, caddr_t),
 		    SCARG(uap, valsize));
@@ -1232,9 +1228,7 @@ sys_setsockopt(struct proc *p, void *v, register_t *retval)
 		m->m_len = SCARG(uap, valsize);
 	}
 	so = fp->f_data;
-	solock(so);
 	error = sosetopt(so, SCARG(uap, level), SCARG(uap, name), m);
-	sounlock(so);
 bad:
 	m_freem(m);
 	FRELE(fp, p);
@@ -1271,9 +1265,7 @@ sys_getsockopt(struct proc *p, void *v, register_t *retval)
 		valsize = 0;
 	m = m_get(M_WAIT, MT_SOOPTS);
 	so = fp->f_data;
-	solock_shared(so);
 	error = sogetopt(so, SCARG(uap, level), SCARG(uap, name), m);
-	sounlock_shared(so);
 	if (error == 0 && SCARG(uap, val) && valsize && m != NULL) {
 		if (valsize > m->m_len)
 			valsize = m->m_len;
@@ -1568,12 +1560,12 @@ sys_ypconnect(struct proc *p, void *v, register_t *retval)
 
 	if (p->p_p->ps_flags & PS_CHROOT)
 		return EACCES;
+	KERNEL_LOCK();
 	name = pool_get(&namei_pool, PR_WAITOK);
 	snprintf(name, MAXPATHLEN, "/var/yp/binding/%s.2", domainname);
 	NDINIT(&nid, 0, NOFOLLOW|LOCKLEAF|KERNELPATH, UIO_SYSSPACE, name, p);
 	nid.ni_pledge = PLEDGE_RPATH;
 
-	KERNEL_LOCK();
 	error = namei(&nid);
 	pool_put(&namei_pool, name);
 	if (error)
@@ -1659,7 +1651,7 @@ out:
 	error = soconnect(so, nam);
 	while ((so->so_state & SS_ISCONNECTING) && so->so_error == 0) {
 		error = sosleep_nsec(so, &so->so_timeo, PSOCK | PCATCH,
-		    "netcon2", INFSLP);
+		    "ypcon", INFSLP);
 		if (error)
 			break;
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: job.c,v 1.162 2020/06/02 12:24:44 espie Exp $	*/
+/*	$OpenBSD: job.c,v 1.165 2023/09/04 11:35:11 espie Exp $	*/
 /*	$NetBSD: job.c,v 1.16 1996/11/06 17:59:08 christos Exp $	*/
 
 /*
@@ -93,7 +93,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "config.h"
 #include "defines.h"
 #include "job.h"
 #include "engine.h"
@@ -524,7 +523,6 @@ debug_kill_printf(const char *fmt, ...)
  *	to ABORT_ERROR so no more jobs will be started.
  *-----------------------------------------------------------------------
  */
-/*ARGSUSED*/
 
 static void
 postprocess_job(Job *job)
@@ -745,7 +743,7 @@ reap_finished_job(pid_t pid)
 
 /*
  * classic waitpid handler: retrieve as many dead children as possible.
- * returns true if succesful
+ * returns true if successful
  */
 static bool
 reap_jobs(void)

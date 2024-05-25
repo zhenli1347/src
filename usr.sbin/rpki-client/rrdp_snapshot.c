@@ -1,4 +1,4 @@
-/*	$OpenBSD: rrdp_snapshot.c,v 1.6 2022/02/03 18:19:32 claudio Exp $ */
+/*	$OpenBSD: rrdp_snapshot.c,v 1.9 2024/03/22 03:38:12 job Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -69,7 +69,8 @@ start_snapshot_elem(struct snapshot_xml *sxml, const char **attr)
 			if (errstr == NULL)
 				continue;
 		}
-		if (strcmp("session_id", attr[i]) == 0) {
+		if (strcmp("session_id", attr[i]) == 0 &&
+		    valid_uuid(attr[i + 1])) {
 			sxml->session_id = xstrdup(attr[i + 1]);
 			continue;
 		}
@@ -118,7 +119,7 @@ start_publish_elem(struct snapshot_xml *sxml, const char **attr)
 	for (i = 0; attr[i]; i += 2) {
 		if (strcmp("uri", attr[i]) == 0 && hasUri++ == 0) {
 			if (valid_uri(attr[i + 1], strlen(attr[i + 1]),
-			    "rsync://")) {
+			    RSYNC_PROTO)) {
 				uri = xstrdup(attr[i + 1]);
 				continue;
 			}
@@ -247,6 +248,7 @@ free_snapshot_xml(struct snapshot_xml *sxml)
 	free(sxml);
 }
 
+/* Used in regress. */
 void
 log_snapshot_xml(struct snapshot_xml *sxml)
 {

@@ -1,8 +1,9 @@
-#	$OpenBSD: Makefile,v 1.35 2022/03/07 21:43:00 deraadt Exp $
+#	$OpenBSD: Makefile,v 1.39 2023/12/15 06:03:00 jmatthew Exp $
 
 FS=		miniroot${OSrev}.img
 FSSIZE=		11392
-FSDISKTYPE=	mini34
+EFICDBOOT=	eficdboot
+EFICDBOOTSIZE=	350K
 CDROM=		cd${OSrev}.iso
 MOUNT_POINT=	/mnt
 MTREE=		${UTILS}/mtree.conf
@@ -21,7 +22,7 @@ ${FS}: bsd.gz
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
 	vnconfig -v ${FS} > vnd
 	fdisk -yi -l ${FSSIZE} -b 960 -f ${DESTDIR}/usr/mdec/mbr `cat vnd`
-	disklabel -wAT ${.CURDIR}/template `cat vnd`
+	echo '/ *' | disklabel -wAT- `cat vnd`
 	newfs -t msdos /dev/r`cat vnd`i
 	mount ${MOUNT_ARGS_msdos} /dev/`cat vnd`i ${MOUNT_POINT}
 	mkdir -p ${MOUNT_POINT}/efi/boot
@@ -38,7 +39,14 @@ ${FS}: bsd.gz
 	vnconfig -u `cat vnd`
 	rm -f vnd
 
-${CDROM}: bsd.rd
+${EFICDBOOT}: ${EFIBOOT}
+	rm -rf ${.OBJDIR}/eficdboot-dir
+	mkdir -p ${.OBJDIR}/eficdboot-dir/efi/boot
+	cp ${EFIBOOT} ${.OBJDIR}/eficdboot-dir/efi/boot
+	makefs -t msdos -o create_size=${EFICDBOOTSIZE} ${EFICDBOOT} \
+	    ${.OBJDIR}/eficdboot-dir
+
+${CDROM}: bsd.rd ${EFICDBOOT}
 	rm -rf ${.OBJDIR}/cd-dir
 	mkdir -p ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
 	mkdir -p ${.OBJDIR}/cd-dir/etc
@@ -46,12 +54,14 @@ ${CDROM}: bsd.rd
 	cp ${.OBJDIR}/bsd.rd ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
 	cp ${DESTDIR}/usr/mdec/cdbr ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
 	cp ${DESTDIR}/usr/mdec/cdboot ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}/cdboot
+	cp ${.OBJDIR}/${EFICDBOOT} ${.OBJDIR}/cd-dir/${OSREV}/${MACHINE}
 	mkhybrid -a -R -T -L -l -d -D -N -o ${.OBJDIR}/${CDROM} \
 	    -A "OpenBSD ${OSREV} ${MACHINE} bootonly CD" \
 	    -P "Copyright (c) `date +%Y` Theo de Raadt, The OpenBSD project" \
 	    -p "Theo de Raadt <deraadt@openbsd.org>" \
 	    -V "OpenBSD/${MACHINE}   ${OSREV} boot-only CD" \
 	    -b ${OSREV}/${MACHINE}/cdbr -c ${OSREV}/${MACHINE}/boot.catalog \
+	    -e ${OSREV}/${MACHINE}/${EFICDBOOT} \
 	    ${.OBJDIR}/cd-dir
 
 MRDISKTYPE=	rdrootb
@@ -63,7 +73,7 @@ bsd.gz: bsd.rd
 	    bsd.rd bsd.strip
 	gzip -9cn bsd.strip > bsd.gz
 
-bsd.rd: mr.fs bsd
+bsd.rd: mr.fs
 	cp bsd bsd.rd
 	rdsetroot bsd.rd mr.fs
 
@@ -72,7 +82,7 @@ bsd:
 	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && exec ${MAKE} ${MFLAGS}'
 	cp -p ${.CURDIR}/../../../sys/arch/${MACHINE}/compile/${RAMDISK}/obj/bsd bsd
 
-mr.fs: instbin
+mr.fs: instbin bsd
 	rm -rf $@.d
 	install -d -o root -g wheel $@.d
 	mtree -def ${MTREE} -p $@.d -u
@@ -109,7 +119,7 @@ clean cleandir:
 	    *.o *.lo *.c bsd bsd.rd bsd.gz bsd.strip floppy*.img \
 	    lib*.a lib*.olist instbin.map boot instbin.conf ${FS}
 	rm -rf mr.fs.d
-	rm -f ${CDROM}
-	rm -rf cd-dir
+	rm -f ${CDROM} ${EFICDBOOT}
+	rm -rf cd-dir eficdboot-dir
 
 .include <bsd.obj.mk>

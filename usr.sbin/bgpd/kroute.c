@@ -1,4 +1,4 @@
-/*	$OpenBSD: kroute.c,v 1.302 2022/11/09 14:26:14 claudio Exp $ */
+/*	$OpenBSD: kroute.c,v 1.309 2024/01/09 13:41:32 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -168,8 +168,6 @@ struct kroute6	*kroute6_match(struct ktable *, struct bgpd_addr *, int);
 void		 kroute_detach_nexthop(struct ktable *, struct knexthop *);
 
 uint8_t		prefixlen_classful(in_addr_t);
-uint8_t		mask2prefixlen(in_addr_t);
-uint8_t		mask2prefixlen6(struct sockaddr_in6 *);
 uint64_t	ift2ifm(uint8_t);
 const char	*get_media_descr(uint64_t);
 const char	*get_linkstate(uint8_t, int);
@@ -885,95 +883,93 @@ kr_show_route(struct imsg *imsg)
 	struct kroute		*kr, *kn;
 	struct kroute6		*kr6, *kn6;
 	struct kroute_full	*kf;
-	struct bgpd_addr	*addr;
-	int			 flags;
-	sa_family_t		 af;
+	struct bgpd_addr	 addr;
+	struct ctl_kroute_req	 req;
 	struct ctl_show_nexthop	 snh;
 	struct knexthop		*h;
 	struct kif		*kif;
+	uint32_t		 tableid;
+	pid_t			 pid;
 	u_int			 i;
 	u_short			 ifindex = 0;
 
-	switch (imsg->hdr.type) {
+	tableid = imsg_get_id(imsg);
+	pid = imsg_get_pid(imsg);
+	switch (imsg_get_type(imsg)) {
 	case IMSG_CTL_KROUTE:
-		if (imsg->hdr.len != IMSG_HEADER_SIZE + sizeof(flags) +
-		    sizeof(af)) {
+		if (imsg_get_data(imsg, &req, sizeof(req)) == -1) {
 			log_warnx("%s: wrong imsg len", __func__);
 			break;
 		}
-		kt = ktable_get(imsg->hdr.peerid);
+		kt = ktable_get(tableid);
 		if (kt == NULL) {
 			log_warnx("%s: table %u does not exist", __func__,
-			    imsg->hdr.peerid);
+			    tableid);
 			break;
 		}
-		memcpy(&flags, imsg->data, sizeof(flags));
-		memcpy(&af, (char *)imsg->data + sizeof(flags), sizeof(af));
-		if (!af || af == AF_INET)
+		if (!req.af || req.af == AF_INET)
 			RB_FOREACH(kr, kroute_tree, &kt->krt) {
-				if (flags && (kr->flags & flags) == 0)
+				if (req.flags && (kr->flags & req.flags) == 0)
 					continue;
 				kn = kr;
 				do {
 					kf = kr_tofull(kn);
 					kf->priority = kr_priority(kf);
 					send_imsg_session(IMSG_CTL_KROUTE,
-					    imsg->hdr.pid, kf, sizeof(*kf));
+					    pid, kf, sizeof(*kf));
 				} while ((kn = kn->next) != NULL);
 			}
-		if (!af || af == AF_INET6)
+		if (!req.af || req.af == AF_INET6)
 			RB_FOREACH(kr6, kroute6_tree, &kt->krt6) {
-				if (flags && (kr6->flags & flags) == 0)
+				if (req.flags && (kr6->flags & req.flags) == 0)
 					continue;
 				kn6 = kr6;
 				do {
 					kf = kr6_tofull(kn6);
 					kf->priority = kr_priority(kf);
 					send_imsg_session(IMSG_CTL_KROUTE,
-					    imsg->hdr.pid, kf, sizeof(*kf));
+					    pid, kf, sizeof(*kf));
 				} while ((kn6 = kn6->next) != NULL);
 			}
 		break;
 	case IMSG_CTL_KROUTE_ADDR:
-		if (imsg->hdr.len != IMSG_HEADER_SIZE +
-		    sizeof(struct bgpd_addr)) {
+		if (imsg_get_data(imsg, &addr, sizeof(addr)) == -1) {
 			log_warnx("%s: wrong imsg len", __func__);
 			break;
 		}
-		kt = ktable_get(imsg->hdr.peerid);
+		kt = ktable_get(tableid);
 		if (kt == NULL) {
 			log_warnx("%s: table %u does not exist", __func__,
-			    imsg->hdr.peerid);
+			    tableid);
 			break;
 		}
-		addr = imsg->data;
 		kr = NULL;
-		switch (addr->aid) {
+		switch (addr.aid) {
 		case AID_INET:
-			kr = kroute_match(kt, addr, 1);
+			kr = kroute_match(kt, &addr, 1);
 			if (kr != NULL) {
 				kf = kr_tofull(kr);
 				kf->priority = kr_priority(kf);
 				send_imsg_session(IMSG_CTL_KROUTE,
-				    imsg->hdr.pid, kf, sizeof(*kf));
+				    pid, kf, sizeof(*kf));
 			}
 			break;
 		case AID_INET6:
-			kr6 = kroute6_match(kt, addr, 1);
+			kr6 = kroute6_match(kt, &addr, 1);
 			if (kr6 != NULL) {
 				kf = kr6_tofull(kr6);
 				kf->priority = kr_priority(kf);
 				send_imsg_session(IMSG_CTL_KROUTE,
-				    imsg->hdr.pid, kf, sizeof(*kf));
+				    pid, kf, sizeof(*kf));
 			}
 			break;
 		}
 		break;
 	case IMSG_CTL_SHOW_NEXTHOP:
-		kt = ktable_get(imsg->hdr.peerid);
+		kt = ktable_get(tableid);
 		if (kt == NULL) {
 			log_warnx("%s: table %u does not exist", __func__,
-			    imsg->hdr.peerid);
+			    tableid);
 			break;
 		}
 		RB_FOREACH(h, knexthop_tree, KT2KNT(kt)) {
@@ -1002,14 +998,14 @@ kr_show_route(struct imsg *imsg)
 					    kr_show_interface(kif),
 					    sizeof(snh.iface));
 			}
-			send_imsg_session(IMSG_CTL_SHOW_NEXTHOP, imsg->hdr.pid,
+			send_imsg_session(IMSG_CTL_SHOW_NEXTHOP, pid,
 			    &snh, sizeof(snh));
 		}
 		break;
 	case IMSG_CTL_SHOW_INTERFACE:
 		RB_FOREACH(kif, kif_tree, &kit)
 			send_imsg_session(IMSG_CTL_SHOW_INTERFACE,
-			    imsg->hdr.pid, kr_show_interface(kif),
+			    pid, kr_show_interface(kif),
 			    sizeof(struct ctl_show_interface));
 		break;
 	case IMSG_CTL_SHOW_FIB_TABLES:
@@ -1027,20 +1023,20 @@ kr_show_route(struct imsg *imsg)
 			TAILQ_INIT(&ktab.krn);
 
 			send_imsg_session(IMSG_CTL_SHOW_FIB_TABLES,
-			    imsg->hdr.pid, &ktab, sizeof(ktab));
+			    pid, &ktab, sizeof(ktab));
 		}
 		break;
 	default:	/* nada */
 		break;
 	}
 
-	send_imsg_session(IMSG_CTL_END, imsg->hdr.pid, NULL, 0);
+	send_imsg_session(IMSG_CTL_END, pid, NULL, 0);
 }
 
 static void
 kr_send_dependon(struct kif *kif)
 {
-	struct session_dependon sdon = { {0} };
+	struct session_dependon sdon = { 0 };
 
 	strlcpy(sdon.ifname, kif->ifname, sizeof(sdon.ifname));
 	sdon.depend_state = kif->depend_state;
@@ -1864,7 +1860,7 @@ kroute6_remove(struct ktable *kt, struct kroute_full *kf, int any)
 	}
 
 	/* check whether a nexthop depends on this kroute */
-	if (kr->flags & F_NEXTHOP) {
+	if (krm->flags & F_NEXTHOP) {
 		RB_FOREACH(n, knexthop_tree, KT2KNT(kt)) {
 			if (n->kroute == krm)
 				knexthop_validate(kt, n);
@@ -2099,7 +2095,7 @@ kif_validate(struct kif *kif)
 }
 
 /*
- * return 1 when the interface is up and the link state is up or unknwown
+ * return 1 when the interface is up and the link state is up or unknown
  * except when this is a carp interface, then return 1 only when link state
  * is up
  */
@@ -2419,23 +2415,26 @@ prefixlen_classful(in_addr_t ina)
 		return (8);
 }
 
-uint8_t
-mask2prefixlen(in_addr_t ina)
+static uint8_t
+mask2prefixlen4(struct sockaddr_in *sa_in)
 {
+	in_addr_t ina;
+
+	ina = sa_in->sin_addr.s_addr;
 	if (ina == 0)
 		return (0);
 	else
 		return (33 - ffs(ntohl(ina)));
 }
 
-uint8_t
+static uint8_t
 mask2prefixlen6(struct sockaddr_in6 *sa_in6)
 {
 	uint8_t	*ap, *ep;
 	u_int	 l = 0;
 
 	/*
-	 * sin6_len is the size of the sockaddr so substract the offset of
+	 * sin6_len is the size of the sockaddr so subtract the offset of
 	 * the possibly truncated sin6_addr struct.
 	 */
 	ap = (uint8_t *)&sa_in6->sin6_addr;
@@ -2478,6 +2477,19 @@ mask2prefixlen6(struct sockaddr_in6 *sa_in6)
 	if (l > sizeof(struct in6_addr) * 8)
 		fatalx("%s: prefixlen %d out of bound", __func__, l);
 	return (l);
+}
+
+uint8_t
+mask2prefixlen(sa_family_t af, struct sockaddr *mask)
+{
+	switch (af) {
+	case AF_INET:
+		return mask2prefixlen4((struct sockaddr_in *)mask);
+	case AF_INET6:
+		return mask2prefixlen6((struct sockaddr_in6 *)mask);
+	default:
+		fatalx("%s: unsupported af", __func__);
+	}
 }
 
 const struct if_status_description
@@ -3078,23 +3090,20 @@ dispatch_rtmsg_addr(struct rt_msghdr *rtm, struct kroute_full *kf)
 	switch (sa->sa_family) {
 	case AF_INET:
 		sa_in = (struct sockaddr_in *)rti_info[RTAX_NETMASK];
-		if (sa_in != NULL) {
-			if (sa_in->sin_len != 0)
-				kf->prefixlen =
-				    mask2prefixlen(sa_in->sin_addr.s_addr);
-		} else if (rtm->rtm_flags & RTF_HOST)
+		if (rtm->rtm_flags & RTF_HOST)
 			kf->prefixlen = 32;
+		else if (sa_in != NULL)
+			kf->prefixlen = mask2prefixlen4(sa_in);
 		else
 			kf->prefixlen =
 			    prefixlen_classful(kf->prefix.v4.s_addr);
 		break;
 	case AF_INET6:
 		sa_in6 = (struct sockaddr_in6 *)rti_info[RTAX_NETMASK];
-		if (sa_in6 != NULL) {
-			if (sa_in6->sin6_len != 0)
-				kf->prefixlen = mask2prefixlen6(sa_in6);
-		} else if (rtm->rtm_flags & RTF_HOST)
+		if (rtm->rtm_flags & RTF_HOST)
 			kf->prefixlen = 128;
+		else if (sa_in6 != NULL)
+			kf->prefixlen = mask2prefixlen6(sa_in6);
 		else
 			fatalx("in6 net addr without netmask");
 		break;

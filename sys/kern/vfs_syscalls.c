@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_syscalls.c,v 1.360 2022/08/14 01:58:28 jsg Exp $	*/
+/*	$OpenBSD: vfs_syscalls.c,v 1.365 2024/05/18 05:20:22 guenther Exp $	*/
 /*	$NetBSD: vfs_syscalls.c,v 1.71 1996/04/23 10:29:02 mycroft Exp $	*/
 
 /*
@@ -76,6 +76,7 @@ int dosymlinkat(struct proc *, const char *, int, const char *);
 int dounlinkat(struct proc *, int, const char *, int);
 int dofaccessat(struct proc *, int, const char *, int, int);
 int dofstatat(struct proc *, int, const char *, struct stat *, int);
+int dopathconfat(struct proc *, int, const char *, int, int, register_t *);
 int doreadlinkat(struct proc *, int, const char *, char *, size_t,
     register_t *);
 int dochflagsat(struct proc *, int, const char *, u_int, int);
@@ -239,11 +240,10 @@ update:
 	else if (mp->mnt_flag & MNT_RDONLY)
 		mp->mnt_flag |= MNT_WANTRDWR;
 	mp->mnt_flag &=~ (MNT_NOSUID | MNT_NOEXEC | MNT_WXALLOWED | MNT_NODEV |
-	    MNT_SYNCHRONOUS | MNT_ASYNC | MNT_SOFTDEP | MNT_NOATIME |
-	    MNT_NOPERM | MNT_FORCE);
+	    MNT_SYNCHRONOUS | MNT_ASYNC | MNT_NOATIME | MNT_NOPERM | MNT_FORCE);
 	mp->mnt_flag |= flags & (MNT_NOSUID | MNT_NOEXEC | MNT_WXALLOWED |
-	    MNT_NODEV | MNT_SYNCHRONOUS | MNT_ASYNC | MNT_SOFTDEP |
-	    MNT_NOATIME | MNT_NOPERM | MNT_FORCE);
+	    MNT_NODEV | MNT_SYNCHRONOUS | MNT_ASYNC | MNT_NOATIME | MNT_NOPERM |
+	    MNT_FORCE);
 	/*
 	 * Mount the filesystem.
 	 */
@@ -1704,7 +1704,6 @@ dolinkat(struct proc *p, int fd1, const char *path1, int fd2,
 	struct vnode *vp;
 	struct nameidata nd;
 	int error, follow;
-	int flags;
 
 	if (flag & ~AT_SYMLINK_FOLLOW)
 		return (EINVAL);
@@ -1717,12 +1716,12 @@ dolinkat(struct proc *p, int fd1, const char *path1, int fd2,
 		return (error);
 	vp = nd.ni_vp;
 
-	flags = LOCKPARENT;
 	if (vp->v_type == VDIR) {
-		flags |= STRIPSLASHES;
+		error = EPERM;
+		goto out;
 	}
 
-	NDINITAT(&nd, CREATE, flags, UIO_USERSPACE, fd2, path2, p);
+	NDINITAT(&nd, CREATE, LOCKPARENT, UIO_USERSPACE, fd2, path2, p);
 	nd.ni_pledge = PLEDGE_CPATH;
 	nd.ni_unveil = UNVEIL_CREATE;
 	if ((error = namei(&nd)) != 0)
@@ -1737,6 +1736,15 @@ dolinkat(struct proc *p, int fd1, const char *path1, int fd2,
 		error = EEXIST;
 		goto out;
 	}
+
+	/* No cross-mount links! */
+	if (nd.ni_dvp->v_mount != vp->v_mount) {
+		VOP_ABORTOP(nd.ni_dvp, &nd.ni_cnd);
+		vput(nd.ni_dvp);
+		error = EXDEV;
+		goto out;
+	}
+
 	error = VOP_LINK(nd.ni_dvp, vp, &nd.ni_cnd);
 out:
 	vrele(vp);
@@ -1932,20 +1940,6 @@ sys_lseek(struct proc *p, void *v, register_t *retval)
 	return (error);
 }
 
-#if 1
-int
-sys_pad_lseek(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_lseek_args *uap = v;
-	struct sys_lseek_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, offset) = SCARG(uap, offset);
-	SCARG(&unpad, whence) = SCARG(uap, whence);
-	return sys_lseek(p, &unpad, retval);
-}
-#endif
-
 /*
  * Check access permissions.
  */
@@ -2119,16 +2113,42 @@ sys_pathconf(struct proc *p, void *v, register_t *retval)
 		syscallarg(const char *) path;
 		syscallarg(int) name;
 	} */ *uap = v;
-	int error;
+
+	return dopathconfat(p, AT_FDCWD, SCARG(uap, path), SCARG(uap, name),
+	    0, retval);
+}
+
+int
+sys_pathconfat(struct proc *p, void *v, register_t *retval)
+{
+	struct sys_pathconfat_args /* {
+		syscallarg(int) fd;
+		syscallarg(const char *) path;
+		syscallarg(int) name;
+		syscallarg(int) flag;
+	} */ *uap = v;
+
+	return dopathconfat(p, SCARG(uap, fd), SCARG(uap, path),
+	    SCARG(uap, name), SCARG(uap, flag), retval);
+}
+
+int
+dopathconfat(struct proc *p, int fd, const char *path, int name, int flag,
+    register_t *retval)
+{
+	int follow, error;
 	struct nameidata nd;
 
-	NDINIT(&nd, LOOKUP, FOLLOW | LOCKLEAF, UIO_USERSPACE,
-	    SCARG(uap, path), p);
+	if (flag & ~AT_SYMLINK_NOFOLLOW)
+		return EINVAL;
+
+	follow = (flag & AT_SYMLINK_NOFOLLOW) ? NOFOLLOW : FOLLOW;
+	NDINITAT(&nd, LOOKUP, follow | LOCKLEAF, UIO_USERSPACE, fd, path, p);
 	nd.ni_pledge = PLEDGE_RPATH;
 	nd.ni_unveil = UNVEIL_READ;
 	if ((error = namei(&nd)) != 0)
 		return (error);
-	error = VOP_PATHCONF(nd.ni_vp, SCARG(uap, name), retval);
+	error = VOP_PATHCONF(nd.ni_vp, name, retval);
 	vput(nd.ni_vp);
 	return (error);
 }
@@ -2891,30 +2911,6 @@ bad:
 	return (error);
 }
 
-#if 1
-int
-sys_pad_truncate(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_truncate_args *uap = v;
-	struct sys_truncate_args unpad;
-
-	SCARG(&unpad, path) = SCARG(uap, path);
-	SCARG(&unpad, length) = SCARG(uap, length);
-	return sys_truncate(p, &unpad, retval);
-}
-
-int
-sys_pad_ftruncate(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_ftruncate_args *uap = v;
-	struct sys_ftruncate_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, length) = SCARG(uap, length);
-	return sys_ftruncate(p, &unpad, retval);
-}
-#endif
-
 /*
  * Sync an open file.
  */
@@ -2933,10 +2929,6 @@ sys_fsync(struct proc *p, void *v, register_t *retval)
 	vp = fp->f_data;
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 	error = VOP_FSYNC(vp, fp->f_cred, MNT_WAIT, p);
-#ifdef FFS_SOFTUPDATES
-	if (error == 0 && vp->v_mount && (vp->v_mount->mnt_flag & MNT_SOFTDEP))
-		error = softdep_fsync(vp);
-#endif
 
 	VOP_UNLOCK(vp);
 	FRELE(fp, p);
@@ -3397,57 +3389,3 @@ sys_pwritev(struct proc *p, void *v, register_t *retval)
 	iovec_free(iov, iovcnt);
 	return (error);
 }
-
-#if 1
-int
-sys_pad_pread(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_pread_args *uap = v;
-	struct sys_pread_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, buf) = SCARG(uap, buf);
-	SCARG(&unpad, nbyte) = SCARG(uap, nbyte);
-	SCARG(&unpad, offset) = SCARG(uap, offset);
-	return sys_pread(p, &unpad, retval);
-}
-
-int
-sys_pad_preadv(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_preadv_args *uap = v;
-	struct sys_preadv_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, iovp) = SCARG(uap, iovp);
-	SCARG(&unpad, iovcnt) = SCARG(uap, iovcnt);
-	SCARG(&unpad, offset) = SCARG(uap, offset);
-	return sys_preadv(p, &unpad, retval);
-}
-
-int
-sys_pad_pwrite(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_pwrite_args *uap = v;
-	struct sys_pwrite_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, buf) = SCARG(uap, buf);
-	SCARG(&unpad, nbyte) = SCARG(uap, nbyte);
-	SCARG(&unpad, offset) = SCARG(uap, offset);
-	return sys_pwrite(p, &unpad, retval);
-}
-
-int
-sys_pad_pwritev(struct proc *p, void *v, register_t *retval)
-{
-	struct sys_pad_pwritev_args *uap = v;
-	struct sys_pwritev_args unpad;
-
-	SCARG(&unpad, fd) = SCARG(uap, fd);
-	SCARG(&unpad, iovp) = SCARG(uap, iovp);
-	SCARG(&unpad, iovcnt) = SCARG(uap, iovcnt);
-	SCARG(&unpad, offset) = SCARG(uap, offset);
-	return sys_pwritev(p, &unpad, retval);
-}
-#endif

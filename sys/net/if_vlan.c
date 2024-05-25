@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vlan.c,v 1.210 2022/08/10 09:01:48 mvs Exp $	*/
+/*	$OpenBSD: if_vlan.c,v 1.218 2023/12/23 10:52:54 bluhm Exp $	*/
 
 /*
  * Copyright 1998 Massachusetts Institute of Technology
@@ -270,7 +270,7 @@ vlan_transmit(struct vlan_softc *sc, struct ifnet *ifp0, struct mbuf *m)
 	 */
 	if ((ifp0->if_capabilities & IFCAP_VLAN_HWTAGGING) &&
 	    (sc->sc_type == ETHERTYPE_VLAN)) {
-		m->m_pkthdr.ether_vtag = sc->sc_tag +
+		m->m_pkthdr.ether_vtag = sc->sc_tag |
 		    (prio << EVL_PRIO_BITS);
 		m->m_flags |= M_VLANTAG;
 	} else {
@@ -536,7 +536,8 @@ vlan_up(struct vlan_softc *sc)
 		 * Chips that can do hardware-assisted VLAN encapsulation, can
 		 * calculate the correct checksum for VLAN tagged packets.
 		 */
-		ifp->if_capabilities = ifp0->if_capabilities & IFCAP_CSUM_MASK;
+		ifp->if_capabilities = ifp0->if_capabilities &
+		    (IFCAP_CSUM_MASK | IFCAP_TSOv4 | IFCAP_TSOv6);
 	}
 
 	/* commit the sc */
@@ -935,6 +936,9 @@ vlan_set_parent(struct vlan_softc *sc, const char *parent)
 	error = vlan_inuse(sc->sc_type, ifp0->if_index, sc->sc_tag);
 	if (error != 0)
 		goto put;
+
+	if (ether_brport_isset(ifp))
+		ifsetlro(ifp0, 0);
 
 	/* commit */
 	sc->sc_ifidx0 = ifp0->if_index;

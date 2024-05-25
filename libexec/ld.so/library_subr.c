@@ -1,4 +1,4 @@
-/*	$OpenBSD: library_subr.c,v 1.53 2022/11/07 10:35:26 deraadt Exp $ */
+/*	$OpenBSD: library_subr.c,v 1.55 2023/04/27 12:27:56 robert Exp $ */
 
 /*
  * Copyright (c) 2002 Dale Rahn

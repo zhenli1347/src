@@ -1,4 +1,4 @@
-/* $OpenBSD: status.c,v 1.236 2022/09/10 17:01:33 nicm Exp $ */
+/* $OpenBSD: status.c,v 1.242 2024/05/15 08:39:30 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -472,17 +472,26 @@ void
 status_message_set(struct client *c, int delay, int ignore_styles,
     int ignore_keys, const char *fmt, ...)
 {
-	struct timeval	tv;
-	va_list		ap;
+	struct timeval	 tv;
+	va_list		 ap;
+	char		*s;
+
+	va_start(ap, fmt);
+	xvasprintf(&s, fmt, ap);
+	va_end(ap);
+
+	log_debug("%s: %s", __func__, s);
+
+	if (c == NULL) {
+		server_add_message("message: %s", s);
+		free(s);
+		return;
+	}
 
 	status_message_clear(c);
 	status_push_screen(c);
-
-	va_start(ap, fmt);
-	xvasprintf(&c->message_string, fmt, ap);
-	va_end(ap);
-
-	server_add_message("%s message: %s", c->name, c->message_string);
+	c->message_string = s;
+	server_add_message("%s message: %s", c->name, s);
 
 	/*
 	 * With delay -1, the display-time option is used; zero means wait for
@@ -985,8 +994,7 @@ status_prompt_paste(struct client *c)
 		if ((pb = paste_get_top(NULL)) == NULL)
 			return (0);
 		bufdata = paste_buffer_data(pb, &bufsize);
-		ud = xreallocarray(NULL, bufsize + 1, sizeof *ud);
-		udp = ud;
+		ud = udp = xreallocarray(NULL, bufsize + 1, sizeof *ud);
 		for (i = 0; i != bufsize; /* nothing */) {
 			more = utf8_open(udp, bufdata[i]);
 			if (more == UTF8_MORE) {
@@ -1007,25 +1015,24 @@ status_prompt_paste(struct client *c)
 		udp->size = 0;
 		n = udp - ud;
 	}
-	if (n == 0)
-		return (0);
-
-	c->prompt_buffer = xreallocarray(c->prompt_buffer, size + n + 1,
-	    sizeof *c->prompt_buffer);
-	if (c->prompt_index == size) {
-		memcpy(c->prompt_buffer + c->prompt_index, ud,
-		    n * sizeof *c->prompt_buffer);
-		c->prompt_index += n;
-		c->prompt_buffer[c->prompt_index].size = 0;
-	} else {
-		memmove(c->prompt_buffer + c->prompt_index + n,
-		    c->prompt_buffer + c->prompt_index,
-		    (size + 1 - c->prompt_index) * sizeof *c->prompt_buffer);
-		memcpy(c->prompt_buffer + c->prompt_index, ud,
-		    n * sizeof *c->prompt_buffer);
-		c->prompt_index += n;
+	if (n != 0) {
+		c->prompt_buffer = xreallocarray(c->prompt_buffer, size + n + 1,
+		    sizeof *c->prompt_buffer);
+		if (c->prompt_index == size) {
+			memcpy(c->prompt_buffer + c->prompt_index, ud,
+			    n * sizeof *c->prompt_buffer);
+			c->prompt_index += n;
+			c->prompt_buffer[c->prompt_index].size = 0;
+		} else {
+			memmove(c->prompt_buffer + c->prompt_index + n,
+			    c->prompt_buffer + c->prompt_index,
+			    (size + 1 - c->prompt_index) *
+			    sizeof *c->prompt_buffer);
+			memcpy(c->prompt_buffer + c->prompt_index, ud,
+			    n * sizeof *c->prompt_buffer);
+			c->prompt_index += n;
+		}
 	}
-
 	if (ud != c->prompt_saved)
 		free(ud);
 	return (1);
@@ -1471,8 +1478,6 @@ process_key:
 	return (0);
 
 append_key:
-	if (key <= 0x1f || (key >= KEYC_BASE && key < KEYC_BASE_END))
-		return (0);
 	if (key <= 0x7f)
 		utf8_set(&tmp, key);
 	else if (KEYC_IS_UNICODE(key))
@@ -1766,8 +1771,9 @@ status_prompt_complete_list_menu(struct client *c, char **list, u_int size,
 	else
 		offset = 0;
 
-	if (menu_display(menu, MENU_NOMOUSE|MENU_TAB, NULL, offset,
-	    py, c, NULL, status_prompt_menu_callback, spm) != 0) {
+	if (menu_display(menu, MENU_NOMOUSE|MENU_TAB, 0, NULL, offset, py, c,
+	    BOX_LINES_DEFAULT, NULL, NULL, NULL, NULL,
+	    status_prompt_menu_callback, spm) != 0) {
 		menu_free(menu);
 		free(spm);
 		return (0);
@@ -1831,6 +1837,7 @@ status_prompt_complete_window_menu(struct client *c, struct session *s,
 	}
 	if (size == 0) {
 		menu_free(menu);
+		free(spm);
 		return (NULL);
 	}
 	if (size == 1) {
@@ -1841,6 +1848,7 @@ status_prompt_complete_window_menu(struct client *c, struct session *s,
 		} else
 			tmp = list[0];
 		free(list);
+		free(spm);
 		return (tmp);
 	}
 	if (height > size)
@@ -1859,8 +1867,9 @@ status_prompt_complete_window_menu(struct client *c, struct session *s,
 	else
 		offset = 0;
 
-	if (menu_display(menu, MENU_NOMOUSE|MENU_TAB, NULL, offset,
-	    py, c, NULL, status_prompt_menu_callback, spm) != 0) {
+	if (menu_display(menu, MENU_NOMOUSE|MENU_TAB, 0, NULL, offset, py, c,
+	    BOX_LINES_DEFAULT, NULL, NULL, NULL, NULL,
+	    status_prompt_menu_callback, spm) != 0) {
 		menu_free(menu);
 		free(spm);
 		return (NULL);

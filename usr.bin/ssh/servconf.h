@@ -1,4 +1,4 @@
-/* $OpenBSD: servconf.h,v 1.157 2022/09/17 10:34:29 djm Exp $ */
+/* $OpenBSD: servconf.h,v 1.163 2024/05/23 23:47:16 jsg Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -20,19 +20,12 @@
 
 #define MAX_PORTS		256	/* Max # ports. */
 
-#define MAX_SUBSYSTEMS		256	/* Max # subsystems. */
-
 /* permit_root_login */
 #define	PERMIT_NOT_SET		-1
 #define	PERMIT_NO		0
 #define	PERMIT_FORCED_ONLY	1
 #define	PERMIT_NO_PASSWD	2
 #define	PERMIT_YES		3
-
-/* use_privsep */
-#define PRIVSEP_OFF		0
-#define PRIVSEP_ON		1
-#define PRIVSEP_NOSANDBOX	2
 
 /* PermitOpen */
 #define PERMITOPEN_ANY		0
@@ -54,7 +47,6 @@
 #define PUBKEYAUTH_VERIFY_REQUIRED	(1<<1)
 
 struct ssh;
-struct fwd_perm_list;
 
 /*
  * Used to store addresses from ListenAddr directives. These may be
@@ -165,9 +157,9 @@ typedef struct {
 	char   **deny_groups;
 
 	u_int num_subsystems;
-	char   *subsystem_name[MAX_SUBSYSTEMS];
-	char   *subsystem_command[MAX_SUBSYSTEMS];
-	char   *subsystem_args[MAX_SUBSYSTEMS];
+	char   **subsystem_name;
+	char   **subsystem_command;
+	char   **subsystem_args;
 
 	u_int num_accept_env;
 	char   **accept_env;
@@ -228,6 +220,13 @@ typedef struct {
 	u_int64_t timing_secret;
 	char   *sk_provider;
 	int	required_rsa_size;	/* minimum size of RSA keys */
+
+	char	**channel_timeouts;	/* inactivity timeout by channel type */
+	u_int	num_channel_timeouts;
+
+	int	unused_connection_timeout;
+
+	char   *sshd_session_path;
 }       ServerOptions;
 
 /* Information about the incoming connection as used by Match */
@@ -285,22 +284,24 @@ TAILQ_HEAD(include_list, include_item);
 		M_CP_STRARRAYOPT(auth_methods, num_auth_methods); \
 		M_CP_STRARRAYOPT(permitted_opens, num_permitted_opens); \
 		M_CP_STRARRAYOPT(permitted_listens, num_permitted_listens); \
+		M_CP_STRARRAYOPT(channel_timeouts, num_channel_timeouts); \
 		M_CP_STRARRAYOPT(log_verbose, num_log_verbose); \
+		M_CP_STRARRAYOPT(subsystem_name, num_subsystems); \
+		M_CP_STRARRAYOPT(subsystem_command, num_subsystems); \
+		M_CP_STRARRAYOPT(subsystem_args, num_subsystems); \
 	} while (0)
 
-struct connection_info *get_connection_info(struct ssh *, int, int);
 void	 initialize_server_options(ServerOptions *);
 void	 fill_default_server_options(ServerOptions *);
 int	 process_server_config_line(ServerOptions *, char *, const char *, int,
 	    int *, struct connection_info *, struct include_list *includes);
-void	 process_permitopen(struct ssh *ssh, ServerOptions *options);
 void	 load_server_config(const char *, struct sshbuf *);
 void	 parse_server_config(ServerOptions *, const char *, struct sshbuf *,
 	    struct include_list *includes, struct connection_info *, int);
 void	 parse_server_match_config(ServerOptions *,
 	    struct include_list *includes, struct connection_info *);
 int	 parse_server_match_testspec(struct connection_info *, char *);
-int	 server_match_spec_complete(struct connection_info *);
+void	 servconf_merge_subsystems(ServerOptions *, ServerOptions *);
 void	 copy_set_server_options(ServerOptions *, ServerOptions *, int);
 void	 dump_config(ServerOptions *);
 char	*derelativise_path(const char *);

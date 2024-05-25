@@ -1,4 +1,4 @@
-/* $OpenBSD: screen.c,v 1.81 2022/06/30 09:55:53 nicm Exp $ */
+/* $OpenBSD: screen.c,v 1.85 2024/03/21 11:26:28 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -83,6 +83,7 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 
 	s->cstyle = SCREEN_CURSOR_DEFAULT;
 	s->default_cstyle = SCREEN_CURSOR_DEFAULT;
+	s->mode = MODE_CURSOR;
 	s->default_mode = 0;
 	s->ccolour = -1;
 	s->default_ccolour = -1;
@@ -383,7 +384,7 @@ screen_resize_y(struct screen *s, u_int sy, int eat_empty, u_int *cy)
 
 		/*
 		 * Try to pull as much as possible out of scrolled history, if
-		 * is is enabled.
+		 * it is enabled.
 		 */
 		available = gd->hscrolled;
 		if (gd->flags & GRID_HISTORY && available > 0) {
@@ -626,7 +627,7 @@ screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 	 * before copying back.
 	 */
 	if (s->saved_grid != NULL)
-		screen_resize(s, s->saved_grid->sx, s->saved_grid->sy, 1);
+		screen_resize(s, s->saved_grid->sx, s->saved_grid->sy, 0);
 
 	/*
 	 * Restore the cursor position and cell. This happens even if not
@@ -700,9 +701,9 @@ screen_mode_to_string(int mode)
 	if (mode & MODE_CURSOR_VERY_VISIBLE)
 		strlcat(tmp, "CURSOR_VERY_VISIBLE,", sizeof tmp);
 	if (mode & MODE_MOUSE_UTF8)
-		strlcat(tmp, "UTF8,", sizeof tmp);
+		strlcat(tmp, "MOUSE_UTF8,", sizeof tmp);
 	if (mode & MODE_MOUSE_SGR)
-		strlcat(tmp, "SGR,", sizeof tmp);
+		strlcat(tmp, "MOUSE_SGR,", sizeof tmp);
 	if (mode & MODE_BRACKETPASTE)
 		strlcat(tmp, "BRACKETPASTE,", sizeof tmp);
 	if (mode & MODE_FOCUSON)

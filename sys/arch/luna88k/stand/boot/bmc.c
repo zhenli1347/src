@@ -1,4 +1,4 @@
-/*	$OpenBSD: bmc.c,v 1.1 2013/10/28 22:13:12 miod Exp $	*/
+/*	$OpenBSD: bmc.c,v 1.3 2023/02/15 12:43:32 aoyama Exp $	*/
 /*	$NetBSD: bmc.c,v 1.4 2013/01/21 11:58:12 tsutsui Exp $	*/
 
 /*
@@ -110,24 +110,30 @@ bmccninit(struct consdev *cp)
 {
 	sioinit();
 	bmdinit();
+	draw_logo();
 }
 
 int
 bmccngetc(dev_t dev)
 {
-	int c;
-	int unit = 1;
+	int c, unit = 1, poll = (dev & 0x80) != 0;
 
-	_siointr();
-	if (RBUF_EMPTY(unit))
-		return 0;
+	siointr(unit);
+
+	if (poll) {
+		if (RBUF_EMPTY(unit))
+			return 0;
+		PEEK_RBUF(unit, c);
+		return c;
+	}
+
+	while (RBUF_EMPTY(unit)) {
+		DELAY(1);
+		siointr(unit);
+	}
 
 	POP_RBUF(unit, c);
-
-	return(c);
-/*
-	return(siocngetc(dev));
- */
+	return c;
 }
 
 void

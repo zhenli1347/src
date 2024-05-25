@@ -1,4 +1,4 @@
-#	$OpenBSD: RAMDISK,v 1.201 2021/02/16 00:03:54 deraadt Exp $
+#	$OpenBSD: RAMDISK,v 1.203 2023/08/15 14:24:53 jsg Exp $
 
 machine		i386
 maxusers	4
@@ -15,7 +15,6 @@ option		SCSITERSE
 
 option		FFS
 option		FFS2
-option		MSDOSFS
 
 config		bsd root on rd0a swap on rd0b and wd0b and sd0b
 
@@ -81,8 +80,8 @@ wskbd*		at pckbd? mux 1
 vga0		at isa?
 vga*		at pci?
 pcdisplay0	at isa?			# CGA, MDA, EGA, HGA
-wsdisplay*	at vga?
-wsdisplay*	at pcdisplay?
+wsdisplay0	at vga? console 1
+wsdisplay0	at pcdisplay? console 1
 
 com0		at isa? port 0x3f8 irq 4	# standard PC serial ports
 com1		at isa? port 0x2f8 irq 3

@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$OpenBSD: network_statement.sh,v 1.7 2022/03/04 11:01:15 claudio Exp $
+#	$OpenBSD: network_statement.sh,v 1.9 2024/01/28 12:36:21 anton Exp $
 
 set -e
 
@@ -34,7 +34,6 @@ error_notify() {
 	route -qn -T ${RDOMAIN2} flush || true
 	ifconfig lo${RDOMAIN1} destroy || true
 	ifconfig lo${RDOMAIN2} destroy || true
-	rm -f ${TMP}
 	if [ $1 -ne 0 ]; then
 		echo FAILED
 		exit 1
@@ -43,27 +42,14 @@ error_notify() {
 	fi
 }
 
-wait_until() {
-	local _i=0
-
-	cat >"$TMP"
-	while [ "$_i" -lt 8 ]; do
-		sh -x "$TMP" && return 0
-		sleep 0.5
-		_i="$((_i + 1))"
-	done
-	echo timeout
-	return 1
-}
-
 if [ "$(id -u)" -ne 0 ]; then 
 	echo need root privileges >&2
 	exit 1
 fi
 
-trap 'error_notify $?' EXIT
+. "${BGPDCONFIGDIR}/util.sh"
 
-TMP="$(mktemp -t bgpd.XXXXXX)"
+trap 'error_notify $?' EXIT
 
 echo check if rdomains are busy
 for n in ${RDOMAINS}; do
@@ -100,9 +86,11 @@ route -T ${RDOMAIN2} add -priority 55 ${PAIR2PRIORITY} \
 route -T ${RDOMAIN2} exec ${BGPD} \
 	-v -f ${BGPDCONFIGDIR}/bgpd.network_statement.rdomain2.conf
 
-wait_until <<EOF
-route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | grep -q ${PAIR2STATIC}
-EOF
+sleep 1
+route -T ${RDOMAIN1} exec bgpctl nei RDOMAIN2 up
+sleep 1
+
+wait_until "route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | grep -q ${PAIR2STATIC}"
 
 echo test 1
 route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | \
@@ -124,9 +112,7 @@ route -T ${RDOMAIN2} delete -label PAIR2RTABLE ${PAIR2RTABLE} \
 route -T ${RDOMAIN2} delete -priority 55 ${PAIR2PRIORITY} \
 	${PAIR1IP}
 
-wait_until <<EOF
-route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | ! grep -q ${PAIR2STATIC}
-EOF
+wait_until "route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | ! grep -q ${PAIR2STATIC}"
 
 echo test 2
 route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | \
@@ -138,8 +124,6 @@ route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2RTABLE} | \
 route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2PRIORITY} | \
 	! grep ${PAIR2PRIORITY}
 
-sleep 1
-
 echo add routes
 route -T ${RDOMAIN2} add ${PAIR2STATIC} ${PAIR1IP}
 ifconfig ${PAIR2} alias ${PAIR2CONNIP}/${PAIR2CONNPREF}
@@ -148,9 +132,7 @@ route -T ${RDOMAIN2} add -label PAIR2RTABLE ${PAIR2RTABLE} \
 route -T ${RDOMAIN2} add -priority 55 ${PAIR2PRIORITY} \
 	${PAIR1IP}
 
-wait_until <<EOF
-route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | grep -q ${PAIR2STATIC}
-EOF
+wait_until "route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | grep -q ${PAIR2STATIC}"
 
 echo test 3
 route -T ${RDOMAIN1} exec bgpctl sh rib ${PAIR2STATIC} | \

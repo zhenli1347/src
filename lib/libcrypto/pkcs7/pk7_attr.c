@@ -1,4 +1,4 @@
-/* $OpenBSD: pk7_attr.c,v 1.13 2022/11/12 12:11:14 beck Exp $ */
+/* $OpenBSD: pk7_attr.c,v 1.15 2024/02/19 15:37:44 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 2001.
  */
@@ -57,14 +57,12 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <openssl/bio.h>
+
 #include <openssl/asn1.h>
-#include <openssl/asn1t.h>
-#include <openssl/pem.h>
+#include <openssl/err.h>
+#include <openssl/objects.h>
 #include <openssl/pkcs7.h>
 #include <openssl/x509.h>
-#include <openssl/err.h>
 
 int
 PKCS7_add_attrib_smimecap(PKCS7_SIGNER_INFO *si, STACK_OF(X509_ALGOR) *cap)
@@ -79,7 +77,7 @@ PKCS7_add_attrib_smimecap(PKCS7_SIGNER_INFO *si, STACK_OF(X509_ALGOR) *cap)
 	return PKCS7_add_signed_attribute(si, NID_SMIMECapabilities,
 	    V_ASN1_SEQUENCE, seq);
 }
-LCRYPTO_ALIAS(PKCS7_add_attrib_smimecap)
+LCRYPTO_ALIAS(PKCS7_add_attrib_smimecap);
 
 STACK_OF(X509_ALGOR) *
 PKCS7_get_smimecap(PKCS7_SIGNER_INFO *si)
@@ -95,7 +93,7 @@ PKCS7_get_smimecap(PKCS7_SIGNER_INFO *si)
 	ASN1_item_d2i(NULL, &p, cap->value.sequence->length,
 	    &X509_ALGORS_it);
 }
-LCRYPTO_ALIAS(PKCS7_get_smimecap)
+LCRYPTO_ALIAS(PKCS7_get_smimecap);
 
 /* Basic smime-capabilities OID and optional integer arg */
 int
@@ -132,7 +130,7 @@ err:
 	X509_ALGOR_free(alg);
 	return 0;
 }
-LCRYPTO_ALIAS(PKCS7_simple_smimecap)
+LCRYPTO_ALIAS(PKCS7_simple_smimecap);
 
 int
 PKCS7_add_attrib_content_type(PKCS7_SIGNER_INFO *si, ASN1_OBJECT *coid)
@@ -144,7 +142,7 @@ PKCS7_add_attrib_content_type(PKCS7_SIGNER_INFO *si, ASN1_OBJECT *coid)
 	return PKCS7_add_signed_attribute(si, NID_pkcs9_contentType,
 	    V_ASN1_OBJECT, coid);
 }
-LCRYPTO_ALIAS(PKCS7_add_attrib_content_type)
+LCRYPTO_ALIAS(PKCS7_add_attrib_content_type);
 
 int
 PKCS7_add0_attrib_signing_time(PKCS7_SIGNER_INFO *si, ASN1_TIME *t)
@@ -156,7 +154,7 @@ PKCS7_add0_attrib_signing_time(PKCS7_SIGNER_INFO *si, ASN1_TIME *t)
 	return PKCS7_add_signed_attribute(si, NID_pkcs9_signingTime,
 	    V_ASN1_UTCTIME, t);
 }
-LCRYPTO_ALIAS(PKCS7_add0_attrib_signing_time)
+LCRYPTO_ALIAS(PKCS7_add0_attrib_signing_time);
 
 int
 PKCS7_add1_attrib_digest(PKCS7_SIGNER_INFO *si, const unsigned char *md,
@@ -175,4 +173,4 @@ PKCS7_add1_attrib_digest(PKCS7_SIGNER_INFO *si, const unsigned char *md,
 	}
 	return 1;
 }
-LCRYPTO_ALIAS(PKCS7_add1_attrib_digest)
+LCRYPTO_ALIAS(PKCS7_add1_attrib_digest);

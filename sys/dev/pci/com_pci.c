@@ -1,4 +1,4 @@
-/* $OpenBSD: com_pci.c,v 1.2 2022/04/06 18:59:29 naddy Exp $ */
+/* $OpenBSD: com_pci.c,v 1.4 2024/05/24 06:02:53 jsg Exp $ */
 /*
  * Copyright (c) 2020 Patrick Wildt <patrick@blueri.se>
  *
@@ -17,8 +17,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/selinfo.h>
 #include <sys/tty.h>
 
 #include <dev/pci/pcidevs.h>
@@ -27,7 +25,6 @@
 
 #include <dev/ic/comreg.h>
 #include <dev/ic/comvar.h>
-#include <dev/ic/ns16550reg.h>
 
 #define com_usr 31	/* Synopsys DesignWare UART */
 

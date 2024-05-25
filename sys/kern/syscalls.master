@@ -1,4 +1,4 @@
-;	$OpenBSD: syscalls.master,v 1.237 2022/11/30 10:20:37 mvs Exp $
+;	$OpenBSD: syscalls.master,v 1.264 2024/05/18 05:20:22 guenther Exp $
 ;	$NetBSD: syscalls.master,v 1.32 1996/04/23 10:24:21 mycroft Exp $
 
 ;	@(#)syscalls.master	8.2 (Berkeley) 1/13/94
@@ -12,8 +12,6 @@
 ;		compatibility options defined in syscalls.conf
 ;
 ; types:
-;	INDIR	included, but don't define the syscall args structure,
-;		and allow it to be "really" varargs
 ;	NOARGS	included, but don't define the syscall args structure
 ;	NODEF	included, but don't define the syscall number
 ;	NOLOCK	don't acquire the kernel lock when calling this syscall
@@ -48,7 +46,7 @@
 ; redistributions should be placed in the reserved range at the end
 ; of the current calls.
 
-0	INDIR		{ int sys_syscall(int number, ...); }
+0	UNIMPL		syscall
 1	STD		{ void sys_exit(int rval); }
 2	STD		{ int sys_fork(void); }
 3	STD NOLOCK	{ ssize_t sys_read(int fd, void *buf, size_t nbyte); }
@@ -105,7 +103,7 @@
 34	STD		{ int sys_chflags(const char *path, u_int flags); }
 35	STD		{ int sys_fchflags(int fd, u_int flags); }
 36	STD		{ void sys_sync(void); }
-37	STD		{ int sys_msyscall(void *addr, size_t len); }
+37	OBSOL		msyscall
 38	STD		{ int sys_stat(const char *path, struct stat *ub); }
 39	STD NOLOCK	{ pid_t sys_getppid(void); }
 40	STD		{ int sys_lstat(const char *path, struct stat *ub); }
@@ -165,7 +163,7 @@
 			    struct itimerval *oitv); }
 70	STD NOLOCK	{ int sys_getitimer(int which, \
 			    struct itimerval *itv); }
-71	STD		{ int sys_select(int nd, fd_set *in, fd_set *ou, \
+71	STD NOLOCK	{ int sys_select(int nd, fd_set *in, fd_set *ou, \
 			    fd_set *ex, struct timeval *tv); }
 72	STD NOLOCK	{ int sys_kevent(int fd, \
 			    const struct kevent *changelist, int nchanges, \
@@ -221,22 +219,22 @@
 101	STD NOLOCK	{ int sys_pipe2(int *fdp, int flags); }
 102	STD NOLOCK	{ int sys_dup3(int from, int to, int flags); }
 103	STD		{ int sys_sigreturn(struct sigcontext *sigcntxp); }
-104	STD		{ int sys_bind(int s, const struct sockaddr *name, \
+104	STD NOLOCK	{ int sys_bind(int s, const struct sockaddr *name, \
 			    socklen_t namelen); }
 105	STD NOLOCK	{ int sys_setsockopt(int s, int level, int name, \
 			    const void *val, socklen_t valsize); }
-106	STD		{ int sys_listen(int s, int backlog); }
+106	STD NOLOCK	{ int sys_listen(int s, int backlog); }
 107	STD		{ int sys_chflagsat(int fd, const char *path, \
 			    u_int flags, int atflags); }
 108	STD NOLOCK	{ int sys_pledge(const char *promises, \
 			    const char *execpromises); }
-109	STD		{ int sys_ppoll(struct pollfd *fds, \
+109	STD NOLOCK	{ int sys_ppoll(struct pollfd *fds, \
 			    u_int nfds, const struct timespec *ts, \
 			    const sigset_t *mask); }
-110	STD		{ int sys_pselect(int nd, fd_set *in, fd_set *ou, \
+110	STD NOLOCK	{ int sys_pselect(int nd, fd_set *in, fd_set *ou, \
 			    fd_set *ex, const struct timespec *ts, \
 			    const sigset_t *mask); }
-111	STD		{ int sys_sigsuspend(int mask); }
+111	STD NOLOCK	{ int sys_sigsuspend(int mask); }
 112	STD NOLOCK	{ int sys_sendsyslog(const char *buf, size_t nbyte, \
 			    int flags); }
 113	UNIMPL		fktrace
@@ -270,7 +268,7 @@
 133	STD NOLOCK	{ ssize_t sys_sendto(int s, const void *buf, \
 			    size_t len, int flags, const struct sockaddr *to, \
 			    socklen_t tolen); }
-134	STD		{ int sys_shutdown(int s, int how); }
+134	STD NOLOCK	{ int sys_shutdown(int s, int how); }
 135	STD NOLOCK	{ int sys_socketpair(int domain, int type, \
 			    int protocol, int *rsv); }
 136	STD		{ int sys_mkdir(const char *path, mode_t mode); }
@@ -279,12 +277,12 @@
 139	OBSOL		4.2 sigreturn
 140	STD NOLOCK	{ int sys_adjtime(const struct timeval *delta, \
 			    struct timeval *olddelta); }
-141	STD		{ int sys_getlogin_r(char *namebuf, u_int namelen); }
-142	OBSOL		ogethostid
-143	OBSOL		osethostid
+141	STD		{ int sys_getlogin_r(char *namebuf, size_t namelen); }
+142	STD		{ int sys_getthrname(pid_t tid, char *name, size_t len); }
+143	STD		{ int sys_setthrname(pid_t tid, const char *name); }
 144	OBSOL		ogetrlimit
 145	OBSOL		osetrlimit
-146	OBSOL		okillpg
+146	OBSOL		pinsyscall
 147	STD		{ int sys_setsid(void); }
 148	STD		{ int sys_quotactl(const char *path, int cmd, \
 			    int uid, char *arg); }
@@ -306,7 +304,8 @@
 #endif
 156	OBSOL		ogetdirentries
 157	OBSOL		statfs25
-158	OBSOL		fstatfs25
+158	STD		{ int sys_pinsyscalls(void *base, size_t len, \
+			    u_int *pins, int npins); }
 159	STD		{ int sys_mimmutable(void *addr, size_t len); }
 160	STD		{ int sys_waitid(int idtype, id_t id, \
 			    siginfo_t *info, int options); }
@@ -328,10 +327,8 @@
 172	STD NOLOCK	{ ssize_t sys_pwritev(int fd, \
 			    const struct iovec *iovp, int iovcnt, \
 			    off_t offset); }
-173	STD NOLOCK	{ ssize_t sys_pad_pread(int fd, void *buf, \
-			  size_t nbyte, int pad, off_t offset); }
-174	STD NOLOCK	{ ssize_t sys_pad_pwrite(int fd, const void *buf, \
-			  size_t nbyte, int pad, off_t offset); }
+173	OBSOL		pad_pread
+174	OBSOL		pad_pwrite
 175	UNIMPL		ntp_gettime
 176	UNIMPL		ntp_adjtime
 177	UNIMPL
@@ -349,7 +346,8 @@
 187	OBSOL		lfs_segwait
 188	OBSOL		stat35
 189	OBSOL		fstat35
-190	OBSOL		lstat35
+190	STD		{ long sys_pathconfat(int fd, const char *path, \
+			    int name, int flag); }
 191	STD		{ long sys_pathconf(const char *path, int name); }
 192	STD		{ long sys_fpathconf(int fd, int name); }
 193	STD		{ int sys_swapctl(int cmd, const void *arg, int misc); }
@@ -358,14 +356,11 @@
 195	STD NOLOCK	{ int sys_setrlimit(int which, \
 			    const struct rlimit *rlp); }
 196	OBSOL		ogetdirentries48
-197	STD		{ void *sys_pad_mmap(void *addr, size_t len, int prot, \
-			    int flags, int fd, long pad, off_t pos); }
-198	INDIR		{ quad_t sys___syscall(quad_t num, ...); }
-199	STD NOLOCK	{ off_t sys_pad_lseek(int fd, int pad, off_t offset, \
-			    int whence); }
-200	STD		{ int sys_pad_truncate(const char *path, int pad, \
-			    off_t length); }
-201	STD		{ int sys_pad_ftruncate(int fd, int pad, off_t length); }
+197	OBSOL		pad_mmap
+198	OBSOL		__syscall
+199	OBSOL		pad_lseek
+200	OBSOL		pad_truncate
+201	OBSOL		pad_ftruncate
 202	STD		{ int sys_sysctl(const int *name, u_int namelen, \
 			    void *old, size_t *oldlenp, void *new, \
 			    size_t newlen); }
@@ -375,7 +370,7 @@
 206	OBSOL		t32_futimes
 207	STD		{ pid_t sys_getpgid(pid_t pid); }
 208	OBSOL		nnpfspioctl
-209	STD		{ int sys_utrace(const char *label, const void *addr, \
+209	STD NOLOCK	{ int sys_utrace(const char *label, const void *addr, \
 			    size_t len); }
 ;
 ; Syscalls 210-219 were reserved for dynamically loaded syscalls
@@ -445,10 +440,10 @@
 247	UNIMPL
 248	UNIMPL
 249	UNIMPL
-250	STD		{ int sys_minherit(void *addr, size_t len, \
+250	STD NOLOCK	{ int sys_minherit(void *addr, size_t len, \
 			    int inherit); }
 251	OBSOL		rfork
-252	STD		{ int sys_poll(struct pollfd *fds, \
+252	STD NOLOCK	{ int sys_poll(struct pollfd *fds, \
 			    u_int nfds, int timeout); }
 253	STD NOLOCK	{ int sys_issetugid(void); }
 254	STD		{ int sys_lchown(const char *path, uid_t uid, gid_t gid); }
@@ -464,14 +459,10 @@
 264	STD		{ int sys_fhopen(const fhandle_t *fhp, int flags); }
 265	UNIMPL
 266	UNIMPL
-267	STD NOLOCK	{ ssize_t sys_pad_preadv(int fd, \
-			  const struct iovec *iovp, int iovcnt, \
-			  int pad, off_t offset); }
-268	STD NOLOCK	{ ssize_t sys_pad_pwritev(int fd, \
-			  const struct iovec *iovp, int iovcnt, \
-			  int pad, off_t offset); }
+267	OBSOL		pad_preadv
+268	OBSOL		pad_pwritev
 269	STD NOLOCK	{ int sys_kqueue(void); }
-270	OBSOL		t32_kevent
+270	STD NOLOCK	{ int sys_kqueue1(int flags); }
 271	STD		{ int sys_mlockall(int flags); }
 272	STD		{ int sys_munlockall(void); }
 273	UNIMPL		sys_getpeereid
@@ -491,9 +482,7 @@
 284	STD		{ int sys_setresgid(gid_t rgid, gid_t egid, \
 			    gid_t sgid); }
 285	OBSOL		sys_omquery
-286	STD		{ void *sys_pad_mquery(void *addr, size_t len, \
-			    int prot, int flags, int fd, long pad, \
-			    off_t pos); }
+286	OBSOL		pad_mquery
 287	STD NOLOCK	{ int sys_closefrom(int fd); }
 288	STD		{ int sys_sigaltstack(const struct sigaltstack *nss, \
 			    struct sigaltstack *oss); }
@@ -537,7 +526,7 @@
 301	STD NOLOCK	{ int sys___thrwakeup(const volatile void *ident, \
 			    int n); }
 302	STD		{ void sys___threxit(pid_t *notdead); }
-303	STD		{ int sys___thrsigdivert(sigset_t sigmask, \
+303	STD NOLOCK	{ int sys___thrsigdivert(sigset_t sigmask, \
 			    siginfo_t *info, const struct timespec *timeout); }
 304	STD		{ int sys___getcwd(char *buf, size_t len); }
 305	STD NOLOCK	{ int sys_adjfreq(const int64_t *freq, \

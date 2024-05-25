@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip.c,v 1.27 2022/11/29 20:41:32 job Exp $ */
+/*	$OpenBSD: ip.c,v 1.33 2024/03/19 05:04:13 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -72,7 +72,7 @@ ip_addr_afi_parse(const char *fn, const ASN1_OCTET_STRING *p, enum afi *afi)
  * specified in the "ips" array.
  * This means that the IP prefix must be strictly within the ranges or
  * singletons given in the array.
- * Return 0 if we're inheriting from the parent, >0 if we're covered,
+ * Return 0 if we're inheriting from the issuer, >0 if we're covered,
  * or <0 if we're not covered.
  */
 int
@@ -103,11 +103,11 @@ ip_addr_check_covered(enum afi afi,
  */
 int
 ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
-    const struct cert_ip *ips, size_t ipsz)
+    const struct cert_ip *ips, size_t ipsz, int quiet)
 {
 	size_t	 i, sz = ip->afi == AFI_IPV4 ? 4 : 16;
 	int	 inherit_v4 = 0, inherit_v6 = 0;
-	int	 has_v4 = 0, has_v6 = 0, socktype;
+	int	 has_v4 = 0, has_v6 = 0;
 
 	/*
 	 * FIXME: cache this by having a flag on the cert_ip, else we're
@@ -135,39 +135,28 @@ ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
 	     ip->type == CERT_IP_INHERIT) ||
 	    (has_v6 && ip->afi == AFI_IPV6 &&
 	     ip->type == CERT_IP_INHERIT)) {
-		warnx("%s: RFC 3779 section 2.2.3.5: "
-		    "cannot have multiple inheritance or inheritance and "
-		    "addresses of the same class", fn);
+		if (!quiet) {
+			warnx("%s: RFC 3779 section 2.2.3.5: "
+			    "cannot have multiple inheritance or inheritance "
+			    "and addresses of the same class", fn);
+		}
 		return 0;
 	}
 
 	/* Check our ranges. */
 
 	for (i = 0; i < ipsz; i++) {
-		char	 buf[64];
-
 		if (ips[i].afi != ip->afi)
 			continue;
 		if (memcmp(ips[i].max, ip->min, sz) <= 0 ||
 		    memcmp(ips[i].min, ip->max, sz) >= 0)
 			continue;
-		socktype = (ips[i].afi == AFI_IPV4) ? AF_INET : AF_INET6,
-		    warnx("%s: RFC 3779 section 2.2.3.5: "
-		    "cannot have overlapping IP addresses", fn);
-		ip_addr_print(&ip->ip, ip->afi, buf, sizeof(buf));
-		warnx("%s: certificate IP: %s", fn, buf);
-		if (inet_ntop(socktype, ip->min, buf, sizeof(buf)) == NULL)
-			err(1, "inet_ntop");
-		warnx("%s: certificate IP minimum: %s", fn, buf);
-		if (inet_ntop(socktype, ip->max, buf, sizeof(buf)) == NULL)
-			err(1, "inet_ntop");
-		warnx("%s: certificate IP maximum: %s", fn, buf);
-		if (inet_ntop(socktype, ips[i].min, buf, sizeof(buf)) == NULL)
-			err(1, "inet_ntop");
-		warnx("%s: offending IP minimum: %s", fn, buf);
-		if (inet_ntop(socktype, ips[i].max, buf, sizeof(buf)) == NULL)
-			err(1, "inet_ntop");
-		warnx("%s: offending IP maximum: %s", fn, buf);
+		if (!quiet) {
+			warnx("%s: RFC 3779 section 2.2.3.5: "
+			    "cannot have overlapping IP addresses", fn);
+			ip_warn(fn, "certificate IP", ip);
+			ip_warn(fn, "offending IP", &ips[i]);
+		}
 		return 0;
 	}
 
@@ -254,6 +243,47 @@ ip_addr_print(const struct ip_addr *addr,
 }
 
 /*
+ * Convert a ip_addr into a NUL-terminated range notation string.
+ * The size of the buffer must be at least 95 (inclusive).
+ */
+static void
+ip_addr_range_print(const struct ip_addr_range *range,
+    enum afi afi, char *buf, size_t bufsz)
+{
+	struct cert_ip ip;
+	char min[INET6_ADDRSTRLEN], max[INET6_ADDRSTRLEN];
+	int ret, af;
+
+	switch (afi) {
+	case AFI_IPV4:
+		af = AF_INET;
+		break;
+	case AFI_IPV6:
+		af = AF_INET6;
+		break;
+	default:
+		errx(1, "unsupported address family identifier");
+	}
+
+	memset(&ip, 0, sizeof(ip));
+
+	ip.afi = afi;
+	ip.type = CERT_IP_RANGE;
+	ip.range = *range;
+	if (!ip_cert_compose_ranges(&ip))
+		errx(1, "failed to compose ranges");
+
+	if (inet_ntop(af, ip.min, min, sizeof(min)) == NULL)
+		err(1, "inet_ntop");
+	if (inet_ntop(af, ip.max, max, sizeof(max)) == NULL)
+		err(1, "inet_ntop");
+
+	ret = snprintf(buf, bufsz, "%s--%s", min, max);
+	if (ret < 0 || (size_t)ret >= bufsz)
+		err(1, "malformed IP address");
+}
+
+/*
  * Given the addresses (range or IP) in cert_ip, fill in the "min" and
  * "max" fields with the minimum and maximum possible IP addresses given
  * those ranges (or singleton prefixed range).
@@ -290,7 +320,7 @@ ip_cert_compose_ranges(struct cert_ip *p)
 		return 1;
 	}
 
-	sz = AFI_IPV4 == p->afi ? 4 : 16;
+	sz = p->afi == AFI_IPV4 ? 4 : 16;
 	return memcmp(p->min, p->max, sz) <= 0;
 }
 
@@ -309,4 +339,27 @@ ip_roa_compose_ranges(struct roa_ip *p)
 	memcpy(p->max, p->addr.addr, sz);
 	if (sz > 0 && p->addr.prefixlen % 8 != 0)
 		p->max[sz - 1] |= (1 << (8 - p->addr.prefixlen % 8)) - 1;
+}
+
+void
+ip_warn(const char *fn, const char *msg, const struct cert_ip *ip)
+{
+	char buf[128];
+
+	switch (ip->type) {
+	case CERT_IP_ADDR:
+		ip_addr_print(&ip->ip, ip->afi, buf, sizeof(buf));
+		warnx("%s: %s: %s", fn, msg, buf);
+		break;
+	case CERT_IP_RANGE:
+		ip_addr_range_print(&ip->range, ip->afi, buf, sizeof(buf));
+		warnx("%s: %s: %s", fn, msg, buf);
+		break;
+	case CERT_IP_INHERIT:
+		warnx("%s: %s: IP (inherit)", fn, msg);
+		break;
+	default:
+		warnx("%s: corrupt cert", fn);
+		break;
+	}
 }

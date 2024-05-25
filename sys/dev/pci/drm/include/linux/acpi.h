@@ -13,6 +13,7 @@
 
 #include <linux/irqdomain.h>
 #include <linux/module.h>
+#include <linux/property.h>
 
 typedef size_t acpi_size;
 typedef int acpi_status;
@@ -55,10 +56,12 @@ struct acpi_table_header;
 
 #define ACPI_SUCCESS(x) ((x) == 0)
 #define ACPI_FAILURE(x) ((x) != 0)
+#define return_ACPI_STATUS(x)	return(x)
 
 #define AE_ERROR		1
 #define AE_NOT_FOUND		2
 #define AE_BAD_PARAMETER	3
+#define AE_NOT_EXIST		4
 
 acpi_status acpi_evaluate_object(acpi_handle, const char *,
 	struct acpi_object_list *, struct acpi_buffer *);
@@ -66,6 +69,7 @@ acpi_status acpi_evaluate_object(acpi_handle, const char *,
 acpi_status acpi_get_handle(acpi_handle, const char *, acpi_handle *);
 acpi_status acpi_get_name(acpi_handle, int, struct acpi_buffer *);
 acpi_status acpi_get_table(const char *, int, struct acpi_table_header **);
+void acpi_put_table(struct acpi_table_header *);
 
 #define ACPI_FULL_PATHNAME 1
 

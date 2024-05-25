@@ -31,13 +31,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ***************************************************************************/
 
-/* $OpenBSD: if_em.c,v 1.363 2022/11/06 18:17:56 mbuhl Exp $ */
+/* $OpenBSD: if_em.c,v 1.377 2024/05/24 06:02:53 jsg Exp $ */
 /* $FreeBSD: if_em.c,v 1.46 2004/09/29 18:28:28 mlaier Exp $ */
 
 #include <dev/pci/if_em.h>
 #include <dev/pci/if_em_soc.h>
-
-#include <netinet/ip6.h>
 
 /*********************************************************************
  *  Driver version
@@ -168,6 +166,11 @@ const struct pci_matchid em_devices[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM17 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM18 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM19 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM20 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM21 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM22 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM23 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_LM24 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V2 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V4 },
@@ -186,6 +189,11 @@ const struct pci_matchid em_devices[] = {
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V17 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V18 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V19 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V20 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V21 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V22 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V23 },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_I219_V24 },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_82580_COPPER },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_82580_FIBER },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_82580_SERDES },
@@ -267,7 +275,6 @@ void em_enable_intr(struct em_softc *);
 void em_disable_intr(struct em_softc *);
 void em_free_transmit_structures(struct em_softc *);
 void em_free_receive_structures(struct em_softc *);
-void em_update_stats_counters(struct em_softc *);
 void em_disable_aspm(struct em_softc *);
 void em_txeof(struct em_queue *);
 int  em_allocate_receive_structures(struct em_softc *);
@@ -275,11 +282,14 @@ int  em_allocate_transmit_structures(struct em_softc *);
 int  em_allocate_desc_rings(struct em_softc *);
 int  em_rxfill(struct em_queue *);
 void em_rxrefill(void *);
+void em_rxrefill_locked(struct em_queue *);
 int  em_rxeof(struct em_queue *);
 void em_receive_checksum(struct em_softc *, struct em_rx_desc *,
 			 struct mbuf *);
 u_int	em_transmit_checksum_setup(struct em_queue *, struct mbuf *, u_int,
 	    u_int32_t *, u_int32_t *);
+u_int	em_tso_setup(struct em_queue *, struct mbuf *, u_int, u_int32_t *,
+	    u_int32_t *);
 u_int	em_tx_ctx_setup(struct em_queue *, struct mbuf *, u_int, u_int32_t *,
 	    u_int32_t *);
 void em_iff(struct em_softc *);
@@ -1012,7 +1022,7 @@ em_intr(void *arg)
 	if (ifp->if_flags & IFF_RUNNING) {
 		em_txeof(que);
 		if (em_rxeof(que))
-			em_rxrefill(que);
+			em_rxrefill_locked(que);
 	}
 
 	/* Link status change */
@@ -1177,7 +1187,7 @@ em_flowstatus(struct em_softc *sc)
  *
  *  This routine maps the mbufs to tx descriptors.
  *
- *  return 0 on success, positive on failure
+ *  return 0 on failure, positive on success
  **********************************************************************/
 u_int
 em_encap(struct em_queue *que, struct mbuf *m)
@@ -1225,7 +1235,15 @@ em_encap(struct em_queue *que, struct mbuf *m)
 	}
 
 	if (sc->hw.mac_type >= em_82575 && sc->hw.mac_type <= em_i210) {
-		used += em_tx_ctx_setup(que, m, head, &txd_upper, &txd_lower);
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO)) {
+			used += em_tso_setup(que, m, head, &txd_upper,
+			    &txd_lower);
+			if (!used)
+				return (used);
+		} else {
+			used += em_tx_ctx_setup(que, m, head, &txd_upper,
+			    &txd_lower);
+		}
 	} else if (sc->hw.mac_type >= em_82543) {
 		used += em_transmit_checksum_setup(que, m, head,
 		    &txd_upper, &txd_lower);
@@ -1474,7 +1492,7 @@ em_iff(struct em_softc *sc)
 			ETHER_NEXT_MULTI(step, enm);
 		}
 
-		em_mc_addr_list_update(&sc->hw, mta, ac->ac_multicnt, 0, 1);
+		em_mc_addr_list_update(&sc->hw, mta, ac->ac_multicnt, 0);
 	}
 
 	E1000_WRITE_REG(&sc->hw, RCTL, reg_rctl);
@@ -1557,6 +1575,21 @@ em_update_link_status(struct em_softc *sc)
 	if (ifp->if_link_state != link_state) {
 		ifp->if_link_state = link_state;
 		if_link_state_change(ifp);
+	}
+
+	/* Disable TSO for 10/100 speeds to avoid some hardware issues */
+	switch (sc->link_speed) {
+	case SPEED_10:
+	case SPEED_100:
+		if (sc->hw.mac_type >= em_82575 && sc->hw.mac_type <= em_i210) {
+			ifp->if_capabilities &= ~IFCAP_TSOv4;
+			ifp->if_capabilities &= ~IFCAP_TSOv6;
+		}
+		break;
+	case SPEED_1000:
+		if (sc->hw.mac_type >= em_82575 && sc->hw.mac_type <= em_i210)
+			ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
+		break;
 	}
 }
 
@@ -1963,7 +1996,7 @@ em_setup_interface(struct em_softc *sc)
 	ifp->if_watchdog = em_watchdog;
 	ifp->if_hardmtu =
 		sc->hw.max_frame_size - ETHER_HDR_LEN - ETHER_CRC_LEN;
-	ifq_set_maxlen(&ifp->if_snd, sc->sc_tx_slots - 1);
+	ifq_init_maxlen(&ifp->if_snd, sc->sc_tx_slots - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 
@@ -1977,6 +2010,7 @@ em_setup_interface(struct em_softc *sc)
 	if (sc->hw.mac_type >= em_82575 && sc->hw.mac_type <= em_i210) {
 		ifp->if_capabilities |= IFCAP_CSUM_IPv4;
 		ifp->if_capabilities |= IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
+		ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
 	}
 
 	/* 
@@ -2220,9 +2254,9 @@ em_setup_transmit_structures(struct em_softc *sc)
 
 		for (i = 0; i < sc->sc_tx_slots; i++) {
 			pkt = &que->tx.sc_tx_pkts_ring[i];
-			error = bus_dmamap_create(sc->sc_dmat, MAX_JUMBO_FRAME_SIZE,
+			error = bus_dmamap_create(sc->sc_dmat, EM_TSO_SIZE,
 			    EM_MAX_SCATTER / (sc->pcix_82544 ? 2 : 1),
-			    MAX_JUMBO_FRAME_SIZE, 0, BUS_DMA_NOWAIT, &pkt->pkt_map);
+			    EM_TSO_SEG_SIZE, 0, BUS_DMA_NOWAIT, &pkt->pkt_map);
 			if (error != 0) {
 				printf("%s: Unable to create TX DMA map\n",
 				    DEVNAME(sc));
@@ -2395,15 +2429,80 @@ em_free_transmit_structures(struct em_softc *sc)
 }
 
 u_int
+em_tso_setup(struct em_queue *que, struct mbuf *mp, u_int head,
+    u_int32_t *olinfo_status, u_int32_t *cmd_type_len)
+{
+	struct ether_extracted ext;
+	struct e1000_adv_tx_context_desc *TD;
+	uint32_t vlan_macip_lens = 0, type_tucmd_mlhl = 0, mss_l4len_idx = 0;
+
+	*olinfo_status = 0;
+	*cmd_type_len = 0;
+	TD = (struct e1000_adv_tx_context_desc *)&que->tx.sc_tx_desc_ring[head];
+
+#if NVLAN > 0
+	if (ISSET(mp->m_flags, M_VLANTAG)) {
+		uint32_t vtag = mp->m_pkthdr.ether_vtag;
+		vlan_macip_lens |= vtag << E1000_ADVTXD_VLAN_SHIFT;
+		*cmd_type_len |= E1000_ADVTXD_DCMD_VLE;
+	}
+#endif
+
+	ether_extract_headers(mp, &ext);
+	if (ext.tcp == NULL || mp->m_pkthdr.ph_mss == 0)
+		goto out;
+
+	vlan_macip_lens |= (sizeof(*ext.eh) << E1000_ADVTXD_MACLEN_SHIFT);
+
+	if (ext.ip4) {
+		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_IPV4;
+		*olinfo_status |= E1000_TXD_POPTS_IXSM << 8;
+#ifdef INET6
+	} else if (ext.ip6) {
+		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_IPV6;
+#endif
+	} else {
+		goto out;
+	}
+
+	*cmd_type_len |= E1000_ADVTXD_DTYP_DATA | E1000_ADVTXD_DCMD_IFCS;
+	*cmd_type_len |= E1000_ADVTXD_DCMD_DEXT | E1000_ADVTXD_DCMD_TSE;
+	*olinfo_status |= ext.paylen << E1000_ADVTXD_PAYLEN_SHIFT;
+	vlan_macip_lens |= ext.iphlen;
+	type_tucmd_mlhl |= E1000_ADVTXD_DCMD_DEXT | E1000_ADVTXD_DTYP_CTXT;
+
+	type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_TCP;
+	*olinfo_status |= E1000_TXD_POPTS_TXSM << 8;
+
+	mss_l4len_idx |= mp->m_pkthdr.ph_mss << E1000_ADVTXD_MSS_SHIFT;
+	mss_l4len_idx |= ext.tcphlen << E1000_ADVTXD_L4LEN_SHIFT;
+	/* 82575 needs the queue index added */
+	if (que->sc->hw.mac_type == em_82575)
+		mss_l4len_idx |= (que->me & 0xff) << 4;
+
+	htolem32(&TD->vlan_macip_lens, vlan_macip_lens);
+	htolem32(&TD->type_tucmd_mlhl, type_tucmd_mlhl);
+	htolem32(&TD->u.seqnum_seed, 0);
+	htolem32(&TD->mss_l4len_idx, mss_l4len_idx);
+
+	tcpstat_add(tcps_outpkttso, (ext.paylen + mp->m_pkthdr.ph_mss - 1) /
+	    mp->m_pkthdr.ph_mss);
+
+	return 1;
+
+out:
+	tcpstat_inc(tcps_outbadtso);
+	return 0;
+}
+
+u_int
 em_tx_ctx_setup(struct em_queue *que, struct mbuf *mp, u_int head,
     u_int32_t *olinfo_status, u_int32_t *cmd_type_len)
 {
+	struct ether_extracted ext;
 	struct e1000_adv_tx_context_desc *TD;
-	struct ether_header *eh = mtod(mp, struct ether_header *);
-	struct mbuf *m;
 	uint32_t vlan_macip_lens = 0, type_tucmd_mlhl = 0, mss_l4len_idx = 0;
-	int off = 0, hoff;
-	uint8_t ipproto, iphlen;
+	int off = 0;
 
 	*olinfo_status = 0;
 	*cmd_type_len = 0;
@@ -2411,74 +2510,47 @@ em_tx_ctx_setup(struct em_queue *que, struct mbuf *mp, u_int head,
 	
 #if NVLAN > 0
 	if (ISSET(mp->m_flags, M_VLANTAG)) {
-		uint16_t vtag = htole16(mp->m_pkthdr.ether_vtag);
+		uint32_t vtag = mp->m_pkthdr.ether_vtag;
 		vlan_macip_lens |= vtag << E1000_ADVTXD_VLAN_SHIFT;
 		*cmd_type_len |= E1000_ADVTXD_DCMD_VLE;
 		off = 1;
 	}
 #endif
 
-	vlan_macip_lens |= (sizeof(*eh) << E1000_ADVTXD_MACLEN_SHIFT);
-	
-	switch (ntohs(eh->ether_type)) {
-	case ETHERTYPE_IP: {
-		struct ip *ip;
+	ether_extract_headers(mp, &ext);
 
-		m = m_getptr(mp, sizeof(*eh), &hoff);
-		ip = (struct ip *)(mtod(m, caddr_t) + hoff);
+	vlan_macip_lens |= (sizeof(*ext.eh) << E1000_ADVTXD_MACLEN_SHIFT);
 
-		iphlen = ip->ip_hl << 2;
-		ipproto = ip->ip_p;
-
+	if (ext.ip4) {
 		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_IPV4;
 		if (ISSET(mp->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT)) {
 			*olinfo_status |= E1000_TXD_POPTS_IXSM << 8;
 			off = 1;
 		}
-
-		break;
-	}
 #ifdef INET6
-	case ETHERTYPE_IPV6: {
-		struct ip6_hdr *ip6;
-
-		m = m_getptr(mp, sizeof(*eh), &hoff);
-		ip6 = (struct ip6_hdr *)(mtod(m, caddr_t) + hoff);
-
-		iphlen = sizeof(*ip6);
-		ipproto = ip6->ip6_nxt;
-
+	} else if (ext.ip6) {
 		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_IPV6;
-		break;
-	}
 #endif
-	default:
-		iphlen = 0;
-		ipproto = 0;
-		break;
 	}
 
 	*cmd_type_len |= E1000_ADVTXD_DTYP_DATA | E1000_ADVTXD_DCMD_IFCS;
 	*cmd_type_len |= E1000_ADVTXD_DCMD_DEXT;
 	*olinfo_status |= mp->m_pkthdr.len << E1000_ADVTXD_PAYLEN_SHIFT;
-	vlan_macip_lens |= iphlen;
+	vlan_macip_lens |= ext.iphlen;
 	type_tucmd_mlhl |= E1000_ADVTXD_DCMD_DEXT | E1000_ADVTXD_DTYP_CTXT;
 
-	switch (ipproto) {
-	case IPPROTO_TCP:
+	if (ext.tcp) {
 		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_TCP;
 		if (ISSET(mp->m_pkthdr.csum_flags, M_TCP_CSUM_OUT)) {
 			*olinfo_status |= E1000_TXD_POPTS_TXSM << 8;
 			off = 1;
 		}
-		break;
-	case IPPROTO_UDP:
+	} else if (ext.udp) {
 		type_tucmd_mlhl |= E1000_ADVTXD_TUCMD_L4T_UDP;
 		if (ISSET(mp->m_pkthdr.csum_flags, M_UDP_CSUM_OUT)) {
 			*olinfo_status |= E1000_TXD_POPTS_TXSM << 8;
 			off = 1;
 		}
-		break;
 	}
 
 	if (!off)
@@ -2970,6 +3042,16 @@ void
 em_rxrefill(void *arg)
 {
 	struct em_queue *que = arg;
+	int s;
+
+	s = splnet();
+	em_rxrefill_locked(que);
+	splx(s);
+}
+
+void
+em_rxrefill_locked(struct em_queue *que)
+{
 	struct em_softc *sc = que->sc;
 
 	if (em_rxfill(que))
@@ -3966,7 +4048,7 @@ em_queue_intr_msix(void *vque)
 	if (ifp->if_flags & IFF_RUNNING) {
 		em_txeof(que);
 		if (em_rxeof(que))
-			em_rxrefill(que);
+			em_rxrefill_locked(que);
 	}
 
 	em_enable_queue_intr_msix(que);

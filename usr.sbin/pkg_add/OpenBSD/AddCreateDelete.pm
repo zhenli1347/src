@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: AddCreateDelete.pm,v 1.50 2021/01/30 11:16:58 espie Exp $
+# $OpenBSD: AddCreateDelete.pm,v 1.57 2023/10/23 08:38:14 espie Exp $
 #
 # Copyright (c) 2007-2014 Marc Espie <espie@openbsd.org>
 #
@@ -16,10 +16,9 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-use strict;
-use warnings;
+use v5.36;
 
-# common framework, let's place most everything in there
+# common behavior to pkg_add, pkg_delete, pkg_create
 
 package OpenBSD::AddCreateDelete::State;
 our @ISA = qw(OpenBSD::State);
@@ -27,50 +26,64 @@ our @ISA = qw(OpenBSD::State);
 use OpenBSD::State;
 use OpenBSD::ProgressMeter;
 
-sub init
+sub init($self, @p)
 {
-	my $self = shift;
-
 	$self->{progressmeter} = OpenBSD::ProgressMeter->new;
 	$self->{bad} = 0;
-	$self->SUPER::init(@_);
+	$self->SUPER::init(@p);
 	$self->{export_level}++;
 }
 
-sub progress
+sub progress($self)
 {
-	my $self = shift;
 	return $self->{progressmeter};
 }
 
-sub not
+sub not($self)
 {
-	my $self = shift;
 	return $self->{not};
 }
 
-sub sync_display
+sub sync_display($self)
 {
-	my $self = shift;
 	$self->progress->clear;
 }
 
-sub add_interactive_options
+sub add_interactive_options($self)
 {
-	my $self = shift;
 	$self->{has_interactive_options} = 1;
 	return $self;
 }
 
-sub handle_options
-{
-	my ($state, $opt_string, @usage) = @_;
+my $setup = {
+	nowantlib => q'
+	    	use OpenBSD::Dependencies::SolverBase;
+		no warnings qw(redefine);
+		package OpenBSD::Dependencies::SolverBase;
+		sub solve_wantlibs($, $) { 1 }
+	    ',
+	nosystemwantlib => q'
+	    	use OpenBSD::LibSpec;
+		package OpenBSD::Library::System;
+		sub no_match_dispatch($library, $spec, $base)
+		{
+			return $spec->no_match_name($library, $base);
+		}
+	    ',
+	norun => q'
+		package OpenBSD::State;
+		sub _system(@) { 0 }
+	    ',
+};
+		
 
+sub handle_options($state, $opt_string, @usage)
+{
 	my $i;
 
 	if ($state->{has_interactive_options}) {
 		$opt_string .= 'iI';
-		$state->{opt}{i} = sub {
+		$state->{opt}{i} = sub() {
 			$i++;
 		};
 	};
@@ -86,71 +99,82 @@ sub handle_options
 			$i = -t STDIN;
 		}
 	}
+	$state->{interactive} = $state->interactive_class($i)->new($state, $i);
+	if ($state->defines('REGRESSION_TESTING')) {
+		for my $i (split(/[,\s]/,
+		    $state->defines('REGRESSION_TESTING'))) {
+			$state->{regression}{$i} = 1;
+			if (defined $setup->{$i}) {
+				eval "$setup->{$i}";
+				if ($@) {
+					$state->fatal(
+					    "Regression testing #1: #2", 
+					    $i, $@);
+				}
+			}
+		}
+	}
+}
+
+sub interactive_class($, $i)
+{
 	if ($i) {
 		require OpenBSD::Interactive;
-		$state->{interactive} = OpenBSD::Interactive->new($state, $i);
+		return 'OpenBSD::Interactive';
+	} else {
+		return 'OpenBSD::InteractiveStub';
 	}
-	$state->{interactive} //= OpenBSD::InteractiveStub->new($state);
 }
 
-
-sub is_interactive
+sub is_interactive($self)
 {
-	return shift->{interactive}->is_interactive;
+	return $self->{interactive}->is_interactive;
 }
 
-sub find_window_size
+sub find_window_size($state)
 {
-	my $state = shift;
 	$state->SUPER::find_window_size;
 	$state->{progressmeter}->compute_playfield;
 }
 
-sub handle_continue
+sub handle_continue($state)
 {
-	my $state = shift;
 	$state->SUPER::handle_continue;
 	$state->{progressmeter}->handle_continue;
 }
 
-sub confirm_defaults_to_no
+sub confirm_defaults_to_no($self, @p)
 {
-	my $self = shift;
-	return $self->{interactive}->confirm($self->f(@_), 0);
+	return $self->{interactive}->confirm($self->f(@p), 0);
 }
 
-sub confirm_defaults_to_yes
+sub confirm_defaults_to_yes($self, @p)
 {
-	my $self = shift;
-	return $self->{interactive}->confirm($self->f(@_), 1);
+	return $self->{interactive}->confirm($self->f(@p), 1);
 }
 
-sub ask_list
+sub ask_list($self, @p)
 {
-	my $self = shift;
-	return $self->{interactive}->ask_list(@_);
+	return $self->{interactive}->ask_list(@p);
 }
 
-sub vsystem
+sub vsystem($self, @p)
 {
-	my $self = shift;
 	if ($self->verbose < 2) {
-		$self->system(@_);
+		$self->system(@p);
 	} else {
-		$self->verbose_system(@_);
+		$self->verbose_system(@p);
 	}
 }
 
-sub system
+sub system($self, @p)
 {
-	my $self = shift;
-	$self->SUPER::system(@_);
+	$self->SUPER::system(@p);
 }
 
-sub run_makewhatis
+sub run_makewhatis($state, $opts, $l)
 {
-	my ($state, $opts, $l) = @_;
-	my $braindead = sub { chdir('/'); };
+	my $braindead = sub() { chdir('/'); };
 	while (@$l > 1000) {
 		my @b = splice(@$l, 0, 1000);
 		$state->vsystem($braindead,
@@ -160,43 +184,36 @@ sub run_makewhatis
 	    OpenBSD::Paths->makewhatis, @$opts, '--', @$l);
 }
 
-sub ntogo
+# TODO this stuff is definitely not as clear as it could be
+sub ntogo($self, $offset = 0)
 {
-	my ($self, $offset) = @_;
-
 	return $self->{wantntogo} ?
 	    $self->progress->ntogo($self, $offset) :
 	    $self->f("ok");
 }
 
-sub ntogo_string
+sub ntogo_string($self, $offset = 0)
 {
-	my ($self, $offset) = @_;
-
 	return $self->{wantntogo} ?
-	    $self->f(" (#1)", $self->ntodo($offset // 0)) :
+	    $self->f(" (#1)", $self->ntodo($offset)) :
 	    $self->f("");
 }
 
-sub solve_dependency
+sub solve_dependency($self, $solver, $dep, $package)
 {
-	my ($self, $solver, $dep, $package) = @_;
-	# full dependency solving with everything
 	return $solver->really_solve_dependency($self, $dep, $package);
 }
 
 package OpenBSD::AddCreateDelete;
 use OpenBSD::Error;
 
-sub handle_options
+sub handle_options($self, $opt_string, $state, @usage)
 {
-	my ($self, $opt_string, $state, @usage) = @_;
 	$state->handle_options($opt_string, $self, @usage);
 }
 
-sub try_and_run_command
+sub try_and_run_command($self, $state)
 {
-	my ($self, $state) = @_;
 	if ($state->defines('pkg-debug')) {
 		$self->run_command($state);
 	} else {
@@ -214,25 +231,22 @@ sub try_and_run_command
 }
 
 package OpenBSD::InteractiveStub;
-sub new
+sub new($class, $, $)
 {
-	my $class = shift;
 	bless {}, $class;
 }
 
-sub ask_list
+sub ask_list($, $, @values)
 {
-	my ($self, $prompt, @values) = @_;
 	return $values[0];
 }
 
-sub confirm
+sub confirm($, $, $yesno)
 {
-	my ($self, $prompt, $yesno) = @_;
 	return $yesno;
 }
 
-sub is_interactive
+sub is_interactive($)
 {
 	return 0;
 }

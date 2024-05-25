@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.35 2022/11/08 12:08:53 kn Exp $
+#	$OpenBSD: Makefile,v 1.40 2023/08/21 14:25:22 kn Exp $
 
 INSTALLBOOT ?=		/usr/sbin/installboot
 DRY_RUN =		${INSTALLBOOT} -n
@@ -27,6 +27,7 @@ STAGENAMES =		boot
 STAGENAMES =		boot
 .elif ${MACHINE} == "riscv64"
 STAGENAMES =		BOOTRISCV64.EFI
+USE_SOFTRAID ?=		Yes
 .elif ${MACHINE} == "sparc64"
 FORMAT_DISK =		true	# NOOP
 STAGENAMES =		bootblk ofwboot
@@ -37,9 +38,11 @@ regress:
 	@echo SKIPPED
 .endif
 
+# how distrib/$(arch -s)/*/install.md:md_prep_disklabel() formats the root disk
 FORMAT_DISK ?=		fdisk -iy -b '32768@32768:C'
 STAGEDIR =		/usr/mdec
 STAGEFILES =		${STAGENAMES:=${STAGEDIR}/%}
+# is installboot(8) built with -DSOFTRAID?
 USE_SOFTRAID ?=		No
 
 .if ${USE_SOFTRAID:L} == "yes"
@@ -73,8 +76,7 @@ create-disks:
 	${SUDO} vnconfig -- ${diskfile} 1>${devfile}
 	${SUDO} ${FORMAT_DISK} -- "$$(<${devfile})" 1>/dev/null
 .  if ${USE_SOFTRAID:L} == "yes"
-	echo 'RAID 1M-* 100%' | \
-		${SUDO} disklabel -wAT/dev/stdin -- "$$(<${devfile})" 1>/dev/null
+	echo 'RAID *' | ${SUDO} disklabel -wAT- -- "$$(<${devfile})" 1>/dev/null
 .  endif
 .endfor
 
@@ -82,7 +84,7 @@ create-root: create-disks
 .if ${USE_SOFTRAID:L} == "yes"
 	${SUDO} bioctl -l"$$(sed -- s/$$/a/ ${DISKDEVFILES} | paste -sd, -- -)" \
 	    -c1C -k"$$(<${KEYDEVFILE})"a -- softraid0 | \
-		awk -- '{ print $$NF }' 1>${ROOTDEVFILE}
+		grep -o -- 'sd[0-9]*$$' 1>${ROOTDEVFILE}
 	${SUDO} ${FORMAT_DISK} -- "$$(<${ROOTDEVFILE})" 1>/dev/null
 .else
 	ln -s -- ${DISKDEVFILES} ${ROOTDEVFILE}
@@ -96,16 +98,18 @@ create-root: create-disks
 
 
 # must be first as some targets expect a working filesystem
-REGRESS_TARGETS = prepare
+REGRESS_TARGETS =	prepare
 
 prepare:
 	${SUDO} ${REAL_RUN} -p -- "$$(<${ROOTDEVFILE})"
 
-REGRESS_TARGETS +=	dry-prepare \
+SUCCESS_TESTS +=	dry-prepare \
 			dry-default \
 			dry-root \
 			root \
 			root-stages
+REGRESS_TARGETS +=	${SUCCESS_TESTS}
+REGRESS_ROOT_TARGETS +=	${SUCCESS_TESTS}
 
 dry-prepare:
 	${SUDO} ${DRY_RUN} -p -- "$$(<${ROOTDEVFILE})"
@@ -115,17 +119,19 @@ dry-root:
 	${SUDO} ${DRY_RUN} -r/ -- "$$(<${ROOTDEVFILE})"
 
 root:
-	${SUDO} ${REAL_RUN} -r ${MOUNTPOINT} "$$(<${ROOTDEVFILE})"
+	${SUDO} ${REAL_RUN} -r ${MOUNTPOINT} -- "$$(<${ROOTDEVFILE})"
 root-stages:
 	${SUDO} ${REAL_RUN} -- "$$(<${ROOTDEVFILE})" ${STAGEFILES}
 
 
-REGRESS_EXPECTED_FAILURES =	dry-prepare-root \
+FAILURE_TESTS =			dry-prepare-root \
 				dry-prepare-stages \
 				dry-nodisk-stages \
 				dry-toofew \
 				dry-toomany
-REGRESS_TARGETS +=		${REGRESS_EXPECTED_FAILURES}
+REGRESS_EXPECTED_FAILURES +=	${FAILURE_TESTS}
+REGRESS_TARGETS +=		${FAILURE_TESTS}
+REGRESS_ROOT_TARGETS +=		dry-nodisk-stages
 
 dry-prepare-root:
 	${DRY_RUN} -p -r/ -- "$$(<${ROOTDEVFILE})" 2>/dev/null

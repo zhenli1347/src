@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.84 2022/08/26 00:02:08 kn Exp $	*/
+/*	$OpenBSD: engine.c,v 1.89 2024/04/21 17:33:05 florian Exp $	*/
 
 /*
  * Copyright (c) 2017 Florian Obser <florian@openbsd.org>
@@ -60,7 +60,6 @@
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netinet/ip6.h>
-#include <netinet6/ip6_var.h>
 #include <netinet6/nd6.h>
 #include <netinet/icmp6.h>
 
@@ -661,7 +660,7 @@ engine_dispatch_main(int fd, short event, void *bula)
 				fatalx("%s: received unexpected imsg fd "
 				    "to engine", __func__);
 
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg fd to "
 				   "engine but didn't receive any", __func__);
 
@@ -1272,7 +1271,7 @@ request_solicitation(struct slaacd_iface *iface)
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	timespecsub(&now, &iface->last_sol, &diff);
 	if (timespeccmp(&diff, &sol_delay, <)) {
-		log_warnx("last solicitation less then %d seconds ago",
+		log_debug("last solicitation less than %d seconds ago",
 		    RTR_SOLICITATION_INTERVAL);
 		return;
 	}
@@ -1927,7 +1926,7 @@ update_iface_ra_prefix(struct slaacd_iface *iface, struct radv *ra,
     struct radv_prefix *prefix)
 {
 	struct address_proposal	*addr_proposal;
-	uint32_t		 remaining_lifetime, pltime, vltime;
+	uint32_t		 pltime, vltime;
 	int			 found, found_temporary, duplicate_found;
 
 	found = found_temporary = duplicate_found = 0;
@@ -1966,16 +1965,7 @@ update_iface_ra_prefix(struct slaacd_iface *iface, struct radv *ra,
 			continue;
 		}
 
-		remaining_lifetime = real_lifetime(&addr_proposal->uptime,
-			addr_proposal->vltime);
-
-		/* RFC 4862 5.5.3 two hours rule */
-#define TWO_HOURS 2 * 3600
-		if (prefix->vltime > TWO_HOURS ||
-		    prefix->vltime >= remaining_lifetime)
-			vltime = prefix->vltime;
-		else
-			vltime = TWO_HOURS;
+		vltime = prefix->vltime;
 
 		if (addr_proposal->temporary) {
 			struct timespec	now;
@@ -2140,6 +2130,7 @@ configure_address(struct address_proposal *addr_proposal)
 
 	address.if_index = addr_proposal->if_index;
 	memcpy(&address.addr, &addr_proposal->addr, sizeof(address.addr));
+	memcpy(&address.gw, &addr_proposal->from, sizeof(address.gw));
 	memcpy(&address.mask, &addr_proposal->mask, sizeof(address.mask));
 	address.vltime = addr_proposal->vltime;
 	address.pltime = addr_proposal->pltime;

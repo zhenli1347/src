@@ -1,24 +1,18 @@
-# $OpenBSD: Makefile.inc,v 1.6 2021/05/01 16:11:09 visa Exp $
+# $OpenBSD: Makefile.inc,v 1.17 2024/03/29 11:00:57 jsing Exp $
 
 # mips64-specific libcrypto build rules
 
 # aes
-SRCS+= aes_cbc.c 
 CFLAGS+= -DAES_ASM
 SSLASM+= aes aes-mips aes-mips
-# bf
-SRCS+= bf_enc.c
+CFLAGS+= -DHAVE_AES_SET_ENCRYPT_KEY_INTERNAL
+CFLAGS+= -DHAVE_AES_SET_DECRYPT_KEY_INTERNAL
+CFLAGS+= -DHAVE_AES_ENCRYPT_INTERNAL
+CFLAGS+= -DHAVE_AES_DECRYPT_INTERNAL
 # bn
 SSLASM+= bn mips bn-mips
-CFLAGS+= -DBN_DIV3W
 SSLASM+= bn mips-mont mips-mont
 CFLAGS+= -DOPENSSL_BN_ASM_MONT
-# camellia
-SRCS+= camellia.c cmll_cbc.c cmll_misc.c
-# des
-SRCS+= des_enc.c fcrypt_b.c
-# rc4
-SRCS+= rc4_enc.c rc4_skey.c
 # sha
 SSLASM+= sha sha1-mips sha1-mips
 CFLAGS+= -DSHA1_ASM
@@ -26,8 +20,6 @@ SSLASM+= sha sha512-mips sha256-mips
 CFLAGS+= -DSHA256_ASM
 SSLASM+= sha sha512-mips sha512-mips
 CFLAGS+= -DSHA512_ASM
-# whrlpool
-SRCS+= wp_block.c
 
 .for dir src dst in ${SSLASM}
 SRCS+=	${dst}.S

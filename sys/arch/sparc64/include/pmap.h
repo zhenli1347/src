@@ -35,7 +35,6 @@
 #define	_MACHINE_PMAP_H_
 
 #ifndef _LOCORE
-#include <machine/pte.h>
 #ifdef	_KERNEL
 #include <sys/queue.h>
 #endif
@@ -145,17 +144,10 @@ struct prom_map {
 #define PMAP_4M		0x018
 #define PMAP_SZ_TO_TTE(x)	(((x)&0x018)<<58)
 /* If these bits are different in va's to the same PA then there is an aliasing in the d$ */
-#define VA_ALIAS_MASK	(1<<13)	/* = (VA_ALIAS_ALIGN - 1) & ~PAGE_MASK */
 #define VA_ALIAS_ALIGN	(1<<14)
+#define VA_ALIAS_MASK	(VA_ALIAS_ALIGN - 1)
 
 typedef	struct pmap *pmap_t;
-
-/* 
- * Encode IO space for pmap_enter() 
- *
- * Since sun4u machines don't have separate IO spaces, this is a noop.
- */
-#define PMAP_IOENC(io)	0
 
 extern struct pmap kernel_pmap_;
 #define	pmap_kernel()	(&kernel_pmap_)
@@ -165,27 +157,28 @@ extern struct pmap kernel_pmap_;
 #define	pmap_update(pm)			/* nothing (yet) */
 
 #define pmap_proc_iflush(p,va,len)	/* nothing */
+#define pmap_init_percpu()		do { /* nothing */ } while (0)
 
-void pmap_bootstrap(u_long, u_long, u_int, u_int);
+void	pmap_bootstrap(u_long, u_long, u_int, u_int);
+int	pmap_copyinsn(pmap_t, vaddr_t, uint32_t *);
+
 /* make sure all page mappings are modulo 16K to prevent d$ aliasing */
-#define PMAP_PREFER(pa, va)	((va) + (((va) ^ (pa)) & VA_ALIAS_MASK))
-
+#define PMAP_PREFER
 /* pmap prefer alignment */
 #define PMAP_PREFER_ALIGN()	(VA_ALIAS_ALIGN)
 /* pmap prefer offset in alignment */
 #define PMAP_PREFER_OFFSET(of)	((of) & VA_ALIAS_MASK)
+
+#define PMAP_CHECK_COPYIN	CPU_ISSUN4V
 
 #define PMAP_GROWKERNEL         /* turn on pmap_growkernel interface */
 
 #define	__HAVE_PMAP_COLLECT
 
 /* SPARC specific? */
-void		pmap_redzone(void);
-int             pmap_dumpsize(void);
-int             pmap_dumpmmu(int (*)(dev_t, daddr_t, caddr_t, size_t), daddr_t);
-int		pmap_pa_exists(paddr_t);
-struct proc;
-void		switchexit(struct proc *);
+int	pmap_dumpsize(void);
+int	pmap_dumpmmu(int (*)(dev_t, daddr_t, caddr_t, size_t), daddr_t);
+int	pmap_pa_exists(paddr_t);
 
 /* SPARC64 specific */
 int	ctx_alloc(struct pmap*);
@@ -200,7 +193,7 @@ void	ctx_free(struct pmap*);
 typedef struct pv_entry {
 	struct pv_entry	*pv_next;	/* next pv_entry */
 	struct pmap	*pv_pmap;	/* pmap where mapping lies */
-	vaddr_t	pv_va;		/* virtual address for mapping */
+	vaddr_t		 pv_va;		/* virtual address for mapping */
 } *pv_entry_t;
 /* PV flags encoded in the low bits of the VA of the first pv_entry */
 

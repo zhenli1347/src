@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.110 2022/12/06 01:56:44 cheloha Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.114 2023/10/24 13:20:10 claudio Exp $	*/
 /* $NetBSD: cpu.c,v 1.1.2.7 2000/06/26 02:04:05 sommerfeld Exp $ */
 
 /*-
@@ -72,7 +72,6 @@
 #include <sys/timeout.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/malloc.h>
 #include <sys/memrange.h>
 #include <sys/atomic.h>
 
@@ -84,9 +83,7 @@
 #include <machine/cpufunc.h>
 #include <machine/cpuvar.h>
 #include <machine/pmap.h>
-#include <machine/vmparam.h>
 #include <machine/mpbiosvar.h>
-#include <machine/npx.h>
 #include <machine/pcb.h>
 #include <machine/specialreg.h>
 #include <machine/segments.h>
@@ -94,7 +91,6 @@
 #include <machine/pio.h>
 
 #if NLAPIC > 0
-#include <machine/apicvar.h>
 #include <machine/i82489reg.h>
 #include <machine/i82489var.h>
 #endif
@@ -364,6 +360,7 @@ cpu_attach(struct device *parent, struct device *self, void *aux)
 #endif
 		cpu_tsx_disable(ci);
 		identifycpu(ci);
+		clockqueue_init(&ci->ci_queue);
 		sched_init_cpu(ci);
 		ci->ci_next = cpu_info_list->ci_next;
 		cpu_info_list->ci_next = ci;
@@ -481,7 +478,7 @@ cpu_tsx_disable(struct cpu_info *ci)
 	if (strcmp(cpu_vendor, "GenuineIntel") == 0 &&
 	    (sefflags_edx & SEFF0EDX_ARCH_CAP)) {
 		msr = rdmsr(MSR_ARCH_CAPABILITIES);
-		if (msr & ARCH_CAPABILITIES_TSX_CTRL) {
+		if (msr & ARCH_CAP_TSX_CTRL) {
 			msr = rdmsr(MSR_TSX_CTRL);
 			msr |= TSX_CTRL_RTM_DISABLE | TSX_CTRL_TSX_CPUID_CLEAR;
 			wrmsr(MSR_TSX_CTRL, msr);
@@ -724,13 +721,11 @@ cpu_hatch(void *v)
 	if (mp_verbose)
 		printf("%s: CPU at apid %ld running\n",
 		    ci->ci_dev->dv_xname, ci->ci_cpuid);
-	nanouptime(&ci->ci_schedstate.spc_runtime);
 	splx(s);
 
 	lapic_startclock();
 
-	SCHED_LOCK(s);
-	cpu_switchto(NULL, sched_chooseproc());
+	sched_toidle();
 }
 
 void

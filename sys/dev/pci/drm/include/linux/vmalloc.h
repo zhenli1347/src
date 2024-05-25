@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmalloc.h,v 1.4 2021/07/07 02:38:36 jsg Exp $	*/
+/*	$OpenBSD: vmalloc.h,v 1.7 2024/03/20 02:42:17 jsg Exp $	*/
 /*
  * Copyright (c) 2013, 2014, 2015 Mark Kettenis
  *
@@ -18,13 +18,14 @@
 #ifndef _LINUX_VMALLOC_H
 #define _LINUX_VMALLOC_H
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/malloc.h>
 #include <uvm/uvm_extern.h>
-#include <linux/types.h>
 #include <linux/overflow.h>
+#include <linux/types.h> /* for pgprot_t */
 
 void	*vmap(struct vm_page **, unsigned int, unsigned long, pgprot_t);
+void	*vmap_pfn(unsigned long *, unsigned int, pgprot_t);
 void	 vunmap(void *, size_t);
 
 static inline void *

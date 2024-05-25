@@ -1,4 +1,4 @@
-#	$OpenBSD: rc,v 1.565 2022/11/28 14:56:31 cheloha Exp $
+#	$OpenBSD: rc,v 1.575 2024/05/17 00:33:43 deraadt Exp $
 
 # System startup script run by init on autoboot or after single-user.
 # Output and error are redirected to console by init, and the console is the
@@ -137,6 +137,7 @@ make_keys() {
 	local _isakmpd_pub=/etc/isakmpd/local.pub
 	local _iked_key=/etc/iked/private/local.key
 	local _iked_pub=/etc/iked/local.pub
+	local _ssh_pub=/etc/ssh/ssh_host_ed25519_key.pub _show_ssh_fp=false
 
 	if [[ ! -f $_isakmpd_key ]]; then
 		echo -n "openssl: generating isakmpd RSA keys... "
@@ -162,7 +163,10 @@ make_keys() {
 		fi
 	fi
 
+	[[ -f $_ssh_pub ]] || _show_ssh_fp=true
 	ssh-keygen -A
+	$_show_ssh_fp && ssh-keygen -lf $_ssh_pub |
+	    (read sz fp comm type && echo "sshd: $type $fp")
 
 	if [[ ! -f /etc/soii.key ]]; then
 		openssl rand -hex 16 > /etc/soii.key &&
@@ -188,7 +192,7 @@ reorder_libs() {
 		fi
 	done
 
-	echo -n 'reordering libraries:'
+	echo 'reordering:'
 
 	# Remount the (read-only) filesystems in _ro_list as read-write.
 	for _mp in $_ro_list; do
@@ -215,7 +219,7 @@ reorder_libs() {
 		cd $_tmpdir
 		ar x $_liba
 		if [[ $_lib == ld.so ]]; then
-			echo -n " $_lib"
+			echo " $_lib"
 			args="-g -x -e _dl_start \
 			    --version-script=Symbols.map --shared -Bsymbolic \
 			    --no-undefined"
@@ -226,13 +230,33 @@ reorder_libs() {
 			$_install /usr/libexec/ld.so /usr/libexec/ld.so.save
 			$_install ld.so.test $_lib_dir/ld.so
 		else
-			echo -n " ${_lib%%.*}"
+			echo " ${_lib%%.*}"
 			cc -shared -o $_lib $(ls *.so | sort -R) $(<.ldadd)
 			[[ -s $_lib ]] && file $_lib | fgrep -q 'shared object'
 			LD_BIND_NOW=1 LD_LIBRARY_PATH=$_tmpdir awk 'BEGIN {exit 0}'
 			LD_BIND_NOW=1 LD_LIBRARY_PATH=$_tmpdir openssl \
 			    x509 -in /etc/ssl/cert.pem -out /dev/null
 			$_install $_lib $_lib_dir/$_lib
+		fi
+		) || { _error=true; break; }
+	done
+
+	for _bin in $_relink/usr/sbin/sshd $_relink/usr/libexec/sshd-session \
+	    $_relink/usr/bin/ssh-agent ; do
+		_tmpdir=$(mktemp -dq $_relink/_rebuild.XXXXXXXXXXXX) &&
+		(
+		set -o errexit
+		cd $_tmpdir
+		_binn=${_bin##*/}
+		_bint=${_bin}/${_binn}.tar
+		if [[ -f $_bint ]]; then
+			echo " $_binn"
+			tar xf $_bint
+			if [[ -f install.sh ]]; then
+				sh install.sh >/dev/null 2>&1
+			else
+				make -f Makefile.relink relink >/dev/null 2>&1
+			fi
 		fi
 		) || { _error=true; break; }
 	done
@@ -249,6 +273,18 @@ reorder_libs() {
 	else
 		echo '.'
 	fi
+}
+
+# Read output of reorder_libs co-process and output on console.
+wait_reorder_libs() {
+	local _line
+
+	[[ $library_aslr == NO ]] && return
+
+	while IFS= read -p _line; do
+		echo -n "$_line"
+	done
+	echo
 }
 
 # Run rc.* script and email output to root.
@@ -420,7 +456,7 @@ if [[ $pf != NO ]]; then
 	if ifconfig lo0 inet6 >/dev/null 2>&1; then
 		RULES="$RULES
 		pass out inet6 proto icmp6 all icmp6-type neighbrsol
-		pass in inet6 proto icmp6 all icmp6-type neighbradv
+		pass inet6 proto icmp6 all icmp6-type neighbradv no state
 		pass out inet6 proto icmp6 all icmp6-type routersol
 		pass in inet6 proto icmp6 all icmp6-type routeradv
 		pass out inet6 proto udp from any port dhcpv6-client to any port dhcpv6-server
@@ -452,6 +488,8 @@ mount -s /var >/dev/null 2>&1		# cannot be on NFS
 mount -s /var/log >/dev/null 2>&1	# cannot be on NFS
 mount -s /usr >/dev/null 2>&1		# if NFS, fstab must use IP address
 
+reorder_libs 2>&1 |&
+
 start_daemon slaacd dhcpleased resolvd >/dev/null 2>&1
 
 echo 'starting network'
@@ -466,7 +504,7 @@ start_daemon unwind >/dev/null 2>&1
 
 random_seed
 
-reorder_libs
+wait_reorder_libs
 
 # Load pf rules and bring up pfsync interface.
 if [[ $pf != NO ]]; then

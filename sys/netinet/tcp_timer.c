@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_timer.c,v 1.71 2022/11/07 11:22:55 yasuoka Exp $	*/
+/*	$OpenBSD: tcp_timer.c,v 1.76 2024/01/28 20:34:25 bluhm Exp $	*/
 /*	$NetBSD: tcp_timer.c,v 1.14 1996/02/13 23:44:09 christos Exp $	*/
 
 /*
@@ -198,30 +198,35 @@ void
 tcp_timer_rexmt(void *arg)
 {
 	struct tcpcb *otp = NULL, *tp = arg;
+	struct inpcb *inp;
 	uint32_t rto;
 	short ostate;
 
 	NET_LOCK();
+	inp = tp->t_inpcb;
+
 	/* Ignore canceled timeouts or timeouts that have been rescheduled. */
 	if (!ISSET((tp)->t_flags, TF_TMR_REXMT) ||
 	    timeout_pending(&tp->t_timer[TCPT_REXMT]))
 		goto out;
 	CLR((tp)->t_flags, TF_TMR_REXMT);
 
-	if ((tp->t_flags & TF_PMTUD_PEND) && tp->t_inpcb &&
+	if ((tp->t_flags & TF_PMTUD_PEND) && inp &&
 	    SEQ_GEQ(tp->t_pmtud_th_seq, tp->snd_una) &&
 	    SEQ_LT(tp->t_pmtud_th_seq, (int)(tp->snd_una + tp->t_maxseg))) {
 		struct sockaddr_in sin;
 		struct icmp icmp;
 
+		/* TF_PMTUD_PEND is set in tcp_ctlinput() which is IPv4 only */
+		KASSERT(!ISSET(inp->inp_flags, INP_IPV6));
 		tp->t_flags &= ~TF_PMTUD_PEND;
 
 		/* XXX create fake icmp message with relevant entries */
 		icmp.icmp_nextmtu = tp->t_pmtud_nextmtu;
 		icmp.icmp_ip.ip_len = tp->t_pmtud_ip_len;
 		icmp.icmp_ip.ip_hl = tp->t_pmtud_ip_hl;
-		icmp.icmp_ip.ip_dst = tp->t_inpcb->inp_faddr;
-		icmp_mtudisc(&icmp, tp->t_inpcb->inp_rtableid);
+		icmp.icmp_ip.ip_dst = inp->inp_faddr;
+		icmp_mtudisc(&icmp, inp->inp_rtableid);
 
 		/*
 		 * Notify all connections to the same peer about
@@ -230,9 +235,9 @@ tcp_timer_rexmt(void *arg)
 		bzero(&sin, sizeof(sin));
 		sin.sin_len = sizeof(sin);
 		sin.sin_family = AF_INET;
-		sin.sin_addr = tp->t_inpcb->inp_faddr;
-		in_pcbnotifyall(&tcbtable, sintosa(&sin),
-		    tp->t_inpcb->inp_rtableid, EMSGSIZE, tcp_mtudisc);
+		sin.sin_addr = inp->inp_faddr;
+		in_pcbnotifyall(&tcbtable, &sin, inp->inp_rtableid, EMSGSIZE,
+		    tcp_mtudisc);
 		goto out;
 	}
 
@@ -244,7 +249,7 @@ tcp_timer_rexmt(void *arg)
 		    tp->t_softerror : ETIMEDOUT);
 		goto out;
 	}
-	if (tp->t_inpcb->inp_socket->so_options & SO_DEBUG) {
+	if (inp->inp_socket->so_options & SO_DEBUG) {
 		otp = tp;
 		ostate = tp->t_state;
 	}
@@ -265,10 +270,9 @@ tcp_timer_rexmt(void *arg)
 	 * lots more sophisticated searching to find the right
 	 * value here...
 	 */
-	if (ip_mtudisc && tp->t_inpcb &&
+	if (ip_mtudisc && inp &&
 	    TCPS_HAVEESTABLISHED(tp->t_state) &&
 	    tp->t_rxtshift > TCP_MAXRXTSHIFT / 6) {
-		struct inpcb *inp = tp->t_inpcb;
 		struct rtentry *rt = NULL;
 
 		/* No data to send means path mtu is not a problem */
@@ -319,7 +323,7 @@ tcp_timer_rexmt(void *arg)
 	 * retransmit times until then.
 	 */
 	if (tp->t_rxtshift > TCP_MAXRXTSHIFT / 4) {
-		in_losing(tp->t_inpcb);
+		in_losing(inp);
 		tp->t_rttvar += (tp->t_srtt >> TCP_RTT_SHIFT);
 		tp->t_srtt = 0;
 	}
@@ -367,7 +371,9 @@ tcp_timer_rexmt(void *arg)
 	 * to go below this.)
 	 */
 	{
-		u_long win = ulmin(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
+		u_long win;
+
+		win = ulmin(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
 		if (win < 2)
 			win = 2;
 		tp->snd_cwnd = tp->t_maxseg;
@@ -394,7 +400,7 @@ tcp_timer_persist(void *arg)
 	struct tcpcb *otp = NULL, *tp = arg;
 	uint32_t rto;
 	short ostate;
-	uint32_t now;
+	uint64_t now;
 
 	NET_LOCK();
 	/* Ignore canceled timeouts or timeouts that have been rescheduled. */
@@ -423,7 +429,7 @@ tcp_timer_persist(void *arg)
 		rto = tp->t_rttmin;
 	now = tcp_now();
 	if (tp->t_rxtshift == TCP_MAXRXTSHIFT &&
-	    ((now - tp->t_rcvtime) >= TCP_TIME(tcp_maxpersistidle) ||
+	    ((now - tp->t_rcvtime) >= tcp_maxpersistidle ||
 	    (now - tp->t_rcvtime) >= rto * tcp_totbackoff)) {
 		tcpstat_inc(tcps_persistdrop);
 		tp = tcp_drop(tp, ETIMEDOUT);
@@ -463,12 +469,12 @@ tcp_timer_keep(void *arg)
 	    tp->t_inpcb->inp_socket->so_options & SO_KEEPALIVE) &&
 	    tp->t_state <= TCPS_CLOSING) {
 		int maxidle;
-		uint32_t now;
+		uint64_t now;
 
 		maxidle = READ_ONCE(tcp_maxidle);
 		now = tcp_now();
-		if ((maxidle > 0) && ((now - tp->t_rcvtime) >=
-		    TCP_TIME(tcp_keepidle + maxidle)))
+		if ((maxidle > 0) &&
+		    ((now - tp->t_rcvtime) >= tcp_keepidle + maxidle))
 			goto dropit;
 		/*
 		 * Send a packet designed to force a response
@@ -485,9 +491,9 @@ tcp_timer_keep(void *arg)
 		tcpstat_inc(tcps_keepprobe);
 		tcp_respond(tp, mtod(tp->t_template, caddr_t),
 		    NULL, tp->rcv_nxt, tp->snd_una - 1, 0, 0, now);
-		TCP_TIMER_ARM(tp, TCPT_KEEP, TCP_TIME(tcp_keepintvl));
+		TCP_TIMER_ARM(tp, TCPT_KEEP, tcp_keepintvl);
 	} else
-		TCP_TIMER_ARM(tp, TCPT_KEEP, TCP_TIME(tcp_keepidle));
+		TCP_TIMER_ARM(tp, TCPT_KEEP, tcp_keepidle);
 	if (otp)
 		tcp_trace(TA_TIMER, ostate, tp, otp, NULL, TCPT_KEEP, 0);
  out:
@@ -506,7 +512,7 @@ tcp_timer_2msl(void *arg)
 	struct tcpcb *otp = NULL, *tp = arg;
 	short ostate;
 	int maxidle;
-	uint32_t now;
+	uint64_t now;
 
 	NET_LOCK();
 	/* Ignore canceled timeouts or timeouts that have been rescheduled. */
@@ -524,8 +530,8 @@ tcp_timer_2msl(void *arg)
 	maxidle = READ_ONCE(tcp_maxidle);
 	now = tcp_now();
 	if (tp->t_state != TCPS_TIME_WAIT &&
-	    ((maxidle == 0) || ((now - tp->t_rcvtime) <= TCP_TIME(maxidle))))
-		TCP_TIMER_ARM(tp, TCPT_2MSL, TCP_TIME(tcp_keepintvl));
+	    ((maxidle == 0) || ((now - tp->t_rcvtime) <= maxidle)))
+		TCP_TIMER_ARM(tp, TCPT_2MSL, tcp_keepintvl);
 	else
 		tp = tcp_close(tp);
 	if (otp)

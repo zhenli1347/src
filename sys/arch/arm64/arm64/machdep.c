@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.78 2022/11/26 17:23:15 tobhe Exp $ */
+/* $OpenBSD: machdep.c,v 1.89 2024/04/29 13:01:54 jsg Exp $ */
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
@@ -71,7 +71,7 @@ void (*cpuresetfn)(void);
 void (*powerdownfn)(void);
 
 int cold = 1;
-int lid_action = 0;
+int lid_action = 1;
 
 struct vm_map *exec_map = NULL;
 struct vm_map *phys_map = NULL;
@@ -209,19 +209,23 @@ consinit(void)
 void
 cpu_idle_enter(void)
 {
+	disable_irq_daif();
 }
+
+void (*cpu_idle_cycle_fcn)(void) = cpu_wfi;
 
 void
 cpu_idle_cycle(void)
 {
+	cpu_idle_cycle_fcn();
 	enable_irq_daif();
-	__asm volatile("dsb sy" ::: "memory");
-	__asm volatile("wfi");
+	disable_irq_daif();
 }
 
 void
 cpu_idle_leave(void)
 {
+	enable_irq_daif();
 }
 
 /* Dummy trapframe for proc0. */
@@ -314,11 +318,6 @@ cpu_switchto(struct proc *old, struct proc *new)
 	cpu_switchto_asm(old, new);
 }
 
-extern uint64_t cpu_id_aa64isar0;
-extern uint64_t cpu_id_aa64isar1;
-extern uint64_t cpu_id_aa64pfr0;
-extern uint64_t cpu_id_aa64pfr1;
-
 /*
  * machine dependent system variables.
  */
@@ -367,7 +366,8 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return sysctl_rdquad(oldp, oldlenp, newp, value);
 	case CPU_ID_AA64PFR1:
 		value = 0;
-		value |= cpu_id_aa64pfr1 & ID_AA64PFR1_SBSS_MASK;
+		value |= cpu_id_aa64pfr1 & ID_AA64PFR1_BT_MASK;
+		value |= cpu_id_aa64pfr1 & ID_AA64PFR1_SSBS_MASK;
 		return sysctl_rdquad(oldp, oldlenp, newp, value);
 	case CPU_ID_AA64ISAR2:
 	case CPU_ID_AA64MMFR0:
@@ -451,8 +451,21 @@ void
 setregs(struct proc *p, struct exec_package *pack, u_long stack,
     struct ps_strings *arginfo)
 {
+	struct pmap *pm = p->p_vmspace->vm_map.pmap;
 	struct pcb *pcb = &p->p_addr->u_pcb;
 	struct trapframe *tf = pcb->pcb_tf;
+
+	if (pack->ep_flags & EXEC_NOBTCFI)
+		pm->pm_guarded = 0;
+	else
+		pm->pm_guarded = ATTR_GP;
+
+	arc4random_buf(&pm->pm_apiakey, sizeof(pm->pm_apiakey));
+	arc4random_buf(&pm->pm_apdakey, sizeof(pm->pm_apdakey));
+	arc4random_buf(&pm->pm_apibkey, sizeof(pm->pm_apibkey));
+	arc4random_buf(&pm->pm_apdbkey, sizeof(pm->pm_apdbkey));
+	arc4random_buf(&pm->pm_apgakey, sizeof(pm->pm_apgakey));
+	pmap_setpauthkeys(pm);
 
 	/* If we were using the FPU, forget about it. */
 	memset(&pcb->pcb_fpstate, 0, sizeof(pcb->pcb_fpstate));
@@ -606,11 +619,6 @@ dumpsys(void)
 	void *va;
 	int (*dump)(dev_t, daddr_t, caddr_t, size_t);
 	int error;
-
-#if 0
-	/* Save registers. */
-	savectx(&dumppcb);
-#endif
 
 	if (dumpdev == NODEV)
 		return;
@@ -845,7 +853,7 @@ initarm(struct arm64_bootparams *abp)
 	startpa = trunc_page((paddr_t)config);
 	endpa = round_page((paddr_t)config + sizeof(struct fdt_head));
 	for (pa = startpa; pa < endpa; pa += PAGE_SIZE, va += PAGE_SIZE)
-		pmap_kenter_cache(va, pa, PROT_READ, PMAP_CACHE_WB);
+		pmap_kenter_cache(va, pa, PROT_READ | PROT_WRITE, PMAP_CACHE_WB);
 	fh = (void *)(vstart + ((paddr_t)config - startpa));
 	if (betoh32(fh->fh_magic) != FDT_MAGIC || betoh32(fh->fh_size) == 0)
 		panic("%s: no FDT", __func__);
@@ -853,7 +861,7 @@ initarm(struct arm64_bootparams *abp)
 	/* Map the remainder of the FDT. */
 	endpa = round_page((paddr_t)config + betoh32(fh->fh_size));
 	for (; pa < endpa; pa += PAGE_SIZE, va += PAGE_SIZE)
-		pmap_kenter_cache(va, pa, PROT_READ, PMAP_CACHE_WB);
+		pmap_kenter_cache(va, pa, PROT_READ | PROT_WRITE, PMAP_CACHE_WB);
 	config = (void *)(vstart + ((paddr_t)config - startpa));
 	vstart = va;
 
@@ -1041,6 +1049,22 @@ initarm(struct arm64_bootparams *abp)
 		}
 	}
 
+	/* Remove reserved memory. */
+	node = fdt_find_node("/reserved-memory");
+	if (node) {
+		for (node = fdt_child_node(node); node;
+		    node = fdt_next_node(node)) {
+			char *no_map;
+			if (fdt_node_property(node, "no-map", &no_map) < 0)
+				continue;
+			if (fdt_get_reg(node, 0, &reg))
+				continue;
+			if (reg.size == 0)
+				continue;
+			memreg_remove(&reg);
+		}
+	}
+
 	/* Remove the initial 64MB block. */
 	reg.addr = memstart;
 	reg.size = memend - memstart;
@@ -1055,13 +1079,15 @@ initarm(struct arm64_bootparams *abp)
 		physmem += atop(end - start);
 	}
 
+	kmeminit_nkmempages();
+
 	/*
 	 * Make sure that we have enough KVA to initialize UVM.  In
 	 * particular, we need enough KVA to be able to allocate the
-	 * vm_page structures.
+	 * vm_page structures and nkmempages for malloc(9).
 	 */
 	pmap_growkernel(VM_MIN_KERNEL_ADDRESS + 1024 * 1024 * 1024 +
-	    physmem * sizeof(struct vm_page));
+	    physmem * sizeof(struct vm_page) + ptoa(nkmempages));
 
 #ifdef DDB
 	db_machine_init();

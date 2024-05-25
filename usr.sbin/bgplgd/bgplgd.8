@@ -1,4 +1,4 @@
-.\" $OpenBSD: bgplgd.8,v 1.4 2022/10/17 15:42:19 claudio Exp $
+.\" $OpenBSD: bgplgd.8,v 1.8 2024/01/26 18:11:49 job Exp $
 .\"
 .\" Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: October 17 2022 $
+.Dd $Mdocdate: January 26 2024 $
 .Dt BGPLGD 8
 .Os
 .Sh NAME
@@ -27,6 +27,7 @@
 .Op Fl S Ar socket
 .Op Fl s Ar socket
 .Op Fl U Ar user
+.Op Fl V
 .Sh DESCRIPTION
 .Nm
 is a server which implements the FastCGI Protocol to execute
@@ -80,6 +81,8 @@ Change the owner of
 to
 .Ar user
 and its primary group instead of the default www:www.
+.It Fl V
+Show the version and exit.
 .El
 .Pp
 .Nm
@@ -136,10 +139,19 @@ Show only entries from the RIB with name
 .Pq Ic valid | not-found | invalid
 .Xc
 Show only prefixes that match the specified Origin Validation State.
+.It Xo
+.Ic avs Ns = Ns
+.Pq Ic valid | invalid | unknown
+.Xc
+Show only prefixes that match the specified ASPA Validation State.
 .It Cm best Ns = Ns 1
 Show only selected routes.
 .It Cm error Ns = Ns 1
 Show only prefixes which are marked invalid and were treated as withdrawn.
+.It Cm invalid Ns = Ns 1
+Show only prefixes which are not eligible.
+.It Cm leaked Ns = Ns 1
+Show only prefixes where a route leak was detected.
 .It Cm prefix Ns = Ns Ar addr
 Show only entries that match prefix either as the best matching route or
 show the entry for this CIDR prefix.

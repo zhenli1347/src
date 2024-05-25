@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplspi.c,v 1.4 2022/04/06 18:59:26 naddy Exp $	*/
+/*	$OpenBSD: aplspi.c,v 1.6 2024/05/13 01:15:50 jsg Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -30,6 +30,7 @@
 #include <dev/ofw/ofw_clock.h>
 #include <dev/ofw/ofw_gpio.h>
 #include <dev/ofw/ofw_pinctrl.h>
+#include <dev/ofw/ofw_power.h>
 #include <dev/ofw/fdt.h>
 
 #define SPI_CLKCFG		0x00
@@ -88,7 +89,6 @@ int	 aplspi_acquire_bus(void *, int);
 void	 aplspi_release_bus(void *, int);
 
 void	 aplspi_set_cs(struct aplspi_softc *, int, int);
-int	 aplspi_wait_state(struct aplspi_softc *, uint32_t, uint32_t);
 
 void	 aplspi_scan(struct aplspi_softc *);
 
@@ -147,6 +147,7 @@ aplspi_attach(struct device *parent, struct device *self, void *aux)
 
 	sc->sc_pfreq = clock_get_frequency(sc->sc_node, NULL);
 
+	power_domain_enable(sc->sc_node);
 	pinctrl_byname(sc->sc_node, "default");
 
 	/* Configure CS# pin for manual control. */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: xenstore.c,v 1.47 2022/11/10 02:47:52 asou Exp $	*/
+/*	$OpenBSD: xenstore.c,v 1.50 2024/05/24 10:05:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Belopuhov
@@ -19,12 +19,10 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/atomic.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
-#include <sys/ioctl.h>
 #include <sys/task.h>
 
 #include <machine/bus.h>
@@ -471,7 +469,7 @@ xs_ring_put(struct xs_softc *xs, void *src, size_t size)
 	size = MIN(size, avail);
 	/* How many contiguous bytes can we memcpy... */
 	left = XS_RING_SIZE - prod;
-	/* ...bounded by by how much we need to write? */
+	/* ...bounded by how much we need to write? */
 	left = MIN(left, size);
 
 	memcpy(&xsr->xsr_req[prod], src, left);
@@ -498,7 +496,7 @@ xs_ring_get(struct xs_softc *xs, void *dst, size_t size)
 	size = MIN(size, avail);
 	/* How many contiguous bytes can we memcpy... */
 	left = XS_RING_SIZE - cons;
-	/* ...bounded by by how much we need to read? */
+	/* ...bounded by how much we need to read? */
 	left = MIN(left, size);
 
 	memcpy(dst, &xsr->xsr_rsp[cons], left);
@@ -1116,11 +1114,16 @@ xs_kvop(void *xsc, int op, char *key, char *value, size_t valuelen)
 		/* FALLTHROUGH */
 	case XS_LIST:
 		for (i = 0; i < iov_cnt; i++) {
-			if (i && strlcat(value, "\n", valuelen) >= valuelen)
+			if (i > 0 && strlcat(value, "\n", valuelen) >=
+			    valuelen) {
+				error = ERANGE;
 				break;
+			}
 			if (strlcat(value, iovp[i].iov_base,
-			    valuelen) >= valuelen)
+			    valuelen) >= valuelen) {
+				error = ERANGE;
 				break;
+			}
 		}
 		xs_resfree(&xst, iovp, iov_cnt);
 		break;
@@ -1128,5 +1131,5 @@ xs_kvop(void *xsc, int op, char *key, char *value, size_t valuelen)
 		break;
 	}
 
-	return (0);
+	return (error);
 }

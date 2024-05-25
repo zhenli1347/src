@@ -1,4 +1,4 @@
-/*	$OpenBSD: expandchildren.c,v 1.2 2020/01/26 12:41:21 espie Exp $ */
+/*	$OpenBSD: expandchildren.c,v 1.4 2024/04/23 13:34:50 jsg Exp $ */
 /*	$NetBSD: suff.c,v 1.13 1996/11/06 17:59:25 christos Exp $	*/
 
 /*
@@ -44,7 +44,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "config.h"
 #include "defines.h"
 #include "direxpand.h"
 #include "engine.h"
@@ -134,13 +133,13 @@ ExpandVarChildren(LstNode after, GNode *cgn, GNode *pgn)
 				cp2+=2;
 			else
 				cp2++;
-	    }
+		}
 
-	    if (cp2 != start) {
-		    /* Stuff left over -- add it to the list too.  */
-		    gn = Targ_FindNodei(start, cp2, TARG_CREATE);
-		    Lst_AtEnd(&members, gn);
-	    }
+		if (cp2 != start) {
+			/* Stuff left over -- add it to the list too.  */
+			gn = Targ_FindNodei(start, cp2, TARG_CREATE);
+			Lst_AtEnd(&members, gn);
+		}
 	}
 	/* Add all elements of the members list to the parent node.  */
 	while ((gn = Lst_DeQueue(&members)) != NULL) {

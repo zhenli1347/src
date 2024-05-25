@@ -1,4 +1,4 @@
-/*	$OpenBSD: systm.h,v 1.159 2022/09/03 15:29:44 kettenis Exp $	*/
+/*	$OpenBSD: systm.h,v 1.170 2023/10/30 07:04:36 claudio Exp $	*/
 /*	$NetBSD: systm.h,v 1.50 1996/06/09 04:55:09 briggs Exp $	*/
 
 /*-
@@ -201,12 +201,14 @@ void	*memmove(void *, const void *, size_t)
 void	*memset(void *, int, size_t)
 		__attribute__ ((__bounded__(__buffer__,1,3)));
 
-int	copystr(const void *, void *, size_t, size_t *)
-		__attribute__ ((__bounded__(__string__,2,3)));
 int	copyinstr(const void *, void *, size_t, size_t *)
+		__attribute__ ((__bounded__(__string__,2,3)));
+int	_copyinstr(const void *, void *, size_t, size_t *)
 		__attribute__ ((__bounded__(__string__,2,3)));
 int	copyoutstr(const void *, void *, size_t, size_t *);
 int	copyin(const void *, void *, size_t)
+		__attribute__ ((__bounded__(__buffer__,2,3)));
+int	_copyin(const void *, void *, size_t)
 		__attribute__ ((__bounded__(__buffer__,2,3)));
 int	copyout(const void *, void *, size_t);
 int	copyin32(const uint32_t *, uint32_t *);
@@ -231,14 +233,21 @@ int	tvtohz(const struct timeval *);
 int	tstohz(const struct timespec *);
 void	realitexpire(void *);
 
+extern uint64_t hardclock_period;
+extern uint64_t statclock_avg;
+extern int statclock_is_randomized;
+
 struct clockframe;
 void	hardclock(struct clockframe *);
-void	statclock(struct clockframe *);
+
+struct clockrequest;
+void	statclock(struct clockrequest *, void *, void *);
 
 void	initclocks(void);
 void	inittodr(time_t);
 void	resettodr(void);
 void	cpu_initclocks(void);
+void	cpu_startclock(void);
 
 void	startprofclock(struct process *);
 void	stopprofclock(struct process *);
@@ -247,10 +256,8 @@ void	setstatclockrate(int);
 void	start_periodic_resettodr(void);
 void	stop_periodic_resettodr(void);
 
-struct sleep_state;
-void	sleep_setup(struct sleep_state *, const volatile void *, int,
-	    const char *, int);
-int	sleep_finish(struct sleep_state *, int);
+void	sleep_setup(const volatile void *, int, const char *);
+int	sleep_finish(int, int);
 void	sleep_queue_init(void);
 
 struct cond;
@@ -413,7 +420,7 @@ int	_kernel_lock_held(void);
 #define	KERNEL_LOCK()			_kernel_lock()
 #define	KERNEL_UNLOCK()			_kernel_unlock()
 #define	KERNEL_ASSERT_LOCKED()		KASSERT(_kernel_lock_held())
-#define	KERNEL_ASSERT_UNLOCKED()	KASSERT(!_kernel_lock_held())
+#define	KERNEL_ASSERT_UNLOCKED()	KASSERT(panicstr || db_active || !_kernel_lock_held())
 
 #else /* ! MULTIPROCESSOR */
 

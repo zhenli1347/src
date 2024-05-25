@@ -1,4 +1,4 @@
-/*	$OpenBSD: output-json.c,v 1.29 2022/11/02 12:43:02 job Exp $ */
+/*	$OpenBSD: output-json.c,v 1.49 2024/04/21 19:27:44 claudio Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  *
@@ -21,9 +21,10 @@
 #include <netdb.h>
 
 #include "extern.h"
+#include "json.h"
 
-static int
-outputheader_json(FILE *out, struct stats *st)
+static void
+outputheader_json(struct stats *st)
 {
 	char		 hn[NI_MAXHOST], tbuf[26];
 	struct tm	*tp;
@@ -36,189 +37,152 @@ outputheader_json(FILE *out, struct stats *st)
 
 	gethostname(hn, sizeof hn);
 
-	if (fprintf(out,
-	    "{\n\t\"metadata\": {\n"
-	    "\t\t\"buildmachine\": \"%s\",\n"
-	    "\t\t\"buildtime\": \"%s\",\n"
-	    "\t\t\"elapsedtime\": \"%lld\",\n"
-	    "\t\t\"usertime\": \"%lld\",\n"
-	    "\t\t\"systemtime\": \"%lld\",\n"
-	    "\t\t\"roas\": %zu,\n"
-	    "\t\t\"failedroas\": %zu,\n"
-	    "\t\t\"invalidroas\": %zu,\n"
-	    "\t\t\"aspas\": %zu,\n"
-	    "\t\t\"failedaspas\": %zu,\n"
-	    "\t\t\"invalidaspas\": %zu,\n"
-	    "\t\t\"bgpsec_pubkeys\": %zu,\n"
-	    "\t\t\"certificates\": %zu,\n"
-	    "\t\t\"invalidcertificates\": %zu,\n"
-	    "\t\t\"taks\": %zu,\n"
-	    "\t\t\"tals\": %zu,\n"
-	    "\t\t\"invalidtals\": %zu,\n"
-	    "\t\t\"talfiles\": [\n",
-	    hn, tbuf, (long long)st->elapsed_time.tv_sec,
-	    (long long)st->user_time.tv_sec, (long long)st->system_time.tv_sec,
-	    st->roas, st->roas_fail, st->roas_invalid,
-	    st->aspas, st->aspas_fail, st->aspas_invalid,
-	    st->brks, st->certs, st->certs_fail, st->taks,
-	    st->tals, talsz - st->tals) < 0)
-		return -1;
+	json_do_object("metadata", 0);
 
-	for (i = 0; i < talsz; i++) {
-		if (fprintf(out,
-		    "\t\t\t\"%s\"%s\n",
-		    tals[i], i == talsz - 1 ? "" : ",") < 0)
-			return -1;
-	}
+	json_do_string("buildmachine", hn);
+	json_do_string("buildtime", tbuf);
+	json_do_int("elapsedtime", st->elapsed_time.tv_sec);
+	json_do_int("usertime", st->user_time.tv_sec);
+	json_do_int("systemtime", st->system_time.tv_sec);
+	json_do_int("roas", st->repo_tal_stats.roas);
+	json_do_int("failedroas", st->repo_tal_stats.roas_fail);
+	json_do_int("invalidroas", st->repo_tal_stats.roas_invalid);
+	json_do_int("spls", st->repo_tal_stats.spls);
+	json_do_int("failedspls", st->repo_tal_stats.spls_fail);
+	json_do_int("invalidspls", st->repo_tal_stats.spls_invalid);
+	json_do_int("aspas", st->repo_tal_stats.aspas);
+	json_do_int("failedaspas", st->repo_tal_stats.aspas_fail);
+	json_do_int("invalidaspas", st->repo_tal_stats.aspas_invalid);
+	json_do_int("bgpsec_pubkeys", st->repo_tal_stats.brks);
+	json_do_int("certificates", st->repo_tal_stats.certs);
+	json_do_int("invalidcertificates", st->repo_tal_stats.certs_fail);
+	json_do_int("taks", st->repo_tal_stats.taks);
+	json_do_int("tals", st->tals);
+	json_do_int("invalidtals", talsz - st->tals);
 
-	if (fprintf(out,
-	    "\t\t],\n"
-	    "\t\t\"manifests\": %zu,\n"
-	    "\t\t\"failedmanifests\": %zu,\n"
-	    "\t\t\"stalemanifests\": %zu,\n"
-	    "\t\t\"crls\": %zu,\n"
-	    "\t\t\"gbrs\": %zu,\n"
-	    "\t\t\"repositories\": %zu,\n"
-	    "\t\t\"vrps\": %zu,\n"
-	    "\t\t\"uniquevrps\": %zu,\n"
-	    "\t\t\"vaps\": %zu,\n"
-	    "\t\t\"uniquevaps\": %zu,\n"
-	    "\t\t\"cachedir_del_files\": %zu,\n"
-	    "\t\t\"cachedir_superfluous_files\": %zu,\n"
-	    "\t\t\"cachedir_del_dirs\": %zu\n"
-	    "\t},\n\n",
-	    st->mfts, st->mfts_fail, st->mfts_stale,
-	    st->crls,
-	    st->gbrs,
-	    st->repos,
-	    st->vrps, st->uniqs,
-	    st->vaps, st->vaps_uniqs,
-	    st->del_files, st->extra_files, st->del_dirs) < 0)
-		return -1;
-	return 0;
+	json_do_array("talfiles");
+	for (i = 0; i < talsz; i++)
+		json_do_string("name", tals[i]);
+	json_do_end();
+
+	json_do_int("manifests", st->repo_tal_stats.mfts);
+	json_do_int("failedmanifests", st->repo_tal_stats.mfts_fail);
+	json_do_int("crls", st->repo_tal_stats.crls);
+	json_do_int("gbrs", st->repo_tal_stats.gbrs);
+	json_do_int("repositories", st->repos);
+	json_do_int("vrps", st->repo_tal_stats.vrps);
+	json_do_int("uniquevrps", st->repo_tal_stats.vrps_uniqs);
+	json_do_int("vsps", st->repo_tal_stats.vsps);
+	json_do_int("uniquevsps", st->repo_tal_stats.vsps_uniqs);
+	json_do_int("vaps", st->repo_tal_stats.vaps);
+	json_do_int("uniquevaps", st->repo_tal_stats.vaps_uniqs);
+	json_do_int("cachedir_new_files", st->repo_stats.new_files);
+	json_do_int("cachedir_del_files", st->repo_stats.del_files);
+	json_do_int("cachedir_del_dirs", st->repo_stats.del_dirs);
+	json_do_int("cachedir_superfluous_files", st->repo_stats.extra_files);
+	json_do_int("cachedir_del_superfluous_files",
+	    st->repo_stats.del_extra_files);
+
+	json_do_end();
 }
 
-static int
-print_vap(FILE *out, struct vap *v)
+static void
+print_vap(struct vap *v)
 {
 	size_t i;
 
-	if (fprintf(out, "\t\t\t{ \"customer_asid\": %u, \"providers\": [",
-	    v->custasid) < 0)
-		return -1;
-	for (i = 0; i < v->providersz; i++) {
-		if (fprintf(out, "%u", v->providers[i]) < 0)
-			return -1;
-		if (i + 1 < v->providersz)
-			if (fprintf(out, ", ") < 0)
-				return -1;
-	}
-	if (fprintf(out, "], \"expires\": %lld }", (long long)v->expires) < 0)
-		return -1;
+	if (v->overflowed)
+		return;
 
-	return 0;
+	json_do_object("aspa", 1);
+	json_do_int("customer_asid", v->custasid);
+	json_do_int("expires", v->expires);
+
+	json_do_array("providers");
+	for (i = 0; i < v->providersz; i++)
+		json_do_int("provider", v->providers[i]);
+
+	json_do_end();
 }
 
-static int
-output_aspa(FILE *out, struct vap_tree *vaps)
+static void
+output_aspa(struct vap_tree *vaps)
 {
 	struct vap	*v;
-	int		 first;
 
-	if (fprintf(out, "\n\t],\n\n\t\"provider_authorizations\": {\n"
-	    "\t\t\"ipv4\": [\n") < 0)
-		return -1;
-
-	first = 1;
+	json_do_array("aspas");
 	RB_FOREACH(v, vap_tree, vaps)
-		if (v->afi == AFI_IPV4) {
-			if (!first) {
-				if (fprintf(out, ",\n") < 0)
-					return -1;
-			}
-			first = 0;
-			if (print_vap(out, v))
-				return -1;
-		}
-
-	if (fprintf(out, "\n\t\t],\n\t\t\"ipv6\": [\n") < 0)
-		return -1;
-
-	first = 1;
-	RB_FOREACH(v, vap_tree, vaps) {
-		if (v->afi == AFI_IPV6) {
-			if (!first) {
-				if (fprintf(out, ",\n") < 0)
-					return -1;
-			}
-			first = 0;
-			if (print_vap(out, v))
-				return -1;
-		}
-	}
-
-	if (fprintf(out, "\n\t\t]\n\t}\n") < 0)
-		return -1;
-
-	return 0;
+		print_vap(v);
+	json_do_end();
 }
 
+static void
+output_spl(struct vsp_tree *vsps)
+{
+	struct vsp	*vsp;
+	char		 buf[64];
+	size_t		 i;
+
+	json_do_array("signedprefixlists");
+	RB_FOREACH(vsp, vsp_tree, vsps) {
+		json_do_object("vsp", 1);
+		json_do_int("origin_as", vsp->asid);
+		json_do_array("prefixes");
+		for (i = 0; i < vsp->prefixesz; i++) {
+			ip_addr_print(&vsp->prefixes[i].prefix,
+			    vsp->prefixes[i].afi, buf, sizeof(buf));
+			json_do_string("prefix", buf);
+		}
+		json_do_end();
+		json_do_int("expires", vsp->expires);
+		json_do_string("ta", taldescs[vsp->talid]);
+		json_do_end();
+	}
+	json_do_end();
+}
 
 int
 output_json(FILE *out, struct vrp_tree *vrps, struct brk_tree *brks,
-    struct vap_tree *vaps, struct stats *st)
+    struct vap_tree *vaps, struct vsp_tree *vsps, struct stats *st)
 {
 	char		 buf[64];
 	struct vrp	*v;
 	struct brk	*b;
-	int		 first = 1;
 
-	if (outputheader_json(out, st) < 0)
-		return -1;
+	json_do_start(out);
+	outputheader_json(st);
 
-	if (fprintf(out, "\t\"roas\": [\n") < 0)
-		return -1;
-
+	json_do_array("roas");
 	RB_FOREACH(v, vrp_tree, vrps) {
-		if (!first) {
-			if (fprintf(out, ",\n") < 0)
-				return -1;
-		}
-		first = 0;
-
 		ip_addr_print(&v->addr, v->afi, buf, sizeof(buf));
 
-		if (fprintf(out, "\t\t{ \"asn\": %u, \"prefix\": \"%s\", "
-		    "\"maxLength\": %u, \"ta\": \"%s\", \"expires\": %lld }",
-		    v->asid, buf, v->maxlength, taldescs[v->talid],
-		    (long long)v->expires)
-		    < 0)
-			return -1;
+		json_do_object("roa", 1);
+		json_do_int("asn", v->asid);
+		json_do_string("prefix", buf);
+		json_do_int("maxLength", v->maxlength);
+		json_do_string("ta", taldescs[v->talid]);
+		json_do_int("expires", v->expires);
+		json_do_end();
 	}
+	json_do_end();
 
-	if (fprintf(out, "\n\t],\n\n\t\"bgpsec_keys\": [\n") < 0)
-		return -1;
-
-	first = 1;
+	json_do_array("bgpsec_keys");
 	RB_FOREACH(b, brk_tree, brks) {
-		if (!first) {
-			if (fprintf(out, ",\n") < 0)
-				return -1;
-		}
-		first = 0;
-
-		if (fprintf(out, "\t\t{ \"asn\": %u, \"ski\": \"%s\", "
-		    "\"pubkey\": \"%s\", \"ta\": \"%s\", \"expires\": %lld }",
-		    b->asid, b->ski, b->pubkey, taldescs[b->talid],
-		    (long long)b->expires) < 0)
-			return -1;
+		json_do_object("brks", 0);
+		json_do_int("asn", b->asid);
+		json_do_string("ski", b->ski);
+		json_do_string("pubkey", b->pubkey);
+		json_do_string("ta", taldescs[b->talid]);
+		json_do_int("expires", b->expires);
+		json_do_end();
 	}
+	json_do_end();
 
-	if (output_aspa(out, vaps) < 0)
-		return -1;
+	if (!excludeaspa)
+		output_aspa(vaps);
 
-	if (fprintf(out, "\n}\n") < 0)
-		return -1;
+	if (experimental)
+		output_spl(vsps);
 
-	return 0;
+	return json_do_finish();
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmm.c,v 1.106 2022/11/06 11:54:08 dv Exp $	*/
+/*	$OpenBSD: vmm.c,v 1.119 2024/02/05 21:58:09 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -52,6 +52,7 @@
 #include "vmd.h"
 #include "vmm.h"
 #include "atomicio.h"
+#include "proc.h"
 
 void	vmm_sighdlr(int, short, void *);
 int	vmm_start_vm(struct imsg *, uint32_t *, pid_t *);
@@ -80,23 +81,28 @@ vmm_run(struct privsep *ps, struct privsep_proc *p, void *arg)
 	if (config_init(ps->ps_env) == -1)
 		fatal("failed to initialize configuration");
 
-	signal_del(&ps->ps_evsigchld);
-	signal_set(&ps->ps_evsigchld, SIGCHLD, vmm_sighdlr, ps);
-	signal_add(&ps->ps_evsigchld, NULL);
+	/*
+	 * We aren't root, so we can't chroot(2). Use unveil(2) instead.
+	 */
+	if (unveil(env->argv0, "x") == -1)
+		fatal("unveil %s", env->argv0);
+	if (unveil(NULL, NULL) == -1)
+		fatal("unveil lock");
 
 	/*
 	 * pledge in the vmm process:
 	 * stdio - for malloc and basic I/O including events.
 	 * vmm - for the vmm ioctls and operations.
-	 * proc - for forking and maitaining vms.
+	 * proc, exec - for forking and execing new vm's.
 	 * sendfd - for sending send/recv fds to vm proc.
 	 * recvfd - for disks, interfaces and other fds.
 	 */
-	if (pledge("stdio vmm sendfd recvfd proc", NULL) == -1)
+	if (pledge("stdio vmm sendfd recvfd proc exec", NULL) == -1)
 		fatal("pledge");
 
-	/* Get and terminate all running VMs */
-	get_info_vm(ps, NULL, 1);
+	signal_del(&ps->ps_evsigchld);
+	signal_set(&ps->ps_evsigchld, SIGCHLD, vmm_sighdlr, ps);
+	signal_add(&ps->ps_evsigchld, NULL);
 }
 
 int
@@ -228,7 +234,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		IMSG_SIZE_CHECK(imsg, &verbose);
 		memcpy(&verbose, imsg->data, sizeof(verbose));
 		log_setverbose(verbose);
-
+		env->vmd_verbose = verbose;
 		/* Forward message to each VM process */
 		TAILQ_FOREACH(vm, env->vmd_vms, vm_entry) {
 			imsg_compose_event(&vm->vm_iev,
@@ -247,7 +253,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 		imsg_compose_event(&vm->vm_iev,
 		    imsg->hdr.type, imsg->hdr.peerid, imsg->hdr.pid,
-		    imsg->fd, &vid, sizeof(vid));
+		    imsg_get_fd(imsg), &vid, sizeof(vid));
 		break;
 	case IMSG_VMDOP_UNPAUSE_VM:
 		IMSG_SIZE_CHECK(imsg, &vid);
@@ -260,7 +266,7 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		}
 		imsg_compose_event(&vm->vm_iev,
 		    imsg->hdr.type, imsg->hdr.peerid, imsg->hdr.pid,
-		    imsg->fd, &vid, sizeof(vid));
+		    imsg_get_fd(imsg), &vid, sizeof(vid));
 		break;
 	case IMSG_VMDOP_SEND_VM_REQUEST:
 		IMSG_SIZE_CHECK(imsg, &vid);
@@ -268,13 +274,13 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		id = vid.vid_id;
 		if ((vm = vm_getbyvmid(id)) == NULL) {
 			res = ENOENT;
-			close(imsg->fd);
+			close(imsg_get_fd(imsg));	/* XXX */
 			cmd = IMSG_VMDOP_START_VM_RESPONSE;
 			break;
 		}
 		imsg_compose_event(&vm->vm_iev,
 		    imsg->hdr.type, imsg->hdr.peerid, imsg->hdr.pid,
-		    imsg->fd, &vid, sizeof(vid));
+		    imsg_get_fd(imsg), &vid, sizeof(vid));
 		break;
 	case IMSG_VMDOP_RECEIVE_VM_REQUEST:
 		IMSG_SIZE_CHECK(imsg, &vmc);
@@ -285,18 +291,18 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 			cmd = IMSG_VMDOP_START_VM_RESPONSE;
 			break;
 		}
-		vm->vm_tty = imsg->fd;
+		vm->vm_tty = imsg_get_fd(imsg);
 		vm->vm_state |= VM_STATE_RECEIVED;
 		vm->vm_state |= VM_STATE_PAUSED;
 		break;
 	case IMSG_VMDOP_RECEIVE_VM_END:
 		if ((vm = vm_getbyvmid(imsg->hdr.peerid)) == NULL) {
 			res = ENOENT;
-			close(imsg->fd);
+			close(imsg_get_fd(imsg));	/* XXX */
 			cmd = IMSG_VMDOP_START_VM_RESPONSE;
 			break;
 		}
-		vm->vm_receive_fd = imsg->fd;
+		vm->vm_receive_fd = imsg_get_fd(imsg);
 		res = vmm_start_vm(imsg, &id, &pid);
 		/* Check if the ID can be mapped correctly */
 		if ((id = vm_id2vmid(id, NULL)) == 0)
@@ -313,7 +319,15 @@ vmm_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		/* Forward hardware address details to the guest vm */
 		imsg_compose_event(&vm->vm_iev,
 		    imsg->hdr.type, imsg->hdr.peerid, imsg->hdr.pid,
-		    imsg->fd, &var, sizeof(var));
+		    imsg_get_fd(imsg), &var, sizeof(var));
+		break;
+	case IMSG_VMDOP_RECEIVE_VMM_FD:
+		if (env->vmd_fd > -1)
+			fatalx("already received vmm fd");
+		env->vmd_fd = imsg_get_fd(imsg);
+
+		/* Get and terminate all running VMs */
+		get_info_vm(ps, NULL, 1);
 		break;
 	default:
 		return (-1);
@@ -454,8 +468,14 @@ vmm_pipe(struct vmd_vm *vm, int fd, void (*cb)(int, short, void *))
 {
 	struct imsgev	*iev = &vm->vm_iev;
 
-	if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
-		log_warn("failed to set nonblocking mode on vm pipe");
+	/*
+	 * Set to close-on-exec as vmm_pipe is used after fork+exec to
+	 * establish async ipc between vm and vmd's vmm process. This
+	 * prevents future vm processes or virtio subprocesses from
+	 * inheriting this control channel.
+	 */
+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) == -1) {
+		log_warn("failed to set close-on-exec for vmm ipc channel");
 		return (-1);
 	}
 
@@ -573,32 +593,47 @@ terminate_vm(struct vm_terminate_params *vtp)
  * Parameters
  *  ifname: a buffer of at least IF_NAMESIZE bytes.
  *
- * Returns a file descriptor to the tap node opened, or -1 if no tap
- * devices were available.
+ * Returns a file descriptor to the tap node opened or -1 if no tap devices were
+ * available, setting errno to the open(2) error.
  */
 int
 opentap(char *ifname)
 {
-	int i, fd;
+	int err = 0, i, fd;
 	char path[PATH_MAX];
 
 	for (i = 0; i < MAX_TAP; i++) {
 		snprintf(path, PATH_MAX, "/dev/tap%d", i);
+
+		errno = 0;
 		fd = open(path, O_RDWR | O_NONBLOCK);
-		if (fd != -1) {
-			snprintf(ifname, IF_NAMESIZE, "tap%d", i);
-			return (fd);
+		if (fd != -1)
+			break;
+		err = errno;
+		if (err == EBUSY) {
+			/* Busy...try next tap. */
+			continue;
+		} else if (err == ENOENT) {
+			/* Ran out of /dev/tap* special files. */
+			break;
+		} else {
+			log_warn("%s: unexpected error", __func__);
+			break;
 		}
 	}
-	strlcpy(ifname, "tap", IF_NAMESIZE);
 
-	return (-1);
+	/* Record the last opened tap device. */
+	snprintf(ifname, IF_NAMESIZE, "tap%d", i);
+
+	if (err)
+		errno = err;
+	return (fd);
 }
 
 /*
  * vmm_start_vm
  *
- * Prepares and forks a new VM process.
+ * Prepares and fork+execs a new VM process.
  *
  * Parameters:
  *  imsg: The VM data structure that is including the VM create parameters.
@@ -614,34 +649,33 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 {
 	struct vm_create_params	*vcp;
 	struct vmd_vm		*vm;
-	int			 ret = EINVAL;
+	char			*nargv[8], num[32], vmm_fd[32];
+	int			 fd, ret = EINVAL;
 	int			 fds[2];
 	pid_t			 vm_pid;
 	size_t			 i, j, sz;
 
 	if ((vm = vm_getbyvmid(imsg->hdr.peerid)) == NULL) {
 		log_warnx("%s: can't find vm", __func__);
-		ret = ENOENT;
-		goto err;
+		return (ENOENT);
 	}
 	vcp = &vm->vm_params.vmc_params;
 
 	if (!(vm->vm_state & VM_STATE_RECEIVED)) {
-		if ((vm->vm_tty = imsg->fd) == -1) {
+		if ((vm->vm_tty = imsg_get_fd(imsg)) == -1) {
 			log_warnx("%s: can't get tty", __func__);
 			goto err;
 		}
 	}
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, fds) == -1)
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, PF_UNSPEC, fds)
+	    == -1)
 		fatal("socketpair");
 
 	/* Start child vmd for this VM (fork, chroot, drop privs) */
 	vm_pid = fork();
-
-	/* Start child failed? - cleanup and leave */
 	if (vm_pid == -1) {
-		log_warnx("%s: start child failed", __func__);
+		log_warn("%s: start child failed", __func__);
 		ret = EIO;
 		goto err;
 	}
@@ -649,30 +683,47 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 	if (vm_pid > 0) {
 		/* Parent */
 		vm->vm_pid = vm_pid;
-		close(fds[1]);
+		close_fd(fds[1]);
 
-		for (i = 0 ; i < vcp->vcp_ndisks; i++) {
+		/* Send the details over the pipe to the child. */
+		sz = atomicio(vwrite, fds[0], vm, sizeof(*vm));
+		if (sz != sizeof(*vm)) {
+			log_warnx("%s: failed to send config for vm '%s'",
+			    __func__, vcp->vcp_name);
+			ret = EIO;
+			/* Defer error handling until after fd closing. */
+		}
+
+		/* As the parent/vmm process, we no longer need these fds. */
+		for (i = 0 ; i < vm->vm_params.vmc_ndisks; i++) {
 			for (j = 0; j < VM_MAX_BASE_PER_DISK; j++) {
-				if (vm->vm_disks[i][j] != -1)
-					close(vm->vm_disks[i][j]);
-				vm->vm_disks[i][j] = -1;
+				if (close_fd(vm->vm_disks[i][j]) == 0)
+				    vm->vm_disks[i][j] = -1;
 			}
 		}
-		for (i = 0 ; i < vcp->vcp_nnics; i++) {
-			close(vm->vm_ifs[i].vif_fd);
-			vm->vm_ifs[i].vif_fd = -1;
+		for (i = 0 ; i < vm->vm_params.vmc_nnics; i++) {
+			if (close_fd(vm->vm_ifs[i].vif_fd) == 0)
+			    vm->vm_ifs[i].vif_fd = -1;
 		}
-		if (vm->vm_kernel != -1) {
-			close(vm->vm_kernel);
+		if (close_fd(vm->vm_kernel) == 0)
 			vm->vm_kernel = -1;
-		}
-		if (vm->vm_cdrom != -1) {
-			close(vm->vm_cdrom);
+		if (close_fd(vm->vm_cdrom) == 0)
 			vm->vm_cdrom = -1;
-		}
-		if (vm->vm_tty != -1) {
-			close(vm->vm_tty);
+		if (close_fd(vm->vm_tty) == 0)
 			vm->vm_tty = -1;
+
+		/* Deferred error handling from sending the vm struct. */
+		if (ret == EIO)
+			goto err;
+
+		/* Send the current local prefix configuration. */
+		sz = atomicio(vwrite, fds[0], &env->vmd_cfg.cfg_localprefix,
+		    sizeof(env->vmd_cfg.cfg_localprefix));
+		if (sz != sizeof(env->vmd_cfg.cfg_localprefix)) {
+			log_warnx("%s: failed to send local prefix for vm '%s'",
+			    __func__, vcp->vcp_name);
+			ret = EIO;
+			goto err;
 		}
 
 		/* Read back the kernel-generated vm id from the child */
@@ -685,30 +736,74 @@ vmm_start_vm(struct imsg *imsg, uint32_t *id, pid_t *pid)
 			goto err;
 		}
 
+		/* Check for an invalid id. This indicates child failure. */
 		if (vcp->vcp_id == 0)
 			goto err;
 
 		*id = vcp->vcp_id;
 		*pid = vm->vm_pid;
 
+		/* Wire up our pipe into the event handling. */
 		if (vmm_pipe(vm, fds[0], vmm_dispatch_vm) == -1)
 			fatal("setup vm pipe");
-
-		return (0);
 	} else {
-		/* Child */
-		close(fds[0]);
-		close(PROC_PARENT_SOCK_FILENO);
+		/* Child. Create a new session. */
+		if (setsid() == -1)
+			fatal("setsid");
 
-		ret = start_vm(vm, fds[1]);
+		close_fd(fds[0]);
+		close_fd(PROC_PARENT_SOCK_FILENO);
 
+		/* Detach from terminal. */
+		if (!env->vmd_debug && (fd =
+			open("/dev/null", O_RDWR, 0)) != -1) {
+			dup2(fd, STDIN_FILENO);
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
+			if (fd > 2)
+				close(fd);
+		}
+
+		/*
+		 * Prepare our new argv for execvp(2) with the fd of our open
+		 * pipe to the parent/vmm process as an argument.
+		 */
+		memset(&nargv, 0, sizeof(nargv));
+		memset(num, 0, sizeof(num));
+		snprintf(num, sizeof(num), "%d", fds[1]);
+		memset(vmm_fd, 0, sizeof(vmm_fd));
+		snprintf(vmm_fd, sizeof(vmm_fd), "%d", env->vmd_fd);
+
+		nargv[0] = env->argv0;
+		nargv[1] = "-V";
+		nargv[2] = num;
+		nargv[3] = "-n";
+		nargv[4] = "-i";
+		nargv[5] = vmm_fd;
+		nargv[6] = NULL;
+
+		if (env->vmd_verbose == 1) {
+			nargv[6] = VMD_VERBOSE_1;
+			nargv[7] = NULL;
+		} else if (env->vmd_verbose > 1) {
+			nargv[6] = VMD_VERBOSE_2;
+			nargv[7] = NULL;
+		}
+
+		/* Control resumes in vmd main(). */
+		execvp(nargv[0], nargv);
+
+		ret = errno;
+		log_warn("execvp %s", nargv[0]);
 		_exit(ret);
+		/* NOTREACHED */
 	}
 
 	return (0);
 
  err:
-	vm_remove(vm, __func__);
+	if (!vm->vm_from_config)
+		vm_remove(vm, __func__);
 
 	return (ret);
 }

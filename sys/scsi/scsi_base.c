@@ -1,4 +1,4 @@
-/*	$OpenBSD: scsi_base.c,v 1.280 2022/02/28 14:48:11 krw Exp $	*/
+/*	$OpenBSD: scsi_base.c,v 1.283 2023/08/02 19:58:52 kettenis Exp $	*/
 /*	$NetBSD: scsi_base.c,v 1.43 1997/04/02 02:29:36 mycroft Exp $	*/
 
 /*
@@ -138,6 +138,8 @@ scsi_init(void)
 	/* Initialize the scsi_xfer pool. */
 	pool_init(&scsi_xfer_pool, sizeof(struct scsi_xfer), 0, IPL_BIO, 0,
 	    "scxspl", NULL);
+	pool_setlowat(&scsi_xfer_pool, 8);
+	pool_prime(&scsi_xfer_pool, 8);
 	pool_init(&scsi_plug_pool, sizeof(struct scsi_plug), 0, IPL_BIO, 0,
 	    "scsiplug", NULL);
 }
@@ -1497,8 +1499,10 @@ scsi_done(struct scsi_xfer *xs)
 int
 scsi_xs_sync(struct scsi_xfer *xs)
 {
-	struct mutex	cookie = MUTEX_INITIALIZER(IPL_BIO);
+	struct mutex	cookie;
 	int		error;
+
+	mtx_init(&cookie, IPL_BIO);
 
 #ifdef DIAGNOSTIC
 	if (xs->cookie != NULL)

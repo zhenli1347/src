@@ -1,28 +1,20 @@
-# $OpenBSD: Makefile,v 1.9 2022/02/05 18:34:06 tb Exp $
+# $OpenBSD: Makefile,v 1.14 2024/02/03 15:58:34 beck Exp $
 
 # Connect a client to a server.  Both can be current libressl, or
-# openssl 1.0.2, or openssl 1.1.  Create lists of supported ciphers
+# openssl 1.1 or 3.0.  Create lists of supported ciphers
 # and pin client and server to one of the ciphers.  Use server
 # certificate with compatible type.  Check that client and server
 # have used correct cipher by grepping in their session print out.
 
-run-cipher-GOST2001-GOST89-GOST89-client-libressl-server-libressl \
-run-cipher-GOST2012256-GOST89-GOST89-client-libressl-server-libressl \
-client-cipher-GOST2012256-GOST89-GOST89-client-libressl-server-libressl.out \
-client-cipher-GOST2001-GOST89-GOST89-client-libressl-server-libressl.out \
-server-cipher-GOST2001-GOST89-GOST89-client-libressl-server-libressl.out \
-server-cipher-GOST2012256-GOST89-GOST89-client-libressl-server-libressl.out \
-check-cipher-GOST2001-GOST89-GOST89-client-libressl-server-libressl \
-check-cipher-GOST2012256-GOST89-GOST89-client-libressl-server-libressl:
-	# gost does not work with libressl TLS 1.3 right now
-	@echo DISABLED
-
 LIBRARIES =		libressl
-.if exists(/usr/local/bin/eopenssl)
-LIBRARIES +=		openssl
-.endif
 .if exists(/usr/local/bin/eopenssl11)
 LIBRARIES +=		openssl11
+.endif
+.if exists(/usr/local/bin/eopenssl30)
+LIBRARIES +=		openssl30
+.endif
+.if exists(/usr/local/bin/eopenssl31)
+LIBRARIES +=		openssl31
 .endif
 
 CLEANFILES =	*.tmp *.ciphers ciphers.mk
@@ -52,8 +44,10 @@ client-${clib}-server-${slib}.ciphers: \
 	uniq -d <$@.tmp >$@
 	# we are only interested in ciphers supported by libressl
 	sort $@ client-libressl.ciphers >$@.tmp
-. if "${clib}" == "openssl11" || "${slib}" == "openssl11"
-	# OpenSSL 1.1's SSL_CTX_set_cipher_list doesn't accept TLSv1.3 ciphers
+. if "${clib}" == "openssl11" || "${slib}" == "openssl11" || \
+	"${clib}" == "openssl30" || "${slib}" == "openssl30" || \
+	"${clib}" == "openssl31" || "${slib}" == "openssl31"
+	# OpenSSL's SSL_CTX_set_cipher_list doesn't accept TLSv1.3 ciphers
 	sed -i '/^TLS_/d' $@.tmp
 . endif
 	uniq -d <$@.tmp >$@
@@ -80,8 +74,8 @@ regress: ciphers.mk
 .endif
 
 LEVEL_libressl =
-LEVEL_openssl =
 LEVEL_openssl11 = ,@SECLEVEL=0
+LEVEL_openssl30 = ,@SECLEVEL=0
 
 .for clib in ${LIBRARIES}
 .for slib in ${LIBRARIES}
@@ -91,25 +85,19 @@ LEVEL_openssl11 = ,@SECLEVEL=0
 TYPE_${cipher} =	dsa
 .elif "${cipher:M*-ECDSA-*}" != ""
 TYPE_${cipher} =	ec
-.elif "${cipher:M*-GOST89-*}" != ""
-TYPE_${cipher} =	gost
 .elif "${cipher:M*-RSA-*}" != ""
 TYPE_${cipher} =	rsa
 .else
 TYPE_${cipher} =	127.0.0.1
 .endif
 
-.if "${slib}" == "openssl" && \
-    "${cipher:MADH-*}${cipher:MEDH-*}${cipher:MDHE-*}" != ""
-DHPARAM_${cipher}_${slib} =	-p dh.param
-.else
 DHPARAM_${cipher}_${slib} =
-.endif
 
 .if ("${clib}" == "libressl" || "${slib}" == "libressl")
 REGRESS_TARGETS +=	run-cipher-${cipher}-client-${clib}-server-${slib}
 .else
-REGRESS_SLOW_TARGETS +=	run-cipher-${cipher}-client-${clib}-server-${slib}
+# Don't use REGRESS_SLOW_TARGETS since its handling in bsd.regress.mk is slow.
+SLOW_TARGETS +=	run-cipher-${cipher}-client-${clib}-server-${slib}
 .endif
 run-cipher-${cipher}-client-${clib}-server-${slib} \
 client-cipher-${cipher}-client-${clib}-server-${slib}.out \
@@ -131,13 +119,13 @@ server-cipher-${cipher}-client-${clib}-server-${slib}.out: dh.param \
 .if ("${clib}" == "libressl" || "${slib}" == "libressl")
 REGRESS_TARGETS +=	check-cipher-${cipher}-client-${clib}-server-${slib}
 .else
-REGRESS_SLOW_TARGETS +=	check-cipher-${cipher}-client-${clib}-server-${slib}
+# Don't use REGRESS_SLOW_TARGETS since its handling in bsd.regress.mk is slow.
+SLOW_TARGETS +=	check-cipher-${cipher}-client-${clib}-server-${slib}
 .endif
 check-cipher-${cipher}-client-${clib}-server-${slib}: \
     client-cipher-${cipher}-client-${clib}-server-${slib}.out \
     server-cipher-${cipher}-client-${clib}-server-${slib}.out
-.if "${clib}" != "openssl" && "${slib}" != "openssl" && \
-    "${cipher:C/TLS_(AES.*_GCM|CHACHA.*_POLY.*)_SHA.*/TLS1_3/}" != TLS1_3
+.if "${cipher:C/TLS_(AES.*_GCM|CHACHA.*_POLY.*)_SHA.*/TLS1_3/}" != TLS1_3
 	# client and server 1.3 capable, not TLS 1.3 cipher
 . if "${clib}" == "libressl"
 	# libressl client may prefer chacha-poly if aes-ni is not supported
@@ -148,7 +136,7 @@ check-cipher-${cipher}-client-${clib}-server-${slib}: \
 . endif
 . if "${clib}" == "libressl"
 	# libressl client may prefer chacha-poly if aes-ni is not supported
-.  if "${slib}" == "openssl11"
+.  if "${slib}" == "openssl11" || "${slib}" == "openssl30" || "${slib}" == "openssl31"
 	egrep -q ' Cipher *: TLS_(AES_256_GCM_SHA384|CHACHA20_POLY1305_SHA256)$$' ${@:S/^check/server/}.out
 .  else
 	egrep -q ' Cipher *: TLS_(AES_256_GCM_SHA384|CHACHA20_POLY1305_SHA256)$$' ${@:S/^check/server/}.out
@@ -165,5 +153,11 @@ check-cipher-${cipher}-client-${clib}-server-${slib}: \
 .endfor
 .endfor
 .endfor
+
+.include <bsd.own.mk>
+REGRESS_SKIP_SLOW ?= no
+.if ${REGRESS_SKIP_SLOW:L} != "yes"
+REGRESS_TARGETS += ${SLOW_TARGETS}
+.endif
 
 .include <bsd.regress.mk>

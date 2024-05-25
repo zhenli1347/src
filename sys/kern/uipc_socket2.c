@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_socket2.c,v 1.129 2022/10/03 16:43:52 bluhm Exp $	*/
+/*	$OpenBSD: uipc_socket2.c,v 1.155 2024/05/17 19:11:14 mvs Exp $	*/
 /*	$NetBSD: uipc_socket2.c,v 1.11 1996/02/04 02:17:55 christos Exp $	*/
 
 /*
@@ -41,7 +41,6 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/signalvar.h>
-#include <sys/event.h>
 #include <sys/pool.h>
 
 /*
@@ -142,7 +141,16 @@ soisdisconnecting(struct socket *so)
 {
 	soassertlocked(so);
 	so->so_state &= ~SS_ISCONNECTING;
-	so->so_state |= (SS_ISDISCONNECTING|SS_CANTRCVMORE|SS_CANTSENDMORE);
+	so->so_state |= SS_ISDISCONNECTING;
+
+	mtx_enter(&so->so_rcv.sb_mtx);
+	so->so_rcv.sb_state |= SS_CANTRCVMORE;
+	mtx_leave(&so->so_rcv.sb_mtx);
+
+	mtx_enter(&so->so_snd.sb_mtx);
+	so->so_snd.sb_state |= SS_CANTSENDMORE;
+	mtx_leave(&so->so_snd.sb_mtx);
+
 	wakeup(&so->so_timeo);
 	sowwakeup(so);
 	sorwakeup(so);
@@ -153,7 +161,16 @@ soisdisconnected(struct socket *so)
 {
 	soassertlocked(so);
 	so->so_state &= ~(SS_ISCONNECTING|SS_ISCONNECTED|SS_ISDISCONNECTING);
-	so->so_state |= (SS_CANTRCVMORE|SS_CANTSENDMORE|SS_ISDISCONNECTED);
+	so->so_state |= SS_ISDISCONNECTED;
+
+	mtx_enter(&so->so_rcv.sb_mtx);
+	so->so_rcv.sb_state |= SS_CANTRCVMORE;
+	mtx_leave(&so->so_rcv.sb_mtx);
+
+	mtx_enter(&so->so_snd.sb_mtx);
+	so->so_snd.sb_state |= SS_CANTSENDMORE;
+	mtx_leave(&so->so_snd.sb_mtx);
+
 	wakeup(&so->so_timeo);
 	sowwakeup(so);
 	sorwakeup(so);
@@ -172,7 +189,7 @@ sonewconn(struct socket *head, int connstatus, int wait)
 {
 	struct socket *so;
 	int persocket = solock_persocket(head);
-	int error;
+	int soqueue = connstatus ? 1 : 0;
 
 	/*
 	 * XXXSMP as long as `so' and `head' share the same lock, we
@@ -185,7 +202,7 @@ sonewconn(struct socket *head, int connstatus, int wait)
 		return (NULL);
 	if (head->so_qlen + head->so_q0len > head->so_qlimit * 3)
 		return (NULL);
-	so = soalloc(wait);
+	so = soalloc(head->so_proto, wait);
 	if (so == NULL)
 		return (NULL);
 	so->so_type = head->so_type;
@@ -209,65 +226,30 @@ sonewconn(struct socket *head, int connstatus, int wait)
 	/*
 	 * Inherit watermarks but those may get clamped in low mem situations.
 	 */
-	if (soreserve(so, head->so_snd.sb_hiwat, head->so_rcv.sb_hiwat)) {
-		if (persocket)
-			sounlock(so);
-		pool_put(&socket_pool, so);
-		return (NULL);
-	}
+	if (soreserve(so, head->so_snd.sb_hiwat, head->so_rcv.sb_hiwat))
+		goto fail;
+
+	mtx_enter(&head->so_snd.sb_mtx);
 	so->so_snd.sb_wat = head->so_snd.sb_wat;
 	so->so_snd.sb_lowat = head->so_snd.sb_lowat;
 	so->so_snd.sb_timeo_nsecs = head->so_snd.sb_timeo_nsecs;
+	mtx_leave(&head->so_snd.sb_mtx);
+
+	mtx_enter(&head->so_rcv.sb_mtx);
 	so->so_rcv.sb_wat = head->so_rcv.sb_wat;
 	so->so_rcv.sb_lowat = head->so_rcv.sb_lowat;
 	so->so_rcv.sb_timeo_nsecs = head->so_rcv.sb_timeo_nsecs;
+	mtx_leave(&head->so_rcv.sb_mtx);
 
-	klist_init(&so->so_rcv.sb_sel.si_note, &socket_klistops, so);
-	klist_init(&so->so_snd.sb_sel.si_note, &socket_klistops, so);
-	sigio_init(&so->so_sigio);
 	sigio_copy(&so->so_sigio, &head->so_sigio);
 
-	soqinsque(head, so, 0);
-
-	/*
-	 * We need to unlock `head' because PCB layer could release
-	 * solock() to enforce desired lock order.
-	 */
-	if (persocket) {
-		head->so_newconn++;
-		sounlock(head);
+	soqinsque(head, so, soqueue);
+	if (pru_attach(so, 0, wait) != 0) {
+		soqremque(so, soqueue);
+		goto fail;
 	}
-
-	error = pru_attach(so, 0, wait);
-
-	if (persocket) {
-		sounlock(so);
-		solock(head);
-		solock(so);
-
-		if ((head->so_newconn--) == 0) {
-			if ((head->so_state & SS_NEWCONN_WAIT) != 0) {
-				head->so_state &= ~SS_NEWCONN_WAIT;
-				wakeup(&head->so_newconn);
-			}
-		}
-	}
-
-	if (error) {
-		soqremque(so, 0);
-		if (persocket)
-			sounlock(so);
-		sigio_free(&so->so_sigio);
-		klist_free(&so->so_rcv.sb_sel.si_note);
-		klist_free(&so->so_snd.sb_sel.si_note);
-		pool_put(&socket_pool, so);
-		return (NULL);
-	}
-
 	if (connstatus) {
 		so->so_state |= connstatus;
-		soqremque(so, 0);
-		soqinsque(head, so, 1);
 		sorwakeup(head);
 		wakeup(&head->so_timeo);
 	}
@@ -276,6 +258,16 @@ sonewconn(struct socket *head, int connstatus, int wait)
 		sounlock(so);
 
 	return (so);
+
+fail:
+	if (persocket)
+		sounlock(so);
+	sigio_free(&so->so_sigio);
+	klist_free(&so->so_rcv.sb_klist);
+	klist_free(&so->so_snd.sb_klist);
+	pool_put(&socket_pool, so);
+
+	return (NULL);
 }
 
 void
@@ -334,15 +326,21 @@ void
 socantsendmore(struct socket *so)
 {
 	soassertlocked(so);
-	so->so_state |= SS_CANTSENDMORE;
+	mtx_enter(&so->so_snd.sb_mtx);
+	so->so_snd.sb_state |= SS_CANTSENDMORE;
+	mtx_leave(&so->so_snd.sb_mtx);
 	sowwakeup(so);
 }
 
 void
 socantrcvmore(struct socket *so)
 {
-	soassertlocked(so);
-	so->so_state |= SS_CANTRCVMORE;
+	if ((so->so_rcv.sb_flags & SB_MTXLOCK) == 0)
+		soassertlocked(so);
+
+	mtx_enter(&so->so_rcv.sb_mtx);
+	so->so_rcv.sb_state |= SS_CANTRCVMORE;
+	mtx_leave(&so->so_rcv.sb_mtx);
 	sorwakeup(so);
 }
 
@@ -368,7 +366,7 @@ solock_shared(struct socket *so)
 	case PF_INET6:
 		if (so->so_proto->pr_usrreqs->pru_lock != NULL) {
 			NET_LOCK_SHARED();
-			pru_lock(so);
+			rw_enter_write(&so->so_lock);
 		} else
 			NET_LOCK();
 		break;
@@ -427,7 +425,7 @@ sounlock_shared(struct socket *so)
 	case PF_INET:
 	case PF_INET6:
 		if (so->so_proto->pr_usrreqs->pru_unlock != NULL) {
-			pru_unlock(so);
+			rw_exit_write(&so->so_lock);
 			NET_UNLOCK_SHARED();
 		} else
 			NET_UNLOCK();
@@ -439,12 +437,33 @@ sounlock_shared(struct socket *so)
 }
 
 void
-soassertlocked(struct socket *so)
+soassertlocked_readonly(struct socket *so)
 {
 	switch (so->so_proto->pr_domain->dom_family) {
 	case PF_INET:
 	case PF_INET6:
 		NET_ASSERT_LOCKED();
+		break;
+	default:
+		rw_assert_wrlock(&so->so_lock);
+		break;
+	}
+}
+
+void
+soassertlocked(struct socket *so)
+{
+	switch (so->so_proto->pr_domain->dom_family) {
+	case PF_INET:
+	case PF_INET6:
+		if (rw_status(&netlock) == RW_READ) {
+			NET_ASSERT_LOCKED();
+
+			if (splassert_ctl > 0 && pru_locked(so) == 0 &&
+			    rw_status(&so->so_lock) != RW_WRITE)
+				splassert_fail(0, RW_WRITE, __func__);
+		} else
+			NET_ASSERT_LOCKED_EXCLUSIVE();
 		break;
 	default:
 		rw_assert_wrlock(&so->so_lock);
@@ -463,12 +482,12 @@ sosleep_nsec(struct socket *so, void *ident, int prio, const char *wmesg,
 	case PF_INET6:
 		if (so->so_proto->pr_usrreqs->pru_unlock != NULL &&
 		    rw_status(&netlock) == RW_READ) {
-			pru_unlock(so);
+			rw_exit_write(&so->so_lock);
 		}
 		ret = rwsleep_nsec(ident, &netlock, prio, wmesg, nsecs);
 		if (so->so_proto->pr_usrreqs->pru_lock != NULL &&
 		    rw_status(&netlock) == RW_READ) {
-			pru_lock(so);
+			rw_enter_write(&so->so_lock);
 		}
 		break;
 	default:
@@ -479,54 +498,64 @@ sosleep_nsec(struct socket *so, void *ident, int prio, const char *wmesg,
 	return ret;
 }
 
+void
+sbmtxassertlocked(struct socket *so, struct sockbuf *sb)
+{
+	if (sb->sb_flags & SB_MTXLOCK) {
+		if (splassert_ctl > 0 && mtx_owned(&sb->sb_mtx) == 0)
+			splassert_fail(0, RW_WRITE, __func__);
+	} else
+		soassertlocked(so);
+}
+
 /*
  * Wait for data to arrive at/drain from a socket buffer.
  */
 int
 sbwait(struct socket *so, struct sockbuf *sb)
 {
+	uint64_t timeo_nsecs;
 	int prio = (sb->sb_flags & SB_NOINTR) ? PSOCK : PSOCK | PCATCH;
+
+	if (sb->sb_flags & SB_MTXLOCK) {
+		MUTEX_ASSERT_LOCKED(&sb->sb_mtx);
+
+		sb->sb_flags |= SB_WAIT;
+		return msleep_nsec(&sb->sb_cc, &sb->sb_mtx, prio, "sbwait",
+		    sb->sb_timeo_nsecs);
+	}
 
 	soassertlocked(so);
 
+	mtx_enter(&sb->sb_mtx);
+	timeo_nsecs = sb->sb_timeo_nsecs;
 	sb->sb_flags |= SB_WAIT;
-	return sosleep_nsec(so, &sb->sb_cc, prio, "netio", sb->sb_timeo_nsecs);
+	mtx_leave(&sb->sb_mtx);
+
+	return sosleep_nsec(so, &sb->sb_cc, prio, "netio", timeo_nsecs);
 }
 
 int
-sblock(struct socket *so, struct sockbuf *sb, int wait)
+sblock(struct sockbuf *sb, int flags)
 {
-	int error, prio = (sb->sb_flags & SB_NOINTR) ? PSOCK : PSOCK | PCATCH;
+	int rwflags = RW_WRITE, error;
 
-	soassertlocked(so);
+	if (!(flags & SBL_NOINTR || sb->sb_flags & SB_NOINTR))
+		rwflags |= RW_INTR;
+	if (!(flags & SBL_WAIT))
+		rwflags |= RW_NOSLEEP;
 
-	if ((sb->sb_flags & SB_LOCK) == 0) {
-		sb->sb_flags |= SB_LOCK;
-		return (0);
-	}
-	if (wait & M_NOWAIT)
-		return (EWOULDBLOCK);
+	error = rw_enter(&sb->sb_lock, rwflags);
+	if (error == EBUSY)
+		error = EWOULDBLOCK;
 
-	while (sb->sb_flags & SB_LOCK) {
-		sb->sb_flags |= SB_WANT;
-		error = sosleep_nsec(so, &sb->sb_flags, prio, "netlck", INFSLP);
-		if (error)
-			return (error);
-	}
-	sb->sb_flags |= SB_LOCK;
-	return (0);
+	return error;
 }
 
 void
-sbunlock(struct socket *so, struct sockbuf *sb)
+sbunlock(struct sockbuf *sb)
 {
-	soassertlocked(so);
-
-	sb->sb_flags &= ~SB_LOCK;
-	if (sb->sb_flags & SB_WANT) {
-		sb->sb_flags &= ~SB_WANT;
-		wakeup(&sb->sb_flags);
-	}
+	rw_exit(&sb->sb_lock);
 }
 
 /*
@@ -537,15 +566,24 @@ sbunlock(struct socket *so, struct sockbuf *sb)
 void
 sowakeup(struct socket *so, struct sockbuf *sb)
 {
-	soassertlocked(so);
+	int dowakeup = 0, dopgsigio = 0;
 
+	mtx_enter(&sb->sb_mtx);
 	if (sb->sb_flags & SB_WAIT) {
 		sb->sb_flags &= ~SB_WAIT;
-		wakeup(&sb->sb_cc);
+		dowakeup = 1;
 	}
 	if (sb->sb_flags & SB_ASYNC)
+		dopgsigio = 1;
+
+	knote_locked(&sb->sb_klist, 0);
+	mtx_leave(&sb->sb_mtx);
+
+	if (dowakeup)
+		wakeup(&sb->sb_cc);
+
+	if (dopgsigio)
 		pgsigio(&so->so_sigio, SIGIO, 0);
-	KNOTE(&sb->sb_sel.si_note, 0);
 }
 
 /*
@@ -585,22 +623,29 @@ soreserve(struct socket *so, u_long sndcc, u_long rcvcc)
 {
 	soassertlocked(so);
 
+	mtx_enter(&so->so_rcv.sb_mtx);
+	mtx_enter(&so->so_snd.sb_mtx);
 	if (sbreserve(so, &so->so_snd, sndcc))
 		goto bad;
-	if (sbreserve(so, &so->so_rcv, rcvcc))
-		goto bad2;
 	so->so_snd.sb_wat = sndcc;
-	so->so_rcv.sb_wat = rcvcc;
-	if (so->so_rcv.sb_lowat == 0)
-		so->so_rcv.sb_lowat = 1;
 	if (so->so_snd.sb_lowat == 0)
 		so->so_snd.sb_lowat = MCLBYTES;
 	if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat)
 		so->so_snd.sb_lowat = so->so_snd.sb_hiwat;
+	if (sbreserve(so, &so->so_rcv, rcvcc))
+		goto bad2;
+	so->so_rcv.sb_wat = rcvcc;
+	if (so->so_rcv.sb_lowat == 0)
+		so->so_rcv.sb_lowat = 1;
+	mtx_leave(&so->so_snd.sb_mtx);
+	mtx_leave(&so->so_rcv.sb_mtx);
+
 	return (0);
 bad2:
 	sbrelease(so, &so->so_snd);
 bad:
+	mtx_leave(&so->so_snd.sb_mtx);
+	mtx_leave(&so->so_rcv.sb_mtx);
 	return (ENOBUFS);
 }
 
@@ -612,8 +657,7 @@ bad:
 int
 sbreserve(struct socket *so, struct sockbuf *sb, u_long cc)
 {
-	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
-	soassertlocked(so);
+	sbmtxassertlocked(so, sb);
 
 	if (cc == 0 || cc > sb_max)
 		return (1);
@@ -754,7 +798,7 @@ sbappend(struct socket *so, struct sockbuf *sb, struct mbuf *m)
 	if (m == NULL)
 		return;
 
-	soassertlocked(so);
+	sbmtxassertlocked(so, sb);
 	SBLASTRECORDCHK(sb, "sbappend 1");
 
 	if ((n = sb->sb_lastrecord) != NULL) {
@@ -835,8 +879,7 @@ sbappendrecord(struct socket *so, struct sockbuf *sb, struct mbuf *m0)
 {
 	struct mbuf *m;
 
-	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
-	soassertlocked(so);
+	sbmtxassertlocked(so, sb);
 
 	if (m0 == NULL)
 		return;
@@ -871,7 +914,7 @@ sbappendaddr(struct socket *so, struct sockbuf *sb, const struct sockaddr *asa,
 	struct mbuf *m, *n, *nlast;
 	int space = asa->sa_len;
 
-	soassertlocked(so);
+	sbmtxassertlocked(so, sb);
 
 	if (m0 && (m0->m_flags & M_PKTHDR) == 0)
 		panic("sbappendaddr");
@@ -918,7 +961,9 @@ sbappendcontrol(struct socket *so, struct sockbuf *sb, struct mbuf *m0,
     struct mbuf *control)
 {
 	struct mbuf *m, *mlast, *n;
-	int space = 0;
+	int eor = 0, space = 0;
+
+	sbmtxassertlocked(so, sb);
 
 	if (control == NULL)
 		panic("sbappendcontrol");
@@ -928,8 +973,16 @@ sbappendcontrol(struct socket *so, struct sockbuf *sb, struct mbuf *m0,
 			break;
 	}
 	n = m;			/* save pointer to last control buffer */
-	for (m = m0; m; m = m->m_next)
+	for (m = m0; m; m = m->m_next) {
 		space += m->m_len;
+		eor |= m->m_flags & M_EOR;
+		if (eor) {
+			if (m->m_next == NULL)
+				m->m_flags |= M_EOR;
+			else
+				m->m_flags &= ~M_EOR;
+		}
+	}
 	if (space > sbspace(so, sb))
 		return (0);
 	n->m_next = m0;			/* concatenate data to control */
@@ -1016,7 +1069,7 @@ void
 sbflush(struct socket *so, struct sockbuf *sb)
 {
 	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
-	KASSERT((sb->sb_flags & SB_LOCK) == 0);
+	rw_assert_unlocked(&sb->sb_lock);
 
 	while (sb->sb_mbcnt)
 		sbdrop(so, sb, (int)sb->sb_cc);
@@ -1037,8 +1090,7 @@ sbdrop(struct socket *so, struct sockbuf *sb, int len)
 	struct mbuf *m, *mn;
 	struct mbuf *next;
 
-	KASSERT(sb == &so->so_rcv || sb == &so->so_snd);
-	soassertlocked(so);
+	sbmtxassertlocked(so, sb);
 
 	next = (m = sb->sb_mb) ? m->m_nextpkt : NULL;
 	while (len > 0) {

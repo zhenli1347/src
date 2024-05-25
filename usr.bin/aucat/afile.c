@@ -365,7 +365,7 @@ afile_wav_readhdr(struct afile *f)
 	if (!afile_readhdr(f, &riff, sizeof(struct wav_riff)))
 		return 0;
 	if (memcmp(&riff.id, &wav_id_riff, 4) != 0 ||
-	    memcmp(&riff.type, &wav_id_wave, 4)) {
+	    memcmp(&riff.type, &wav_id_wave, 4) != 0) {
 		log_puts(f->path);
 		log_puts(": not a .wav file\n");
 		return 0;
@@ -406,7 +406,7 @@ afile_wav_readhdr(struct afile *f)
 		pos += sizeof(struct wav_chunk) + csize;
 		if (lseek(f->fd, sizeof(riff) + pos, SEEK_SET) == -1) {
 			log_puts(f->path);
-			log_puts(": filed to seek to chunk\n");
+			log_puts(": failed to seek to chunk\n");
 			return 0;
 		}
 	}
@@ -432,12 +432,17 @@ afile_wav_writehdr(struct afile *f)
 	le32_set(&hdr.riff.size, f->endpos - sizeof(hdr.riff));
 	memcpy(hdr.fmt_hdr.id, wav_id_fmt, 4);
 	le32_set(&hdr.fmt_hdr.size, sizeof(hdr.fmt));
-	le16_set(&hdr.fmt.fmt, 1);
+	le16_set(&hdr.fmt.fmt, WAV_FMT_EXT);
 	le16_set(&hdr.fmt.nch, f->nch);
 	le32_set(&hdr.fmt.rate, f->rate);
 	le32_set(&hdr.fmt.byterate, f->rate * f->par.bps * f->nch);
 	le16_set(&hdr.fmt.blkalign, f->par.bps * f->nch);
 	le16_set(&hdr.fmt.bits, f->par.bits);
+	le16_set(&hdr.fmt.extsize,
+	    WAV_FMT_EXT_SIZE - WAV_FMT_SIZE - sizeof(hdr.fmt.extsize));
+	le16_set(&hdr.fmt.valbits, f->par.bits);
+	le16_set(&hdr.fmt.extfmt, 1);
+	memcpy(&hdr.fmt.guid, wav_guid, sizeof(hdr.fmt.guid));
 	memcpy(hdr.data_hdr.id, wav_id_data, 4);
 	le32_set(&hdr.data_hdr.size, f->endpos - f->startpos);
 	return afile_writehdr(f, &hdr, sizeof(struct wav_hdr));
@@ -595,7 +600,7 @@ afile_aiff_readhdr(struct afile *f)
 
 		if (lseek(f->fd, sizeof(form) + pos, SEEK_SET) == -1) {
 			log_puts(f->path);
-			log_puts(": filed to seek to chunk\n");
+			log_puts(": failed to seek to chunk\n");
 			return 0;
 		}
 	}

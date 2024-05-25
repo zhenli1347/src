@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_loop.c,v 1.93 2022/10/21 14:20:03 kn Exp $	*/
+/*	$OpenBSD: if_loop.c,v 1.98 2023/12/29 11:43:04 bluhm Exp $	*/
 /*	$NetBSD: if_loop.c,v 1.15 1996/05/07 02:40:33 thorpej Exp $	*/
 
 /*
@@ -146,6 +146,7 @@ void	lortrequest(struct ifnet *, int, struct rtentry *);
 void	loinput(struct ifnet *, struct mbuf *);
 int	looutput(struct ifnet *,
 	    struct mbuf *, struct sockaddr *, struct rtentry *);
+int	lo_bpf_mtap(caddr_t, const struct mbuf *, u_int);
 
 int	loop_clone_create(struct if_clone *, int);
 int	loop_clone_destroy(struct ifnet *);
@@ -172,13 +173,19 @@ loop_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_softc = NULL;
 	ifp->if_mtu = LOMTU;
 	ifp->if_flags = IFF_LOOPBACK | IFF_MULTICAST;
-	ifp->if_xflags = IFXF_CLONED;
+	ifp->if_xflags = IFXF_CLONED | IFXF_LRO;
+	ifp->if_capabilities = IFCAP_CSUM_IPv4 |
+	    IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4 |
+	    IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6 |
+	    IFCAP_LRO | IFCAP_TSOv4 | IFCAP_TSOv6;
+	ifp->if_bpf_mtap = lo_bpf_mtap;
 	ifp->if_rtrequest = lortrequest;
 	ifp->if_ioctl = loioctl;
 	ifp->if_input = loinput;
 	ifp->if_output = looutput;
 	ifp->if_type = IFT_LOOP;
 	ifp->if_hdrlen = sizeof(u_int32_t);
+	if_counters_alloc(ifp);
 	if (unit == 0) {
 		if_attachhead(ifp);
 		if_addgroup(ifp, ifc->ifc_name);
@@ -227,6 +234,13 @@ loop_clone_destroy(struct ifnet *ifp)
 	return (0);
 }
 
+int
+lo_bpf_mtap(caddr_t if_bpf, const struct mbuf *m, u_int dir)
+{
+	/* loopback dumps on output, disable input bpf */
+	return (0);
+}
+
 void
 loinput(struct ifnet *ifp, struct mbuf *m)
 {
@@ -237,7 +251,7 @@ loinput(struct ifnet *ifp, struct mbuf *m)
 
 	error = if_input_local(ifp, m, m->m_pkthdr.ph_family);
 	if (error)
-		ifp->if_ierrors++;
+		counters_inc(ifp->if_counters, ifc_ierrors);
 }
 
 int
@@ -278,6 +292,10 @@ loioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 
 	switch (cmd) {
 	case SIOCSIFFLAGS:
+		if (ISSET(ifp->if_xflags, IFXF_LRO))
+			SET(ifp->if_capabilities, IFCAP_TSOv4 | IFCAP_TSOv6);
+		else
+			CLR(ifp->if_capabilities, IFCAP_TSOv4 | IFCAP_TSOv6);
 		break;
 
 	case SIOCSIFADDR:

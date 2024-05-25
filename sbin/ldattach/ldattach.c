@@ -1,4 +1,4 @@
-/*	$OpenBSD: ldattach.c,v 1.18 2019/06/28 13:32:44 deraadt Exp $	*/
+/*	$OpenBSD: ldattach.c,v 1.20 2023/04/19 12:58:15 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008 Marc Balmer <mbalmer@openbsd.org>
@@ -27,7 +27,6 @@
 #include <sys/limits.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 
 #include <err.h>
 #include <errno.h>
@@ -332,7 +331,6 @@ bail_out:
 	return 0;
 }
 
-/* ARGSUSED */
 void
 coroner(int useless)
 {

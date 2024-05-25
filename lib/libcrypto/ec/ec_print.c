@@ -1,4 +1,4 @@
-/* $OpenBSD: ec_print.c,v 1.9 2022/11/26 16:08:52 tb Exp $ */
+/* $OpenBSD: ec_print.c,v 1.14 2023/11/21 22:17:15 tb Exp $ */
 /* ====================================================================
  * Copyright (c) 1998-2002 The OpenSSL Project.  All rights reserved.
  *
@@ -63,8 +63,7 @@ EC_POINT_point2bn(const EC_GROUP *group, const EC_POINT *point,
 	size_t buf_len = 0;
 	unsigned char *buf;
 
-	buf_len = EC_POINT_point2oct(group, point, form,
-	    NULL, 0, ctx);
+	buf_len = EC_POINT_point2oct(group, point, form, NULL, 0, ctx);
 	if (buf_len == 0)
 		return NULL;
 
@@ -81,6 +80,7 @@ EC_POINT_point2bn(const EC_GROUP *group, const EC_POINT *point,
 
 	return ret;
 }
+LCRYPTO_ALIAS(EC_POINT_point2bn);
 
 EC_POINT *
 EC_POINT_bn2point(const EC_GROUP *group,
@@ -110,13 +110,14 @@ EC_POINT_bn2point(const EC_GROUP *group,
 
 	if (!EC_POINT_oct2point(group, ret, buf, buf_len, ctx)) {
 		if (point == NULL)
-			EC_POINT_clear_free(ret);
+			EC_POINT_free(ret);
 		free(buf);
 		return NULL;
 	}
 	free(buf);
 	return ret;
 }
+LCRYPTO_ALIAS(EC_POINT_bn2point);
 
 static const char *HEX_DIGITS = "0123456789ABCDEF";
 
@@ -159,6 +160,7 @@ EC_POINT_point2hex(const EC_GROUP *group, const EC_POINT *point,
 
 	return ret;
 }
+LCRYPTO_ALIAS(EC_POINT_point2hex);
 
 EC_POINT *
 EC_POINT_hex2point(const EC_GROUP *group, const char *buf,
@@ -167,12 +169,13 @@ EC_POINT_hex2point(const EC_GROUP *group, const char *buf,
 	EC_POINT *ret = NULL;
 	BIGNUM *tmp_bn = NULL;
 
-	if (!BN_hex2bn(&tmp_bn, buf))
+	if (BN_hex2bn(&tmp_bn, buf) == 0)
 		return NULL;
 
 	ret = EC_POINT_bn2point(group, tmp_bn, point, ctx);
 
-	BN_clear_free(tmp_bn);
+	BN_free(tmp_bn);
 
 	return ret;
 }
+LCRYPTO_ALIAS(EC_POINT_hex2point);

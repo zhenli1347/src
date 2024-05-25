@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_elf.h,v 1.97 2022/10/27 23:17:18 deraadt Exp $	*/
+/*	$OpenBSD: exec_elf.h,v 1.103 2024/01/17 22:22:25 kurt Exp $	*/
 /*
  * Copyright (c) 1995, 1996 Erik Theisen.  All rights reserved.
  *
@@ -476,10 +476,13 @@ typedef struct {
 
 #define PT_GNU_EH_FRAME		0x6474e550	/* Exception handling info */
 #define PT_GNU_RELRO		0x6474e552	/* Read-only after relocation */
+#define PT_GNU_PROPERTY		0x6474e553	/* Program property note */ 
 
 #define PT_OPENBSD_MUTABLE	0x65a3dbe5	/* like bss, but not immutable */
 #define PT_OPENBSD_RANDOMIZE	0x65a3dbe6	/* fill with random data */
 #define PT_OPENBSD_WXNEEDED	0x65a3dbe7	/* program performs W^X violations */
+#define PT_OPENBSD_NOBTCFI	0x65a3dbe8	/* no branch target CFI */
+#define PT_OPENBSD_SYSCALLS	0x65a3dbe9	/* syscall locations */
 #define PT_OPENBSD_BOOTDATA	0x65a41be6	/* section for boot arguments */
 
 /* Segment flags - p_flags */
@@ -492,6 +495,10 @@ typedef struct {
 					/*  specific segment flags */
 
 #define PF_OPENBSD_MUTABLE	0x08000000	/* Mutable */
+
+#ifdef	_KERNEL
+#define PF_ISVNODE	0x00100000	/* For coredump segments */
+#endif
 
 /* Dynamic structure */
 typedef struct {
@@ -645,7 +652,7 @@ typedef struct {
  *	NT_OPENBSD_PROCINFO
  *		Note is a "elfcore_procinfo" structure.
  *	NT_OPENBSD_AUXV
- *		Note is a a bunch of Auxiliary Vectors, terminated by
+ *		Note is a bunch of Auxiliary Vectors, terminated by
  *		an AT_NULL entry.
  *	NT_OPENBSD_REGS
  *		Note is a "reg" structure.
@@ -664,6 +671,7 @@ typedef struct {
 #define NT_OPENBSD_FPREGS	21
 #define NT_OPENBSD_XFPREGS	22
 #define NT_OPENBSD_WCOOKIE	23
+#define NT_OPENBSD_PACMASK	24
 
 struct elfcore_procinfo {
 	/* Version 1 fields start here. */

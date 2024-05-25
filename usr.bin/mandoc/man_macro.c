@@ -1,4 +1,4 @@
-/* $OpenBSD: man_macro.c,v 1.109 2022/04/27 17:04:15 schwarze Exp $ */
+/* $OpenBSD: man_macro.c,v 1.111 2023/11/13 19:13:00 schwarze Exp $ */
 /*
  * Copyright (c) 2012-2015,2017-2020,2022 Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2008, 2009, 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -77,6 +77,7 @@ static const struct man_macro man_macros[MAN_MAX - MAN_TH] = {
 	{ blk_close, MAN_XSCOPE }, /* UE */
 	{ blk_exp, MAN_XSCOPE }, /* MT */
 	{ blk_close, MAN_XSCOPE }, /* ME */
+	{ in_line_eoln, 0 }, /* MR */
 };
 
 
@@ -311,7 +312,7 @@ blk_exp(MACRO_PROT_ARGS)
 		if (tok == MAN_RS) {
 			if (roff_getreg(man->roff, "an-margin") == 0)
 				roff_setreg(man->roff, "an-margin",
-				    7 * 24, '=');
+				    5 * 24, '=');
 			if ((head->aux = strtod(p, NULL) * 24.0) > 0)
 				roff_setreg(man->roff, "an-margin",
 				    head->aux, '+');

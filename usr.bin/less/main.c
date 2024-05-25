@@ -53,7 +53,6 @@ extern int	quit_if_one_screen;
 extern int	quit_at_eof;
 extern int	pr_type;
 extern int	hilite_search;
-extern int	use_lessopen;
 extern int	no_init;
 extern int	top_scroll;
 extern int	errmsgs;
@@ -128,11 +127,8 @@ main(int argc, char *argv[])
 		/* default prompt is medium */
 		pr_type = OPT_ON;
 
-		/* do not hilight search terms */
+		/* do not highlight search terms */
 		hilite_search = OPT_OFF;
-
-		/* do not use LESSOPEN */
-		use_lessopen = OPT_OFF;
 
 		/* do not set init strings to terminal */
 		no_init = OPT_ON;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.40 2020/08/15 11:31:17 tobhe Exp $	*/
+/*	$OpenBSD: util.c,v 1.44 2024/02/03 00:38:08 jsg Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -499,6 +499,12 @@ print_hexval(const uint8_t *buf, off_t offset, size_t length)
 	print_debug("\n");
 }
 
+void
+print_hexbuf(struct ibuf *ibuf)
+{
+	print_hex(ibuf_data(ibuf), 0, ibuf_size(ibuf));
+}
+
 const char *
 print_bits(unsigned short v, unsigned char *bits)
 {
@@ -636,19 +642,20 @@ prefixlen2mask6(uint8_t prefixlen, uint32_t *mask)
 }
 
 const char *
-print_host(struct sockaddr *sa, char *buf, size_t len)
+print_addr(void *addr)
 {
-	static char	sbuf[IKED_CYCLE_BUFFERS][NI_MAXHOST + 7];
-	static int	idx = 0;
-	char		pbuf[7];
-	in_port_t	port;
+	static char	 sbuf[IKED_CYCLE_BUFFERS][NI_MAXHOST + 7];
+	static int	 idx;
+	struct sockaddr	*sa = addr;
+	char		*buf;
+	size_t		 len;
+	char		 pbuf[7];
+	in_port_t	 port;
 
-	if (buf == NULL) {
-		buf = sbuf[idx];
-		len = sizeof(sbuf[idx]);
-		if (++idx >= IKED_CYCLE_BUFFERS)
-			idx = 0;
-	}
+	buf = sbuf[idx];
+	len = sizeof(sbuf[idx]);
+	if (++idx >= IKED_CYCLE_BUFFERS)
+		idx = 0;
 
 	if (sa->sa_family == AF_UNSPEC) {
 		strlcpy(buf, "any", len);
@@ -694,8 +701,7 @@ print_proto(uint8_t proto)
 	if ((p = getprotobynumber(proto)) != NULL)
 		strlcpy(buf[idx], p->p_name, sizeof(buf[idx]));
 	else
-		snprintf(buf[idx], sizeof(buf), "%u", proto);
-
+		snprintf(buf[idx], sizeof(buf[idx]), "%u", proto);
 
 	return (buf[idx++]);
 }

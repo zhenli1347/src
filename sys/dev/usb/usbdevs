@@ -1,4 +1,4 @@
-$OpenBSD: usbdevs,v 1.752 2022/11/09 10:03:04 robert Exp $
+$OpenBSD: usbdevs,v 1.765 2024/05/23 08:06:22 kevlo Exp $
 /* $NetBSD: usbdevs,v 1.322 2003/05/10 17:47:14 hamajima Exp $ */
 
 /*
@@ -645,6 +645,7 @@ vendor THINGM		0x27b8	ThingM
 vendor ASUSTEK		0x2821	ASUSTeK Computer
 vendor PIONEERDJ	0x2b73	Pioneer DJ
 vendor PLANEX		0x2c02	Planex Communications
+vendor MERCUSYS		0x2c4e	Mercusys
 vendor QUECTEL		0x2c7c	Quectel
 vendor CLUB3D		0x2d1c	Club 3D
 vendor AQUANTIA		0x2eca	Aquantia
@@ -653,6 +654,7 @@ vendor DYNABOOK		0x30f3	Dynabook
 vendor LINKINSTRUMENTS	0x3195	Link Instruments
 vendor AEI		0x3334	AEI
 vendor PQI		0x3538	PQI
+vendor RDING		0x3553	RDing TECH
 vendor DAISY		0x3579	Daisy Technology
 vendor NI		0x3923	National Instruments
 vendor MICRONET		0x3980	Micronet Communications
@@ -1002,8 +1004,8 @@ product APPLE WELLSPRING9_JIS	0x0274	Keyboard/Trackpad
 product APPLE WELLSPRING8_ANSI	0x0290	Keyboard/Trackpad
 product APPLE WELLSPRING8_ISO	0x0291	Keyboard/Trackpad
 product APPLE WELLSPRING8_JIS	0x0292	Keyboard/Trackpad
-product APPLE WELLSPRINGM1_J293	0x0341	Keyboard/Trackpad	
 product APPLE OPTMOUSE		0x0302	Optical mouse
+product APPLE WELLSPRINGM1_J293	0x0341	Keyboard/Trackpad	
 product APPLE BLUETOOTH_HCI	0x1000	HID-proxy
 product APPLE SPEAKERS		0x1101	Speakers
 product APPLE IPHONE		0x1290	iPhone
@@ -1575,6 +1577,7 @@ product DIGITALSTREAM PS2	0x0001	PS/2 Active
 /* DisplayLink products */
 product DISPLAYLINK GUC2020	0x0059	IOGEAR DVI GUC2020
 product DISPLAYLINK LD220	0x0100	Samsung LD220
+product DISPLAYLINK TOSHIBA	0x0110	TOSHIBA Video Dock
 product DISPLAYLINK POLARIS2	0x0117	Polaris2 USB dock
 product DISPLAYLINK VCUD60	0x0136	Rextron DVI
 product DISPLAYLINK CONV	0x0138	StarTech CONV-USB2DVI
@@ -3098,6 +3101,9 @@ product MELCO UWABR100		0x017f	SONY UWA-BR100
 product MELCO WLIUCGNM		0x01a2	WLI-UC-GNM
 product MELCO WLIUCGNM2		0x01ee	WLI-UC-GNM2
 
+/* Mercusys products */
+product MERCUSYS MW150USV2	0x0102	MW150US V2
+
 /* MetaGeek products */
 product METAGEEK WISPY24I	0x2400	Wi-Spy 2.4i
 
@@ -3528,7 +3534,7 @@ product PAPOUCH GOLIATH_MSR	0x8005	GOLIATH MSR
 product PARA RT3070		0x8888	RT3070
 
 /* PC Sensors products */
-product PCSENSORS TEMPER	0x2107	TEMPer
+product PCSENSORS TEMPER	0x2107	TEMPer sensor
 
 /* Pegatron products */
 product PEGATRON RT2870		0x0002	RT2870
@@ -3714,7 +3720,21 @@ product QUANTA2 UMASS		0x1000	Quanta USB MSM (umass mode)
 product QUANTA2 Q101		0xea02	Quanta Q101 HSDPA USB modem
 
 /* Quectel products */
-product QUECTEL EC25		0x0125	EC25 LTE
+product QUECTEL EC21		0x0121	EC21
+product QUECTEL EC25		0x0125	EC20/EC25
+product QUECTEL EG91		0x0191	EG91
+product QUECTEL EG95		0x0195	EG95
+product QUECTEL BG96		0x0296	BG96
+product QUECTEL EG06		0x0306	EG06/EP06/EM06
+product QUECTEL EM060K		0x030b	EM060K
+product QUECTEL AG15		0x0415	AG15
+product QUECTEL AG35		0x0435	AG35
+product QUECTEL AG520R		0x0452	AG520R
+product QUECTEL AG525R		0x0455	AG550R
+product QUECTEL EG12		0x0512	EG12/EM12/EG18
+product QUECTEL EG20		0x0620	EG20
+product QUECTEL BG95		0x0700	BG95/BG77/BG600L-M3/BC69
+product QUECTEL RG5XXQ		0x0800	RG500Q/RM500Q/RG510Q/RM510Q
 
 /* Quickshot products */
 product QUICKSHOT STRIKEPAD	0x6238	USB StrikePad
@@ -3755,6 +3775,9 @@ product RALINK RT2573_2		0x9021	RT2573
 product RATOC REXUSB60		0xb000	USB serial REX-USB60
 product RATOC REXUSB60F		0xb020	REX-USB60F
 
+/* RDing TECH products */
+product RDING TEMPER		0xa001	TEMPer sensor
+
 /* Realtek products */
 product REALTEK RTL8188ETV	0x0179	RTL8188ETV
 product REALTEK RTL8188CTV	0x018a	RTL8188CTV
@@ -3786,6 +3809,7 @@ product REALTEK RTL8187		0x8187	RTL8187
 product REALTEK RTL8187B_0	0x8189	RTL8187B
 product REALTEK RTL8188CUS	0x818a	RTL8188CUS
 product REALTEK RTL8192EU	0x818b	RTL8192EU
+product REALTEK RTL8192EU_2	0x818c	RTL8192EU
 product REALTEK RTL8188CU_3	0x8191	RTL8188CU
 product REALTEK RTL8192U	0x8192	RTL8192U
 product REALTEK RTL8187B_1	0x8197	RTL8187B
@@ -3796,6 +3820,7 @@ product REALTEK RTL8713		0x8713	RTL8713
 product REALTEK RTL8188CU_COMBO	0x8754	RTL8188CU
 product REALTEK RTL8723BU	0xb720	RTL8723BU
 product REALTEK RTL8192SU	0xc512	RTL8192SU
+product REALTEK RTL8188FTV	0xf179	RTL8188FTV
 
 /* Renesas products */
 product RENESAS RX610		0x0053	RX610 RX-Stick
@@ -4459,7 +4484,7 @@ product TPLINK RTL8188EUS	0x010c	RTL8188EUS
 product TPLINK EU300		0x0601	EU300
 product TPLINK RTL8152B_1	0x0602	RTL8152B
 product TPLINK RTL8152B_2	0x0603	RTL8152B
-product TPLINK RTL8153		0x0604	RTL8153
+product TPLINK UB500		0x0604	UB500
 
 /* Trek Technology products */
 product TREK THUMBDRIVE		0x1111	ThumbDrive
@@ -4615,6 +4640,7 @@ product WACOM GRAPHIRE3_4X5	0x0013	Graphire3 4x5
 product WACOM GRAPHIRE4_4X5	0x0015	Graphire4 Classic A6
 product WACOM INTUOSA5		0x0021	Intuos A5
 product WACOM INTUOS_DRAW	0x033b	Intuos Draw (CTL-490)
+product WACOM INTUOS_S		0x0374	Intuos S (CTL-4100)
 product WACOM ONE_S		0x037a	One S (CTL-472)
 product WACOM ONE_M		0x037b	One M (CTL-672)
 product WACOM INTUOS_PRO_S	0x0392	Intuos Pro S
@@ -4628,7 +4654,10 @@ product WAVESENSE JAZZ		0xaaaa	Jazz blood glucose meter
 /* WCH/QinHeng Electronics */
 product WCH CH341		0x5523	CH341 serial/parallel
 product WCH2 CH341A		0x5523	CH341A serial/parallel
+product WCH2 CH343		0x55d3	CH343 serial/parallel
+product WCH2 CH9102		0x55d4	CH9102 serial/parallel
 product WCH2 CH340		0x7523	CH340 serial/parallel
+product	WCH2 TEMPER		0xe025	TEMPer sensor
 
 /* WIENER Plein & Baus products */
 product WIENERPLEINBAUS PL512	0x0010	PL512 PSU

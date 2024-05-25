@@ -1,4 +1,4 @@
-/*	$OpenBSD: init.c,v 1.10 2022/11/06 09:25:39 deraadt Exp $ */
+/*	$OpenBSD: init.c,v 1.22 2024/01/21 17:18:13 kettenis Exp $ */
 /*
  * Copyright (c) 2014,2015 Philip Guenther <guenther@openbsd.org>
  *
@@ -51,7 +51,7 @@ int	_pagesize = 0;
 struct timekeep	*_timekeep;
 
 /*
- * In dynamicly linked binaries environ and __progname are overriden by
+ * In dynamically linked binaries environ and __progname are overridden by
  * the definitions in ld.so.
  */
 char	**environ __attribute__((weak)) = NULL;
@@ -70,6 +70,9 @@ extern Elf_Ehdr __executable_start[] __attribute__((weak));
 
 /* provide definitions for these */
 const dl_cb *_dl_cb __relro = NULL;
+
+int	HIDDEN(execve)(const char *, char *const *, char *const *)
+	__attribute__((weak));
 
 void _libc_preinit(int, char **, char **, dl_cb_cb *) __dso_hidden;
 void
@@ -126,7 +129,6 @@ _libc_preinit(int argc, char **argv, char **envp, dl_cb_cb *cb)
 		 * Static non-PIE processes don't get an AUX vector,
 		 * so find the phdrs through the ELF header
 		 */
-		_static_phdr_info.dlpi_addr = (Elf_Addr)__executable_start;
 		phdr = (void *)((char *)__executable_start +
 		    __executable_start->e_phoff);
 		phnum = __executable_start->e_phnum;
@@ -205,16 +207,12 @@ _csu_finish(char **argv, char **envp, void (*cleanup)(void))
 
 #ifndef PIC
 /*
- * static libc in a static link?  Then disable kbind and set up
- * __progname and environ
+ * static libc in a static link?  Then set up __progname and environ
  */
 static inline void
 early_static_init(char **argv, char **envp)
 {
 	static char progname_storage[NAME_MAX+1];
-
-	/* disable kbind */
-	syscall(SYS_kbind, (void *)NULL, (size_t)0, (long long)0);
 
 	environ = envp;
 

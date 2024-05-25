@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ether.c,v 1.252 2022/12/07 14:38:29 claudio Exp $	*/
+/*	$OpenBSD: if_ether.c,v 1.267 2023/12/18 13:30:44 bluhm Exp $	*/
 /*	$NetBSD: if_ether.c,v 1.31 1996/05/11 12:59:58 mycroft Exp $	*/
 
 /*
@@ -105,10 +105,11 @@ struct niqueue arpinq = NIQUEUE_INITIALIZER(50, NETISR_ARP);
 /* llinfo_arp live time, rt_llinfo and RTF_LLINFO are protected by arp_mtx */
 struct mutex arp_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
 
-LIST_HEAD(, llinfo_arp) arp_list; /* [mN] list of all llinfo_arp structures */
+LIST_HEAD(, llinfo_arp) arp_list =
+    LIST_HEAD_INITIALIZER(arp_list);	/* [mN] list of llinfo_arp structures */
 struct	pool arp_pool;		/* [I] pool for llinfo_arp structures */
 int	arp_maxtries = 5;	/* [I] arp requests before set to rejected */
-int	la_hold_total;		/* [a] packets currently in the arp queue */
+unsigned int	la_hold_total;	/* [a] packets currently in the arp queue */
 
 #ifdef NFSCLIENT
 /* revarp state */
@@ -120,7 +121,6 @@ unsigned int revarp_ifidx;
 /*
  * Timeout routine.  Age arp_tab entries periodically.
  */
-/* ARGSUSED */
 void
 arptimer(void *arg)
 {
@@ -149,7 +149,8 @@ arpinit(void)
 	pool_init(&arp_pool, sizeof(struct llinfo_arp), 0,
 	    IPL_SOFTNET, 0, "arp", NULL);
 
-	timeout_set_proc(&arptimer_to, arptimer, &arptimer_to);
+	timeout_set_flags(&arptimer_to, arptimer, &arptimer_to,
+	    KCLOCK_NONE, TIMEOUT_PROC | TIMEOUT_MPSAFE);
 	timeout_add_sec(&arptimer_to, arpt_prune);
 }
 
@@ -339,6 +340,7 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	struct rtentry *rt = NULL;
 	char addr[INET_ADDRSTRLEN];
 	time_t uptime;
+	int refresh = 0, reject = 0;
 
 	if (m->m_flags & M_BCAST) {	/* broadcast */
 		memcpy(desten, etherbroadcastaddr, sizeof(etherbroadcastaddr));
@@ -380,8 +382,6 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	 */
 	if ((rt->rt_expire == 0 || rt->rt_expire > uptime) &&
 	    sdl->sdl_family == AF_LINK && sdl->sdl_alen != 0) {
-		int refresh = 0;
-
 		memcpy(desten, LLADDR(sdl), sdl->sdl_alen);
 
 		/* refresh ARP entry when timeout gets close */
@@ -389,10 +389,8 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 		    rt->rt_expire - arpt_keep / 8 < uptime) {
 
 			mtx_enter(&arp_mtx);
-			if (ISSET(rt->rt_flags, RTF_LLINFO)) {
-				la = (struct llinfo_arp *)rt->rt_llinfo;
-				KASSERT(la != NULL);
-
+			la = (struct llinfo_arp *)rt->rt_llinfo;
+			if (la != NULL) {
 				if (la->la_refreshed + 30 < uptime) {
 					la->la_refreshed = uptime;
 					refresh = 1;
@@ -412,20 +410,12 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	if (ifp->if_flags & (IFF_NOARP|IFF_STATICARP))
 		goto bad;
 
-	KERNEL_LOCK();
-	/*
-	 * Re-check since we grab the kernel lock after the first check.
-	 * rtrequest_delete() can be called with shared netlock.  From
-	 * there arp_rtrequest() is reached which touches RTF_LLINFO
-	 * and rt_llinfo.  As this is called with kernel lock we grab the
-	 * kernel lock here and are safe.  XXXSMP
-	 */
-	if (!ISSET(rt->rt_flags, RTF_LLINFO)) {
-		KERNEL_UNLOCK();
+	mtx_enter(&arp_mtx);
+	la = (struct llinfo_arp *)rt->rt_llinfo;
+	if (la == NULL) {
+		mtx_leave(&arp_mtx);
 		goto bad;
 	}
-	la = (struct llinfo_arp *)rt->rt_llinfo;
-	KASSERT(la != NULL);
 
 	/*
 	 * There is an arptab entry, but no ethernet address
@@ -452,16 +442,13 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	}
 #endif
 	if (rt->rt_expire) {
-		rt->rt_flags &= ~RTF_REJECT;
+		reject = ~RTF_REJECT;
 		if (la->la_asked == 0 || rt->rt_expire != uptime) {
 			rt->rt_expire = uptime;
 			if (la->la_asked++ < arp_maxtries)
-				arprequest(ifp,
-				    &satosin(rt->rt_ifa->ifa_addr)->sin_addr.s_addr,
-				    &satosin(dst)->sin_addr.s_addr,
-				    ac->ac_enaddr);
+				refresh = 1;
 			else {
-				rt->rt_flags |= RTF_REJECT;
+				reject = RTF_REJECT;
 				rt->rt_expire += arpt_down;
 				la->la_asked = 0;
 				la->la_refreshed = 0;
@@ -470,8 +457,21 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 			}
 		}
 	}
+	mtx_leave(&arp_mtx);
 
-	KERNEL_UNLOCK();
+	if (reject == RTF_REJECT && !ISSET(rt->rt_flags, RTF_REJECT)) {
+		KERNEL_LOCK();
+		SET(rt->rt_flags, RTF_REJECT);
+		KERNEL_UNLOCK();
+	}
+	if (reject == ~RTF_REJECT && ISSET(rt->rt_flags, RTF_REJECT)) {
+		KERNEL_LOCK();
+		CLR(rt->rt_flags, RTF_REJECT);
+		KERNEL_UNLOCK();
+	}
+	if (refresh)
+		arprequest(ifp, &satosin(rt->rt_ifa->ifa_addr)->sin_addr.s_addr,
+		    &satosin(dst)->sin_addr.s_addr, ac->ac_enaddr);
 	return (EAGAIN);
 
 bad:
@@ -609,12 +609,7 @@ in_arpinput(struct ifnet *ifp, struct mbuf *m)
 		    "address %s\n", addr, ether_sprintf(ea->arp_sha));
 		itaddr = isaddr;
 	} else if (rt != NULL) {
-		int error;
-
-		KERNEL_LOCK();
-		error = arpcache(ifp, ea, rt);
-		KERNEL_UNLOCK();
-		if (error)
+		if (arpcache(ifp, ea, rt))
 			goto out;
 	}
 
@@ -653,13 +648,10 @@ arpcache(struct ifnet *ifp, struct ether_arp *ea, struct rtentry *rt)
 	struct in_addr *spa = (struct in_addr *)ea->arp_spa;
 	char addr[INET_ADDRSTRLEN];
 	struct ifnet *rifp;
-	struct mbuf_list ml;
-	struct mbuf *m;
 	time_t uptime;
-	unsigned int len;
 	int changed = 0;
 
-	KERNEL_ASSERT_LOCKED();
+	NET_ASSERT_LOCKED_EXCLUSIVE();
 	KASSERT(sdl != NULL);
 
 	/*
@@ -729,16 +721,7 @@ arpcache(struct ifnet *ifp, struct ether_arp *ea, struct rtentry *rt)
 
 	la->la_asked = 0;
 	la->la_refreshed = 0;
-	mq_delist(&la->la_mq, &ml);
-	len = ml_len(&ml);
-	while ((m = ml_dequeue(&ml)) != NULL)
-		ifp->if_output(ifp, m, rt_key(rt), rt);
-	/* XXXSMP we discard if other CPU enqueues */
-	if (mq_len(&la->la_mq) > 0) {
-		/* mbuf is back in queue. Discard. */
-		atomic_sub_int(&la_hold_total, len + mq_purge(&la->la_mq));
-	} else
-		atomic_sub_int(&la_hold_total, len);
+	if_output_mq(ifp, &la->la_mq, &la_hold_total, rt_key(rt), rt);
 
 	return (0);
 }
@@ -773,7 +756,8 @@ arptfree(struct rtentry *rt)
 	arpinvalidate(rt);
 
 	ifp = if_get(rt->rt_ifidx);
-	KASSERT(ifp != NULL);
+	if (ifp == NULL)
+		return;
 	if (!ISSET(rt->rt_flags, RTF_STATIC|RTF_CACHED))
 		rtdeletemsg(rt, ifp, ifp->if_rdomain);
 	if_put(ifp);

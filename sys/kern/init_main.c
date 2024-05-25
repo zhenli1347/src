@@ -1,4 +1,4 @@
-/*	$OpenBSD: init_main.c,v 1.319 2022/11/10 07:05:41 jmatthew Exp $	*/
+/*	$OpenBSD: init_main.c,v 1.326 2024/04/02 08:39:16 deraadt Exp $	*/
 /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
 
 /*
@@ -47,6 +47,7 @@
 #include <sys/resourcevar.h>
 #include <sys/signalvar.h>
 #include <sys/systm.h>
+#include <sys/clockintr.h>
 #include <sys/namei.h>
 #include <sys/vnode.h>
 #include <sys/tty.h>
@@ -105,7 +106,7 @@ extern void stoeplitz_init(void);
 const char	copyright[] =
 "Copyright (c) 1982, 1986, 1989, 1991, 1993\n"
 "\tThe Regents of the University of California.  All rights reserved.\n"
-"Copyright (c) 1995-2022 OpenBSD. All rights reserved.  https://www.OpenBSD.org\n";
+"Copyright (c) 1995-2024 OpenBSD. All rights reserved.  https://www.OpenBSD.org\n";
 
 /* Components of the first process -- never freed. */
 struct	session session0;
@@ -313,6 +314,7 @@ main(void *framep)
 	/* Initialize run queues */
 	sched_init_runqueues();
 	sleep_queue_init();
+	clockqueue_init(&curcpu()->ci_queue);
 	sched_init_cpu(curcpu());
 	p->p_cpu->ci_randseed = (arc4random() & 0x7fffffff) + 1;
 
@@ -397,6 +399,7 @@ main(void *framep)
 	/* Enable per-CPU data. */
 	mbcpuinit();
 	kqueue_init_percpu();
+	pmap_init_percpu();
 	uvm_init_percpu();
 	evcount_init_percpu();
 
@@ -479,16 +482,12 @@ main(void *framep)
 
 	/*
 	 * Now can look at time, having had a chance to verify the time
-	 * from the file system.  Reset p->p_rtime as it may have been
-	 * munched in mi_switch() after the time got set.
+	 * from the file system. 
 	 */
 	LIST_FOREACH(pr, &allprocess, ps_list) {
 		nanouptime(&pr->ps_start);
-		TAILQ_FOREACH(p, &pr->ps_threads, p_thr_link) {
-			nanouptime(&p->p_cpu->ci_schedstate.spc_runtime);
-			timespecclear(&p->p_rtime);
-		}
 	}
+	nanouptime(&curcpu()->ci_schedstate.spc_runtime);
 
 	uvm_swap_init();
 
@@ -537,7 +536,7 @@ main(void *framep)
 	/*
 	 * Start the idle pool page garbage collector
 	 */
-#if !(defined(__m88k__) && defined(MULTIPROCESSOR))	/* XXX */
+#if defined(MULTIPROCESSOR)
 	pool_gc_pages(NULL);
 #endif
 
@@ -627,7 +626,7 @@ start_init(void *arg)
 	    NULL, UVM_UNKNOWN_OFFSET, 0,
 	    UVM_MAPFLAG(PROT_READ | PROT_WRITE, PROT_MASK, MAP_INHERIT_COPY,
 	    MADV_NORMAL,
-	    UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW|UVM_FLAG_STACK|UVM_FLAG_SYSCALL)))
+	    UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW|UVM_FLAG_STACK)))
 		panic("init: couldn't allocate argument space");
 
 	for (pathp = &initpaths[0]; (path = *pathp) != NULL; pathp++) {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplpinctrl.c,v 1.5 2022/12/06 16:07:14 kettenis Exp $	*/
+/*	$OpenBSD: aplpinctrl.c,v 1.8 2023/07/23 11:17:50 kettenis Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -28,6 +28,7 @@
 #include <dev/ofw/openfirm.h>
 #include <dev/ofw/ofw_gpio.h>
 #include <dev/ofw/ofw_pinctrl.h>
+#include <dev/ofw/ofw_power.h>
 #include <dev/ofw/fdt.h>
 
 #define APPLE_PIN(pinmux) ((pinmux) & 0xffff)
@@ -135,6 +136,8 @@ aplpinctrl_attach(struct device *parent, struct device *self, void *aux)
 		printf(": can't map registers\n");
 		return;
 	}
+
+	power_domain_enable(faa->fa_node);
 
 	pinctrl_register(faa->fa_node, aplpinctrl_pinctrl, sc);
 
@@ -337,7 +340,7 @@ aplpinctrl_intr_establish(void *cookie, int *cells, int ipl,
 	ih->ih_arg = arg;
 	ih->ih_irq = pin;
 	ih->ih_type = type;
-	ih->ih_ipl = ipl;
+	ih->ih_ipl = ipl & IPL_IRQMASK;
 	ih->ih_name = name;
 	ih->ih_sc = sc;
 	if (name != NULL)
@@ -388,7 +391,6 @@ aplpinctrl_intr_disestablish(void *cookie)
 	TAILQ_REMOVE(&sc->sc_handler[ih->ih_irq], ih, ih_list);
 	if (ih->ih_name)
 		evcount_detach(&ih->ih_count);
-	free(ih, M_DEVBUF, sizeof(*ih));
 
 	if (TAILQ_EMPTY(&sc->sc_handler[ih->ih_irq])) {
 		reg = HREAD4(sc, GPIO_PIN(ih->ih_irq));
@@ -396,6 +398,8 @@ aplpinctrl_intr_disestablish(void *cookie)
 		reg |= GPIO_PIN_MODE_IRQ_OFF;
 		HWRITE4(sc, GPIO_PIN(ih->ih_irq), reg);
 	}
+
+	free(ih, M_DEVBUF, sizeof(*ih));
 
 	splx(s);
 }

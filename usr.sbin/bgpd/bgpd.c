@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.255 2022/11/18 10:17:23 claudio Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.264 2024/05/15 09:09:38 job Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -20,6 +20,8 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <err.h>
 #include <errno.h>
@@ -73,7 +75,7 @@ struct connect_elm {
 	int				fd;
 };
 
-TAILQ_HEAD( ,connect_elm)	connect_queue = \
+TAILQ_HEAD(, connect_elm)	connect_queue = \
 				    TAILQ_HEAD_INITIALIZER(connect_queue);
 u_int				connect_cnt;
 #define MAX_CONNECT_CNT		32
@@ -598,6 +600,7 @@ send_config(struct bgpd_config *conf)
 	struct roa		*roa;
 	struct aspa_set		*aspa;
 	struct rtr_config	*rtr;
+	struct flowspec_config	*f, *nf;
 
 	reconfpending = 3;	/* one per child */
 
@@ -656,6 +659,26 @@ send_config(struct bgpd_config *conf)
 	/* networks go via kroute to the RDE */
 	kr_net_reload(conf->default_tableid, 0, &conf->networks);
 
+	/* flowspec goes directly to the RDE, also remove old objects */
+	RB_FOREACH_SAFE(f, flowspec_tree, &conf->flowspecs, nf) {
+		if (f->reconf_action != RECONF_DELETE) {
+			if (imsg_compose(ibuf_rde, IMSG_FLOWSPEC_ADD, 0, 0, -1,
+			    f->flow, FLOWSPEC_SIZE + f->flow->len) == -1)
+				return (-1);
+			if (send_filterset(ibuf_rde, &f->attrset) == -1)
+				return (-1);
+			if (imsg_compose(ibuf_rde, IMSG_FLOWSPEC_DONE, 0, 0, -1,
+			    NULL, 0) == -1)
+				return (-1);
+		} else {
+			if (imsg_compose(ibuf_rde, IMSG_FLOWSPEC_REMOVE, 0, 0,
+			    -1, f->flow, FLOWSPEC_SIZE + f->flow->len) == -1)
+				return (-1);
+			RB_REMOVE(flowspec_tree, &conf->flowspecs, f);
+			flowspec_free(f);
+		}
+	}
+
 	/* prefixsets for filters in the RDE */
 	while ((ps = SIMPLEQ_FIRST(&conf->prefixsets)) != NULL) {
 		SIMPLEQ_REMOVE_HEAD(&conf->prefixsets, entry);
@@ -695,14 +718,19 @@ send_config(struct bgpd_config *conf)
 	}
 	free_roatree(&conf->roa);
 	RB_FOREACH(aspa, aspa_tree, &conf->aspa) {
+		/* XXX prevent oversized IMSG for now */
+		if (aspa->num * sizeof(*aspa->tas) >
+		    MAX_IMSGSIZE - IMSG_HEADER_SIZE) {
+			log_warnx("oversized ASPA set for customer-as %s, %s",
+			    log_as(aspa->as), "dropped");
+			continue;
+		}
+
 		if (imsg_compose(ibuf_rtr, IMSG_RECONF_ASPA, 0, 0,
 		    -1, aspa, offsetof(struct aspa_set, tas)) == -1)
 			return (-1);
 		if (imsg_compose(ibuf_rtr, IMSG_RECONF_ASPA_TAS, 0, 0,
-		    -1, aspa->tas, sizeof(*aspa->tas) * aspa->num) == -1)
-			return (-1);
-		if (imsg_compose(ibuf_rtr, IMSG_RECONF_ASPA_TAS_AID,
-		    0, 0, -1, aspa->tas_aid, aspa->num) == -1)
+		    -1, aspa->tas, aspa->num * sizeof(*aspa->tas)) == -1)
 			return (-1);
 		if (imsg_compose(ibuf_rtr, IMSG_RECONF_ASPA_DONE, 0, 0, -1,
 		    NULL, 0) == -1)
@@ -811,98 +839,95 @@ send_config(struct bgpd_config *conf)
 }
 
 int
-dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
+dispatch_imsg(struct imsgbuf *imsgbuf, int idx, struct bgpd_config *conf)
 {
 	struct imsg		 imsg;
 	struct peer		*p;
 	struct rtr_config	*r;
+	struct kroute_full	 kf;
+	struct bgpd_addr	 addr;
+	struct pftable_msg	 pfmsg;
+	struct demote_msg	 demote;
+	char			 reason[REASON_LEN], ifname[IFNAMSIZ];
 	ssize_t			 n;
 	u_int			 rtableid;
 	int			 rv, verbose;
 
 	rv = 0;
-	while (ibuf) {
-		if ((n = imsg_get(ibuf, &imsg)) == -1)
+	while (imsgbuf) {
+		if ((n = imsg_get(imsgbuf, &imsg)) == -1)
 			return (-1);
 
 		if (n == 0)
 			break;
 
-		switch (imsg.hdr.type) {
+		switch (imsg_get_type(&imsg)) {
 		case IMSG_KROUTE_CHANGE:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("route request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct kroute_full))
-				log_warnx("wrong imsg len");
-			else if (kr_change(imsg.hdr.peerid, imsg.data))
+			else if (imsg_get_data(&imsg, &kf, sizeof(kf)) == -1)
+				log_warn("wrong imsg len");
+			else if (kr_change(imsg_get_id(&imsg), &kf))
 				rv = -1;
 			break;
 		case IMSG_KROUTE_DELETE:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("route request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct kroute_full))
-				log_warnx("wrong imsg len");
-			else if (kr_delete(imsg.hdr.peerid, imsg.data))
+			else if (imsg_get_data(&imsg, &kf, sizeof(kf)) == -1)
+				log_warn("wrong imsg len");
+			else if (kr_delete(imsg_get_id(&imsg), &kf))
 				rv = -1;
 			break;
 		case IMSG_KROUTE_FLUSH:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("route request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE)
-				log_warnx("wrong imsg len");
-			else if (kr_flush(imsg.hdr.peerid))
+			else if (kr_flush(imsg_get_id(&imsg)))
 				rv = -1;
 			break;
 		case IMSG_NEXTHOP_ADD:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("nexthop request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct bgpd_addr))
-				log_warnx("wrong imsg len");
+			else if (imsg_get_data(&imsg, &addr, sizeof(addr)) ==
+			    -1)
+				log_warn("wrong imsg len");
 			else {
 				rtableid = conf->default_tableid;
-				if (kr_nexthop_add(rtableid, imsg.data) == -1)
+				if (kr_nexthop_add(rtableid, &addr) == -1)
 					rv = -1;
 			}
 			break;
 		case IMSG_NEXTHOP_REMOVE:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("nexthop request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct bgpd_addr))
-				log_warnx("wrong imsg len");
+			else if (imsg_get_data(&imsg, &addr, sizeof(addr)) ==
+			    -1)
+				log_warn("wrong imsg len");
 			else {
 				rtableid = conf->default_tableid;
-				kr_nexthop_delete(rtableid, imsg.data);
+				kr_nexthop_delete(rtableid, &addr);
 			}
 			break;
 		case IMSG_PFTABLE_ADD:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("pftable request not from RDE");
-			else
-				if (imsg.hdr.len != IMSG_HEADER_SIZE +
-				    sizeof(struct pftable_msg))
-					log_warnx("wrong imsg len");
-				else if (pftable_addr_add(imsg.data) != 0)
-					rv = -1;
+			else if (imsg_get_data(&imsg, &pfmsg, sizeof(pfmsg)) ==
+			    -1)
+				log_warn("wrong imsg len");
+			else if (pftable_addr_add(&pfmsg) != 0)
+				rv = -1;
 			break;
 		case IMSG_PFTABLE_REMOVE:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("pftable request not from RDE");
-			else
-				if (imsg.hdr.len != IMSG_HEADER_SIZE +
-				    sizeof(struct pftable_msg))
-					log_warnx("wrong imsg len");
-				else if (pftable_addr_remove(imsg.data) != 0)
-					rv = -1;
+			else if (imsg_get_data(&imsg, &pfmsg, sizeof(pfmsg)) ==
+			    -1)
+				log_warn("wrong imsg len");
+			else if (pftable_addr_remove(&pfmsg) != 0)
+				rv = -1;
 			break;
 		case IMSG_PFTABLE_COMMIT:
 			if (idx != PFD_PIPE_RDE)
 				log_warnx("pftable request not from RDE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE)
-				log_warnx("wrong imsg len");
 			else if (pftable_commit() != 0)
 				rv = -1;
 			break;
@@ -911,7 +936,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				log_warnx("pfkey reload request not from SE");
 				break;
 			}
-			p = getpeerbyid(conf, imsg.hdr.peerid);
+			p = getpeerbyid(conf, imsg_get_id(&imsg));
 			if (p != NULL) {
 				if (pfkey_establish(p) == -1)
 					log_peer_warnx(&p->conf,
@@ -923,24 +948,24 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				log_warnx("reload request not from SE");
 			else {
 				reconfig = 1;
-				reconfpid = imsg.hdr.pid;
-				if (imsg.hdr.len == IMSG_HEADER_SIZE +
-				    REASON_LEN && ((char *)imsg.data)[0])
+				reconfpid = imsg_get_pid(&imsg);
+				if (imsg_get_data(&imsg, reason,
+				    sizeof(reason)) == 0 && reason[0] != '\0')
 					log_info("reload due to: %s",
-					    log_reason(imsg.data));
+					    log_reason(reason));
 			}
 			break;
 		case IMSG_CTL_FIB_COUPLE:
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("couple request not from SE");
 			else
-				kr_fib_couple(imsg.hdr.peerid);
+				kr_fib_couple(imsg_get_id(&imsg));
 			break;
 		case IMSG_CTL_FIB_DECOUPLE:
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("decouple request not from SE");
 			else
-				kr_fib_decouple(imsg.hdr.peerid);
+				kr_fib_decouple(imsg_get_id(&imsg));
 			break;
 		case IMSG_CTL_KROUTE:
 		case IMSG_CTL_KROUTE_ADDR:
@@ -955,28 +980,29 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 		case IMSG_SESSION_DEPENDON:
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("DEPENDON request not from SE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE + IFNAMSIZ)
-				log_warnx("DEPENDON request with wrong len");
+			else if (imsg_get_data(&imsg, ifname, sizeof(ifname)) ==
+			    -1)
+				log_warn("wrong imsg len");
 			else
-				kr_ifinfo(imsg.data);
+				kr_ifinfo(ifname);
 			break;
 		case IMSG_DEMOTE:
 			if (idx != PFD_PIPE_SESSION)
 				log_warnx("demote request not from SE");
-			else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct demote_msg))
-				log_warnx("DEMOTE request with wrong len");
-			else {
-				struct demote_msg	*msg;
-
-				msg = imsg.data;
-				carp_demote_set(msg->demote_group, msg->level);
-			}
+			else if (imsg_get_data(&imsg, &demote, sizeof(demote))
+			    == -1)
+				log_warn("wrong imsg len");
+			else
+				carp_demote_set(demote.demote_group,
+				    demote.level);
 			break;
 		case IMSG_CTL_LOG_VERBOSE:
 			/* already checked by SE */
-			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_setverbose(verbose);
+			if (imsg_get_data(&imsg, &verbose, sizeof(verbose)) ==
+			    -1)
+				log_warn("wrong imsg len");
+			else
+				log_setverbose(verbose);
 			break;
 		case IMSG_RECONF_DONE:
 			if (reconfpending == 0) {
@@ -984,9 +1010,9 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				break;
 			}
 			if (idx == PFD_PIPE_SESSION) {
+				/* RDE and RTR engine can reload concurrently */
 				imsg_compose(ibuf_rtr, IMSG_RECONF_DONE, 0,
 				    0, -1, NULL, 0);
-			} else if (idx == PFD_PIPE_RTR) {
 				imsg_compose(ibuf_rde, IMSG_RECONF_DONE, 0,
 				    0, -1, NULL, 0);
 
@@ -1019,12 +1045,12 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				log_warnx("connect request not from RTR");
 			} else {
 				SIMPLEQ_FOREACH(r, &conf->rtrs, entry) {
-					if (imsg.hdr.peerid == r->id)
+					if (imsg_get_id(&imsg) == r->id)
 						break;
 				}
 				if (r == NULL)
 					log_warnx("unknown rtr id %d",
-					    imsg.hdr.peerid);
+					    imsg_get_id(&imsg));
 				else
 					bgpd_rtr_connect(r);
 			}
@@ -1032,32 +1058,35 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 		case IMSG_CTL_SHOW_RTR:
 			if (idx == PFD_PIPE_SESSION) {
 				SIMPLEQ_FOREACH(r, &conf->rtrs, entry) {
-					imsg_compose(ibuf_rtr, imsg.hdr.type,
-					    r->id, imsg.hdr.pid, -1, NULL, 0);
+					imsg_compose(ibuf_rtr,
+					    IMSG_CTL_SHOW_RTR, r->id,
+					    imsg_get_pid(&imsg), -1, NULL, 0);
 				}
 				imsg_compose(ibuf_rtr, IMSG_CTL_END,
-				    0, imsg.hdr.pid, -1, NULL, 0);
-			} else if (imsg.hdr.len != IMSG_HEADER_SIZE +
-			    sizeof(struct ctl_show_rtr)) {
-				log_warnx("IMSG_CTL_SHOW_RTR with wrong len");
+				    0, imsg_get_pid(&imsg), -1, NULL, 0);
 			} else if (idx == PFD_PIPE_RTR) {
+				struct ctl_show_rtr rtr;
+				if (imsg_get_data(&imsg, &rtr, sizeof(rtr)) ==
+				    -1) {
+					log_warn("wrong imsg len");
+					break;
+				}
+
 				SIMPLEQ_FOREACH(r, &conf->rtrs, entry) {
-					if (imsg.hdr.peerid == r->id)
+					if (imsg_get_id(&imsg) == r->id)
 						break;
 				}
 				if (r != NULL) {
-					struct ctl_show_rtr *msg;
-					msg = imsg.data;
-					strlcpy(msg->descr, r->descr,
-					    sizeof(msg->descr));
-					msg->local_addr = r->local_addr;
-					msg->remote_addr = r->remote_addr;
-					msg->remote_port = r->remote_port;
+					strlcpy(rtr.descr, r->descr,
+					    sizeof(rtr.descr));
+					rtr.local_addr = r->local_addr;
+					rtr.remote_addr = r->remote_addr;
+					rtr.remote_port = r->remote_port;
 
-					imsg_compose(ibuf_se, imsg.hdr.type,
-					    imsg.hdr.peerid, imsg.hdr.pid,
-					    -1, imsg.data,
-					    imsg.hdr.len - IMSG_HEADER_SIZE);
+					imsg_compose(ibuf_se, IMSG_CTL_SHOW_RTR,
+					    imsg_get_id(&imsg),
+					    imsg_get_pid(&imsg), -1,
+					    &rtr, sizeof(rtr));
 				}
 			}
 			break;
@@ -1067,9 +1096,7 @@ dispatch_imsg(struct imsgbuf *ibuf, int idx, struct bgpd_config *conf)
 				log_warnx("connect request not from RTR");
 				break;
 			}
-			imsg_compose(ibuf_se, imsg.hdr.type, imsg.hdr.peerid,
-			    imsg.hdr.pid, -1, imsg.data,
-			    imsg.hdr.len - IMSG_HEADER_SIZE);
+			imsg_forward(ibuf_se, &imsg);
 			break;
 		default:
 			break;
@@ -1277,7 +1304,7 @@ getsockpair(int pipe[2])
 }
 
 int
-imsg_send_sockets(struct imsgbuf *se, struct imsgbuf *rde, struct imsgbuf *roa)
+imsg_send_sockets(struct imsgbuf *se, struct imsgbuf *rde, struct imsgbuf *rtr)
 {
 	int pipe_s2r[2];
 	int pipe_s2r_ctl[2];
@@ -1301,7 +1328,7 @@ imsg_send_sockets(struct imsgbuf *se, struct imsgbuf *rde, struct imsgbuf *roa)
 	    NULL, 0) == -1)
 		return (-1);
 
-	if (imsg_compose(roa, IMSG_SOCKET_CONN_RTR, 0, 0, pipe_r2r[0],
+	if (imsg_compose(rtr, IMSG_SOCKET_CONN_RTR, 0, 0, pipe_r2r[0],
 	    NULL, 0) == -1)
 		return (-1);
 	if (imsg_compose(rde, IMSG_SOCKET_CONN_RTR, 0, 0, pipe_r2r[1],
@@ -1317,6 +1344,8 @@ bgpd_rtr_connect(struct rtr_config *r)
 	struct connect_elm *ce;
 	struct sockaddr *sa;
 	socklen_t len;
+	int nodelay = 1;
+	int pre = IPTOS_PREC_INTERNETCONTROL;
 
 	if (connect_cnt >= MAX_CONNECT_CNT) {
 		log_warnx("rtr %s: too many concurrent connection requests",
@@ -1359,6 +1388,29 @@ bgpd_rtr_connect(struct rtr_config *r)
 		}
 		TAILQ_INSERT_TAIL(&connect_queue, ce, entry);
 		connect_cnt++;
+		return;
+	}
+
+	switch (r->remote_addr.aid) {
+	case AID_INET:
+		if (setsockopt(ce->fd, IPPROTO_IP, IP_TOS, &pre, sizeof(pre)) ==
+		    -1) {
+			log_warn("rtr %s: setsockopt IP_TOS", r->descr);
+			return;
+		}
+		break;
+	case AID_INET6:
+		if (setsockopt(ce->fd, IPPROTO_IPV6, IPV6_TCLASS, &pre,
+		    sizeof(pre)) == -1) {
+			log_warn("rtr %s: setsockopt IP_TOS", r->descr);
+			return;
+		}
+		break;
+	}
+
+	if (setsockopt(ce->fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
+	    sizeof(nodelay)) == -1) {
+		log_warn("rtr %s: setsockopt TCP_NODELAY", r->descr);
 		return;
 	}
 

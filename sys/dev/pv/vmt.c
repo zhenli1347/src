@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmt.c,v 1.27 2022/12/03 10:57:04 yasuoka Exp $ */
+/*	$OpenBSD: vmt.c,v 1.32 2024/05/24 10:05:55 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 David Crawshaw <david@zentus.com>
@@ -28,14 +28,9 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/timeout.h>
-#include <sys/signalvar.h>
 #include <sys/syslog.h>
-#include <sys/proc.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/task.h>
 #include <sys/sensors.h>
@@ -471,7 +466,7 @@ vmt_attach(struct device *parent, struct device *self, void *aux)
 
 	config_mountroot(self, vmt_tick_hook);
 
-	timeout_set(&sc->sc_tclo_tick, vmt_tclo_tick, sc);
+	timeout_set_proc(&sc->sc_tclo_tick, vmt_tclo_tick, sc);
 	timeout_add_sec(&sc->sc_tclo_tick, 1);
 	sc->sc_tclo_ping = 1;
 
@@ -534,7 +529,7 @@ vmt_kvop(void *arg, int op, char *key, char *value, size_t valuelen)
 		DPRINTF("%s: unable to send rpci command\n", DEVNAME(sc));
 		sc->sc_rpc_error = 1;
 		error = EIO;
-		goto done;
+		goto close;
 	}
 
 	if (vm_rpc_get_length(&rpci, &rlen, &ack) != 0) {
@@ -542,13 +537,13 @@ vmt_kvop(void *arg, int op, char *key, char *value, size_t valuelen)
 		    DEVNAME(sc));
 		sc->sc_rpc_error = 1;
 		error = EIO;
-		goto done;
+		goto close;
 	}
 
 	if (rlen > 0) {
 		if (rlen + 1 > valuelen) {
-			error = EMSGSIZE;
-			goto done;
+			error = ERANGE;
+			goto close;
 		}
 
 		if (vm_rpc_get_data(&rpci, value, rlen, ack) != 0) {
@@ -556,20 +551,23 @@ vmt_kvop(void *arg, int op, char *key, char *value, size_t valuelen)
 			    DEVNAME(sc));
 			sc->sc_rpc_error = 1;
 			error = EIO;
-			goto done;
+			goto close;
 		}
 		/* test if response success  */
 		if (rlen < 2 || value[0] != '1' || value[1] != ' ') {
 			DPRINTF("%s: host rejected command: %s\n", DEVNAME(sc),
 			    buf);
 			error = EINVAL;
-			goto done;
+			goto close;
 		}
 		/* skip response that was tested */
 		bcopy(value + 2, value, valuelen - 2);
 		value[rlen - 2] = '\0';
 	}
 
+ close:
+	if (vm_rpc_close(&rpci) != 0)
+		DPRINTF("%s: unable to close rpci channel\n", DEVNAME(sc));
  done:
 	free(buf, M_TEMP, bufsz);
 	return (error);
@@ -896,9 +894,12 @@ vmt_tclo_broadcastip(struct vmt_softc *sc)
 {
 	struct ifnet *iface;
 	struct sockaddr_in *guest_ip;
+	char ip[INET_ADDRSTRLEN];
 
 	/* find first available ipv4 address */
 	guest_ip = NULL;
+
+	NET_LOCK_SHARED();
 	TAILQ_FOREACH(iface, &ifnetlist, if_list) {
 		struct ifaddr *iface_addr;
 
@@ -915,14 +916,14 @@ vmt_tclo_broadcastip(struct vmt_softc *sc)
 				continue;
 
 			guest_ip = satosin(iface_addr->ifa_addr);
+			inet_ntop(AF_INET, &guest_ip->sin_addr, ip,
+			    sizeof(ip));
 			break;
 		}
 	}
+	NET_UNLOCK_SHARED();
 
 	if (guest_ip != NULL) {
-		char ip[INET_ADDRSTRLEN];
-
-		inet_ntop(AF_INET, &guest_ip->sin_addr, ip, sizeof(ip));
 		if (vm_rpc_send_rpci_tx(sc, "info-set guestinfo.ip %s",
 		    ip) != 0) {
 			DPRINTF("%s: unable to send guest IP address\n",

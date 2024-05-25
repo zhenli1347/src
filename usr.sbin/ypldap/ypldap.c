@@ -1,4 +1,4 @@
-/*	$OpenBSD: ypldap.c,v 1.23 2022/08/22 08:02:02 jmatthew Exp $ */
+/*	$OpenBSD: ypldap.c,v 1.25 2024/05/21 05:00:48 jsg Exp $ */
 
 /*
  * Copyright (c) 2008 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -51,7 +51,6 @@ void		 main_trash_update(struct env *);
 void		 main_end_update(struct env *);
 int		 main_create_user_groups(struct env *);
 void		 purge_config(struct env *);
-void		 reconfigure(struct env *);
 
 int		 pipe_main2client[2];
 
@@ -392,7 +391,7 @@ main_dispatch_client(int fd, short events, void *p)
 			if (env->update_trashed)
 				break;
 
-			(void)memcpy(&ir, imsg.data, sizeof(ir));
+			(void)memcpy(&ir, imsg.data, n - IMSG_HEADER_SIZE);
 			if ((ue = calloc(1, sizeof(*ue))) == NULL ||
 			    (ue->ue_line = strdup(ir.ir_line)) == NULL) {
 				/*
@@ -418,7 +417,7 @@ main_dispatch_client(int fd, short events, void *p)
 			if (env->update_trashed)
 				break;
 
-			(void)memcpy(&ir, imsg.data, sizeof(ir));
+			(void)memcpy(&ir, imsg.data, n - IMSG_HEADER_SIZE);
 			if ((ge = calloc(1, sizeof(*ge))) == NULL ||
 			    (ge->ge_line = strdup(ir.ir_line)) == NULL) {
 				/*

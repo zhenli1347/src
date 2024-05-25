@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mcx.c,v 1.106 2022/11/22 06:48:32 jmatthew Exp $ */
+/*	$OpenBSD: if_mcx.c,v 1.115 2024/05/24 06:02:53 jsg Exp $ */
 
 /*
  * Copyright (c) 2017 David Gwynne <dlg@openbsd.org>
@@ -25,11 +25,8 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/device.h>
-#include <sys/pool.h>
-#include <sys/queue.h>
 #include <sys/timeout.h>
 #include <sys/task.h>
 #include <sys/atomic.h>
@@ -40,7 +37,6 @@
 #include <machine/intr.h>
 
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_media.h>
 #include <net/toeplitz.h>
 
@@ -149,8 +145,8 @@ CTASSERT(MCX_MAX_QUEUES * MCX_WQ_DOORBELL_STRIDE <
 #define MCX_CMDQ_DOORBELL		0x0018
 
 #define MCX_STATE			0x01fc
-#define MCX_STATE_MASK				(1 << 31)
-#define MCX_STATE_INITIALIZING			(1 << 31)
+#define MCX_STATE_MASK				(1U << 31)
+#define MCX_STATE_INITIALIZING			(1U << 31)
 #define MCX_STATE_READY				(0 << 31)
 #define MCX_STATE_INTERFACE_MASK		(0x3 << 24)
 #define MCX_STATE_INTERFACE_FULL_DRIVER		(0x0 << 24)
@@ -192,11 +188,25 @@ CTASSERT(MCX_MAX_QUEUES * MCX_WQ_DOORBELL_STRIDE <
 #define MCX_ETHER_CAP_100G_CR4		20
 #define MCX_ETHER_CAP_100G_SR4		21
 #define MCX_ETHER_CAP_100G_KR4		22
+#define MCX_ETHER_CAP_100G_LR4		23
 #define MCX_ETHER_CAP_25G_CR		27
 #define MCX_ETHER_CAP_25G_KR		28
 #define MCX_ETHER_CAP_25G_SR		29
 #define MCX_ETHER_CAP_50G_CR2		30
 #define MCX_ETHER_CAP_50G_KR2		31
+
+#define MCX_ETHER_EXT_CAP_SGMII_100	0
+#define MCX_ETHER_EXT_CAP_1000_X	1
+#define MCX_ETHER_EXT_CAP_5G_R		3
+#define MCX_ETHER_EXT_CAP_XAUI		4
+#define MCX_ETHER_EXT_CAP_XLAUI		5
+#define MCX_ETHER_EXT_CAP_25G_AUI1	6
+#define MCX_ETHER_EXT_CAP_50G_AUI2	7
+#define MCX_ETHER_EXT_CAP_50G_AUI1	8
+#define MCX_ETHER_EXT_CAP_CAUI4		9
+#define MCX_ETHER_EXT_CAP_100G_AUI2	10
+#define MCX_ETHER_EXT_CAP_200G_AUI4	12
+#define MCX_ETHER_EXT_CAP_400G_AUI8	15
 
 #define MCX_MAX_CQE			32
 
@@ -405,11 +415,14 @@ struct mcx_reg_ptys {
 	uint8_t			rp_reserved2;
 	uint8_t			rp_proto_mask;
 #define MCX_REG_PTYS_PROTO_MASK_ETH		(1 << 2)
-	uint8_t			rp_reserved3[8];
+	uint8_t			rp_reserved3[4];
+	uint32_t		rp_ext_eth_proto_cap;
 	uint32_t		rp_eth_proto_cap;
-	uint8_t			rp_reserved4[8];
+	uint8_t			rp_reserved4[4];
+	uint32_t		rp_ext_eth_proto_admin;
 	uint32_t		rp_eth_proto_admin;
-	uint8_t			rp_reserved5[8];
+	uint8_t			rp_reserved5[4];
+	uint32_t		rp_ext_eth_proto_oper;
 	uint32_t		rp_eth_proto_oper;
 	uint8_t			rp_reserved6[24];
 } __packed __aligned(4);
@@ -1405,7 +1418,7 @@ struct mcx_cmd_create_tir_mb_in {
 #define MCX_TIR_CTX_HASH_SEL_SPORT	(1 << 2)
 #define MCX_TIR_CTX_HASH_SEL_DPORT	(1 << 3)
 #define MCX_TIR_CTX_HASH_SEL_IPV4	(0 << 31)
-#define MCX_TIR_CTX_HASH_SEL_IPV6	(1 << 31)
+#define MCX_TIR_CTX_HASH_SEL_IPV6	(1U << 31)
 #define MCX_TIR_CTX_HASH_SEL_TCP	(0 << 30)
 #define MCX_TIR_CTX_HASH_SEL_UDP	(1 << 30)
 	uint32_t		cmd_rx_hash_sel_inner;
@@ -1675,7 +1688,7 @@ CTASSERT(sizeof(struct mcx_wq_ctx) == 0xC0);
 
 struct mcx_sq_ctx {
 	uint32_t		sq_flags;
-#define MCX_SQ_CTX_RLKEY			(1 << 31)
+#define MCX_SQ_CTX_RLKEY			(1U << 31)
 #define MCX_SQ_CTX_FRE_SHIFT			(1 << 29)
 #define MCX_SQ_CTX_FLUSH_IN_ERROR		(1 << 28)
 #define MCX_SQ_CTX_MIN_WQE_INLINE_SHIFT		24
@@ -1722,7 +1735,7 @@ struct mcx_sq_entry {
 	/* ethernet segment */
 	uint32_t		sqe_reserved1;
 	uint32_t		sqe_mss_csum;
-#define MCX_SQE_L4_CSUM				(1 << 31)
+#define MCX_SQE_L4_CSUM				(1U << 31)
 #define MCX_SQE_L3_CSUM				(1 << 30)
 	uint32_t		sqe_reserved2;
 	uint16_t		sqe_inline_header_size;
@@ -1789,7 +1802,7 @@ struct mcx_cmd_destroy_sq_out {
 
 struct mcx_rq_ctx {
 	uint32_t		rq_flags;
-#define MCX_RQ_CTX_RLKEY			(1 << 31)
+#define MCX_RQ_CTX_RLKEY			(1U << 31)
 #define MCX_RQ_CTX_VLAN_STRIP_DIS		(1 << 28)
 #define MCX_RQ_CTX_MEM_RQ_TYPE_SHIFT		24
 #define MCX_RQ_CTX_STATE_SHIFT			20
@@ -2656,7 +2669,9 @@ static const struct pci_matchid mcx_devices[] = {
 	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT28800 },
 	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT28800VF },
 	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT28908 },
-	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT2892  },
+	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT28908VF },
+	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT2892 },
+	{ PCI_VENDOR_MELLANOX,	PCI_PRODUCT_MELLANOX_MT2894 },
 };
 
 struct mcx_eth_proto_capability {
@@ -2681,11 +2696,27 @@ static const struct mcx_eth_proto_capability mcx_eth_cap_map[] = {
 	[MCX_ETHER_CAP_100G_CR4]	= { IFM_100G_CR4,	IF_Gbps(100) },
 	[MCX_ETHER_CAP_100G_SR4]	= { IFM_100G_SR4,	IF_Gbps(100) },
 	[MCX_ETHER_CAP_100G_KR4]	= { IFM_100G_KR4,	IF_Gbps(100) },
+	[MCX_ETHER_CAP_100G_LR4]	= { IFM_100G_LR4,	IF_Gbps(100) },
 	[MCX_ETHER_CAP_25G_CR]		= { IFM_25G_CR,		IF_Gbps(25) },
 	[MCX_ETHER_CAP_25G_KR]		= { IFM_25G_KR,		IF_Gbps(25) },
 	[MCX_ETHER_CAP_25G_SR]		= { IFM_25G_SR,		IF_Gbps(25) },
 	[MCX_ETHER_CAP_50G_CR2]		= { IFM_50G_CR2,	IF_Gbps(50) },
 	[MCX_ETHER_CAP_50G_KR2]		= { IFM_50G_KR2,	IF_Gbps(50) },
+};
+
+static const struct mcx_eth_proto_capability mcx_ext_eth_cap_map[] = {
+	[MCX_ETHER_EXT_CAP_SGMII_100]	= { IFM_100_FX,		IF_Mbps(100) },
+	[MCX_ETHER_EXT_CAP_1000_X]	= { IFM_1000_SX,	IF_Gbps(1) },
+	[MCX_ETHER_EXT_CAP_5G_R]	= { IFM_5000_T,		IF_Gbps(5) },
+	[MCX_ETHER_EXT_CAP_XAUI]	= { IFM_10G_SFI,	IF_Gbps(10) },
+	[MCX_ETHER_EXT_CAP_XLAUI]	= { IFM_40G_XLPPI,	IF_Gbps(40) },
+	[MCX_ETHER_EXT_CAP_25G_AUI1]	= { 0 /*IFM_25G_AUI*/,	IF_Gbps(25) },
+	[MCX_ETHER_EXT_CAP_50G_AUI2]	= { 0 /*IFM_50G_AUI*/,	IF_Gbps(50) },
+	[MCX_ETHER_EXT_CAP_50G_AUI1]	= { 0 /*IFM_50G_AUI*/,	IF_Gbps(50) },
+	[MCX_ETHER_EXT_CAP_CAUI4]	= { 0 /*IFM_100G_AUI*/,	IF_Gbps(100) },
+	[MCX_ETHER_EXT_CAP_100G_AUI2]	= { 0 /*IFM_100G_AUI*/,	IF_Gbps(100) },
+	[MCX_ETHER_EXT_CAP_200G_AUI4]	= { 0 /*IFM_200G_AUI*/,	IF_Gbps(200) },
+	[MCX_ETHER_EXT_CAP_400G_AUI8]	= { 0 /*IFM_400G_AUI*/,	IF_Gbps(400) },
 };
 
 static int
@@ -2927,7 +2958,7 @@ mcx_attach(struct device *parent, struct device *self, void *aux)
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
-	ifq_set_maxlen(&ifp->if_snd, 1024);
+	ifq_init_maxlen(&ifp->if_snd, 1024);
 
 	ifmedia_init(&sc->sc_media, IFM_IMASK, mcx_media_change,
 	    mcx_media_status);
@@ -6793,16 +6824,6 @@ mcx_process_txeof(struct mcx_softc *sc, struct mcx_tx *tx,
 	return (slots);
 }
 
-static uint64_t
-mcx_uptime(void)
-{
-	struct timespec ts;
-
-	nanouptime(&ts);
-
-	return ((uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec);
-}
-
 static void
 mcx_calibrate_first(struct mcx_softc *sc)
 {
@@ -6812,7 +6833,7 @@ mcx_calibrate_first(struct mcx_softc *sc)
 	sc->sc_calibration_gen = 0;
 
 	s = splhigh(); /* crit_enter? */
-	c->c_ubase = mcx_uptime();
+	c->c_ubase = nsecuptime();
 	c->c_tbase = mcx_timer(sc);
 	splx(s);
 	c->c_ratio = 0;
@@ -6847,7 +6868,7 @@ mcx_calibrate(void *arg)
 	nc->c_timestamp = pc->c_tbase;
 
 	s = splhigh(); /* crit_enter? */
-	nc->c_ubase = mcx_uptime();
+	nc->c_ubase = nsecuptime();
 	nc->c_tbase = mcx_timer(sc);
 	splx(s);
 
@@ -7963,6 +7984,19 @@ mcx_media_add_types(struct mcx_softc *sc)
 
 		ifmedia_add(&sc->sc_media, IFM_ETHER | cap->cap_media, 0, NULL);
 	}
+
+	proto_cap = betoh32(ptys.rp_ext_eth_proto_cap);
+	for (i = 0; i < nitems(mcx_ext_eth_cap_map); i++) {
+		const struct mcx_eth_proto_capability *cap;
+		if (!ISSET(proto_cap, 1 << i))
+			continue;
+
+		cap = &mcx_ext_eth_cap_map[i];
+		if (cap->cap_media == 0)
+			continue;
+
+		ifmedia_add(&sc->sc_media, IFM_ETHER | cap->cap_media, 0, NULL);
+	}
 }
 
 static void
@@ -7972,6 +8006,7 @@ mcx_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 	struct mcx_reg_ptys ptys;
 	int i;
 	uint32_t proto_oper;
+	uint32_t ext_proto_oper;
 	uint64_t media_oper;
 
 	memset(&ptys, 0, sizeof(ptys));
@@ -7986,6 +8021,7 @@ mcx_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 	}
 
 	proto_oper = betoh32(ptys.rp_eth_proto_oper);
+	ext_proto_oper = betoh32(ptys.rp_ext_eth_proto_oper);
 
 	media_oper = 0;
 
@@ -8000,8 +8036,21 @@ mcx_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 			media_oper = cap->cap_media;
 	}
 
+	if (media_oper == 0) {
+		for (i = 0; i < nitems(mcx_ext_eth_cap_map); i++) {
+			const struct mcx_eth_proto_capability *cap;
+			if (!ISSET(ext_proto_oper, 1 << i))
+				continue;
+
+			cap = &mcx_ext_eth_cap_map[i];
+
+			if (cap->cap_media != 0)
+				media_oper = cap->cap_media;
+		}
+	}
+
 	ifmr->ifm_status = IFM_AVALID;
-	if (proto_oper != 0) {
+	if ((proto_oper | ext_proto_oper) != 0) {
 		ifmr->ifm_status |= IFM_ACTIVE;
 		ifmr->ifm_active = IFM_ETHER | IFM_AUTO | media_oper;
 		/* txpause, rxpause, duplex? */
@@ -8017,6 +8066,7 @@ mcx_media_change(struct ifnet *ifp)
 	struct mcx_reg_ptys ptys;
 	struct mcx_reg_paos paos;
 	uint32_t media;
+	uint32_t ext_media;
 	int i, error;
 
 	if (IFM_TYPE(sc->sc_media.ifm_media) != IFM_ETHER)
@@ -8039,6 +8089,7 @@ mcx_media_change(struct ifnet *ifp)
 		}
 
 		media = betoh32(ptys.rp_eth_proto_cap);
+		ext_media = betoh32(ptys.rp_ext_eth_proto_cap);
 	} else {
 		/* map media type */
 		media = 0;
@@ -8049,6 +8100,18 @@ mcx_media_change(struct ifnet *ifp)
 			if (cap->cap_media ==
 			    IFM_SUBTYPE(sc->sc_media.ifm_media)) {
 				media = (1 << i);
+				break;
+			}
+		}
+
+		ext_media = 0;
+		for (i = 0; i < nitems(mcx_ext_eth_cap_map); i++) {
+			const struct  mcx_eth_proto_capability *cap;
+
+			cap = &mcx_ext_eth_cap_map[i];
+			if (cap->cap_media ==
+			    IFM_SUBTYPE(sc->sc_media.ifm_media)) {
+				ext_media = (1 << i);
 				break;
 			}
 		}
@@ -8070,6 +8133,7 @@ mcx_media_change(struct ifnet *ifp)
 	ptys.rp_local_port = 1;
 	ptys.rp_proto_mask = MCX_REG_PTYS_PROTO_MASK_ETH;
 	ptys.rp_eth_proto_admin = htobe32(media);
+	ptys.rp_ext_eth_proto_admin = htobe32(ext_media);
 	if (mcx_access_hca_reg(sc, MCX_REG_PTYS, MCX_REG_OP_WRITE, &ptys,
 	    sizeof(ptys), MCX_CMDQ_SLOT_IOCTL) != 0) {
 		printf("%s: unable to set port media type/speed\n",
@@ -8114,10 +8178,11 @@ mcx_port_change(void *xsc)
 	if (mcx_access_hca_reg(sc, MCX_REG_PTYS, MCX_REG_OP_READ, &ptys,
 	    sizeof(ptys), slot) == 0) {
 		uint32_t proto_oper = betoh32(ptys.rp_eth_proto_oper);
+		uint32_t ext_proto_oper = betoh32(ptys.rp_ext_eth_proto_oper);
 		uint64_t baudrate = 0;
 		unsigned int i;
 
-		if (proto_oper != 0)
+		if ((proto_oper | ext_proto_oper) != 0)
 			link_state = LINK_STATE_FULL_DUPLEX;
 
 		for (i = 0; i < nitems(mcx_eth_cap_map); i++) {
@@ -8131,6 +8196,21 @@ mcx_port_change(void *xsc)
 
 			baudrate = cap->cap_baudrate;
 			break;
+		}
+
+		if (baudrate == 0) {
+			for (i = 0; i < nitems(mcx_ext_eth_cap_map); i++) {
+				const struct mcx_eth_proto_capability *cap;
+				if (!ISSET(ext_proto_oper, 1 << i))
+					continue;
+
+				cap = &mcx_ext_eth_cap_map[i];
+				if (cap->cap_baudrate == 0)
+					continue;
+
+				baudrate = cap->cap_baudrate;
+				break;
+			}
 		}
 
 		ifp->if_baudrate = baudrate;

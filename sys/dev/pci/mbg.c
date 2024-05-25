@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbg.c,v 1.33 2022/03/11 18:00:50 mpi Exp $ */
+/*	$OpenBSD: mbg.c,v 1.37 2024/05/24 06:02:58 jsg Exp $ */
 
 /*
  * Copyright (c) 2006, 2007 Marc Balmer <mbalmer@openbsd.org>
@@ -18,11 +18,9 @@
 
 #include <sys/param.h>
 #include <sys/device.h>
-#include <sys/kernel.h>
 #include <sys/timeout.h>
 #include <sys/systm.h>
 #include <sys/sensors.h>
-#include <sys/syslog.h>
 #include <sys/time.h>
 
 #include <machine/bus.h>
@@ -159,8 +157,10 @@ const struct pci_matchid mbg_devices[] = {
 	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_GPS170PCI },
 	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PCI32 },
 	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PCI509 },
+	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PCI510 },
 	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PCI511 },
-	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PEX511 }
+	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PEX511 },
+	{ PCI_VENDOR_MEINBERG, PCI_PRODUCT_MEINBERG_PZF180PEX }
 };
 
 int
@@ -240,12 +240,14 @@ mbg_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_read = mbg_read_amcc_s5920;
 		sensor_task_register(sc, mbg_task, 10);
 		break;
+	case PCI_PRODUCT_MEINBERG_PCI510:
 	case PCI_PRODUCT_MEINBERG_PCI511:
 	case PCI_PRODUCT_MEINBERG_PEX511:
 		sc->sc_read = mbg_read_asic;
 		sensor_task_register(sc, mbg_task, 10);
 		break;
 	case PCI_PRODUCT_MEINBERG_GPS170PCI:
+	case PCI_PRODUCT_MEINBERG_PZF180PEX:
 		t_trust = 4 * 24 * 60 * 60;	/* four days */
 		sc->sc_read = mbg_read_asic;
 		sensor_task_register(sc, mbg_task_hr, 1);
@@ -557,7 +559,7 @@ mbg_read_asic(struct mbg_softc *sc, int cmd, char *buf, size_t len,
 }
 
 /*
- * degrade the sensor state if we are feerunning for more than
+ * degrade the sensor state if we are freerunning for more than
  * sc->sc_trust seconds.
  */
 void

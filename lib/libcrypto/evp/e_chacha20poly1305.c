@@ -1,4 +1,4 @@
-/* $OpenBSD: e_chacha20poly1305.c,v 1.27 2022/11/26 16:08:52 tb Exp $ */
+/* $OpenBSD: e_chacha20poly1305.c,v 1.36 2024/05/22 14:02:08 tb Exp $ */
 
 /*
  * Copyright (c) 2022 Joel Sing <jsing@openbsd.org>
@@ -18,6 +18,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -106,7 +107,7 @@ poly1305_pad16(poly1305_state *poly1305, size_t data_len)
 	static const unsigned char zero_pad16[16];
 	size_t pad_len;
 
-	/* pad16() is defined in RFC 7539 2.8.1. */
+	/* pad16() is defined in RFC 8439 2.8.1. */
 	if ((pad_len = data_len % 16) == 0)
 		return;
 
@@ -330,7 +331,7 @@ aead_xchacha20_poly1305_open(const EVP_AEAD_CTX *ctx, unsigned char *out,
 	return 1;
 }
 
-/* RFC 7539 */
+/* RFC 8439 */
 static const EVP_AEAD aead_chacha20_poly1305 = {
 	.key_len = 32,
 	.nonce_len = CHACHA20_NONCE_LEN,
@@ -344,10 +345,11 @@ static const EVP_AEAD aead_chacha20_poly1305 = {
 };
 
 const EVP_AEAD *
-EVP_aead_chacha20_poly1305()
+EVP_aead_chacha20_poly1305(void)
 {
 	return &aead_chacha20_poly1305;
 }
+LCRYPTO_ALIAS(EVP_aead_chacha20_poly1305);
 
 static const EVP_AEAD aead_xchacha20_poly1305 = {
 	.key_len = 32,
@@ -362,10 +364,11 @@ static const EVP_AEAD aead_xchacha20_poly1305 = {
 };
 
 const EVP_AEAD *
-EVP_aead_xchacha20_poly1305()
+EVP_aead_xchacha20_poly1305(void)
 {
 	return &aead_xchacha20_poly1305;
 }
+LCRYPTO_ALIAS(EVP_aead_xchacha20_poly1305);
 
 struct chacha20_poly1305_ctx {
 	ChaCha_ctx chacha;
@@ -476,7 +479,7 @@ chacha20_poly1305_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
 	if (len > SIZE_MAX - cpx->in_len) {
 		EVPerror(EVP_R_TOO_LARGE);
-		return 0;
+		return -1;
 	}
 
 	/* Disallow authenticated data after plaintext/ciphertext. */
@@ -490,6 +493,8 @@ chacha20_poly1305_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
 	/* Update with AD or plaintext/ciphertext. */
 	if (in != NULL) {
+		if (!ctx->encrypt || out == NULL)
+			CRYPTO_poly1305_update(&cpx->poly1305, in, len);
 		if (out == NULL) {
 			cpx->ad_len += len;
 			cpx->in_ad = 1;
@@ -499,8 +504,6 @@ chacha20_poly1305_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 		}
 		if (ctx->encrypt && out != NULL)
 			CRYPTO_poly1305_update(&cpx->poly1305, out, len);
-		else
-			CRYPTO_poly1305_update(&cpx->poly1305, in, len);
 
 		return len;
 	}
@@ -530,12 +533,14 @@ chacha20_poly1305_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 	return len;
 }
 
-static void
+static int
 chacha20_poly1305_cleanup(EVP_CIPHER_CTX *ctx)
 {
 	struct chacha20_poly1305_ctx *cpx = ctx->cipher_data;
 
 	explicit_bzero(cpx, sizeof(*cpx));
+
+	return 1;
 }
 
 static int
@@ -547,6 +552,12 @@ chacha20_poly1305_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void *ptr)
 	case EVP_CTRL_INIT:
 		memset(cpx, 0, sizeof(*cpx));
 		cpx->nonce_len = sizeof(cpx->nonce);
+		return 1;
+
+	case EVP_CTRL_AEAD_GET_IVLEN:
+		if (cpx->nonce_len > INT_MAX)
+			return 0;
+		*(int *)ptr = (int)cpx->nonce_len;
 		return 1;
 
 	case EVP_CTRL_AEAD_SET_IVLEN:
@@ -590,8 +601,9 @@ static const EVP_CIPHER cipher_chacha20_poly1305 = {
 	.key_len = 32,
 	.iv_len = 12,
 	.flags = EVP_CIPH_ALWAYS_CALL_INIT | EVP_CIPH_CTRL_INIT |
-	    EVP_CIPH_CUSTOM_IV | EVP_CIPH_FLAG_AEAD_CIPHER |
-	    EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_FLAG_DEFAULT_ASN1,
+	    EVP_CIPH_CUSTOM_IV | EVP_CIPH_FLAG_CUSTOM_IV_LENGTH |
+	    EVP_CIPH_FLAG_AEAD_CIPHER | EVP_CIPH_FLAG_CUSTOM_CIPHER |
+	    EVP_CIPH_FLAG_DEFAULT_ASN1,
 	.init = chacha20_poly1305_init,
 	.do_cipher = chacha20_poly1305_cipher,
 	.cleanup = chacha20_poly1305_cleanup,
@@ -604,5 +616,6 @@ EVP_chacha20_poly1305(void)
 {
 	return &cipher_chacha20_poly1305;
 }
+LCRYPTO_ALIAS(EVP_chacha20_poly1305);
 
 #endif  /* !OPENSSL_NO_CHACHA && !OPENSSL_NO_POLY1305 */

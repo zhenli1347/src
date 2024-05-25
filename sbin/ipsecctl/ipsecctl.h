@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsecctl.h,v 1.75 2021/10/22 12:30:54 bluhm Exp $	*/
+/*	$OpenBSD: ipsecctl.h,v 1.77 2023/10/09 15:32:14 tobhe Exp $	*/
 /*
  * Copyright (c) 2004, 2005 Hans-Joerg Hoexer <hshoexer@openbsd.org>
  *
@@ -30,6 +30,8 @@
 #define IPSECCTL_OPT_MONITOR		0x0400
 #define IPSECCTL_OPT_SHOWKEY		0x0800
 #define IPSECCTL_OPT_COLLAPSE		0x1000
+#define IPSECCTL_OPT_SHOWFLOWS		0x2000
+#define IPSECCTL_OPT_SHOWSAS		0x4000
 
 enum {
 	ACTION_ADD, ACTION_DELETE
@@ -178,6 +180,9 @@ TAILQ_HEAD(dst_bundle_queue, ipsec_rule);
 struct ipsec_rule {
 	u_int8_t	 type;
 
+	unsigned int	 flags;
+#define IPSEC_RULE_F_IFACE		(1 << 0) /* iface is valid */
+
 	struct ipsec_addr_wrap *src;
 	struct ipsec_addr_wrap *dst;
 	struct ipsec_addr_wrap *dst2;
@@ -215,6 +220,7 @@ struct ipsec_rule {
 	u_int32_t	 spi;
 	u_int32_t	 spi2;
 	u_int32_t	 nr;
+	unsigned int	 iface;
 
 	TAILQ_ENTRY(ipsec_rule) rule_entry;
 	TAILQ_ENTRY(ipsec_rule) bundle_entry;
@@ -240,7 +246,6 @@ int	parse_rules(const char *, struct ipsecctl *);
 int	cmdline_symset(char *);
 int	ipsecctl_add_rule(struct ipsecctl *, struct ipsec_rule *);
 void	ipsecctl_free_rule(struct ipsec_rule *);
-void	ipsecctl_get_rules(struct ipsecctl *);
 void	ipsecctl_print_rule(struct ipsec_rule *, int);
 int	ike_print_config(struct ipsec_rule *, int);
 int	ike_ipsec_establish(int, struct ipsec_rule *, const char *);

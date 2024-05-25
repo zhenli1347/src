@@ -1,4 +1,4 @@
-$OpenBSD: pcidevs,v 1.2014 2022/12/04 03:13:52 jsg Exp $
+$OpenBSD: pcidevs,v 1.2076 2024/05/22 16:24:59 martijn Exp $
 /*	$NetBSD: pcidevs,v 1.30 1997/06/24 06:20:24 thorpej Exp $	*/
 
 /*
@@ -227,6 +227,7 @@ vendor	ADMTEK		0x1317	ADMtek
 vendor	PE		0x1318	Packet Engines
 vendor	FORTEMEDIA	0x1319	Forte Media
 vendor	SIIG		0x131f	SIIG
+vendor	MICRON		0x1344	Micron Technology
 vendor	DTCTECH		0x134a	DTC Tech
 vendor	PCTEL		0x134d	PCTEL
 vendor	BRAINBOXES	0x135a	Brainboxes
@@ -273,6 +274,7 @@ vendor	TOPIC		0x151f	Topic/SmartLink
 vendor	ENE		0x1524	ENE
 vendor	ARALION		0x1538	Aralion
 vendor	TERRATEC	0x153b	TerraTec
+vendor	PLDA		0x1556	PLDA
 vendor	PERLE		0x155f	Perle
 vendor	SYMBOL		0x1562	Symbol
 vendor	SYBA		0x1592	Syba
@@ -308,6 +310,7 @@ vendor	LENOVO		0x17aa	Lenovo
 vendor	HAWKING		0x17b3	Hawking Technology
 vendor	QUALCOMM	0x17cb	Qualcomm
 vendor	NETCHIP		0x17cc	NetChip Technology
+vendor	CADENCE		0x17cd	Cadence
 vendor	I4		0x17cf	I4
 vendor	ARECA		0x17d3	Areca
 vendor	NETERION	0x17d5	Neterion
@@ -343,8 +346,10 @@ vendor	SYMPHONY2	0x1c1c	Symphony Labs
 vendor	SKHYNIX		0x1c5c	SK hynix
 vendor	ADATA		0x1cc1	ADATA Technology
 vendor	UMIS		0x1cc4	Union Memory
+vendor	BAIKAL		0x1d39	Baikal Electronics
 vendor	AQUANTIA	0x1d6a	Aquantia
 vendor	ROCKCHIP	0x1d87	Rockchip
+vendor	LONGSYS		0x1d97	Longsys
 vendor	TEKRAM2		0x1de1	Tekram
 vendor	AMPERE		0x1def	Ampere
 vendor	KIOXIA		0x1e0f	Kioxia
@@ -372,6 +377,7 @@ vendor	C4T		0x6374	c't Magazin
 vendor	DCI		0x6666	Decision Computer
 vendor	QUANCOM		0x8008	Quancom Informationssysteme
 vendor	INTEL		0x8086	Intel
+vendor	WANGXUN		0x8088	Beijing WangXun Technology
 vendor	INNOTEK		0x80ee	InnoTek
 vendor	SIGMATEL	0x8384	Sigmatel
 vendor	WINBOND2	0x8c4a	Winbond
@@ -382,6 +388,7 @@ vendor	ATRONICS	0x907f	Atronics
 vendor	NETMOS		0x9710	NetMos
 vendor	3COM2		0xa727	3Com
 vendor	PARALLELS	0xaaaa	Parallels
+vendor	CRUCIAL		0xc0a9	Crucial
 vendor	TIGERJET	0xe159	TigerJet Network
 vendor	ENDACE		0xeace	Endace
 vendor	BELKIN		0xec80	Belkin Components
@@ -754,6 +761,7 @@ product AMD 17_PCIE_2		0x1453	17h PCIE
 product AMD 17_PCIE_3		0x1454	17h PCIE
 product AMD 17_CCP_1		0x1456	17h Crypto
 product AMD 17_HDA		0x1457	17h HD Audio
+product AMD EPYC_TENGB		0x1458	EPYC Embedded 3000 10GbE
 product AMD 17_XHCI_1		0x145c	17h xHCI
 product AMD 17_XHCI_2		0x145f	17h xHCI
 product AMD 17_DF_1		0x1460	17h Data Fabric
@@ -775,11 +783,30 @@ product AMD 17_7X_PCIE_2	0x1484	17h PCIE
 product AMD 17_3X_CCP		0x1486	17h Crypto
 product AMD 17_3X_HDA		0x1487	17h HD Audio
 product AMD 17_7X_XHCI		0x149c	17h xHCI
+product AMD 19_1X_IOMMU		0x149e	19h/1xh IOMMU
+product AMD 19_1X_PCIE		0x149f	19h/1xh PCIE
+product AMD 19_1X_RC		0x14a4	19h/1xh Root Complex
+product AMD 19_1X_PCIE_1	0x14a5	19h/1xh PCIE
+product AMD 19_1X_RCEC		0x14a6	19h/1xh RCEC
+product AMD 19_1X_PCIE_2	0x14a7	19h/1xh PCIE
+product AMD 19_1X_PCIE_3	0x14aa	19h/1xh PCIE
+product AMD 19_1X_PCIE_4	0x14ab	19h/1xh PCIE
+product AMD 19_1X_PCIE_5	0x14ac	19h/1xh PCIE
+product AMD 19_1X_DF_1		0x14ad	19h/1xh Data Fabric
+product AMD 19_1X_DF_2		0x14ae	19h/1xh Data Fabric
+product AMD 19_1X_DF_3		0x14af	19h/1xh Data Fabric
+product AMD 19_1X_DF_4		0x14b0	19h/1xh Data Fabric
+product AMD 19_1X_DF_5		0x14b1	19h/1xh Data Fabric
+product AMD 19_1X_DF_6		0x14b2	19h/1xh Data Fabric
+product AMD 19_1X_DF_7		0x14b3	19h/1xh Data Fabric
+product AMD 19_1X_DF_8		0x14b4	19h/1xh Data Fabric
 product AMD 19_4X_RC		0x14b5	19h/4xh Root Complex
 product AMD 19_4X_IOMMU		0x14b6	19h/4xh IOMMU
 product AMD 19_4X_HB_1		0x14b7	19h/4xh Host
 product AMD 19_4X_PCIE_1	0x14b9	19h/4xh PCIE
 product AMD 19_4X_PCIE_2	0x14ba	19h/4xh PCIE
+product AMD 19_1X_XHCI		0x14c9	19h/1xh xHCI
+product AMD 19_1X_PSP		0x14ca	19h/1xh PSP
 product AMD 19_6X_RC		0x14d8	19h/6xh Root Complex
 product AMD 19_6X_IOMMU		0x14d9	19h/6xh IOMMU
 product AMD 19_6X_HB		0x14da	19h/6xh Host
@@ -793,6 +820,22 @@ product AMD 19_6X_DF_5		0x14e4	19h/6xh Data Fabric
 product AMD 19_6X_DF_6		0x14e5	19h/6xh Data Fabric
 product AMD 19_6X_DF_7		0x14e6	19h/6xh Data Fabric
 product AMD 19_6X_DF_8		0x14e7	19h/6xh Data Fabric
+product AMD 19_7X_RC		0x14e8	19h/7xh Root Complex
+product AMD 19_7X_IOMMU		0x14e9	19h/7xh IOMMU
+product AMD 19_7X_HB		0x14ea	19h/7xh Host
+product AMD 19_7X_PCIE_1	0x14eb	19h/7xh PCIE
+product AMD 19_7X_PCIE_2	0x14ed	19h/7xh PCIE
+product AMD 19_7X_PCIE_3	0x14ee	19h/7xh PCIE
+product AMD 19_7X_PCIE_4	0x14ef	19h/7xh PCIE
+product AMD 19_7X_DF_1		0x14f0	19h/7xh Data Fabric
+product AMD 19_7X_DF_2		0x14f1	19h/7xh Data Fabric
+product AMD 19_7X_DF_3		0x14f2	19h/7xh Data Fabric
+product AMD 19_7X_DF_4		0x14f3	19h/7xh Data Fabric
+product AMD 19_7X_DF_5		0x14f4	19h/7xh Data Fabric
+product AMD 19_7X_DF_6		0x14f5	19h/7xh Data Fabric
+product AMD 19_7X_DF_7		0x14f6	19h/7xh Data Fabric
+product AMD 19_7X_DF_8		0x14f7	19h/7xh Data Fabric
+product AMD 19_7X_IPU		0x1502	19h/7xh IPU
 product AMD 14_HB		0x1510	14h Host
 product AMD 14_PCIE_1		0x1512	14h PCIE
 product AMD 14_PCIE_2		0x1513	14h PCIE
@@ -830,6 +873,11 @@ product AMD 16_3X_MISC_2	0x1585	16h Misc Cfg
 product AMD 19_6X_XHCI_1	0x15b6	19h/6xh xHCI
 product AMD 19_6X_XHCI_2	0x15b7	19h/6xh xHCI
 product AMD 19_6X_XHCI_3	0x15b8	19h/6xh xHCI
+product AMD 19_7X_XHCI_1	0x15b9	19h/7xh xHCI
+product AMD 19_7X_XHCI_2	0x15ba	19h/7xh xHCI
+product AMD 19_7X_XHCI_3	0x15c0	19h/7xh xHCI
+product AMD 19_7X_XHCI_4	0x15c1	19h/7xh xHCI
+product AMD 19_7X_PSP		0x15c7	19h/7xh PSP
 product AMD 17_1X_RC		0x15d0	17h/1xh Root Complex
 product AMD 17_1X_IOMMU		0x15d1	17h/1xh IOMMU
 product AMD 17_1X_PCIE_1	0x15d3	17h/1xh PCIE
@@ -881,6 +929,8 @@ product AMD 17_90_DF_4		0x1664	17h/90h Data Fabric
 product AMD 17_90_DF_5		0x1665	17h/90h Data Fabric
 product AMD 17_90_DF_6		0x1666	17h/90h Data Fabric
 product AMD 17_90_DF_7		0x1667	17h/90h Data Fabric
+product AMD 19_7X_USB4_1	0x1668	19h/7xh USB4
+product AMD 19_7X_USB4_2	0x1669	19h/7xh USB4
 product AMD 19_5X_DF_0		0x166a	19h/5xh Data Fabric
 product AMD 19_5X_DF_1		0x166b	19h/5xh Data Fabric
 product AMD 19_5X_DF_2		0x166c	19h/5xh Data Fabric
@@ -1122,17 +1172,24 @@ product APPLE NVME2		0x2003	NVMe
 
 /* Aquantia Corp. */
 product AQUANTIA AQC100		0x00b1	AQC100
+product AQUANTIA AQC113		0x04c0	AQC113
 product AQUANTIA AQC107		0x07b1	AQC107
 product AQUANTIA AQC108		0x08b1	AQC108
 product AQUANTIA AQC109		0x09b1	AQC109
 product AQUANTIA AQC111		0x11b1	AQC111
+product AQUANTIA AQC116C	0x11c0	AQC116C
 product AQUANTIA AQC112		0x12b1	AQC112
+product AQUANTIA AQC115C	0x12c0	AQC115C
+product AQUANTIA AQC113C	0x14c0	AQC113C
+product AQUANTIA AQC113CA	0x34c0	AQC113CA
 product AQUANTIA AQC100S	0x80b1	AQC100S
 product AQUANTIA AQC107S	0x87b1	AQC107S
 product AQUANTIA AQC108S	0x88b1	AQC108S
 product AQUANTIA AQC109S	0x89b1	AQC109S
 product AQUANTIA AQC111S	0x91b1	AQC111S
 product AQUANTIA AQC112S	0x92b1	AQC112S
+product AQUANTIA AQC114CS	0x93c0	AQC114CS
+product AQUANTIA AQC113CS	0x94c0	AQC113CS
 product AQUANTIA D100		0xd100	D100
 product AQUANTIA D107		0xd107	D107
 product AQUANTIA D108		0xd108	D108
@@ -1185,6 +1242,7 @@ product ASMEDIA ASM1182E	0x1182	ASM1182e
 product ASMEDIA ASM1184E	0x1184	ASM1184e
 product ASMEDIA ASM1042AE	0x1242	ASM1042AE xHCI
 product ASMEDIA ASM1143		0x1343	ASM1143 xHCI
+product ASMEDIA ASM2142		0x2142	ASM2142 xHCI
 product ASMEDIA ASM2824		0x2824	ASM2824
 
 /* ASPEED Technology products */
@@ -1263,9 +1321,13 @@ product ATI KAVERI_20		0x131b	Kaveri Radeon R4
 product ATI KAVERI_21		0x131c	Kaveri Radeon R7
 product ATI KAVERI_22		0x131d	Kaveri Radeon R6
 product ATI CYAN_SKILLFISH_1	0x13fe	Cyan Skillfish
+product ATI VANGOGH_0932	0x1435	Van Gogh
+product ATI CYAN_SKILLFISH_2	0x143f	Cyan Skillfish
 product ATI PPB_1		0x1478	PCIE
 product ATI PPB_2		0x1479	PCIE
 product ATI MENDOCINO		0x1506	Mendocino
+product ATI PHOENIX_1		0x15bf	Phoenix
+product ATI PHOENIX_2		0x15c8	Phoenix
 product ATI PICASSO		0x15d8	Picasso
 product ATI RAVEN_VEGA		0x15dd	Radeon Vega
 product ATI RAVEN_VEGA_HDA	0x15de	Radeon Vega HD Audio
@@ -1273,13 +1335,15 @@ product ATI BARCELO		0x15e7	Barcelo
 product ATI RENOIR		0x1636	Renoir
 product ATI RENOIR_HDA		0x1637	Renoir HD Audio
 product ATI CEZANNE		0x1638	Cezanne
-product ATI VANGOGH		0x163f	Van Gogh
+product ATI VANGOGH_0405	0x163f	Van Gogh
 product ATI VANGOGH_HDA		0x1640	Van Gogh HD Audio
 product ATI LUCIENNE		0x164c	Lucienne
-product ATI YELLOW_CARP_1	0x164d	Yellow Carp
+product ATI YELLOW_CARP_1	0x164d	Rembrandt
 product ATI RAPHAEL		0x164e	Raphael
-product ATI YELLOW_CARP_2	0x1681	Yellow Carp
+product ATI YELLOW_CARP_2	0x1681	Rembrandt
 product ATI RADEON_HD6500D_HDA	0x1714	Radeon HD 6500D HD Audio
+product ATI HAWK_POINT_1	0x1900	Hawk Point
+product ATI HAWK_POINT_2	0x1901	Hawk Point
 product ATI RADEON_M241P	0x3150	Mobility Radeon X600
 product ATI FIREMV_2400_1	0x3151	FireMV 2400
 product ATI RADEON_X300M24	0x3152  Mobility Radeon X300
@@ -2073,12 +2137,26 @@ product ATI DIMGREY_CAVEFISH_9	0x73ec	Navi 23
 product ATI DIMGREY_CAVEFISH_10	0x73ed	Navi 23
 product ATI DIMGREY_CAVEFISH_11	0x73ef	Navi 23
 product ATI DIMGREY_CAVEFISH_12	0x73ff	Navi 23
+product ATI ALDEBARAN_1		0x7408	Aldebaran
+product ATI ALDEBARAN_2		0x740c	Aldebaran
+product ATI ALDEBARAN_3		0x740f	Aldebaran
+product ATI ALDEBARAN_4		0x7410	Aldebaran
 product ATI BEIGE_GOBY_1	0x7420	Navi 24
 product ATI BEIGE_GOBY_2	0x7421	Navi 24
 product ATI BEIGE_GOBY_3	0x7422	Navi 24
 product ATI BEIGE_GOBY_4	0x7423	Navi 24
 product ATI BEIGE_GOBY_5	0x7424	Navi 24
 product ATI BEIGE_GOBY_6	0x743f	Navi 24
+product ATI NAVI31_2		0x7448	Navi 31
+product ATI NAVI31_1		0x744c	Navi 31
+product ATI NAVI31_3		0x745e	Navi 31
+product ATI NAVI32_1		0x7470	Navi 32
+product ATI NAVI32_2		0x747e	Navi 32
+product ATI NAVI33_1		0x7480	Navi 33
+product ATI NAVI33_2		0x7483	Navi 33
+product ATI NAVI33_3		0x7489	Navi 33
+product ATI MI300A		0x74a0	MI300A
+product ATI MI300X		0x74a1	MI300X
 product ATI RADEON_9000IGP	0x7834	Radeon 9000/9100 IGP
 product ATI RADEON_RS350IGP	0x7835	Radeon RS350IGP
 product ATI RS690_HB		0x7910	RS690 Host
@@ -2411,6 +2489,9 @@ product AVM T1			0x1200	PRI T1 ISDN
 /* AWT products */
 product AWT RT2890		0x1059	RT2890
 
+/* Baikal products */
+product BAIKAL BE_M1000		0x8060	BE-M1000
+
 /* Belkin Components products */
 product BELKIN F5D6000		0xec00	F5D6000
 product BELKIN2 F5D6001		0x6001	F5D6001
@@ -2599,6 +2680,7 @@ product BROADCOM BCM4401B0	0x4402	BCM4401B0
 product BROADCOM BCM4371	0x440d	BCM4371
 product BROADCOM BCM4378	0x4425	BCM4378
 product BROADCOM BCM4387	0x4433	BCM4387
+product BROADCOM BCM4388	0x4434	BCM4388
 product BROADCOM BCM4313	0x4727	BCM4313
 product BROADCOM 5801		0x5801	5801
 product BROADCOM 5802		0x5802	5802
@@ -2845,6 +2927,9 @@ product CREATIVELABS SBJOY2	0x7004	PCI Gameport Joystick
 product CREATIVELABS SBJOY3	0x7005	PCI Gameport Joystick
 product CREATIVELABS PPB	0x7006	PCIE-PCI
 product CREATIVELABS EV1938	0x8938	Ectiva 1938
+
+/* Crucial products */
+product CRUCIAL P5PLUS		0x5407	P5 Plus
 
 /* Cyclades products */
 product CYCLADES CYCLOMY_1	0x0100	Cyclom-Y below 1M
@@ -3680,6 +3765,10 @@ product INTEL I219_V10		0x0d4f	I219-V
 product INTEL I219_LM12		0x0d53	I219-LM
 product INTEL I219_V12		0x0d55	I219-V
 product INTEL I225_IT		0x0d9f	I225-IT
+product INTEL I219_LM23		0x0dc5	I219-LM
+product INTEL I219_V23		0x0dc6	I219-V
+product INTEL I219_LM22		0x0dc7	I219-LM
+product INTEL I219_V22		0x0dc8	I219-V
 product INTEL E5V2_HB		0x0e00	E5 v2 Host
 product INTEL E5V2_PCIE_1	0x0e01	E5 v2 PCIE
 product INTEL E5V2_PCIE_2	0x0e02	E5 v2 PCIE
@@ -4221,6 +4310,32 @@ product INTEL 82597EX_SR	0x1a48	82597EX
 product INTEL BXT_IGD_2		0x1a84	HD Graphics
 product INTEL BXT_IGD_3		0x1a85	HD Graphics
 product INTEL 82597EX_LR	0x1b48	82597EX
+product INTEL C741_ESPI		0x1b81	C741 eSPI
+product INTEL C740_PCIE_8	0x1bb0	C740 PCIE
+product INTEL C740_PCIE_9	0x1bb1	C740 PCIE
+product INTEL C740_PCIE_10	0x1bb2	C740 PCIE
+product INTEL C740_PCIE_11	0x1bb3	C740 PCIE
+product INTEL C740_PCIE_12	0x1bb4	C740 PCIE
+product INTEL C740_PCIE_13	0x1bb5	C740 PCIE
+product INTEL C740_PCIE_0	0x1bb8	C740 PCIE
+product INTEL C740_PCIE_1	0x1bb9	C740 PCIE
+product INTEL C740_PCIE_2	0x1bba	C740 PCIE
+product INTEL C740_PCIE_3	0x1bbb	C740 PCIE
+product INTEL C740_PCIE_4	0x1bbc	C740 PCIE
+product INTEL C740_PCIE_5	0x1bbd	C740 PCIE
+product INTEL C740_PCIE_6	0x1bbe	C740 PCIE
+product INTEL C740_PCIE_7	0x1bbf	C740 PCIE
+product INTEL C740_P2SB		0x1bc6	C740 P2SB
+product INTEL C740_PMC_1	0x1bc7	C740 PMC
+product INTEL C740_SMB		0x1bc9	C740 SMBus
+product INTEL C740_SPI		0x1bca	C740 SPI
+product INTEL C740_TH		0x1bcc	C740 TH
+product INTEL C740_XHCI		0x1bcd	C740 xHCI
+product INTEL C740_PMC_2	0x1bce	C740 PMC
+product INTEL C740_AHCI_1	0x1bd2	C740 AHCI
+product INTEL C740_MROM		0x1be6	C740 MROM
+product INTEL C740_AHCI_2	0x1bf2	C740 AHCI
+product INTEL C740_DMA_SMB	0x1bff	C740 DMA SMBus
 product INTEL 6SERIES_SATA_1	0x1c00	6 Series SATA
 product INTEL 6SERIES_SATA_2	0x1c01	6 Series SATA
 product INTEL 6SERIES_AHCI_1	0x1c02	6 Series AHCI
@@ -4416,6 +4531,7 @@ product INTEL BSW_SIO_DMA_2	0x2286	Braswell SIO DMA
 product INTEL BSW_SIO_HSUART_1	0x228a	Braswell Serial
 product INTEL BSW_SIO_HSUART_2	0x228c	Braswell Serial
 product INTEL BRASWELL_SMB	0x2292	Braswell SMBus
+product INTEL BSW_SDIO		0x2295	Braswell SDIO
 product INTEL BSW_TXE		0x2298	Braswell TXE
 product INTEL BSW_PCU_LPC	0x229c	Braswell PCU LPC
 product INTEL BSW_AHCI		0x22a3	Braswell AHCI
@@ -4532,6 +4648,7 @@ product INTEL WL_8265_1		0x24fd	Dual Band Wireless-AC 8265
 product INTEL 82820_HB		0x2501	82820 Host
 product INTEL 82820_AGP		0x250f	82820 AGP
 product INTEL OPTANE		0x2522	Optane
+product INTEL P1600X		0x2525	P1600X
 product INTEL WL_9260_1		0x2526	Dual Band Wireless-AC 9260
 product INTEL 82850_HB		0x2530	82850 Host
 product INTEL 82860_HB		0x2531	82860 Host
@@ -5533,11 +5650,29 @@ product INTEL 500SERIES_GSPI_2	0x43fb	500 Series GSPI
 product INTEL 500SERIES_ISH	0x43fc	500 Series ISH
 product INTEL 500SERIES_GSPI_3	0x43fd	500 Series GSPI
 product INTEL TURBO_MEMORY	0x444e	Turbo Memory
+product INTEL EHL_DPTF		0x4503	Elkhart Lake DPTF
+product INTEL EHL_GNA		0x4511	Elkhart Lake GNA
+product INTEL EHL_HB_1		0x4512	Elkhart Lake Host
+product INTEL EHL_HB_2		0x4514	Elkhart Lake Host
+product INTEL EHL_HB_3		0x4516	Elkhart Lake Host
+product INTEL EHL_HB_4		0x4518	Elkhart Lake Host
+product INTEL EHL_HB_5		0x451e	Elkhart Lake Host
+product INTEL EHL_HB_6		0x4522	Elkhart Lake Host
+product INTEL EHL_HB_7		0x4526	Elkhart Lake Host
+product INTEL EHL_HB_8		0x4528	Elkhart Lake Host
+product INTEL EHL_GCD_TH	0x4529	Elkhart Lake TH
+product INTEL EHL_HB_9		0x452a	Elkhart Lake Host
+product INTEL EHL_HB_10		0x452c	Elkhart Lake Host
+product INTEL EHL_HB_11		0x452e	Elkhart Lake Host
+product INTEL EHL_HB_12		0x4532	Elkhart Lake Host
+product INTEL EHL_HB_13		0x4538	Elkhart Lake Host
+product INTEL EHL_HB_14		0x453a	Elkhart Lake Host
 product INTEL EHL_GT_1		0x4541	UHD Graphics
 product INTEL EHL_GT_2		0x4551	UHD Graphics
 product INTEL EHL_GT_3		0x4555	UHD Graphics
 product INTEL EHL_GT_4		0x4557	UHD Graphics
-product INTEL EHL_GT_5		0x4571	UHD Graphics
+product INTEL EHL_GT_6		0x4570	UHD Graphics
+product INTEL EHL_GT_7		0x4571	UHD Graphics
 product INTEL ADL_PU15_HB_1	0x4601	Core 12G Host
 product INTEL ADL_U9_HB_1	0x4602	Core 12G Host
 product INTEL ADL_U15_HB_1	0x4609	Core 12G Host
@@ -5545,8 +5680,11 @@ product INTEL ADL_U9_HB_2	0x460a	Core 12G Host
 product INTEL ADL_S_PCIE_1	0x460d	Core 12G PCIE
 product INTEL ADL_XDCI		0x460e	Core 12G xDCI
 product INTEL ADL_S_HB_6	0x4610	Core 12G Host
+product INTEL ADL_N_HB_1	0x4617	ADL-N Host
 product INTEL ADL_U15_HB_2	0x4619	Core 12G Host
 product INTEL ADL_U9_HB_3	0x461a	Core 12G Host
+product INTEL ADL_N_HB_2	0x461b	N200 Host
+product INTEL ADL_N_HB_3	0x461c	N100 Host
 product INTEL ADL_S_DTT		0x461d	Core 12G DTT
 product INTEL ADL_XHCI		0x461e	Core 12G xHCI
 product INTEL ADL_TBT_PCIE3	0x461f	Core 12G PCIE
@@ -5558,6 +5696,7 @@ product INTEL ADL_H_HB_2	0x4629	Core 12G Host
 product INTEL ADL_P_GT2_3	0x462a	Graphics
 product INTEL ADL_HX_HB_4	0x462b	Core 12G Host
 product INTEL ADL_S_PCIE_2	0x462d	Core 12G PCIE
+product INTEL ADL_N_IPU		0x462e	ADL-N IPU
 product INTEL ADL_TBT_PCIE2	0x462f	Core 12G PCIE
 product INTEL ADL_S_HB_5	0x4630	Core 12G Host
 product INTEL ADL_HX_HB_1	0x4637	Core 12G Host
@@ -5565,19 +5704,24 @@ product INTEL ADL_HX_HB_2	0x463b	Core 12G Host
 product INTEL ADL_PCIE_1	0x463d	Core 12G PCIE
 product INTEL ADL_TBT_DMA0	0x463e	Core 12G TBT
 product INTEL ADL_TBT_PCIE1	0x463f	Core 12G PCIE
+product INTEL RPL_S_HB_1	0x4640	Core 13G Host
 product INTEL ADL_HP_HB_1	0x4641	Core 12G Host
+product INTEL RPL_HX_HB_1	0x4647	Core 13G Host
 product INTEL ADL_S_HB_3	0x4648	Core 12G Host
 product INTEL ADL_H_HB_1	0x4649	Core 12G Host
 product INTEL ADL_S_PCIE_3	0x464d	Core 12G PCIE
+product INTEL ADL_N_XHCI_2	0x464e	ADL-N xHCI
 product INTEL ADL_S_GNA		0x464f	Core 12G GNA
 product INTEL ADL_S_HB_4	0x4650	Core 12G Host
 product INTEL ADL_IPU		0x465d	Core 12G IPU
+product INTEL ADL_N_XDCI_2	0x465e	ADL-N xDCI
 product INTEL ADL_S_HB_1	0x4660	Core 12G Host
 product INTEL ADL_S_HB_2	0x4668	Core 12G Host
 product INTEL ADL_TBT_DMA1	0x466d	Core 12G TBT
 product INTEL ADL_TBT_PCIE0	0x466e	Core 12G PCIE
 product INTEL ADL_S_TH		0x466f	Core 12G TH
 product INTEL ADL_S_CL		0x467d	Core 12G CL
+product INTEL ADL_N_GNA		0x467e	ADL-N GNA
 product INTEL ADL_S_VMD		0x467f	Core 12G VMD
 product INTEL ADL_S_GT1_1	0x4680	UHD Graphics 770
 product INTEL ADL_S_GT1_2	0x4682	UHD Graphics 730
@@ -5605,11 +5749,97 @@ product INTEL ADL_P_GT2_18	0x46c3	Graphics
 product INTEL ADL_N_GT_1	0x46d0	Graphics
 product INTEL ADL_N_GT_2	0x46d1	Graphics
 product INTEL ADL_N_GT_3	0x46d2	Graphics
+product INTEL ADL_N_GT_4	0x46d3	Graphics
+product INTEL ADL_N_GT_5	0x46d4	Graphics
 product INTEL DG1_1		0x4905	Iris Xe MAX
 product INTEL DG1_2		0x4906	Graphics
 product INTEL DG1_3		0x4907	SG-18M
 product INTEL DG1_4		0x4908	Graphics
 product INTEL DG1_5		0x4909	Graphics
+product INTEL EHL_ESPI		0x4b00	Elkhart Lake eSPI
+product INTEL EHL_P2SB		0x4b20	Elkhart Lake P2SB
+product INTEL EHL_PMC		0x4b21	Elkhart Lake PMC
+product INTEL EHL_SMB		0x4b23	Elkhart Lake SMBus
+product INTEL EHL_SPI		0x4b24	Elkhart Lake SPI
+product INTEL EHL_TH		0x4b26	Elkhart Lake TH
+product INTEL EHL_SIO_UART_0	0x4b28	Elkhart Lake UART
+product INTEL EHL_SIO_UART_1	0x4b29	Elkhart Lake UART
+product INTEL EHL_SIO_SPI_0	0x4b2a	Elkhart Lake SPI
+product INTEL EHL_SIO_SPI_1	0x4b2b	Elkhart Lake SPI
+product INTEL EHL_IEH		0x4b2f	Elkhart Lake IEH
+product INTEL EHL_SGMII		0x4b32	Elkhart Lake Ethernet
+product INTEL EHL_SIO_SPI_2	0x4b37	Elkhart Lake SPI
+product INTEL EHL_PCIE_0	0x4b38	Elkhart Lake PCIE
+product INTEL EHL_PCIE_1	0x4b39	Elkhart Lake PCIE
+product INTEL EHL_PCIE_2	0x4b3a	Elkhart Lake PCIE
+product INTEL EHL_PCIE_3	0x4b3b	Elkhart Lake PCIE
+product INTEL EHL_PCIE_4	0x4b3c	Elkhart Lake PCIE
+product INTEL EHL_PCIE_5	0x4b3d	Elkhart Lake PCIE
+product INTEL EHL_PCIE_6	0x4b3e	Elkhart Lake PCIE
+product INTEL EHL_SIO_I2C_6	0x4b44	Elkhart Lake I2C
+product INTEL EHL_SIO_I2C_7	0x4b45	Elkhart Lake I2C
+product INTEL EHL_EMMC		0x4b47	Elkhart Lake eMMC
+product INTEL EHL_SDMMC		0x4b48	Elkhart Lake SD/MMC
+product INTEL EHL_SI		0x4b4a	Elkhart Lake SI
+product INTEL EHL_SIO_I2C_4	0x4b4b	Elkhart Lake I2C
+product INTEL EHL_SIO_I2C_5	0x4b4c	Elkhart Lake I2C
+product INTEL EHL_SIO_UART_2	0x4b4d	Elkhart Lake UART
+product INTEL EHL_HDA		0x4b58	Elkhart Lake HD Audio
+product INTEL EHL_AHCI		0x4b63	Elkhart Lake AHCI
+product INTEL EHL_HPET		0x4b68	Elkhart Lake HPET
+product INTEL EHL_IOAPIC	0x4b69	Elkhart Lake IOAPIC
+product INTEL EHL_CSE_PTT_DMA	0x4b6b	Elkhart Lake PTT DMA
+product INTEL EHL_CSE_UMA	0x4b6c	Elkhart Lake UMA
+product INTEL EHL_CSE_HECI_0	0x4b70	Elkhart Lake HECI
+product INTEL EHL_CSE_HECI_1	0x4b71	Elkhart Lake HECI
+product INTEL EHL_CSE_HECI_2	0x4b74	Elkhart Lake HECI
+product INTEL EHL_CSE_HECI_3	0x4b75	Elkhart Lake HECI
+product INTEL EHL_SIO_I2C_0	0x4b78	Elkhart Lake I2C
+product INTEL EHL_SIO_I2C_1	0x4b79	Elkhart Lake I2C
+product INTEL EHL_SIO_I2C_2	0x4b7a	Elkhart Lake I2C
+product INTEL EHL_SIO_I2C_3	0x4b7b	Elkhart Lake I2C
+product INTEL EHL_XHCI		0x4b7d	Elkhart Lake xHCI
+product INTEL EHL_XDCI		0x4b7e	Elkhart Lake xDCI
+product INTEL EHL_SRAM		0x4b7f	Elkhart Lake SRAM
+product INTEL EHL_PSE_QEP_1	0x4b81	Elkhart Lake QEP
+product INTEL EHL_PSE_QEP_2	0x4b82	Elkhart Lake QEP
+product INTEL EHL_PSE_QEP_3	0x4b83	Elkhart Lake QEP
+product INTEL EHL_PSE_SPI_0	0x4b84	Elkhart Lake SPI
+product INTEL EHL_PSE_SPI_1	0x4b85	Elkhart Lake SPI
+product INTEL EHL_PSE_SPI_2	0x4b86	Elkhart Lake SPI
+product INTEL EHL_PSE_SPI_3	0x4b87	Elkhart Lake SPI
+product INTEL EHL_PSE_GPIO_0	0x4b88	Elkhart Lake GPIO
+product INTEL EHL_PSE_GPIO_1	0x4b89	Elkhart Lake GPIO
+product INTEL EHL_PSE_UART_0	0x4b96	Elkhart Lake UART
+product INTEL EHL_PSE_UART_1	0x4b97	Elkhart Lake UART
+product INTEL EHL_PSE_UART_2	0x4b98	Elkhart Lake UART
+product INTEL EHL_PSE_UART_3	0x4b99	Elkhart Lake UART
+product INTEL EHL_PSE_UART_4	0x4b9a	Elkhart Lake UART
+product INTEL EHL_PSE_UART_5	0x4b9b	Elkhart Lake UART
+product INTEL EHL_PSE_I2S_0	0x4b9c	Elkhart Lake I2S
+product INTEL EHL_PSE_I2S_1	0x4b9d	Elkhart Lake I2S
+product INTEL EHL_PSE0_RGMII_1G	0x4ba0	Elkhart Lake Ethernet
+product INTEL EHL_PSE0_SGMII_1G	0x4ba1	Elkhart Lake Ethernet
+product INTEL EHL_PSE0_SGMII_2G	0x4ba2	Elkhart Lake Ethernet
+product INTEL EHL_PSE1_RGMII_1G	0x4bb0	Elkhart Lake Ethernet
+product INTEL EHL_PSE1_SGMII_1G	0x4bb1	Elkhart Lake Ethernet
+product INTEL EHL_PSE1_SGMII_2G	0x4bb2	Elkhart Lake Ethernet
+product INTEL EHL_PSE_LH2OSE	0x4bb3	Elkhart Lake LH2OSE
+product INTEL EHL_PSE_DMA_0	0x4bb4	Elkhart Lake DMA
+product INTEL EHL_PSE_DMA_1	0x4bb5	Elkhart Lake DMA
+product INTEL EHL_PSE_DMA_2	0x4bb6	Elkhart Lake DMA
+product INTEL EHL_PSE_PWM	0x4bb7	Elkhart Lake PWM 
+product INTEL EHL_PSE_I2C_0	0x4bb9	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_1	0x4bba	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_2	0x4bbb	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_3	0x4bbc	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_4	0x4bbd	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_5	0x4bbe	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_6	0x4bbf	Elkhart Lake I2C
+product INTEL EHL_PSE_I2C_7	0x4bc0	Elkhart Lake I2C
+product INTEL EHL_PSE_CAN_0	0x4bc1	Elkhart Lake CAN
+product INTEL EHL_PSE_CAN_1	0x4bc2	Elkhart Lake CAN
+product INTEL EHL_PSE_QEP_0	0x4bc3	Elkhart Lake QEP
 product INTEL RKL_GT_1		0x4c80	UHD Graphics
 product INTEL RKL_GT_2		0x4c8a	UHD Graphics
 product INTEL RKL_GT_3		0x4c8b	UHD Graphics
@@ -5699,6 +5929,7 @@ product INTEL EP80579_LAN_5	0x5045  EP80579 LAN
 product INTEL EP80579_LAN_3	0x5048  EP80579 LAN
 product INTEL EP80579_LAN_6	0x5049  EP80579 LAN
 product INTEL 600SERIES_LP_ESPI	0x5182	600 Series eSPI
+product INTEL 700SERIES_LP_ESPI	0x519d	700 Series eSPI
 product INTEL 600SERIES_LP_P2SB	0x51a0	600 Series P2SB
 product INTEL 600SERIES_LP_PMC	0x51a1	600 Series PMC
 product INTEL 600SERIES_LP_SMB	0x51a3	600 Series SMBus
@@ -5724,6 +5955,7 @@ product INTEL 600SERIES_LP_I2C_0	0x51c5	600 Series I2C
 product INTEL 600SERIES_LP_I2C_1	0x51c6	600 Series I2C
 product INTEL 600SERIES_LP_UART_2	0x51c7	600 Series UART
 product INTEL 600SERIES_LP_HDA	0x51c8	600 Series HD Audio
+product INTEL 700SERIES_LP_HDA	0x51ca	700 Series HD Audio
 product INTEL 600SERIES_LP_THC_0	0x51d0	600 Series THC
 product INTEL 600SERIES_LP_THC_1	0x51d1	600 Series THC
 product INTEL 600SERIES_LP_AHCI	0x51d3	600 Series AHCI
@@ -5745,40 +5977,96 @@ product INTEL 600SERIES_LP_XHCI	0x51ed	600 Series xHCI
 product INTEL 600SERIES_LP_XDCI	0x51ee	600 Series xDCI
 product INTEL 600SERIES_LP_SRAM	0x51ef	600 Series SRAM
 product INTEL WL_22500_11	0x51f0	Wi-Fi 6 AX211
+product INTEL WL_22500_17	0x51f1	Wi-Fi 6 AX211
 product INTEL 600SERIES_LP_GSPI_2	0x51fb	600 Series GSPI
 product INTEL 600SERIES_LP_ISH	0x51fc	600 Series ISH
 product INTEL 600SERIES_LP_UFS	0x51ff	600 Series UFS
 product INTEL 80960RD		0x5200	i960 RD
 product INTEL PRO_100_SERVER	0x5201	PRO 100 Server
+product INTEL ADL_N_ESPI	0x5481	ADL-N eSPI
+product INTEL ADL_N_P2SB	0x54a0	ADL-N P2SB
+product INTEL ADL_N_PMC		0x54a1	ADL-N PMC
+product INTEL ADL_N_SMB		0x54a3	ADL-N SMBus
+product INTEL ADL_N_SPI		0x54a4	ADL-N SPI
+product INTEL ADL_N_TH		0x54a6	ADL-N TH
+product INTEL ADL_N_UART_0	0x54a8	ADL-N UART
+product INTEL ADL_N_UART_1	0x54a9	ADL-N UART
+product INTEL ADL_N_GSPI_0	0x54aa	ADL-N GSPI
+product INTEL ADL_N_GSPI_1	0x54ab	ADL-N GSPI
+product INTEL ADL_N_PCIE_9	0x54b0	ADL-N PCIE
+product INTEL ADL_N_PCIE_10	0x54b1	ADL-N PCIE
+product INTEL ADL_N_PCIE_11	0x54b2	ADL-N PCIE
+product INTEL ADL_N_PCIE_12	0x54b3	ADL-N PCIE
+product INTEL ADL_N_PCIE_1	0x54b8	ADL-N PCIE
+product INTEL ADL_N_PCIE_2	0x54b9	ADL-N PCIE
+product INTEL ADL_N_PCIE_3	0x54ba	ADL-N PCIE
+product INTEL ADL_N_PCIE_4	0x54bb	ADL-N PCIE
+product INTEL ADL_N_PCIE_7	0x54be	ADL-N PCIE
+product INTEL ADL_N_EMMC	0x54c4	ADL-N eMMC
+product INTEL ADL_N_I2C_4	0x54c5	ADL-N I2C
+product INTEL ADL_N_I2C_5	0x54c6	ADL-N I2C
+product INTEL ADL_N_UART_2	0x54c7	ADL-N UART
+product INTEL ADL_N_HDA		0x54c8	ADL-N HD Audio
+product INTEL ADL_N_THC_0	0x54d0	ADL-N THC
+product INTEL ADL_N_THC_1	0x54d1	ADL-N THC
+product INTEL ADL_N_AHCI	0x54d3	ADL-N AHCI
+product INTEL ADL_N_I2C_6	0x54d8	ADL-N I2C
+product INTEL ADL_N_I2C_7	0x54d9	ADL-N I2C
+product INTEL ADL_N_UART_3	0x54da	ADL-N UART
+product INTEL ADL_N_HECI_1	0x54e0	ADL-N HECI
+product INTEL ADL_N_HECI_2	0x54e1	ADL-N HECI
+product INTEL ADL_N_HECI_3	0x54e4	ADL-N HECI
+product INTEL ADL_N_HECI_4	0x54e5	ADL-N HECI
+product INTEL ADL_N_I2C_0	0x54e8	ADL-N I2C
+product INTEL ADL_N_I2C_1	0x54e9	ADL-N I2C
+product INTEL ADL_N_I2C_2	0x54ea	ADL-N I2C
+product INTEL ADL_N_I2C_3	0x54eb	ADL-N I2C
+product INTEL ADL_N_XHCI	0x54ed	ADL-N xHCI
+product INTEL ADL_N_XDCI	0x54ee	ADL-N xDCI
+product INTEL ADL_N_SRAM	0x54ef	ADL-N SRAM
 product INTEL WL_22500_16	0x54f0	Wi-Fi 6 AX211
+product INTEL ADL_N_GSPI_2	0x54fb	ADL-N GSPI
+product INTEL ADL_N_ISH		0x54fc	ADL-N ISH
+product INTEL ADL_N_UFS		0x54ff	ADL-N UFS
 product INTEL I225_LMVP		0x5502	I225-LMvP
 product INTEL I226_K		0x5504	I226-K
 product INTEL I219_LM18		0x550a	I219-LM
 product INTEL I219_V18		0x550b	I219-V
 product INTEL I219_LM19		0x550c	I219-LM
 product INTEL I219_V19		0x550d	I219-V
+product INTEL I219_LM20		0x550e	I219-LM
+product INTEL I219_V20		0x550f	I219-V
+product INTEL I219_LM21		0x5510	I219-LM
+product INTEL I219_V21		0x5511	I219-V
 product INTEL DG2_G10_1		0x5690	Arc A770M
 product INTEL DG2_G10_2		0x5691	Arc A730M
 product INTEL DG2_G10_3		0x5692	Arc A550M
 product INTEL DG2_G11_1		0x5693	Arc A370M
 product INTEL DG2_G11_2		0x5694	Arc A350M
 product INTEL DG2_G11_3		0x5695	Graphics
-product INTEL DG2_G12_1		0x5696	Graphics
-product INTEL DG2_G12_2		0x5697	Graphics
-product INTEL DG2_G11_4		0x5698	Graphics
+product INTEL DG2_G12_1		0x5696	Arc A570M
+product INTEL DG2_G12_2		0x5697	Arc A530M
 product INTEL DG2_G10_4		0x56a0	Arc A770
 product INTEL DG2_G10_5		0x56a1	Arc A750
 product INTEL DG2_G10_6		0x56a2	Arc A580
 product INTEL DG2_G12_3		0x56a3	Graphics
 product INTEL DG2_G12_4		0x56a4	Graphics
-product INTEL DG2_G11_5		0x56a5	Arc A380
-product INTEL DG2_G11_6		0x56a6	Arc A310
-product INTEL DG2_G11_7		0x56b0	Arc Pro A30M
-product INTEL DG2_G11_8		0x56b1	Arc Pro A40/A50
-product INTEL DG2_G12_5		0x56b2	Graphics
-product INTEL DG2_G12_6		0x56b3	Graphics
+product INTEL DG2_G11_4		0x56a5	Arc A380
+product INTEL DG2_G11_5		0x56a6	Arc A310
+product INTEL DG2_G11_6		0x56b0	Arc Pro A30M
+product INTEL DG2_G11_7		0x56b1	Arc Pro A40/A50
+product INTEL DG2_G12_5		0x56b2	Arc Pro A60M
+product INTEL DG2_G12_6		0x56b3	Arc Pro A60
+product INTEL DG2_G11_8		0x56ba	Arc A380E
+product INTEL DG2_G11_9		0x56bb	Arc A310E
+product INTEL DG2_G11_10	0x56bc	Arc A370E
+product INTEL DG2_G11_11	0x56bd	Arc A350E
+product INTEL DG2_G10_7		0x56be	Arc A750E
+product INTEL DG2_G10_8		0x56bf	Arc A580E
 product INTEL ATS_M150		0x56c0	Flex 170
 product INTEL ATS_M75		0x56c1	Flex 140
+product INTEL I219_LM24		0x57a0	I219-LM
+product INTEL I219_V24		0x57a1	I219-V
 product INTEL QEMU_NVME		0x5845	QEMU NVM Express Controller
 product INTEL KBL_D_GT1		0x5902	HD Graphics 610
 product INTEL CORE7G_U_HB	0x5904	Core 7G Host
@@ -5978,6 +6266,11 @@ product INTEL 82440BX_AGP	0x71a1	82440BX AGP
 product INTEL 82443GX		0x71a2	82443GX
 product INTEL 82372FB_IDE	0x7601	82372FB IDE
 product INTEL 82740		0x7800	82740 AGP
+product INTEL Z790_ESPI		0x7a04	Z790 eSPI
+product INTEL H770_ESPI		0x7a05	H770 eSPI
+product INTEL B760_ESPI		0x7a06	B760 eSPI
+product INTEL C266_ESPI		0x7a13	C266 eSPI
+product INTEL C262_ESPI		0x7a14	C262 eSPI
 product INTEL 700SERIES_P2SB	0x7a20	700 Series P2SB
 product INTEL 700SERIES_PMC	0x7a21	700 Series PMC
 product INTEL 700SERIES_SMB	0x7a23	700 Series SMBus
@@ -6099,7 +6392,97 @@ product INTEL 600SERIES_GSPI_2	0x7afb	600 Series GSPI
 product INTEL 600SERIES_I2C_4	0x7afc	600 Series I2C
 product INTEL 600SERIES_I2C_5	0x7afd	600 Series I2C
 product INTEL 600SERIES_UART_2	0x7afe	600 Series UART
+product INTEL MTL_U4_HB		0x7d00	Core Ultra Host
+product INTEL MTL_H_HB_2	0x7d01	Core Ultra Host
+product INTEL MTL_U_HB_2	0x7d02	Core Ultra Host
+product INTEL MTL_DTT		0x7d03	Core Ultra DTT
+product INTEL MTL_VMD		0x7d0b	Core Ultra VMD
+product INTEL MTL_PMT		0x7d0d	Core Ultra PMT
+product INTEL MTL_H_HB_1	0x7d14	Core Ultra Host
+product INTEL MTL_U_HB_1	0x7d16	Core Ultra Host
+product INTEL MTL_IPU		0x7d19	Core Ultra IPU
+product INTEL MTL_NPU		0x7d1d	Core Ultra NPU
+product INTEL MTL_U4_GT_1	0x7d40	Graphics
+product INTEL MTL_U_GT_1	0x7d45	Graphics
+product INTEL MTL_H_GT_1	0x7d55	Arc Graphics
+product INTEL MTL_U_GT_2	0x7d60	Graphics
+product INTEL MTL_H_GT_2	0x7dd5	Graphics
+product INTEL MTL_H_ESPI	0x7e02	Core Ultra eSPI
+product INTEL MTL_U_ESPI	0x7e03	Core Ultra eSPI
+product INTEL MTL_U4_ESPI	0x7e07	Core Ultra eSPI
+product INTEL MTL_P2SB_SOC	0x7e20	Core Ultra P2SB
+product INTEL MTL_PMC_SOC	0x7e21	Core Ultra PMC
+product INTEL MTL_SMB		0x7e22	Core Ultra SMBus
+product INTEL MTL_SPI		0x7e23	Core Ultra SPI
+product INTEL MTL_TH		0x7e24	Core Ultra TH
+product INTEL MTL_UART_0	0x7e25	Core Ultra UART
+product INTEL MTL_UART_1	0x7e26	Core Ultra UART
+product INTEL MTL_GSPI_0	0x7e27	Core Ultra GSPI
+product INTEL MTL_HDA		0x7e28	Core Ultra HD Audio
+product INTEL MTL_GSPI_1	0x7e30	Core Ultra GSPI
+product INTEL MTL_PCIE_1	0x7e38	Core Ultra PCIE
+product INTEL MTL_PCIE_2	0x7e39	Core Ultra PCIE
+product INTEL MTL_PCIE_3	0x7e3a	Core Ultra PCIE
+product INTEL MTL_PCIE_4	0x7e3b	Core Ultra PCIE
+product INTEL MTL_PCIE_5	0x7e3c	Core Ultra PCIE
+product INTEL MTL_PCIE_6	0x7e3d	Core Ultra PCIE
+product INTEL MTL_PCIE_7	0x7e3e	Core Ultra PCIE
+product INTEL MTL_PCIE_8	0x7e3f	Core Ultra PCIE
 product INTEL WL_22500_14	0x7e40	Wi-Fi 6 AX210
+product INTEL MTL_ISH		0x7e45	Core Ultra ISH
+product INTEL MTL_GSPI_2	0x7e46	Core Ultra GSPI
+product INTEL MTL_THC_0_1	0x7e48	Core Ultra THC
+product INTEL MTL_THC_0_2	0x7e49	Core Ultra THC
+product INTEL MTL_THC_1_1	0x7e4a	Core Ultra THC
+product INTEL MTL_THC_1_2	0x7e4b	Core Ultra THC
+product INTEL MTL_GNA		0x7e4c	Core Ultra GNA
+product INTEL MTL_PCIE_9	0x7e4d	Core Ultra PCIE
+product INTEL MTL_I2C_4		0x7e50	Core Ultra I2C
+product INTEL MTL_I2C_5		0x7e51	Core Ultra I2C
+product INTEL MTL_UART_2	0x7e52	Core Ultra UART
+product INTEL MTL_HECI_5	0x7e58	Core Ultra HECI
+product INTEL MTL_HECI_6	0x7e59	Core Ultra HECI
+product INTEL MTL_HECI_7	0x7e5a	Core Ultra HECI
+product INTEL MTL_AHCI		0x7e63	Core Ultra AHCI
+product INTEL MTL_RAID_1	0x7e67	Core Ultra RAID
+product INTEL MTL_HECI_1	0x7e70	Core Ultra HECI
+product INTEL MTL_HECI_2	0x7e71	Core Ultra HECI
+product INTEL MTL_IDER		0x7e72	Core Ultra IDE-R
+product INTEL MTL_KT		0x7e73	Core Ultra KT
+product INTEL MTL_HECI_3	0x7e74	Core Ultra HECI
+product INTEL MTL_HECI_4	0x7e75	Core Ultra HECI
+product INTEL MTL_I2C_0		0x7e78	Core Ultra I2C
+product INTEL MTL_I2C_1		0x7e79	Core Ultra I2C
+product INTEL MTL_I2C_2		0x7e7a	Core Ultra I2C
+product INTEL MTL_I2C_3		0x7e7b	Core Ultra I2C
+product INTEL MTL_I3C		0x7e7c	Core Ultra I3C
+product INTEL MTL_XHCI_2	0x7e7d	Core Ultra xHCI
+product INTEL MTL_XDCI_2	0x7e7e	Core Ultra xDCI
+product INTEL MTL_SRAM		0x7e7f	Core Ultra SRAM
+product INTEL MTL_U4_XHCI	0x7eb0	Core Ultra xHCI
+product INTEL MTL_U4_XDCI	0x7eb1	Core Ultra xDCI
+product INTEL MTL_U4_TBT_DMA0	0x7eb2	Core Ultra TBT
+product INTEL MTL_U4_PCIE_16	0x7eb4	Core Ultra PCIE
+product INTEL MTL_U4_PCIE_17	0x7eb5	Core Ultra PCIE
+product INTEL MTL_U4_P2SB_IOE	0x7eb8	Core Ultra P2SB
+product INTEL MTL_U4_IEH_IOE	0x7eb9	Core Ultra IEH
+product INTEL MTL_U4_PMC_IOE	0x7ebe	Core Ultra PMC
+product INTEL MTL_U4_SRAM_IOE	0x7ebf	Core Ultra SRAM
+product INTEL MTL_XHCI_1	0x7ec0	Core Ultra xHCI
+product INTEL MTL_XDCI_1	0x7ec1	Core Ultra xDCI
+product INTEL MTL_TBT_DMA0	0x7ec2	Core Ultra TBT
+product INTEL MTL_TBT_DMA1	0x7ec3	Core Ultra TBT
+product INTEL MTL_PCIE_16	0x7ec4	Core Ultra PCIE
+product INTEL MTL_PCIE_17	0x7ec5	Core Ultra PCIE
+product INTEL MTL_PCIE_18	0x7ec6	Core Ultra PCIE
+product INTEL MTL_PCIE_19	0x7ec7	Core Ultra PCIE
+product INTEL MTL_P2SB_IOE	0x7ec8	Core Ultra P2SB
+product INTEL MTL_IEH_IOE	0x7ec9	Core Ultra IEH
+product INTEL MTL_PCIE_10	0x7eca	Core Ultra PCIE
+product INTEL MTL_PCIE_11	0x7ecb	Core Ultra PCIE
+product INTEL MTL_H_PCIE_12	0x7ecc 	Core Ultra PCIE
+product INTEL MTL_PMC_IOE	0x7ece	Core Ultra PMC
+product INTEL MTL_SRAM_IOE	0x7ecf	Core Ultra SRAM
 product INTEL WL_22500_15	0x7f70	Wi-Fi 6 AX211
 product INTEL US15W_HB		0x8100	US15W Host
 product INTEL US15L_HB		0x8101	US15L/UL11L Host
@@ -6800,8 +7183,45 @@ product INTEL 400SERIES_V_PCIE_20	0xa3ea	400 Series PCIE
 product INTEL 400SERIES_V_PCIE_21	0xa3eb	400 Series PCIE
 product INTEL 400SERIES_V_PCIE_22	0xa3ec	400 Series PCIE
 product INTEL 400SERIES_V_PCIE_23	0xa3ed	400 Series PCIE
+product INTEL RPL_S_HB_2	0xa700	Core 13G Host
+product INTEL RPL_HX_HB_2	0xa702	Core 13G Host
+product INTEL RPL_S_HB_3	0xa703	Core 13G Host
+product INTEL RPL_S_HB_4	0xa704	Core 13G Host
+product INTEL RPL_S_HB_5	0xa705	Core 13G Host
+product INTEL RPL_H_HB_1	0xa706	Core 13G Host
+product INTEL RPL_H_HB_2	0xa707	Core 13G Host
+product INTEL RPL_U_HB_1	0xa708	Core 13G Host
+product INTEL RPL_PX_HB_1	0xa709	Core 13G Host
+product INTEL RPL_PX_HB_2	0xa70a	Core 13G Host
+product INTEL RPL_PCIE_1	0xa70d	Core 13G PCIE
+product INTEL RPL_E_HB_1	0xa711	Xeon E-2400 Host
+product INTEL RPL_E_HB_2	0xa712	Xeon E-2400 Host
+product INTEL RPL_E_HB_3	0xa713	Xeon E-2400 Host
+product INTEL RPL_H_HB_3	0xa716	Core 13G Host
+product INTEL RPL_HX_HB_3	0xa719	Core 13G Host
+product INTEL RPL_U_HB_2	0xa71b	Core 13G Host
+product INTEL RPL_U_HB_3	0xa71c	Core 13G Host
+product INTEL RPL_DTT		0xa71d	Core 13G DTT
+product INTEL RPL_XHCI		0xa71e	Core 13G xHCI
+product INTEL RPL_TBT_PCIE3	0xa71f	Core 13G PCIE
 product INTEL RPL_P_GT_1	0xa720	Graphics
-product INTEL RPL_P_GT_2	0xa721	Graphics
+product INTEL RPL_U_GT_1	0xa721	Graphics
+product INTEL RPL_HX_HB_4	0xa728	Core 13G Host
+product INTEL RPL_HX_HB_5	0xa729	Core 13G Host
+product INTEL RPL_HX_HB_6	0xa72a	Core 13G Host
+product INTEL RPL_PCIE_2	0xa72d	Core 13G PCIE
+product INTEL RPL_TBT_PCIE2	0xa72f	Core 13G PCIE	
+product INTEL RPL_TBT_DMA0	0xa73e	Core 13G TBT
+product INTEL RPL_TBT_PCIE1	0xa73f	Core 13G PCIE
+product INTEL RPL_S_HB_6	0xa740	Core 14G Host
+product INTEL RPL_PCIE_3	0xa74d	Core 13G PCIE
+product INTEL RPL_GNA		0xa74f	Core 13G GNA
+product INTEL RPL_IPU		0xa75d	Core 13G IPU
+product INTEL RPL_TBT_DMA1	0xa76d	Core 13G TBT
+product INTEL RPL_TBT_PCIE0	0xa76e	Core 13G PCIE
+product INTEL RPL_TH		0xa76f	Core 13G TH
+product INTEL RPL_CL		0xa77d	Core 13G CL
+product INTEL RPL_VMD		0xa77f	Core 13G VMD
 product INTEL RPL_S_GT_1	0xa780	Graphics
 product INTEL RPL_S_GT_2	0xa781	Graphics
 product INTEL RPL_S_GT_3	0xa782	Graphics
@@ -6810,10 +7230,14 @@ product INTEL RPL_S_GT_5	0xa788	Graphics
 product INTEL RPL_S_GT_6	0xa789	Graphics
 product INTEL RPL_S_GT_7	0xa78a	Graphics
 product INTEL RPL_S_GT_8	0xa78b	Graphics
-product INTEL RPL_P_GT_3	0xa7a0	Graphics
-product INTEL RPL_P_GT_4	0xa7a1	Graphics
-product INTEL RPL_P_GT_5	0xa7a8	Graphics
-product INTEL RPL_P_GT_6	0xa7a9	Graphics
+product INTEL RPL_P_GT_2	0xa7a0	Graphics
+product INTEL RPL_U_GT_2	0xa7a1	Graphics
+product INTEL RPL_P_GT_3	0xa7a8	Graphics
+product INTEL RPL_U_GT_3	0xa7a9	Graphics
+product INTEL RPL_P_GT_4	0xa7aa	Graphics
+product INTEL RPL_P_GT_5	0xa7ab	Graphics
+product INTEL RPL_U_GT_4	0xa7ac	Graphics
+product INTEL RPL_U_GT_5	0xa7ad	Graphics
 product INTEL 21152		0xb152	S21152BB
 product INTEL 21154		0xb154	21154AE/BE
 product INTEL CORE_DMI_0	0xd130	Core DMI
@@ -6898,6 +7322,8 @@ product JMICRON XD_2		0x2394	xD
 
 /* Kingston */
 product KINGSTON A2000		0x2263	A2000
+product KINGSTON KC3000		0x5013	KC3000
+product KINGSTON NV2		0x5019	NV2
 
 /* Kioxia */
 product KIOXIA BG4		0x0001	BG4
@@ -6934,6 +7360,7 @@ product LEADTEK WINFAST_XP	0x6609	Leadtek WinFast TV 2000 XP
 
 /* Lenovo products */
 product LENOVO NVME		0x0003	NVMe
+product LENOVO NVME_2		0x0006	NVMe
 
 /* Level 1 (Intel) */
 product LEVEL1 LXT1001		0x0001	LXT1001
@@ -6955,6 +7382,9 @@ product LMC DS3			0x0004	DS3
 product LMC SSI			0x0005	SSI
 product LMC DS1			0x0006	DS1
 product LMC HSSIC		0x0007	HSSIc
+
+/* Longsys products */
+product LONGSYS FORESEE_XP1000	0x5216	FORESEE XP1000
 
 /* Lucent products */
 product LUCENT LTMODEM		0x0440	K56flex DSVD LTMODEM
@@ -7122,13 +7552,16 @@ product MATROX MARV_G200_SD	0xff04	MGA Marvel G200 SD
 
 /* MediaTek products */
 product MEDIATEK MT7921K	0x0608	MT7921K
+product MEDIATEK MT7922		0x0616	MT7922
 product MEDIATEK MT7921		0x7961	MT7921
 
 /* Meinberg Funkuhren */
 product MEINBERG PCI32		0x0101	PCI32
 product MEINBERG PCI509		0x0102	PCI509
+product MEINBERG PCI510		0x0103	PCI510
 product MEINBERG PCI511		0x0104	PCI511
 product MEINBERG PEX511		0x0105	PEX511
+product MEINBERG PZF180PEX	0x0106	PZF180PEX
 product MEINBERG GPS170PCI	0x0204	GPS170PCI
 
 /* Mellanox */
@@ -7143,6 +7576,7 @@ product MELLANOX MT28800VF	0x101a	ConnectX-5 Ex VF
 product MELLANOX MT28908	0x101b	ConnectX-6
 product MELLANOX MT28908VF	0x101c	ConnectX-6 VF
 product MELLANOX MT2892		0x101d	ConnectX-6 Dx
+product MELLANOX MT2894		0x101f	ConnectX-6 Lx
 product MELLANOX CONNECTX_EN	0x6368	ConnectX EN
 
 /* Mentor */
@@ -7152,6 +7586,9 @@ product MENTOR PCI0661		0x0661	PCI-PCI
 /* Micrel products */
 product MICREL KSZ8841		0x8841	KSZ8841
 product MICREL KSZ8842		0x8842	KSZ8842
+
+/* Micron Technology products */
+product MICRON MTFDKBA512QFM	0x5413	NVMe
 
 /* Microsoft products */
 product MICROSOFT MN120		0x0001	MN-120
@@ -8059,6 +8496,7 @@ product PHILIPS SAA7231		0x7231	SAA7231 TV
 
 /* Phison products */
 product PHISON PS5000		0x5000	PS5000
+product PHISON PS5021		0x5021	PS5021
 
 /* Picopower */
 product PICOPOWER PT80C826	0x0000	PT80C826
@@ -8077,6 +8515,9 @@ product PLANEX FNW_3800_TX	0xab07	FNW-3800-TX
 
 /* Platform */
 product PLATFORM ES1849		0x0100	ES1849
+
+/* PLDA products */
+product PLDA XR_AXI		0x1111	XpressRICH-AXI
 
 /* PLX products */
 product PLX 1076		0x1076	I/O 1076
@@ -8209,6 +8650,7 @@ product QUMRANET VIO1_NET	0x1041	Virtio 1.x Network
 product QUMRANET VIO1_BLOCK	0x1042	Virtio 1.x Storage
 product QUMRANET VIO1_CONS	0x1043	Virtio 1.x Console
 product QUMRANET VIO1_RNG	0x1044	Virtio 1.x RNG
+product QUMRANET VIO1_MEM	0x1045	Virtio 1.x Memory Balloon
 product QUMRANET VIO1_SCSI	0x1048	Virtio 1.x SCSI
 product QUMRANET VIO1_GPU	0x1050	Virtio 1.x GPU
 product QUMRANET VIO1_INPUT	0x1052	Virtio 1.x Input
@@ -8357,10 +8799,15 @@ product REALTEK RTL8192E	0x8192	RTL8192E
 product REALTEK RTL8187SE	0x8199	8187SE
 product REALTEK RTL8723AE	0x8723	8723AE
 product REALTEK RTL8821AE	0x8821	8821AE
+product REALTEK RTL8852AE	0x8852	8852AE
+product REALTEK RTL8852AE_VT	0xa85a	8852AE-VT
 product REALTEK RTL8723BE	0xb723	8723BE
 product REALTEK RTL8822BE	0xb822	8822BE
+product REALTEK RTL8852BE	0xb852	8852BE
+product REALTEK RTL8852BE_2	0xb85b	8852BE
 product REALTEK RTL8821CE	0xc821	8821CE
 product REALTEK RTL8822CE	0xc822	8822CE
+product REALTEK RTL8852CE	0xc852	8852CE
 
 /* Red Hat products */
 product REDHAT PPB		0x0001	Qemu PCI-PCI
@@ -8369,6 +8816,10 @@ product REDHAT SERIAL2		0x0003	Qemu Serial 2x
 product REDHAT SERIAL4		0x0004	Qemu Serial 4x
 product REDHAT SDMMC		0x0007	SD/MMC
 product REDHAT HB		0x0008	Host
+product REDHAT PCIE		0x000c	PCIE
+product REDHAT XHCI		0x000d	xHCI
+product REDHAT PCI		0x000e	PCI
+product REDHAT NVME		0x0010	NVMe
 product REDHAT QXL		0x0100	QXL Video
 
 /* Rendition products */
@@ -8410,7 +8861,9 @@ product RICOH R5U832		0xe832	5U832 Firewire
 product RICOH R5U852		0xe852	5U852 SD/MMC
 
 /* Rockchip products */
-product ROCKCHIP RK3399_RC	0x0100	RK3399 Root Complex
+product ROCKCHIP RK3399		0x0100	RK3399
+product ROCKCHIP RK3566		0x3566	RK3566
+product ROCKCHIP RK3588		0x3588	RK3588
 
 /* Rockwell products */
 product ROCKWELL RS56SP_PCI11P1	0x2005	RS56/SP-PCI11P1 Modem
@@ -8482,6 +8935,7 @@ product SAMSUNG2 SM961_NVME	0xa804	SM961/PM961 NVMe
 product SAMSUNG2 SM981_NVME	0xa808	SM981/PM981 NVMe
 product SAMSUNG2 PM991_NVME	0xa809	PM991 NVMe
 product SAMSUNG2 PM9A1_NVME	0xa80a	PM9A1 NVMe
+product SAMSUNG2 PM9B1_NVME	0xa80b	PM9B1 NVMe
 product SAMSUNG2 NVME_171X	0xa820	NVMe
 product SAMSUNG2 NVME_172X	0xa821	NVMe
 product SAMSUNG2 NVME_172X_A_B	0xa822	NVMe
@@ -8494,6 +8948,7 @@ product SANDISK PCSN520_2	0x5004	PC SN520
 product SANDISK WDSXXXG3X0C	0x5006	WD Black NVMe
 product SANDISK PCSN530		0x5008	PC SN530
 product SANDISK SN850		0x5011	SN850
+product SANDISK PCSN740		0x5015	PC SN740
 
 /* Sangoma products */
 product SANGOMA A10X		0x0300	A10x
@@ -8859,6 +9314,10 @@ product SYMBIOS SAS3416		0x00ac	SAS3416
 product SYMBIOS SAS3508		0x00ad	SAS3508
 product SYMBIOS SAS3508_1	0x00ae	SAS3508
 product SYMBIOS SAS3408		0x00af	SAS3408
+product SYMBIOS SAS39XX		0x00e1	SAS39XX
+product SYMBIOS SAS39XX_1	0x00e2	SAS39XX
+product SYMBIOS SAS38XX		0x00e5	SAS38XX
+product SYMBIOS SAS38XX_1	0x00e6	SAS38XX
 product SYMBIOS MEGARAID_320	0x0407	MegaRAID 320
 product SYMBIOS MEGARAID_3202E	0x0408	MegaRAID 320-2E
 product SYMBIOS MEGARAID_SATA	0x0409	MegaRAID SATA 4x/8x
@@ -8880,6 +9339,10 @@ product SYMBIOS YELLOWFIN_2	0x0702	Yellowfin
 product SYMBIOS 61C102		0x0901	61C102
 product SYMBIOS 63C815		0x1000	63C815
 product SYMBIOS 1030R		0x1030	53c1030R
+product SYMBIOS MEGARAID_39XX	0x10e1	MegaRAID SAS39XX
+product SYMBIOS MEGARAID_39XX_2	0x10e2	MegaRAID SAS39XX
+product SYMBIOS MEGARAID_38XX	0x10e5	MegaRAID SAS38XX
+product SYMBIOS MEGARAID_38XX_2	0x10e6	MegaRAID SAS38XX
 product SYMBIOS MEGARAID	0x1960	MegaRAID
 
 /* Packet Engines products */
@@ -9030,6 +9493,8 @@ product TOSHIBA2 TFIRO		0x0701	Infrared
 product TOSHIBA2 SDCARD		0x0805	SD
 
 /* Transmeta products */
+product TRANSMETA TM8000_HT	0x0060	TM8000 HyperTransport
+product TRANSMETA TM8000_AGP	0x0061	TM8000 AGP
 product TRANSMETA NB		0x0295	Northbridge
 product TRANSMETA LONGRUN_NB	0x0395	LongRun Northbridge
 product TRANSMETA SDRAM		0x0396	SDRAM
@@ -9126,6 +9591,8 @@ product UMC UM8891N		0xe891	UM8891N
 
 /* Shenzhen Unionmemory Information System products */
 product UMIS NVME		0x2263	NVMe
+product UMIS AM620		0x6202	AM620
+product UMIS AM630		0x6303	AM630
 
 /* US Robotics */
 product USR 3CP5610		0x1008	3CP5610
@@ -9491,6 +9958,10 @@ product VORTEX GDT_7X29RN	0x0261	GDT7x29RN
 product VORTEX GDT_8X22RZ	0x02f6	GDT8x22RZ
 product VORTEX GDT_ICP		0x0300	ICP
 product VORTEX GDT_ICP2		0x0301	ICP
+
+/* Beijing WangXun Technology products */
+product WANGXUN WX1860A2	0x0101	WX1860A2
+product WANGXUN WX1860AL1	0x010b	WX1860AL1
 
 /* Nanjing QinHeng Electronics products */
 product WCH CH352		0x3253	CH352

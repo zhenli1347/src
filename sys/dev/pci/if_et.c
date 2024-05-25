@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_et.c,v 1.42 2022/03/11 18:00:45 mpi Exp $	*/
+/*	$OpenBSD: if_et.c,v 1.44 2024/05/24 06:02:53 jsg Exp $	*/
 /*
  * Copyright (c) 2007 The DragonFly Project.  All rights reserved.
  * 
@@ -38,15 +38,12 @@
 #include "bpfilter.h"
 
 #include <sys/param.h>
-#include <sys/endian.h>
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/queue.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
-#include <sys/socket.h>
 
 #include <machine/bus.h>
  
@@ -63,7 +60,6 @@
  
 #include <dev/mii/miivar.h>
 
-#include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcidevs.h>
 
@@ -245,7 +241,7 @@ et_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = et_ioctl;
 	ifp->if_start = et_start;
 	ifp->if_watchdog = et_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, ET_TX_NDESC);
+	ifq_init_maxlen(&ifp->if_snd, ET_TX_NDESC);
 	strlcpy(ifp->if_xname, sc->sc_dev.dv_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;

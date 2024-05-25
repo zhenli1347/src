@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_cas.c,v 1.54 2022/03/11 18:00:45 mpi Exp $	*/
+/*	$OpenBSD: if_cas.c,v 1.56 2024/05/24 06:02:53 jsg Exp $	*/
 
 /*
  *
@@ -49,13 +49,9 @@
 #include <sys/timeout.h>
 #include <sys/mbuf.h>
 #include <sys/syslog.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <sys/device.h>
-#include <sys/endian.h>
 #include <sys/atomic.h>
 
 #include <net/if.h>
@@ -493,7 +489,7 @@ cas_config(struct cas_softc *sc)
 	ifp->if_start = cas_start;
 	ifp->if_ioctl = cas_ioctl;
 	ifp->if_watchdog = cas_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, CAS_NTXDESC - 1);
+	ifq_init_maxlen(&ifp->if_snd, CAS_NTXDESC - 1);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ext2fs_vfsops.c,v 1.117 2022/08/12 14:30:53 visa Exp $	*/
+/*	$OpenBSD: ext2fs_vfsops.c,v 1.119 2024/05/12 09:19:54 jsg Exp $	*/
 /*	$NetBSD: ext2fs_vfsops.c,v 1.1 1997/06/11 09:34:07 bouyer Exp $	*/
 
 /*
@@ -63,8 +63,6 @@
 
 #include <ufs/ext2fs/ext2fs.h>
 #include <ufs/ext2fs/ext2fs_extern.h>
-
-extern struct lock ufs_hashlock;
 
 int ext2fs_sbupdate(struct ufsmount *, int);
 static int	e2fs_sbcheck(struct ext2fs *, int);
@@ -1003,7 +1001,6 @@ ext2fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
 /*
  * Vnode pointer to File handle
  */
-/* ARGSUSED */
 int
 ext2fs_vptofh(struct vnode *vp, struct fid *fhp)
 {

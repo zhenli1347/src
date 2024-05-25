@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.63 2022/06/02 15:35:55 millert Exp $	*/
+/*	$OpenBSD: main.c,v 1.66 2024/05/09 08:35:40 florian Exp $	*/
 /*	$NetBSD: main.c,v 1.14 1997/06/05 11:13:24 lukem Exp $	*/
 
 /*-
@@ -117,7 +117,7 @@ main(int argc, char *argv[])
 	ino_t maxino;
 	time_t t;
 	int dirlist;
-	char *toplevel, *str, *mount_point = NULL, *realpath;
+	char *toplevel, *str, *mount_point = NULL, *realpath, *ct;
 	int just_estimate = 0;
 	u_int64_t zero_uid = 0;
 
@@ -423,11 +423,13 @@ main(int argc, char *argv[])
 	        getdumptime();		/* /etc/dumpdates snarfed */
 
 	t = (time_t)spcl.c_date;
+	ct = ctime(&t);
 	msg("Date of this level %c dump: %s", level,
-		t == 0 ? "the epoch\n" : ctime(&t));
+	    t == 0 ? "the epoch\n" : ct ? ct : "?\n");
 	t = (time_t)spcl.c_ddate;
+	ct = ctime(&t);
  	msg("Date of last level %c dump: %s", lastlevel,
-		t == 0 ? "the epoch\n" : ctime(&t));
+	    t == 0 ? "the epoch\n" : ct ? ct : "?\n");
 	msg("Dumping %s ", disk);
 	if (mount_point != NULL)
 		msgtail("(%s) ", mount_point);
@@ -455,16 +457,17 @@ main(int argc, char *argv[])
 	tp_bshift = ffs(TP_BSIZE) - 1;
 	if (TP_BSIZE != (1 << tp_bshift))
 		quit("TP_BSIZE (%d) is not a power of 2\n", TP_BSIZE);
-#ifdef FS_44INODEFMT
 	if (sblock->fs_magic == FS_UFS2_MAGIC ||
 	    sblock->fs_inodefmt >= FS_44INODEFMT)
 		spcl.c_flags |= DR_NEWINODEFMT;
-#endif
 	maxino = (ino_t)sblock->fs_ipg * sblock->fs_ncg;
 	mapsize = roundup(howmany(maxino, NBBY), TP_BSIZE);
 	usedinomap = calloc((unsigned) mapsize, sizeof(char));
 	dumpdirmap = calloc((unsigned) mapsize, sizeof(char));
 	dumpinomap = calloc((unsigned) mapsize, sizeof(char));
+	if (usedinomap == NULL || dumpdirmap == NULL || dumpinomap == NULL)
+		quit("Failed to allocate tables");
+
 	tapesize = 3 * (howmany(mapsize * sizeof(char), TP_BSIZE) + 1);
 
 	nonodump = spcl.c_level < honorlevel;
@@ -588,10 +591,12 @@ main(int argc, char *argv[])
 		    spcl.c_tapea, spcl.c_volume,
 		    (spcl.c_volume == 1) ? "" : "s");
 	t = (time_t)spcl.c_date;
+	ct = ctime(&t);
 	msg("Date of this level %c dump: %s", level,
-	    t == 0 ? "the epoch\n" : ctime(&t));
+	    t == 0 ? "the epoch\n" : ct ? ct : "?\n");
 	t = do_stats();
-	msg("Date this dump completed:  %s", ctime(&t));
+	ct = ctime(&t);
+	msg("Date this dump completed:  %s", ct ? ct : "?\n");
 	msg("Average transfer rate: %ld KB/s\n", xferrate / tapeno);
 	putdumptime();
 	trewind();

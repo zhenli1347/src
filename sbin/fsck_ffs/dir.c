@@ -1,4 +1,4 @@
-/*	$OpenBSD: dir.c,v 1.32 2015/01/20 18:22:21 deraadt Exp $	*/
+/*	$OpenBSD: dir.c,v 1.35 2024/02/03 18:51:57 beck Exp $	*/
 /*	$NetBSD: dir.c,v 1.20 1996/09/27 22:45:11 christos Exp $	*/
 
 /*
@@ -51,10 +51,6 @@ struct	dirtemplate emptydir = { 0, DIRBLKSIZ };
 struct	dirtemplate dirhead = {
 	0, 12, DT_DIR, 1, ".",
 	0, DIRBLKSIZ - 12, DT_DIR, 2, ".."
-};
-struct	odirtemplate odirhead = {
-	0, 12, 1, ".",
-	0, DIRBLKSIZ - 12, 2, ".."
 };
 
 static int expanddir(union dinode *, char *);
@@ -210,7 +206,7 @@ dircheck(struct inodesc *idesc, struct direct *dp)
 		return (0);
 	if (dp->d_ino == 0)
 		return (1);
-	size = DIRSIZ(0, dp);
+	size = DIRSIZ(dp);
 	namlen = dp->d_namlen;
 	type = dp->d_type;
 	if (dp->d_reclen < size ||
@@ -269,7 +265,7 @@ adjust(struct inodesc *idesc, short lcnt)
 		pinode(idesc->id_number);
 		printf(" COUNT %d SHOULD BE %d", DIP(dp, di_nlink),
 		    DIP(dp, di_nlink) - lcnt);
-		if (preen || usedsoftdep) {
+		if (preen) {
 			if (lcnt < 0) {
 				printf("\n");
 				pfatal("LINK COUNT INCREASING");
@@ -292,9 +288,9 @@ mkentry(struct inodesc *idesc)
 	int newlen, oldlen;
 
 	newent.d_namlen = strlen(idesc->id_name);
-	newlen = DIRSIZ(0, &newent);
+	newlen = DIRSIZ(&newent);
 	if (dirp->d_ino != 0)
-		oldlen = DIRSIZ(0, dirp);
+		oldlen = DIRSIZ(dirp);
 	else
 		oldlen = 0;
 	if (dirp->d_reclen - oldlen < newlen)
@@ -336,7 +332,7 @@ linkup(ino_t orphan, ino_t parentdir)
 	lostdir = (DIP(dp, di_mode) & IFMT) == IFDIR;
 	pwarn("UNREF %s ", lostdir ? "DIR" : "FILE");
 	pinode(orphan);
-	if ((preen || usedsoftdep) && DIP(dp, di_size) == 0)
+	if (preen && DIP(dp, di_size) == 0)
 		return (0);
 	if (preen)
 		printf(" (RECONNECTED)\n");
@@ -439,10 +435,7 @@ linkup(ino_t orphan, ino_t parentdir)
  * fix an entry in a directory.
  */
 int
-changeino(dir, name, newnum)
-	ino_t dir;
-	char *name;
-	ino_t newnum;
+changeino(ino_t dir, char *name, ino_t newnum)
 {
 	struct inodesc idesc;
 

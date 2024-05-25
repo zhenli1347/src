@@ -1,4 +1,4 @@
-/*	$OpenBSD: icmp6.c,v 1.243 2022/12/09 17:32:53 claudio Exp $	*/
+/*	$OpenBSD: icmp6.c,v 1.252 2024/04/21 17:32:10 florian Exp $	*/
 /*	$KAME: icmp6.c,v 1.217 2001/06/20 15:03:29 jinmei Exp $	*/
 
 /*
@@ -128,9 +128,6 @@ static int icmp6_mtudisc_lowat = 256;
  * keep track of # of redirect routes.
  */
 struct rttimer_queue icmp6_redirect_timeout_q;
-
-/* XXX experimental, turned off */
-static int icmp6_redirect_lowat = -1;
 
 void	icmp6_errcount(int, int);
 int	icmp6_ratelimit(const struct in6_addr *, const int, const int);
@@ -381,7 +378,7 @@ icmp6_error(struct mbuf *m, int type, int code, int param)
 		if (!icmp6_reflect(&n, sizeof(struct ip6_hdr), NULL))
 			ip6_send(n);
 	}
-}                                                                    
+}
 
 /*
  * Process a received ICMP6 message.
@@ -396,7 +393,7 @@ icmp6_input(struct mbuf **mp, int *offp, int proto, int af)
 	struct ip6_hdr *ip6, *nip6;
 	struct icmp6_hdr *icmp6, *nicmp6;
 	int off = *offp;
-	int icmp6len = m->m_pkthdr.len - *offp;
+	int icmp6len = m->m_pkthdr.len - off;
 	int code, sum, noff;
 	char src[INET6_ADDRSTRLEN], dst[INET6_ADDRSTRLEN];
 
@@ -913,7 +910,8 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 			icmp6dst.sin6_addr = *finaldst;
 		icmp6dst.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
 		    &icmp6dst.sin6_addr);
-		if (in6_embedscope(&icmp6dst.sin6_addr, &icmp6dst, NULL)) {
+		if (in6_embedscope(&icmp6dst.sin6_addr, &icmp6dst,
+		    NULL, NULL)) {
 			/* should be impossible */
 			nd6log((LOG_DEBUG,
 			    "icmp6_notify_error: in6_embedscope failed\n"));
@@ -930,7 +928,8 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 		icmp6src.sin6_addr = eip6->ip6_src;
 		icmp6src.sin6_scope_id = in6_addr2scopeid(m->m_pkthdr.ph_ifidx,
 		    &icmp6src.sin6_addr);
-		if (in6_embedscope(&icmp6src.sin6_addr, &icmp6src, NULL)) {
+		if (in6_embedscope(&icmp6src.sin6_addr, &icmp6src,
+		    NULL, NULL)) {
 			/* should be impossible */
 			nd6log((LOG_DEBUG,
 			    "icmp6_notify_error: in6_embedscope failed\n"));
@@ -1165,7 +1164,7 @@ icmp6_reflect(struct mbuf **mp, size_t off, struct sockaddr *sa)
 			rtfree(rt);
 			goto bad;
 		}
-		ia6 = in6_ifawithscope(rt->rt_ifa->ifa_ifp, &t, rtableid);
+		ia6 = in6_ifawithscope(rt->rt_ifa->ifa_ifp, &t, rtableid, rt);
 		if (ia6 != NULL)
 			src = &ia6->ia_addr.sin6_addr;
 		if (src == NULL)
@@ -1342,8 +1341,7 @@ icmp6_redirect_input(struct mbuf *m, int off)
 	/* validation passed */
 
 	icmp6len -= sizeof(*nd_rd);
-	nd6_option_init(nd_rd + 1, icmp6len, &ndopts);
-	if (nd6_options(&ndopts) < 0) {
+	if (nd6_options(nd_rd + 1, icmp6len, &ndopts) < 0) {
 		nd6log((LOG_INFO, "icmp6_redirect_input: "
 			"invalid ND option, rejected: %s\n",
 			icmp6_redirect_diag(&src6, &reddst6, &redtgt6)));
@@ -1387,12 +1385,6 @@ icmp6_redirect_input(struct mbuf *m, int off)
 		rtcount = rt_timer_queue_count(&icmp6_redirect_timeout_q);
 		if (0 <= ip6_maxdynroutes && rtcount >= ip6_maxdynroutes)
 			goto freeit;
-		else if (0 <= icmp6_redirect_lowat &&
-		    rtcount > icmp6_redirect_lowat) {
-			/*
-			 * XXX nuke a victim, install the new one.
-			 */
-		}
 
 		bzero(&sdst, sizeof(sdst));
 		bzero(&sgw, sizeof(sgw));
@@ -1701,7 +1693,7 @@ icmp6_ctloutput(int op, struct socket *so, int level, int optname,
     struct mbuf *m)
 {
 	int error = 0;
-	struct inpcb *in6p = sotoinpcb(so);
+	struct inpcb *inp = sotoinpcb(so);
 
 	if (level != IPPROTO_ICMPV6)
 		return EINVAL;
@@ -1718,11 +1710,11 @@ icmp6_ctloutput(int op, struct socket *so, int level, int optname,
 				break;
 			}
 			p = mtod(m, struct icmp6_filter *);
-			if (!p || !in6p->inp_icmp6filt) {
+			if (!p || !inp->inp_icmp6filt) {
 				error = EINVAL;
 				break;
 			}
-			bcopy(p, in6p->inp_icmp6filt,
+			bcopy(p, inp->inp_icmp6filt,
 				sizeof(struct icmp6_filter));
 			error = 0;
 			break;
@@ -1740,13 +1732,13 @@ icmp6_ctloutput(int op, struct socket *so, int level, int optname,
 		    {
 			struct icmp6_filter *p;
 
-			if (!in6p->inp_icmp6filt) {
+			if (!inp->inp_icmp6filt) {
 				error = EINVAL;
 				break;
 			}
 			m->m_len = sizeof(struct icmp6_filter);
 			p = mtod(m, struct icmp6_filter *);
-			bcopy(in6p->inp_icmp6filt, p,
+			bcopy(inp->inp_icmp6filt, p,
 				sizeof(struct icmp6_filter));
 			error = 0;
 			break;
@@ -1880,7 +1872,8 @@ icmp6_sysctl_icmp6stat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(*icmp6stat) == icp6s_ncounters * sizeof(uint64_t));
 	icmp6stat = malloc(sizeof(*icmp6stat), M_TEMP, M_WAITOK|M_ZERO);
-	counters_read(icmp6counters, (uint64_t *)icmp6stat, icp6s_ncounters);
+	counters_read(icmp6counters, (uint64_t *)icmp6stat, icp6s_ncounters,
+	    NULL);
 	ret = sysctl_rdstruct(oldp, oldlenp, newp,
 	    icmp6stat, sizeof(*icmp6stat));
 	free(icmp6stat, M_TEMP, sizeof(*icmp6stat));
@@ -1910,6 +1903,11 @@ icmp6_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 
 	case ICMPV6CTL_STATS:
 		error = icmp6_sysctl_icmp6stat(oldp, oldlenp, newp);
+		break;
+
+	case ICMPV6CTL_ND6_QUEUED:
+		error = sysctl_rdint(oldp, oldlenp, newp,
+		    atomic_load_int(&ln_hold_total));
 		break;
 
 	default:

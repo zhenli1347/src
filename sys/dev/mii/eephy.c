@@ -1,4 +1,4 @@
-/*	$OpenBSD: eephy.c,v 1.60 2022/04/06 18:59:29 naddy Exp $	*/
+/*	$OpenBSD: eephy.c,v 1.65 2024/03/17 00:06:43 patrick Exp $	*/
 /*
  * Principal Author: Parag Patel
  * Copyright (c) 2001
@@ -55,6 +55,11 @@
 
 #include <dev/mii/eephyreg.h>
 
+#ifdef __HAVE_FDT
+#include <machine/fdt.h>
+#include <dev/ofw/openfirm.h>
+#endif
+
 int	eephy_match(struct device *, void *, void *);
 void	eephy_attach(struct device *, struct device *, void *);
 
@@ -69,6 +74,10 @@ struct cfdriver eephy_cd = {
 int	eephy_service(struct mii_softc *, struct mii_data *, int);
 void	eephy_status(struct mii_softc *);
 void	eephy_reset(struct mii_softc *);
+
+#ifdef __HAVE_FDT
+void	eephy_fdt_reg_init(struct mii_softc *);
+#endif
 
 const struct mii_phy_funcs eephy_funcs = {
 	eephy_service, eephy_status, eephy_reset,
@@ -188,18 +197,34 @@ eephy_attach(struct device *parent, struct device *self, void *aux)
 		PHY_WRITE(sc, E1000_EADR, page);
 	}
 
-	/* Switch to SGMII-to-copper mode if necessary. */
-	if (sc->mii_model == MII_MODEL_MARVELL_E1512 &&
-	    sc->mii_flags & MIIF_SGMII) {
+	/*
+	 * GCR1 MII mode defaults to an invalid value on E1512/E1514
+	 * and must be programmed with the desired mode of operation.
+	 */
+	if (sc->mii_model == MII_MODEL_MARVELL_E1512) {
+		uint32_t mode;
+
 		page = PHY_READ(sc, E1000_EADR);
 		PHY_WRITE(sc, E1000_EADR, 18);
+
 		reg = PHY_READ(sc, E1000_GCR1);
+		mode = reg & E1000_GCR1_MODE_MASK;
+
+		if (mode == E1000_GCR1_MODE_UNSET)
+			mode = E1000_GCR1_MODE_RGMII;
+		if (sc->mii_flags & MIIF_SGMII)
+			mode = E1000_GCR1_MODE_SGMII;
+
 		reg &= ~E1000_GCR1_MODE_MASK;
-		reg |= E1000_GCR1_MODE_SGMII;
-		reg |= E1000_GCR1_RESET;
+		reg |= E1000_GCR1_RESET | mode;
 		PHY_WRITE(sc, E1000_GCR1, reg);
+
 		PHY_WRITE(sc, E1000_EADR, page);
 	}
+
+#ifdef __HAVE_FDT
+	eephy_fdt_reg_init(sc);
+#endif
 
 	PHY_RESET(sc);
 
@@ -258,6 +283,7 @@ eephy_reset(struct mii_softc *sc)
 	case MII_MODEL_MARVELL_E1011:
 	case MII_MODEL_MARVELL_E1111:
 	case MII_MODEL_MARVELL_E1112:
+	case MII_MODEL_MARVELL_E1512:
 	case MII_MODEL_MARVELL_PHYG65G:
 		reg &= ~E1000_SCR_EN_DETECT_MASK;
 		break;
@@ -276,10 +302,13 @@ eephy_reset(struct mii_softc *sc)
 
 	PHY_WRITE(sc, E1000_SCR, reg);
 
-	/* 25 MHz TX_CLK should always work. */
-	reg = PHY_READ(sc, E1000_ESCR);
-	reg |= E1000_ESCR_TX_CLK_25;
-	PHY_WRITE(sc, E1000_ESCR, reg);
+	if (sc->mii_model != MII_MODEL_MARVELL_E1512 &&
+	    sc->mii_model != MII_MODEL_MARVELL_E1545) {
+		/* 25 MHz TX_CLK should always work. */
+		reg = PHY_READ(sc, E1000_ESCR);
+		reg |= E1000_ESCR_TX_CLK_25;
+		PHY_WRITE(sc, E1000_ESCR, reg);
+	}
 
 	/* Configure LEDs if they were left unconfigured. */
 	if (sc->mii_model == MII_MODEL_MARVELL_E3016 &&
@@ -290,11 +319,8 @@ eephy_reset(struct mii_softc *sc)
 
 	/*
 	 * Do a software reset for these settings to take effect.
-	 * Disable autonegotiation, such that all capabilities get
-	 * advertised when it is switched back on.
 	 */
 	reg = PHY_READ(sc, E1000_CR);
-	reg &= ~E1000_CR_AUTO_NEG_ENABLE;
 	PHY_WRITE(sc, E1000_CR, reg | E1000_CR_RESET);
 }
 
@@ -415,3 +441,40 @@ eephy_status(struct mii_softc *sc)
 			mii->mii_media_active |= IFM_ETH_MASTER;
 	}
 }
+
+#ifdef __HAVE_FDT
+void eephy_fdt_reg_init(struct mii_softc *sc)
+{
+	uint32_t *prop, opage;
+	int i, len;
+
+	if (!sc->mii_pdata->mii_node)
+		return;
+
+	len = OF_getproplen(sc->mii_pdata->mii_node, "marvell,reg-init");
+	if (len <= 0 || len % (4 * sizeof(uint32_t)) != 0)
+		return;
+
+	opage = PHY_READ(sc, E1000_EADR);
+	prop = malloc(len, M_TEMP, M_WAITOK);
+	OF_getpropintarray(sc->mii_pdata->mii_node, "marvell,reg-init",
+	    prop, len);
+	for (i = 0; i < len; i += 4) {
+		uint32_t page = prop[i + 0];
+		uint32_t reg = prop[i + 1];
+		uint32_t keep = prop[i + 2];
+		uint32_t set = prop[i + 3];
+		uint32_t val = 0;
+
+		PHY_WRITE(sc, E1000_EADR, page);
+		if (keep) {
+			val = PHY_READ(sc, reg);
+			val &= keep;
+		}
+		val |= set;
+		PHY_WRITE(sc, reg, val);
+	}
+	free(prop, M_TEMP, len);
+	PHY_WRITE(sc, E1000_EADR, opage);
+}
+#endif

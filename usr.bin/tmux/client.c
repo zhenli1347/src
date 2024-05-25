@@ -1,4 +1,4 @@
-/* $OpenBSD: client.c,v 1.158 2022/05/30 12:48:57 nicm Exp $ */
+/* $OpenBSD: client.c,v 1.162 2024/05/15 09:59:12 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -246,9 +246,6 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	u_int			 ncaps = 0;
 	struct args_value	*values;
 
-	/* Ignore SIGCHLD now or daemon() in the server will leave a zombie. */
-	signal(SIGCHLD, SIG_IGN);
-
 	/* Set up the initial command. */
 	if (shell_command != NULL) {
 		msg = MSG_SHELL;
@@ -493,20 +490,10 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 static __dead void
 client_exec(const char *shell, const char *shellcmd)
 {
-	const char	*name, *ptr;
-	char		*argv0;
+	char	*argv0;
 
 	log_debug("shell %s, command %s", shell, shellcmd);
-
-	ptr = strrchr(shell, '/');
-	if (ptr != NULL && *(ptr + 1) != '\0')
-		name = ptr + 1;
-	else
-		name = shell;
-	if (client_flags & CLIENT_LOGIN)
-		xasprintf(&argv0, "-%s", name);
-	else
-		xasprintf(&argv0, "%s", name);
+	argv0 = shell_argv0(shell, !!(client_flags & CLIENT_LOGIN));
 	setenv("SHELL", shell, 1);
 
 	proc_clear_signals(client_proc, 1);
@@ -526,11 +513,22 @@ client_signal(int sig)
 {
 	struct sigaction sigact;
 	int		 status;
+	pid_t		 pid;
 
 	log_debug("%s: %s", __func__, strsignal(sig));
-	if (sig == SIGCHLD)
-		waitpid(WAIT_ANY, &status, WNOHANG);
-	else if (!client_attached) {
+	if (sig == SIGCHLD) {
+		for (;;) {
+			pid = waitpid(WAIT_ANY, &status, WNOHANG);
+			if (pid == 0)
+				break;
+			if (pid == -1) {
+				if (errno == ECHILD)
+					break;
+				log_debug("waitpid failed: %s",
+				    strerror(errno));
+			}
+		}
+	} else if (!client_attached) {
 		if (sig == SIGTERM || sig == SIGHUP)
 			proc_exit(client_proc);
 	} else {
@@ -692,6 +690,9 @@ client_dispatch_wait(struct imsg *imsg)
 		file_read_open(&client_files, client_peer, imsg, 1,
 		    !(client_flags & CLIENT_CONTROL), client_file_check_cb,
 		    NULL);
+		break;
+	case MSG_READ_CANCEL:
+		file_read_cancel(&client_files, imsg);
 		break;
 	case MSG_WRITE_OPEN:
 		file_write_open(&client_files, client_peer, imsg, 1,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.93 2022/11/07 01:41:57 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.105 2024/02/21 15:53:07 deraadt Exp $	*/
 /*	$NetBSD: trap.c,v 1.2 2003/05/04 23:51:56 fvdl Exp $	*/
 
 /*-
@@ -121,6 +121,8 @@ const char * const trap_type[] = {
 	"stack fault",				/* 17 T_STKFLT */
 	"machine check",			/* 18 T_MCA */
 	"SSE FP exception",			/* 19 T_XMM */
+	"virtualization exception",		/* 20 T_VE */
+	"control protection exception",		/* 21 T_CP */
 };
 const int	trap_types = nitems(trap_type);
 
@@ -132,6 +134,7 @@ static void trap_print(struct trapframe *, int _type);
 static inline void frame_dump(struct trapframe *_tf, struct proc *_p,
     const char *_sig, uint64_t _cr2);
 static inline void verify_smap(const char *_func);
+static inline int verify_pkru(struct proc *);
 static inline void debug_trap(struct trapframe *_frame, struct proc *_p,
     long _type);
 
@@ -178,7 +181,13 @@ upageflttrap(struct trapframe *frame, uint64_t cr2)
 	union sigval sv;
 	int signal, sicode, error;
 
+	/*
+	 * If NX is not enabled, we cant distinguish between PROT_READ
+	 * and PROT_EXEC access, so try both.
+	 */
 	error = uvm_fault(&p->p_vmspace->vm_map, va, 0, access_type);
+	if (pg_nx == 0 && error == EACCES && access_type == PROT_READ)
+		error = uvm_fault(&p->p_vmspace->vm_map, va, 0, PROT_EXEC);
 	if (error == 0) {
 		uvm_grow(p, va);
 		return 1;
@@ -207,9 +216,8 @@ upageflttrap(struct trapframe *frame, uint64_t cr2)
 
 /*
  * kpageflttrap(frame, usermode): page fault handler
- * Returns non-zero if the fault was handled (possibly by generating
- * a signal).  Returns zero, possibly still holding the kernel lock,
- * if something was so broken that we should panic.
+ * Returns non-zero if the fault was handled (possibly by generating a signal).
+ * Returns zero if something was so broken that we should panic.
  */
 int
 kpageflttrap(struct trapframe *frame, uint64_t cr2)
@@ -231,11 +239,9 @@ kpageflttrap(struct trapframe *frame, uint64_t cr2)
 		caddr_t *nf = __nofault_start;
 		while (*nf++ != pcb->pcb_onfault) {
 			if (nf >= __nofault_end) {
-				KERNEL_LOCK();
 				fault("invalid pcb_nofault=%lx",
 				    (long)pcb->pcb_onfault);
 				return 0;
-				/* retain kernel lock */
 			}
 		}
 	}
@@ -243,19 +249,15 @@ kpageflttrap(struct trapframe *frame, uint64_t cr2)
 	/* This will only trigger if SMEP is enabled */
 	if (pcb->pcb_onfault == NULL && cr2 <= VM_MAXUSER_ADDRESS &&
 	    frame->tf_err & PGEX_I) {
-		KERNEL_LOCK();
 		fault("attempt to execute user address %p "
 		    "in supervisor mode", (void *)cr2);
-		/* retain kernel lock */
 		return 0;
 	}
 	/* This will only trigger if SMAP is enabled */
 	if (pcb->pcb_onfault == NULL && cr2 <= VM_MAXUSER_ADDRESS &&
 	    frame->tf_err & PGEX_P) {
-		KERNEL_LOCK();
 		fault("attempt to access user address %p "
 		    "in supervisor mode", (void *)cr2);
-		/* retain kernel lock */
 		return 0;
 	}
 
@@ -285,10 +287,8 @@ kpageflttrap(struct trapframe *frame, uint64_t cr2)
 	if (error) {
 		if (pcb->pcb_onfault == NULL) {
 			/* bad memory access in the kernel */
-			KERNEL_LOCK();
 			fault("uvm_fault(%p, 0x%llx, 0, %d) -> %x",
 			    map, cr2, access_type, error);
-			/* retain kernel lock */
 			return 0;
 		}
 		frame->tf_rip = (u_int64_t)pcb->pcb_onfault;
@@ -320,7 +320,7 @@ kerntrap(struct trapframe *frame)
 	default:
 	we_re_toast:
 #ifdef DDB
-		if (db_ktrap(type, 0, frame))
+		if (db_ktrap(type, frame->tf_err, frame))
 			return;
 #endif
 		trap_print(frame, type);
@@ -351,6 +351,17 @@ kerntrap(struct trapframe *frame)
 	}
 }
 
+/* If we find out userland changed the pkru register, punish the process */
+static inline int
+verify_pkru(struct proc *p)
+{
+	if (pg_xo == 0 || rdpkru(0) == PGK_VALUE)
+		return 0;
+	KERNEL_LOCK();
+	sigabort(p);
+	KERNEL_UNLOCK();
+	return 1;
+}
 
 /*
  * usertrap(frame): handler for exceptions, faults, and traps from userspace
@@ -373,6 +384,9 @@ usertrap(struct trapframe *frame)
 
 	p->p_md.md_regs = frame;
 	refreshcreds(p);
+
+	if (verify_pkru(p))
+		goto out;
 
 	switch (type) {
 	case T_TSSFLT:
@@ -407,6 +421,11 @@ usertrap(struct trapframe *frame)
 	case T_TRCTRAP:			/* trace trap */
 		sig = SIGTRAP;
 		code = TRAP_BRKPT;
+		break;
+	case T_CP:
+		sig = SIGILL;
+		code = (frame->tf_err & 0x7fff) < 4 ? ILL_BTCFI
+		    : ILL_BADSTK;
 		break;
 
 	case T_PAGEFLT:			/* page fault */
@@ -531,72 +550,31 @@ ast(struct trapframe *frame)
 void
 syscall(struct trapframe *frame)
 {
-	caddr_t params;
 	const struct sysent *callp;
 	struct proc *p;
-	int error;
-	size_t argsize, argoff;
-	register_t code, args[9], rval[2], *argp;
+	int error = ENOSYS;
+	register_t code, *args, rval[2];
 
 	verify_smap(__func__);
 	uvmexp.syscalls++;
 	p = curproc;
 
+	if (verify_pkru(p)) {
+		userret(p);
+		return;
+	}
+
 	code = frame->tf_rax;
-	argp = &args[0];
-	argoff = 0;
+	args = (register_t *)&frame->tf_rdi;
 
-	switch (code) {
-	case SYS_syscall:
-	case SYS___syscall:
-		/*
-		 * Code is first argument, followed by actual args.
-		 */
-		code = frame->tf_rdi;
-		argp = &args[1];
-		argoff = 1;
-		break;
-	default:
-		break;
-	}
-
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
-		callp += code;
-
-	argsize = (callp->sy_argsize >> 3) + argoff;
-	if (argsize) {
-		switch (MIN(argsize, 6)) {
-		case 6:
-			args[5] = frame->tf_r9;
-		case 5:
-			args[4] = frame->tf_r8;
-		case 4:
-			args[3] = frame->tf_r10;
-		case 3:
-			args[2] = frame->tf_rdx;
-		case 2:
-			args[1] = frame->tf_rsi;
-		case 1:
-			args[0] = frame->tf_rdi;
-			break;
-		default:
-			panic("impossible syscall argsize");
-		}
-		if (argsize > 6) {
-			argsize -= 6;
-			params = (caddr_t)frame->tf_rsp + sizeof(register_t);
-			if ((error = copyin(params, &args[6], argsize << 3)))
-				goto bad;
-		}
-	}
+	if (code <= 0 || code >= SYS_MAXSYSCALL)
+		goto bad;
+	callp = sysent + code;
 
 	rval[0] = 0;
 	rval[1] = 0;
 
-	error = mi_syscall(p, code, callp, argp, rval);
+	error = mi_syscall(p, code, callp, args, rval);
 
 	switch (error) {
 	case 0:

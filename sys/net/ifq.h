@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifq.h,v 1.35 2022/11/22 03:40:53 dlg Exp $ */
+/*	$OpenBSD: ifq.h,v 1.41 2023/11/10 15:51:24 bluhm Exp $ */
 
 /*
  * Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
@@ -54,6 +54,7 @@ struct ifqueue {
 	uint64_t		 ifq_qdrops;
 	uint64_t		 ifq_errors;
 	uint64_t		 ifq_mcasts;
+	uint32_t		 ifq_oactives;
 
 	struct kstat		*ifq_kstat;
 
@@ -90,6 +91,7 @@ struct ifiqueue {
 	/* counters */
 	uint64_t		 ifiq_packets;
 	uint64_t		 ifiq_bytes;
+	uint64_t		 ifiq_fdrops;
 	uint64_t		 ifiq_qdrops;
 	uint64_t		 ifiq_errors;
 	uint64_t		 ifiq_mcasts;
@@ -283,7 +285,7 @@ struct ifiqueue {
  *		if_attach(ifp);
  *
  *		if_attach_queues(ifp, DRV_NUM_TX_RINGS);
- *		for (i = ; i < DRV_NUM_TX_RINGS; i++) {
+ *		for (i = 0; i < DRV_NUM_TX_RINGS; i++) {
  *			struct ifqueue *ifq = ifp->if_ifqs[i];
  *			struct drv_tx_ring *ring = &sc->sc_tx_rings[i];
  *
@@ -433,6 +435,7 @@ void		 ifq_deq_commit(struct ifqueue *, struct mbuf *);
 void		 ifq_deq_rollback(struct ifqueue *, struct mbuf *);
 struct mbuf	*ifq_dequeue(struct ifqueue *);
 int		 ifq_hdatalen(struct ifqueue *);
+void		 ifq_init_maxlen(struct ifqueue *, unsigned int);
 void		 ifq_mfreem(struct ifqueue *, struct mbuf *);
 void		 ifq_mfreeml(struct ifqueue *, struct mbuf_list *);
 unsigned int	 ifq_purge(struct ifqueue *);
@@ -440,26 +443,19 @@ void		*ifq_q_enter(struct ifqueue *, const struct ifq_ops *);
 void		 ifq_q_leave(struct ifqueue *, void *);
 void		 ifq_serialize(struct ifqueue *, struct task *);
 void		 ifq_barrier(struct ifqueue *);
-
+void		 ifq_set_oactive(struct ifqueue *);
 
 int		 ifq_deq_sleep(struct ifqueue *, struct mbuf **, int, int,
 		     const char *, volatile unsigned int *,
 		     volatile unsigned int *);
 
-#define	ifq_len(_ifq)			((_ifq)->ifq_len)
-#define	ifq_empty(_ifq)			(ifq_len(_ifq) == 0)
-#define	ifq_set_maxlen(_ifq, _l)	((_ifq)->ifq_maxlen = (_l))
+#define ifq_len(_ifq)		READ_ONCE((_ifq)->ifq_len)
+#define ifq_empty(_ifq)		(ifq_len(_ifq) == 0)
 
 static inline int
 ifq_is_priq(struct ifqueue *ifq)
 {
 	return (ifq->ifq_ops == ifq_priq_ops);
-}
-
-static inline void
-ifq_set_oactive(struct ifqueue *ifq)
-{
-	ifq->ifq_oactive = 1;
 }
 
 static inline void
@@ -494,8 +490,8 @@ int		 ifiq_input(struct ifiqueue *, struct mbuf_list *);
 int		 ifiq_enqueue(struct ifiqueue *, struct mbuf *);
 void		 ifiq_add_data(struct ifiqueue *, struct if_data *);
 
-#define	ifiq_len(_ifiq)			ml_len(&(_ifiq)->ifiq_ml)
-#define	ifiq_empty(_ifiq)		ml_empty(&(_ifiq)->ifiq_ml)
+#define ifiq_len(_ifiq)		READ_ONCE(ml_len(&(_ifiq)->ifiq_ml))
+#define ifiq_empty(_ifiq)	(ifiq_len(_ifiq) == 0)
 
 #endif /* _KERNEL */
 

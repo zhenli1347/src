@@ -1,4 +1,4 @@
-/*	$OpenBSD: aplsmc.c,v 1.20 2022/11/26 17:23:15 tobhe Exp $	*/
+/*	$OpenBSD: aplsmc.c,v 1.25 2023/07/16 16:11:11 kettenis Exp $	*/
 /*
  * Copyright (c) 2021 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -42,6 +42,13 @@ extern void (*simplefb_burn_hook)(u_int);
 
 extern void (*cpuresetfn)(void);
 extern void (*powerdownfn)(void);
+
+extern int (*hw_battery_setchargemode)(int);
+extern int (*hw_battery_setchargestart)(int);
+extern int (*hw_battery_setchargestop)(int);
+extern int hw_battery_chargemode;
+extern int hw_battery_chargestart;
+extern int hw_battery_chargestop;
 
 /* SMC mailbox endpoint */
 #define SMC_EP			32
@@ -131,7 +138,11 @@ struct aplsmc_softc {
 	struct ksensor		sc_sensors[APLSMC_MAX_SENSORS];
 	int			sc_nsensors;
 	struct ksensordev	sc_sensordev;
+	uint32_t		sc_suspend_pstr;
 };
+
+#define CH0I_DISCHARGE		(1 << 0)
+#define CH0C_INHIBIT		(1 << 0)
 
 struct aplsmc_softc *aplsmc_sc;
 
@@ -165,9 +176,11 @@ struct aplsmc_sensor aplsmc_sensors[] = {
 
 int	aplsmc_match(struct device *, void *, void *);
 void	aplsmc_attach(struct device *, struct device *, void *);
+int	aplsmc_activate(struct device *, int);
 
 const struct cfattach aplsmc_ca = {
-	sizeof (struct aplsmc_softc), aplsmc_match, aplsmc_attach
+	sizeof (struct aplsmc_softc), aplsmc_match, aplsmc_attach,
+	NULL, aplsmc_activate
 };
 
 struct cfdriver aplsmc_cd = {
@@ -179,6 +192,7 @@ int	aplsmc_send_cmd(struct aplsmc_softc *, uint16_t, uint32_t, uint16_t);
 int	aplsmc_wait_cmd(struct aplsmc_softc *sc);
 int	aplsmc_read_key(struct aplsmc_softc *, uint32_t, void *, size_t);
 int	aplsmc_write_key(struct aplsmc_softc *, uint32_t, void *, size_t);
+int64_t aplsmc_convert_flt(uint32_t, int);
 void	aplsmc_refresh_sensors(void *);
 int	aplsmc_apminfo(struct apm_power_info *);
 void	aplsmc_set_pin(void *, uint32_t *, int);
@@ -187,6 +201,10 @@ int	aplsmc_settime(struct todr_chip_handle *, struct timeval *);
 void	aplsmc_reset(void);
 void	aplsmc_powerdown(void);
 void	aplsmc_reboot_attachhook(struct device *);
+void	aplsmc_battery_init(struct aplsmc_softc *);
+int	aplsmc_battery_setchargemode(int);
+int	aplsmc_battery_setchargestart(int);
+int	aplsmc_battery_setchargestop(int);
 
 int
 aplsmc_match(struct device *parent, void *match, void *aux)
@@ -337,6 +355,7 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 	apm_setinfohook(aplsmc_apminfo);
 #endif
 
+	aplsmc_battery_init(sc);
 #endif
 
 #ifdef SUSPEND
@@ -344,11 +363,57 @@ aplsmc_attach(struct device *parent, struct device *self, void *aux)
 #endif
 }
 
+int
+aplsmc_activate(struct device *self, int act)
+{
+#ifdef SUSPEND
+	struct aplsmc_softc *sc = (struct aplsmc_softc *)self;
+	int64_t value;
+
+	switch (act) {
+	case DVACT_WAKEUP:
+		value = aplsmc_convert_flt(sc->sc_suspend_pstr, 100);
+		printf("%s: system %lld.%02lld W\n", sc->sc_dev.dv_xname,
+		    value / 100, value % 100);
+	}
+#endif
+
+	return 0;
+}
+
 void
 aplsmc_handle_notification(struct aplsmc_softc *sc, uint64_t data)
 {
 	extern int allowpowerdown;
+#ifdef SUSPEND
 	extern int cpu_suspended;
+	uint32_t flt = 0;
+
+	if (cpu_suspended) {
+		aplsmc_read_key(sc, 'PSTR', &flt, sizeof(flt));
+		sc->sc_suspend_pstr = flt;
+
+		switch (SMC_EV_TYPE(data)) {
+		case SMC_EV_TYPE_BTN:
+			switch (SMC_EV_SUBTYPE(data)) {
+			case SMC_PWRBTN_SHORT:
+			case SMC_PWRBTN_TOUCHID:
+				cpu_suspended = 0;
+				break;
+			}
+			break;
+		case SMC_EV_TYPE_LID:
+			switch (SMC_EV_SUBTYPE(data)) {
+			case SMC_LID_OPEN:
+				cpu_suspended = 0;
+				break;
+			}
+			break;
+		}
+
+		return;
+	}
+#endif
 
 	switch (SMC_EV_TYPE(data)) {
 	case SMC_EV_TYPE_BTN:
@@ -356,11 +421,6 @@ aplsmc_handle_notification(struct aplsmc_softc *sc, uint64_t data)
 		case SMC_PWRBTN_SHORT:
 		case SMC_PWRBTN_TOUCHID:
 			if (SMC_EV_DATA(data) == 1) {
-#ifdef SUSPEND
-				if (cpu_suspended) {
-					cpu_suspended = 0;
-				} else
-#endif
 				if (allowpowerdown) {
 					allowpowerdown = 0;
 					prsignal(initprocess, SIGUSR2);
@@ -379,23 +439,26 @@ aplsmc_handle_notification(struct aplsmc_softc *sc, uint64_t data)
 		}
 		break;
 	case SMC_EV_TYPE_LID:
-		switch (SMC_EV_SUBTYPE(data)) {
-		case SMC_LID_OPEN:
-			if (simplefb_burn_hook)
-				simplefb_burn_hook(1);
-			break;
-		case SMC_LID_CLOSE:
-			if (simplefb_burn_hook)
-				simplefb_burn_hook(0);
-			break;
-		default:
-			printf("%s: SMV_EV_TYPE_LID 0x%016llx\n",
-			       sc->sc_dev.dv_xname, data);
-			break;
-		}
 		switch (lid_action) {
-		case 1: 
-			/* XXX: suspend */
+		case 0:
+			switch (SMC_EV_SUBTYPE(data)) {
+			case SMC_LID_OPEN:
+				if (simplefb_burn_hook)
+					simplefb_burn_hook(1);
+				break;
+			case SMC_LID_CLOSE:
+				if (simplefb_burn_hook)
+					simplefb_burn_hook(0);
+				break;
+			default:
+				printf("%s: SMV_EV_TYPE_LID 0x%016llx\n",
+				       sc->sc_dev.dv_xname, data);
+				break;
+			}
+		case 1:
+#ifdef SUSPEND
+			request_sleep(SLEEP_SUSPEND);
+#endif
 			break;
 		case 2:
 			/* XXX: hibernate */
@@ -504,6 +567,26 @@ aplsmc_write_key(struct aplsmc_softc *sc, uint32_t key, void *data, size_t len)
 
 #ifndef SMALL_KERNEL
 
+int64_t
+aplsmc_convert_flt(uint32_t flt, int scale)
+{
+	int64_t mant;
+	int sign, exp;
+
+	/*
+	 * Convert floating-point to integer, trying to keep as much
+	 * resolution as possible given the scaling factor.
+	 */
+	sign = (flt >> 31) ? -1 : 1;
+	exp = ((flt >> 23) & 0xff) - 127;
+	mant = (flt & 0x7fffff) | 0x800000;
+	mant *= scale;
+	if (exp < 23)
+		return sign * (mant >> (23 - exp));
+	else
+		return sign * (mant << (exp - 23));
+}
+
 void
 aplsmc_refresh_sensors(void *arg)
 {
@@ -532,26 +615,11 @@ aplsmc_refresh_sensors(void *arg)
 			value = (int64_t)ui16 * sensor->scale;
 		} else if (strcmp(sensor->key_type, "flt ") == 0) {
 			uint32_t flt;
-			int64_t mant;
-			int sign, exp;
 
 			error = aplsmc_read_key(sc, key, &flt, sizeof(flt));
 			if (sensor->flags & APLSMC_BE)
 				flt = betoh32(flt);
-
-			/*
-			 * Convert floating-point to integer, trying
-			 * to keep as much resolution as possible
-			 * given the scaling factor for this sensor.
-			 */
-			sign = (flt >> 31) ? -1 : 1;
-			exp = ((flt >> 23) & 0xff) - 127;
-			mant = (flt & 0x7fffff) | 0x800000;
-			mant *= sensor->scale;
-			if (exp < 23)
-				value = sign * (mant >> (23 - exp));
-			else
-				value = sign * (mant << (exp - 23));
+			value = aplsmc_convert_flt(flt, sensor->scale);
 		}
 
 		/* Apple reports temperatures in degC. */
@@ -740,3 +808,112 @@ aplsmc_powerdown(void)
 	    &shutdown_flag, sizeof(shutdown_flag));
 	aplsmc_write_key(sc, key, &off1, sizeof(off1));
 }
+
+void
+aplsmc_battery_init(struct aplsmc_softc *sc)
+{
+	uint8_t ch0i, ch0c;
+	int error;
+
+	error = aplsmc_read_key(sc, SMC_KEY("CH0I"), &ch0i, sizeof(ch0i));
+	if (error)
+		return;
+	error = aplsmc_read_key(sc, SMC_KEY("CH0C"), &ch0c, sizeof(ch0c));
+	if (error)
+		return;
+
+#ifndef SMALL_KERNEL
+	if (ch0i & CH0I_DISCHARGE)
+		hw_battery_chargemode = -1;
+	else if (ch0c & CH0C_INHIBIT)
+		hw_battery_chargemode = 0;
+	else
+		hw_battery_chargemode = 1;
+
+	hw_battery_chargestart = 0;
+	hw_battery_chargestop = 100;
+
+	hw_battery_setchargemode = aplsmc_battery_setchargemode;
+	hw_battery_setchargestart = aplsmc_battery_setchargestart;
+	hw_battery_setchargestop = aplsmc_battery_setchargestop;
+#endif
+}
+
+#ifndef SMALL_KERNEL
+int
+aplsmc_battery_setchargemode(int mode)
+{
+	struct aplsmc_softc *sc = aplsmc_sc;
+	uint8_t val;
+	int error;
+
+	switch (mode) {
+	case -1:
+		val = 0;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0C"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		val = 1;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0I"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		break;
+	case 0:
+		val = 0;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0I"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		val = 1;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0C"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		break;
+	case 1:
+		val = 0;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0I"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		val = 0;
+		error = aplsmc_write_key(sc, SMC_KEY("CH0C"),
+		    &val, sizeof(val));
+		if (error)
+			return error;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	hw_battery_chargemode = mode;
+	return 0;
+}
+
+int
+aplsmc_battery_setchargestart(int start)
+{
+	return EOPNOTSUPP;
+}
+
+int
+aplsmc_battery_setchargestop(int stop)
+{
+	struct aplsmc_softc *sc = aplsmc_sc;
+	uint8_t chwa;
+
+	if (stop <= 80) {
+		hw_battery_chargestart = 75;
+		hw_battery_chargestop = 80;
+		chwa = 1;
+	} else {
+		hw_battery_chargestart = 95;
+		hw_battery_chargestop = 100;
+		chwa = 0;
+	}
+
+	return aplsmc_write_key(sc, SMC_KEY("CHWA"), &chwa, sizeof(chwa));
+}
+#endif

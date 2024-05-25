@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_output.c,v 1.382 2022/08/12 17:04:16 bluhm Exp $	*/
+/*	$OpenBSD: ip_output.c,v 1.399 2024/05/16 13:01:04 bluhm Exp $	*/
 /*	$NetBSD: ip_output.c,v 1.28 1996/02/13 23:43:07 christos Exp $	*/
 
 /*
@@ -81,13 +81,11 @@ int ip_pcbopts(struct mbuf **, struct mbuf *);
 int ip_multicast_if(struct ip_mreqn *, u_int, unsigned int *);
 int ip_setmoptions(int, struct ip_moptions **, struct mbuf *, u_int);
 void ip_mloopback(struct ifnet *, struct mbuf *, struct sockaddr_in *);
-static __inline u_int16_t __attribute__((__unused__))
-    in_cksum_phdr(u_int32_t, u_int32_t, u_int32_t);
+static u_int16_t in_cksum_phdr(u_int32_t, u_int32_t, u_int32_t);
 void in_delayed_cksum(struct mbuf *);
-int in_ifcap_cksum(struct mbuf *, struct ifnet *, int);
 
-int ip_output_ipsec_lookup(struct mbuf *m, int hlen, struct inpcb *inp,
-    struct tdb **, int ipsecflowinfo);
+int ip_output_ipsec_lookup(struct mbuf *m, int hlen,
+    const struct ipsec_level *seclevel, struct tdb **, int ipsecflowinfo);
 void ip_output_ipsec_pmtu_update(struct tdb *, struct route *, struct in_addr,
     int, int);
 int ip_output_ipsec_send(struct tdb *, struct mbuf *, struct route *, int);
@@ -100,11 +98,12 @@ int ip_output_ipsec_send(struct tdb *, struct mbuf *, struct route *, int);
  */
 int
 ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
-    struct ip_moptions *imo, struct inpcb *inp, u_int32_t ipsecflowinfo)
+    struct ip_moptions *imo, const struct ipsec_level *seclevel,
+    u_int32_t ipsecflowinfo)
 {
 	struct ip *ip;
 	struct ifnet *ifp = NULL;
-	struct mbuf_list fml;
+	struct mbuf_list ml;
 	int hlen = sizeof (struct ip);
 	int error = 0;
 	struct route iproute;
@@ -116,11 +115,6 @@ ip_output(struct mbuf *m, struct mbuf *opt, struct route *ro, int flags,
 #endif
 
 	NET_ASSERT_LOCKED();
-
-#ifdef IPSEC
-	if (inp && (inp->inp_flags & INP_IPV6) != 0)
-		panic("ip_output: IPv6 pcb is passed");
-#endif /* IPSEC */
 
 #ifdef	DIAGNOSTIC
 	if ((m->m_flags & M_PKTHDR) == 0)
@@ -166,28 +160,15 @@ reroute:
 	 */
 	if (ro == NULL) {
 		ro = &iproute;
-		memset(ro, 0, sizeof(*ro));
+		ro->ro_rt = NULL;
 	}
-
-	dst = satosin(&ro->ro_dst);
 
 	/*
 	 * If there is a cached route, check that it is to the same
 	 * destination and is still up.  If not, free it and try again.
 	 */
-	if (!rtisvalid(ro->ro_rt) ||
-	    dst->sin_addr.s_addr != ip->ip_dst.s_addr ||
-	    ro->ro_tableid != m->m_pkthdr.ph_rtableid) {
-		rtfree(ro->ro_rt);
-		ro->ro_rt = NULL;
-	}
-
-	if (ro->ro_rt == NULL) {
-		dst->sin_family = AF_INET;
-		dst->sin_len = sizeof(*dst);
-		dst->sin_addr = ip->ip_dst;
-		ro->ro_tableid = m->m_pkthdr.ph_rtableid;
-	}
+	route_cache(ro, &ip->ip_dst, &ip->ip_src, m->m_pkthdr.ph_rtableid);
+	dst = &ro->ro_dstsin;
 
 	if ((IN_MULTICAST(ip->ip_dst.s_addr) ||
 	    (ip->ip_dst.s_addr == INADDR_BROADCAST)) &&
@@ -205,7 +186,7 @@ reroute:
 		struct in_ifaddr *ia;
 
 		if (ro->ro_rt == NULL)
-			ro->ro_rt = rtalloc_mpath(&ro->ro_dst,
+			ro->ro_rt = rtalloc_mpath(&ro->ro_dstsa,
 			    &ip->ip_src.s_addr, ro->ro_tableid);
 
 		if (ro->ro_rt == NULL) {
@@ -242,9 +223,9 @@ reroute:
 	}
 
 #ifdef IPSEC
-	if (ipsec_in_use || inp != NULL) {
+	if (ipsec_in_use || seclevel != NULL) {
 		/* Do we have any pending SAs to apply ? */
-		error = ip_output_ipsec_lookup(m, hlen, inp, &tdb,
+		error = ip_output_ipsec_lookup(m, hlen, seclevel, &tdb,
 		    ipsecflowinfo);
 		if (error) {
 			/* Should silently drop packet */
@@ -273,7 +254,7 @@ reroute:
 		 * still points to the address in "ro".  (It may have been
 		 * changed to point to a gateway address, above.)
 		 */
-		dst = satosin(&ro->ro_dst);
+		dst = &ro->ro_dstsin;
 
 		/*
 		 * See if the caller provided any multicast options
@@ -437,37 +418,30 @@ sendit:
 	else if (m->m_pkthdr.pf.flags & PF_TAG_REROUTE) {
 		/* tag as generated to skip over pf_test on rerun */
 		m->m_pkthdr.pf.flags |= PF_TAG_GENERATED;
+		if (ro == &iproute)
+			rtfree(ro->ro_rt);
 		ro = NULL;
 		if_put(ifp); /* drop reference since target changed */
 		ifp = NULL;
 		goto reroute;
 	}
 #endif
-	in_proto_cksum_out(m, ifp);
 
 #ifdef IPSEC
-	if (ipsec_in_use && (flags & IP_FORWARDING) && (ipforwarding == 2) &&
-	    (m_tag_find(m, PACKET_TAG_IPSEC_IN_DONE, NULL) == NULL)) {
+	if ((flags & IP_FORWARDING) && ipforwarding == 2 &&
+	    (!ipsec_in_use ||
+	    m_tag_find(m, PACKET_TAG_IPSEC_IN_DONE, NULL) == NULL)) {
 		error = EHOSTUNREACH;
 		goto bad;
 	}
 #endif
 
 	/*
-	 * If small enough for interface, can just send directly.
+	 * If TSO or small enough for interface, can just send directly.
 	 */
-	if (ntohs(ip->ip_len) <= mtu) {
-		ip->ip_sum = 0;
-		if (in_ifcap_cksum(m, ifp, IFCAP_CSUM_IPv4))
-			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_OUT;
-		else {
-			ipstat_inc(ips_outswcsum);
-			ip->ip_sum = in_cksum(m, hlen);
-		}
-
-		error = ifp->if_output(ifp, m, sintosa(dst), ro->ro_rt);
+	error = if_output_tso(ifp, &m, sintosa(dst), ro->ro_rt, mtu);
+	if (error || m == NULL)
 		goto done;
-	}
 
 	/*
 	 * Too large for interface; fragment if possible.
@@ -485,7 +459,7 @@ sendit:
 			rtfree(ro->ro_rt);
 			ro->ro_tableid = orig_rtableid;
 			ro->ro_rt = icmp_mtudisc_clone(
-			    satosin(&ro->ro_dst)->sin_addr, ro->ro_tableid, 0);
+			    ro->ro_dstsin.sin_addr, ro->ro_tableid, 0);
 		}
 #endif
 		/*
@@ -505,22 +479,13 @@ sendit:
 		goto bad;
 	}
 
-	error = ip_fragment(m, &fml, ifp, mtu);
-	if (error)
+	if ((error = ip_fragment(m, &ml, ifp, mtu)) ||
+	    (error = if_output_ml(ifp, &ml, sintosa(dst), ro->ro_rt)))
 		goto done;
-
-	while ((m = ml_dequeue(&fml)) != NULL) {
-		error = ifp->if_output(ifp, m, sintosa(dst), ro->ro_rt);
-		if (error)
-			break;
-	}
-	if (error)
-		ml_purge(&fml);
-	else
-		ipstat_inc(ips_fragmented);
+	ipstat_inc(ips_fragmented);
 
 done:
-	if (ro == &iproute && ro->ro_rt)
+	if (ro == &iproute)
 		rtfree(ro->ro_rt);
 	if_put(ifp);
 #ifdef IPSEC
@@ -535,8 +500,8 @@ bad:
 
 #ifdef IPSEC
 int
-ip_output_ipsec_lookup(struct mbuf *m, int hlen, struct inpcb *inp,
-    struct tdb **tdbout, int ipsecflowinfo)
+ip_output_ipsec_lookup(struct mbuf *m, int hlen,
+    const struct ipsec_level *seclevel, struct tdb **tdbout, int ipsecflowinfo)
 {
 	struct m_tag *mtag;
 	struct tdb_ident *tdbi;
@@ -548,7 +513,7 @@ ip_output_ipsec_lookup(struct mbuf *m, int hlen, struct inpcb *inp,
 	if (ipsecflowinfo)
 		ids = ipsp_ids_lookup(ipsecflowinfo);
 	error = ipsp_spd_lookup(m, AF_INET, hlen, IPSP_DIRECTION_OUT,
-	    NULL, inp, &tdb, ids);
+	    NULL, seclevel, &tdb, ids);
 	ipsp_ids_free(ids);
 	if (error || tdb == NULL) {
 		*tdbout = NULL;
@@ -597,7 +562,8 @@ ip_output_ipsec_pmtu_update(struct tdb *tdb, struct route *ro,
 		rt->rt_mtu = tdb->tdb_mtu;
 		if (ro != NULL && ro->ro_rt != NULL) {
 			rtfree(ro->ro_rt);
-			ro->ro_rt = rtalloc(&ro->ro_dst, RT_RESOLVE, rtableid);
+			ro->ro_rt = rtalloc(&ro->ro_dstsa, RT_RESOLVE,
+			    rtableid);
 		}
 		if (rt_mtucloned)
 			rtfree(rt);
@@ -607,12 +573,12 @@ ip_output_ipsec_pmtu_update(struct tdb *tdb, struct route *ro,
 int
 ip_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro, int fwd)
 {
-#if NPF > 0
-	struct ifnet *encif;
-#endif
+	struct mbuf_list ml;
+	struct ifnet *encif = NULL;
 	struct ip *ip;
 	struct in_addr dst;
-	int error, rtableid;
+	u_int len;
+	int error, rtableid, tso = 0;
 
 #if NPF > 0
 	/*
@@ -632,16 +598,22 @@ ip_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro, int fwd)
 	 * Until now the change was not reconsidered.
 	 * What's the behaviour?
 	 */
-	in_proto_cksum_out(m, encif);
 #endif
 
-	/* Check if we are allowed to fragment */
+	/* Check if we can chop the TCP packet */
 	ip = mtod(m, struct ip *);
+	if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO) &&
+	    m->m_pkthdr.ph_mss <= tdb->tdb_mtu) {
+		tso = 1;
+		len = m->m_pkthdr.ph_mss;
+	} else
+		len = ntohs(ip->ip_len);
+
+	/* Check if we are allowed to fragment */
 	dst = ip->ip_dst;
 	rtableid = m->m_pkthdr.ph_rtableid;
 	if (ip_mtudisc && (ip->ip_off & htons(IP_DF)) && tdb->tdb_mtu &&
-	    ntohs(ip->ip_len) > tdb->tdb_mtu &&
-	    tdb->tdb_mtutimeout > gettime()) {
+	    len > tdb->tdb_mtu && tdb->tdb_mtutimeout > gettime()) {
 		int transportmode;
 
 		transportmode = (tdb->tdb_dst.sa.sa_family == AF_INET) &&
@@ -662,14 +634,33 @@ ip_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro, int fwd)
 	 */
 	m->m_flags &= ~(M_MCAST | M_BCAST);
 
-	/* Callee frees mbuf */
+	if (tso) {
+		error = tcp_chopper(m, &ml, encif, len);
+		if (error)
+			goto done;
+	} else {
+		CLR(m->m_pkthdr.csum_flags, M_TCP_TSO);
+		in_proto_cksum_out(m, encif);
+		ml_init(&ml);
+		ml_enqueue(&ml, m);
+	}
+
 	KERNEL_LOCK();
-	error = ipsp_process_packet(m, tdb, AF_INET, 0);
+	while ((m = ml_dequeue(&ml)) != NULL) {
+		/* Callee frees mbuf */
+		error = ipsp_process_packet(m, tdb, AF_INET, 0);
+		if (error)
+			break;
+	}
 	KERNEL_UNLOCK();
+ done:
 	if (error) {
+		ml_purge(&ml);
 		ipsecstat_inc(ipsec_odrops);
 		tdbstat_inc(tdb, tdb_odrops);
 	}
+	if (!error && tso)
+		tcpstat_inc(tcps_outswtso);
 	if (ip_mtudisc && error == EMSGSIZE)
 		ip_output_ipsec_pmtu_update(tdb, ro, dst, rtableid, 0);
 	return error;
@@ -677,16 +668,15 @@ ip_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro, int fwd)
 #endif /* IPSEC */
 
 int
-ip_fragment(struct mbuf *m0, struct mbuf_list *fml, struct ifnet *ifp,
+ip_fragment(struct mbuf *m0, struct mbuf_list *ml, struct ifnet *ifp,
     u_long mtu)
 {
-	struct mbuf *m;
 	struct ip *ip;
 	int firstlen, hlen, tlen, len, off;
 	int error;
 
-	ml_init(fml);
-	ml_enqueue(fml, m0);
+	ml_init(ml);
+	ml_enqueue(ml, m0);
 
 	ip = mtod(m0, struct ip *);
 	hlen = ip->ip_hl << 2;
@@ -705,10 +695,11 @@ ip_fragment(struct mbuf *m0, struct mbuf_list *fml, struct ifnet *ifp,
 	in_proto_cksum_out(m0, NULL);
 
 	/*
-	 * Loop through length of segment after first fragment,
+	 * Loop through length of payload after first fragment,
 	 * make new header and copy data of each part and link onto chain.
 	 */
 	for (off = hlen + firstlen; off < tlen; off += len) {
+		struct mbuf *m;
 		struct ip *mhip;
 		int mhlen;
 
@@ -717,8 +708,7 @@ ip_fragment(struct mbuf *m0, struct mbuf_list *fml, struct ifnet *ifp,
 			error = ENOBUFS;
 			goto bad;
 		}
-		ml_enqueue(fml, m);
-
+		ml_enqueue(ml, m);
 		if ((error = m_dup_pkthdr(m, m0, M_DONTWAIT)) != 0)
 			goto bad;
 		m->m_data += max_linkhdr;
@@ -749,38 +739,27 @@ ip_fragment(struct mbuf *m0, struct mbuf_list *fml, struct ifnet *ifp,
 			goto bad;
 		}
 
-		mhip->ip_sum = 0;
-		if (in_ifcap_cksum(m, ifp, IFCAP_CSUM_IPv4))
-			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_OUT;
-		else {
-			ipstat_inc(ips_outswcsum);
-			mhip->ip_sum = in_cksum(m, mhlen);
-		}
+		in_hdr_cksum_out(m, ifp);
 	}
 
 	/*
 	 * Update first fragment by trimming what's been copied out
 	 * and updating header, then send each fragment (in order).
 	 */
-	m = m0;
-	m_adj(m, hlen + firstlen - tlen);
-	ip->ip_off |= htons(IP_MF);
-	ip->ip_len = htons(m->m_pkthdr.len);
-
-	ip->ip_sum = 0;
-	if (in_ifcap_cksum(m, ifp, IFCAP_CSUM_IPv4))
-		m->m_pkthdr.csum_flags |= M_IPV4_CSUM_OUT;
-	else {
-		ipstat_inc(ips_outswcsum);
-		ip->ip_sum = in_cksum(m, hlen);
+	if (hlen + firstlen < tlen) {
+		m_adj(m0, hlen + firstlen - tlen);
+		ip->ip_off |= htons(IP_MF);
 	}
+	ip->ip_len = htons(m0->m_pkthdr.len);
 
-	ipstat_add(ips_ofragments, ml_len(fml));
+	in_hdr_cksum_out(m0, ifp);
+
+	ipstat_add(ips_ofragments, ml_len(ml));
 	return (0);
 
 bad:
 	ipstat_inc(ips_odropped);
-	ml_purge(fml);
+	ml_purge(ml);
 	return (error);
 }
 
@@ -1042,7 +1021,7 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_AUTH] = optval;
+				inp->inp_seclevel.sl_auth = optval;
 				break;
 
 			case IP_ESP_TRANS_LEVEL:
@@ -1051,7 +1030,7 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_ESP_TRANS] = optval;
+				inp->inp_seclevel.sl_esp_trans = optval;
 				break;
 
 			case IP_ESP_NETWORK_LEVEL:
@@ -1060,7 +1039,7 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_ESP_NETWORK] = optval;
+				inp->inp_seclevel.sl_esp_network = optval;
 				break;
 			case IP_IPCOMP_LEVEL:
 				if (optval < IPSEC_IPCOMP_LEVEL_DEFAULT &&
@@ -1068,7 +1047,7 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 					error = EACCES;
 					break;
 				}
-				inp->inp_seclevel[SL_IPCOMP] = optval;
+				inp->inp_seclevel.sl_ipcomp = optval;
 				break;
 			}
 #endif
@@ -1090,17 +1069,7 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 			if (rtableid != rtid && rtableid != 0 &&
 			    (error = suser(p)) != 0)
 				break;
-			/* table must exist */
-			if (!rtable_exists(rtid)) {
-				error = EINVAL;
-				break;
-			}
-			if (inp->inp_lport) {
-				error = EBUSY;
-				break;
-			}
-			inp->inp_rtableid = rtid;
-			in_pcbrehash(inp);
+			error = in_pcbset_rtableid(inp, rtid);
 			break;
 		case IP_PIPEX:
 			if (m != NULL && m->m_len == sizeof(int))
@@ -1222,18 +1191,18 @@ ip_ctloutput(int op, struct socket *so, int level, int optname,
 			m->m_len = sizeof(int);
 			switch (optname) {
 			case IP_AUTH_LEVEL:
-				optval = inp->inp_seclevel[SL_AUTH];
+				optval = inp->inp_seclevel.sl_auth;
 				break;
 
 			case IP_ESP_TRANS_LEVEL:
-				optval = inp->inp_seclevel[SL_ESP_TRANS];
+				optval = inp->inp_seclevel.sl_esp_trans;
 				break;
 
 			case IP_ESP_NETWORK_LEVEL:
-				optval = inp->inp_seclevel[SL_ESP_NETWORK];
+				optval = inp->inp_seclevel.sl_esp_network;
 				break;
 			case IP_IPCOMP_LEVEL:
-				optval = inp->inp_seclevel[SL_IPCOMP];
+				optval = inp->inp_seclevel.sl_ipcomp;
 				break;
 			}
 			*mtod(m, int *) = optval;
@@ -1782,7 +1751,6 @@ ip_freemoptions(struct ip_moptions *imo)
 void
 ip_mloopback(struct ifnet *ifp, struct mbuf *m, struct sockaddr_in *dst)
 {
-	struct ip *ip;
 	struct mbuf *copym;
 
 	copym = m_dup_pkt(m, max_linkhdr, M_DONTWAIT);
@@ -1791,10 +1759,23 @@ ip_mloopback(struct ifnet *ifp, struct mbuf *m, struct sockaddr_in *dst)
 		 * We don't bother to fragment if the IP length is greater
 		 * than the interface's MTU.  Can this possibly matter?
 		 */
-		ip = mtod(copym, struct ip *);
-		ip->ip_sum = 0;
-		ip->ip_sum = in_cksum(copym, ip->ip_hl << 2);
+		in_hdr_cksum_out(copym, NULL);
 		if_input_local(ifp, copym, dst->sin_family);
+	}
+}
+
+void
+in_hdr_cksum_out(struct mbuf *m, struct ifnet *ifp)
+{
+	struct ip *ip = mtod(m, struct ip *);
+
+	ip->ip_sum = 0;
+	if (in_ifcap_cksum(m, ifp, IFCAP_CSUM_IPv4)) {
+		SET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT);
+	} else {
+		ipstat_inc(ips_outswcsum);
+		ip->ip_sum = in_cksum(m, ip->ip_hl << 2);
+		CLR(m->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT);
 	}
 }
 
@@ -1802,7 +1783,7 @@ ip_mloopback(struct ifnet *ifp, struct mbuf *m, struct sockaddr_in *dst)
  *	Compute significant parts of the IPv4 checksum pseudo-header
  *	for use in a delayed TCP/UDP checksum calculation.
  */
-static __inline u_int16_t __attribute__((__unused__))
+static u_int16_t
 in_cksum_phdr(u_int32_t src, u_int32_t dst, u_int32_t lenproto)
 {
 	u_int32_t sum;
@@ -1870,10 +1851,16 @@ in_proto_cksum_out(struct mbuf *m, struct ifnet *ifp)
 		u_int16_t csum = 0, offset;
 
 		offset = ip->ip_hl << 2;
-		if (m->m_pkthdr.csum_flags & (M_TCP_CSUM_OUT|M_UDP_CSUM_OUT))
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO) &&
+		    in_ifcap_cksum(m, ifp, IFCAP_TSOv4)) {
+			csum = in_cksum_phdr(ip->ip_src.s_addr,
+			    ip->ip_dst.s_addr, htonl(ip->ip_p));
+		} else if (ISSET(m->m_pkthdr.csum_flags,
+		    M_TCP_CSUM_OUT|M_UDP_CSUM_OUT)) {
 			csum = in_cksum_phdr(ip->ip_src.s_addr,
 			    ip->ip_dst.s_addr, htonl(ntohs(ip->ip_len) -
 			    offset + ip->ip_p));
+		}
 		if (ip->ip_p == IPPROTO_TCP)
 			offset += offsetof(struct tcphdr, th_sum);
 		else if (ip->ip_p == IPPROTO_UDP)

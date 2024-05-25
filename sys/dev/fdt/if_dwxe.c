@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_dwxe.c,v 1.21 2022/07/09 20:51:39 kettenis Exp $	*/
+/*	$OpenBSD: if_dwxe.c,v 1.24 2024/02/27 10:47:20 kettenis Exp $	*/
 /*
  * Copyright (c) 2008 Mark Kettenis
  * Copyright (c) 2017 Patrick Wildt <patrick@blueri.se>
@@ -184,7 +184,7 @@ struct dwxe_desc {
 #define DWXE_TX_PAYLOAD_ERR		(1 << 12)
 #define DWXE_TX_LENGTH_ERR		(1 << 14)
 #define DWXE_TX_HEADER_ERR		(1 << 16)
-#define DWXE_TX_DESC_CTL		(1 << 31)
+#define DWXE_TX_DESC_CTL		(1U << 31)
 
 /* Rx status bits */
 #define DWXE_RX_PAYLOAD_ERR		(1 << 0)
@@ -202,7 +202,7 @@ struct dwxe_desc {
 #define DWXE_RX_FRM_LEN_MASK		0x3fff
 #define DWXE_RX_FRM_LEN_SHIFT		16
 #define DWXE_RX_DAF_FAIL		(1 << 30)
-#define DWXE_RX_DESC_CTL		(1 << 31)
+#define DWXE_RX_DESC_CTL		(1U << 31)
 
 /* Tx size bits */
 #define DWXE_TX_BUF_SIZE		(0xfff << 0)
@@ -213,11 +213,11 @@ struct dwxe_desc {
 #define DWXE_TX_CHECKSUM_CTL_FULL	(3 << 27)
 #define DWXE_TX_FIR_DESC		(1 << 29)
 #define DWXE_TX_LAST_DESC		(1 << 30)
-#define DWXE_TX_INT_CTL		(1 << 31)
+#define DWXE_TX_INT_CTL		(1U << 31)
 
 /* Rx size bits */
 #define DWXE_RX_BUF_SIZE		(0xfff << 0)
-#define DWXE_RX_INT_CTL		(1 << 31)
+#define DWXE_RX_INT_CTL		(1U << 31)
 
 /* EMAC syscon bits */
 #define SYSCON_EMAC			0x30
@@ -374,8 +374,10 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct dwxe_softc *sc = (void *)self;
 	struct fdt_attach_args *faa = aux;
+	char phy_mode[16] = { 0 };
 	struct ifnet *ifp;
 	uint32_t phy;
+	int mii_flags = 0;
 	int node;
 
 	sc->sc_node = faa->fa_node;
@@ -387,6 +389,16 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	}
 	sc->sc_dmat = faa->fa_dmat;
 
+	OF_getprop(faa->fa_node, "phy-mode", phy_mode, sizeof(phy_mode));
+	if (strcmp(phy_mode, "rgmii") == 0)
+		mii_flags |= MIIF_SETDELAY;
+	else if (strcmp(phy_mode, "rgmii-rxid") == 0)
+		mii_flags |= MIIF_SETDELAY | MIIF_RXID;
+	else if (strcmp(phy_mode, "rgmii-txid") == 0)
+		mii_flags |= MIIF_SETDELAY | MIIF_TXID;
+	else if (strcmp(phy_mode, "rgmii-id") == 0)
+		mii_flags |= MIIF_SETDELAY | MIIF_RXID | MIIF_TXID;
+
 	/* Lookup PHY. */
 	phy = OF_getpropint(faa->fa_node, "phy-handle", 0);
 	node = OF_getnodebyphandle(phy);
@@ -394,6 +406,7 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc_phyloc = OF_getpropint(node, "reg", MII_PHY_ANY);
 	else
 		sc->sc_phyloc = MII_PHY_ANY;
+	sc->sc_mii.mii_node = node;
 
 	sc->sc_clk = clock_get_frequency(faa->fa_node, "stmmaceth");
 	if (sc->sc_clk > 160000000)
@@ -422,7 +435,7 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = dwxe_ioctl;
 	ifp->if_qstart = dwxe_start;
 	ifp->if_watchdog = dwxe_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, DWXE_NTXDESC - 1);
+	ifq_init_maxlen(&ifp->if_snd, DWXE_NTXDESC - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
@@ -435,7 +448,7 @@ dwxe_attach(struct device *parent, struct device *self, void *aux)
 	ifmedia_init(&sc->sc_media, 0, dwxe_media_change, dwxe_media_status);
 
 	mii_attach(self, &sc->sc_mii, 0xffffffff, sc->sc_phyloc,
-	    MII_OFFSET_ANY, MIIF_NOISOLATE);
+	    MII_OFFSET_ANY, MIIF_NOISOLATE | mii_flags);
 	if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
 		printf("%s: no PHY found!\n", sc->sc_dev.dv_xname);
 		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_MANUAL, 0, NULL);

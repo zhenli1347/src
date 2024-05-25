@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_aobj.c,v 1.107 2022/08/29 02:58:13 jsg Exp $	*/
+/*	$OpenBSD: uvm_aobj.c,v 1.110 2024/04/13 23:44:11 jsg Exp $	*/
 /*	$NetBSD: uvm_aobj.c,v 1.39 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
@@ -143,7 +143,6 @@ struct pool uvm_aobj_pool;
 
 static struct uao_swhash_elt	*uao_find_swhash_elt(struct uvm_aobj *, int,
 				     boolean_t);
-static int			 uao_find_swslot(struct uvm_object *, int);
 static boolean_t		 uao_flush(struct uvm_object *, voff_t,
 				     voff_t, int);
 static void			 uao_free(struct uvm_aobj *);
@@ -241,7 +240,7 @@ uao_find_swhash_elt(struct uvm_aobj *aobj, int pageidx, boolean_t create)
 /*
  * uao_find_swslot: find the swap slot number for an aobj/pageidx
  */
-static inline int
+int
 uao_find_swslot(struct uvm_object *uobj, int pageidx)
 {
 	struct uvm_aobj *aobj = (struct uvm_aobj *)uobj;
@@ -299,7 +298,7 @@ uao_set_swslot(struct uvm_object *uobj, int pageidx, int slot)
 
 		/* but a set is not */
 		printf("uao_set_swslot: uobj = %p\n", uobj);
-	    panic("uao_set_swslot: attempt to set a slot on a NOSWAP object");
+	    	panic("uao_set_swslot: attempt to set a slot on a NOSWAP object");
 	}
 
 	/*
@@ -1399,7 +1398,7 @@ uao_pagein_page(struct uvm_aobj *aobj, int pageidx)
 {
 	struct uvm_object *uobj = &aobj->u_obj;
 	struct vm_page *pg;
-	int rv, slot, npages;
+	int rv, npages;
 
 	pg = NULL;
 	npages = 1;
@@ -1430,8 +1429,7 @@ uao_pagein_page(struct uvm_aobj *aobj, int pageidx)
 	 * ok, we've got the page now.
 	 * mark it as dirty, clear its swslot and un-busy it.
 	 */
-	slot = uao_set_swslot(&aobj->u_obj, pageidx, 0);
-	uvm_swap_free(slot, 1);
+	uao_dropswap(&aobj->u_obj, pageidx);
 	atomic_clearbits_int(&pg->pg_flags, PG_BUSY|PG_CLEAN|PG_FAKE);
 	UVM_PAGE_OWN(pg, NULL);
 

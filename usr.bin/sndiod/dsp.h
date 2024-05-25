@@ -1,4 +1,4 @@
-/*	$OpenBSD: dsp.h,v 1.11 2022/03/07 08:58:33 ratchov Exp $	*/
+/*	$OpenBSD: dsp.h,v 1.14 2024/04/22 11:07:42 ratchov Exp $	*/
 /*
  * Copyright (c) 2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -61,7 +61,7 @@ typedef int adata_t;
 #define RESAMP_RATIO		64
 
 /*
- * Maximum size of the encording string (the longest possible
+ * Maximum size of the encoding string (the longest possible
  * encoding is ``s24le3msb'').
  */
 #define ENCMAX	10
@@ -85,6 +85,7 @@ struct resamp {
 	adata_t ctx[NCHAN_MAX * RESAMP_NCTX];
 	int filt_cutoff, filt_step;
 	unsigned int iblksz, oblksz;
+	int diff;
 	int nch;
 };
 
@@ -106,7 +107,7 @@ struct cmap {
 	int nch;
 };
 
-#define MIDI_TO_ADATA(m)	(aparams_ctltovol[m] << (ADATA_BITS - 16))
+#define MIDI_TO_ADATA(m)	(aparams_ctltovol[m])
 extern const int aparams_ctltovol[128];
 
 void aparams_init(struct aparams *);
@@ -115,7 +116,8 @@ int aparams_strtoenc(struct aparams *, char *);
 int aparams_enctostr(struct aparams *, char *);
 int aparams_native(struct aparams *);
 
-void resamp_do(struct resamp *, adata_t *, adata_t *, int);
+void resamp_getcnt(struct resamp *, int *, int *);
+void resamp_do(struct resamp *, adata_t *, adata_t *, int, int);
 void resamp_init(struct resamp *, unsigned int, unsigned int, int);
 void enc_do(struct conv *, unsigned char *, unsigned char *, int);
 void enc_sil_do(struct conv *, unsigned char *, int);

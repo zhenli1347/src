@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ixl.c,v 1.84 2022/08/05 13:57:16 bluhm Exp $ */
+/*	$OpenBSD: if_ixl.c,v 1.101 2024/05/24 06:02:53 jsg Exp $ */
 
 /*
  * Copyright (c) 2013-2015, Intel Corporation
@@ -55,7 +55,6 @@
 #include <sys/proc.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/device.h>
 #include <sys/pool.h>
@@ -69,8 +68,8 @@
 #include <machine/intr.h>
 
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_media.h>
+#include <net/route.h>
 #include <net/toeplitz.h>
 
 #if NBPFILTER > 0
@@ -82,11 +81,11 @@
 #endif
 
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <netinet/ip6.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
 #include <netinet/if_ether.h>
+#include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
+#include <netinet/udp.h>
 
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
@@ -827,6 +826,10 @@ struct ixl_tx_desc {
 #define IXL_TX_DESC_BSIZE_MASK		\
 	(IXL_TX_DESC_BSIZE_MAX << IXL_TX_DESC_BSIZE_SHIFT)
 
+#define IXL_TX_CTX_DESC_CMD_TSO		0x10
+#define IXL_TX_CTX_DESC_TLEN_SHIFT	30
+#define IXL_TX_CTX_DESC_MSS_SHIFT	50
+
 #define IXL_TX_DESC_L2TAG1_SHIFT	48
 } __packed __aligned(16);
 
@@ -898,6 +901,14 @@ struct ixl_rx_wb_desc_32 {
 #define IXL_RX_QUEUE_ALIGN		128
 
 #define IXL_HARDMTU			9712 /* 9726 - ETHER_HDR_LEN */
+#define IXL_TSO_SIZE			((255 * 1024) - 1)
+#define IXL_MAX_DMA_SEG_SIZE		((16 * 1024) - 1)
+
+/*
+ * Our TCP/IP Stack is unable handle packets greater than MAXMCLBYTES.
+ * This interface is unable handle packets greater than IXL_TSO_SIZE.
+ */
+CTASSERT(MAXMCLBYTES < IXL_TSO_SIZE);
 
 #define IXL_PCIREG			PCI_MAPREG_START
 
@@ -1274,6 +1285,7 @@ struct ixl_softc {
 	unsigned int		 sc_atq_prod;
 	unsigned int		 sc_atq_cons;
 
+	struct mutex		 sc_atq_mtx;
 	struct ixl_dmamem	 sc_arq;
 	struct task		 sc_arq_task;
 	struct ixl_aq_bufs	 sc_arq_idle;
@@ -1723,6 +1735,8 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 
 	/* initialise the adminq */
 
+	mtx_init(&sc->sc_atq_mtx, IPL_NET);
+
 	if (ixl_dmamem_alloc(sc, &sc->sc_atq,
 	    sizeof(struct ixl_aq_desc) * IXL_AQ_NUM, IXL_AQ_ALIGN) != 0) {
 		printf("\n" "%s: unable to allocate atq\n", DEVNAME(sc));
@@ -1863,6 +1877,7 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 		goto free_hmc;
 	}
 
+	mtx_init(&sc->sc_link_state_mtx, IPL_NET);
 	if (ixl_get_link_status(sc) != 0) {
 		/* error printed by ixl_get_link_status */
 		goto free_hmc;
@@ -1949,12 +1964,13 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_watchdog = ixl_watchdog;
 	ifp->if_hardmtu = IXL_HARDMTU;
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
-	ifq_set_maxlen(&ifp->if_snd, sc->sc_tx_ring_ndescs);
+	ifq_init_maxlen(&ifp->if_snd, sc->sc_tx_ring_ndescs);
 
 	ifp->if_capabilities = IFCAP_VLAN_HWTAGGING;
 	ifp->if_capabilities |= IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4 |
 	    IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
+	ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
 
 	ifmedia_init(&sc->sc_media, 0, ixl_media_change, ixl_media_status);
 
@@ -1968,7 +1984,6 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	if_attach_queues(ifp, nqueues);
 	if_attach_iqueues(ifp, nqueues);
 
-	mtx_init(&sc->sc_link_state_mtx, IPL_NET);
 	task_set(&sc->sc_link_state_task, ixl_link_state_update, sc);
 	ixl_wr(sc, I40E_PFINT_ICR0_ENA,
 	    I40E_PFINT_ICR0_ENA_LINK_STAT_CHANGE_MASK |
@@ -2071,8 +2086,10 @@ ixl_media_status(struct ifnet *ifp, struct ifmediareq *ifm)
 
 	KERNEL_ASSERT_LOCKED();
 
+	mtx_enter(&sc->sc_link_state_mtx);
 	ifm->ifm_status = sc->sc_media_status;
 	ifm->ifm_active = sc->sc_media_active;
+	mtx_leave(&sc->sc_link_state_mtx);
 }
 
 static void
@@ -2598,7 +2615,7 @@ ixl_txr_alloc(struct ixl_softc *sc, unsigned int qid)
 		txm = &maps[i];
 
 		if (bus_dmamap_create(sc->sc_dmat,
-		    IXL_HARDMTU, IXL_TX_PKT_DESCS, IXL_HARDMTU, 0,
+		    MAXMCLBYTES, IXL_TX_PKT_DESCS, IXL_MAX_DMA_SEG_SIZE, 0,
 		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &txm->txm_map) != 0)
 			goto uncreate;
@@ -2782,12 +2799,11 @@ ixl_load_mbuf(bus_dma_tag_t dmat, bus_dmamap_t map, struct mbuf *m)
 }
 
 static uint64_t
-ixl_tx_setup_offload(struct mbuf *m0)
+ixl_tx_setup_offload(struct mbuf *m0, struct ixl_tx_ring *txr,
+    unsigned int prod)
 {
-	struct mbuf *m;
-	int hoff;
+	struct ether_extracted ext;
 	uint64_t hlen;
-	uint8_t ipproto;
 	uint64_t offload = 0;
 
 	if (ISSET(m0->m_flags, M_VLANTAG)) {
@@ -2797,73 +2813,67 @@ ixl_tx_setup_offload(struct mbuf *m0)
 	}
 
 	if (!ISSET(m0->m_pkthdr.csum_flags,
-	    M_IPV4_CSUM_OUT|M_TCP_CSUM_OUT|M_UDP_CSUM_OUT))
+	    M_IPV4_CSUM_OUT|M_TCP_CSUM_OUT|M_UDP_CSUM_OUT|M_TCP_TSO))
 		return (offload);
 
-	switch (ntohs(mtod(m0, struct ether_header *)->ether_type)) {
-	case ETHERTYPE_IP: {
-		struct ip *ip;
+	ether_extract_headers(m0, &ext);
 
-		m = m_getptr(m0, ETHER_HDR_LEN, &hoff);
-		KASSERT(m != NULL && m->m_len - hoff >= sizeof(*ip));
-		ip = (struct ip *)(mtod(m, caddr_t) + hoff);
-
+	if (ext.ip4) {
 		offload |= ISSET(m0->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT) ?
 		    IXL_TX_DESC_CMD_IIPT_IPV4_CSUM :
 		    IXL_TX_DESC_CMD_IIPT_IPV4;
- 
-		hlen = ip->ip_hl << 2;
-		ipproto = ip->ip_p;
-		break;
-	}
-
 #ifdef INET6
-	case ETHERTYPE_IPV6: {
-		struct ip6_hdr *ip6;
-
-		m = m_getptr(m0, ETHER_HDR_LEN, &hoff);
-		KASSERT(m != NULL && m->m_len - hoff >= sizeof(*ip6));
-		ip6 = (struct ip6_hdr *)(mtod(m, caddr_t) + hoff);
- 
+	} else if (ext.ip6) {
 		offload |= IXL_TX_DESC_CMD_IIPT_IPV6;
-
-		hlen = sizeof(*ip6);
-		ipproto = ip6->ip6_nxt;
-		break;
-	}
 #endif
-	default:
+	} else {
 		panic("CSUM_OUT set for non-IP packet");
 		/* NOTREACHED */
 	}
+	hlen = ext.iphlen;
 
 	offload |= (ETHER_HDR_LEN >> 1) << IXL_TX_DESC_MACLEN_SHIFT;
 	offload |= (hlen >> 2) << IXL_TX_DESC_IPLEN_SHIFT;
 
-	switch (ipproto) {
-	case IPPROTO_TCP: {
-		struct tcphdr *th;
-
-		if (!ISSET(m0->m_pkthdr.csum_flags, M_TCP_CSUM_OUT))
-			break;
-
-		m = m_getptr(m, hoff + hlen, &hoff);
-		KASSERT(m != NULL && m->m_len - hoff >= sizeof(*th));
-		th = (struct tcphdr *)(mtod(m, caddr_t) + hoff);
- 
+	if (ext.tcp && ISSET(m0->m_pkthdr.csum_flags, M_TCP_CSUM_OUT)) {
 		offload |= IXL_TX_DESC_CMD_L4T_EOFT_TCP;
-		offload |= (uint64_t)th->th_off << IXL_TX_DESC_L4LEN_SHIFT;
-		break;
+		offload |= (uint64_t)(ext.tcphlen >> 2)
+		    << IXL_TX_DESC_L4LEN_SHIFT;
+	} else if (ext.udp && ISSET(m0->m_pkthdr.csum_flags, M_UDP_CSUM_OUT)) {
+		offload |= IXL_TX_DESC_CMD_L4T_EOFT_UDP;
+		offload |= (uint64_t)(sizeof(*ext.udp) >> 2)
+		    << IXL_TX_DESC_L4LEN_SHIFT;
 	}
 
-	case IPPROTO_UDP:
-		if (!ISSET(m0->m_pkthdr.csum_flags, M_UDP_CSUM_OUT))
-			break;
- 
-		offload |= IXL_TX_DESC_CMD_L4T_EOFT_UDP;
-		offload |= (sizeof(struct udphdr) >> 2) <<
-		    IXL_TX_DESC_L4LEN_SHIFT;
-		break;
+	if (ISSET(m0->m_pkthdr.csum_flags, M_TCP_TSO)) {
+		if (ext.tcp && m0->m_pkthdr.ph_mss > 0) {
+			struct ixl_tx_desc *ring, *txd;
+			uint64_t cmd = 0, paylen, outlen;
+
+			hlen += ext.tcphlen;
+
+			/*
+			 * The MSS should not be set to a lower value than 64
+			 * or larger than 9668 bytes.
+			 */
+			outlen = MIN(9668, MAX(64, m0->m_pkthdr.ph_mss));
+			paylen = m0->m_pkthdr.len - ETHER_HDR_LEN - hlen;
+
+			ring = IXL_DMA_KVA(&txr->txr_mem);
+			txd = &ring[prod];
+
+			cmd |= IXL_TX_DESC_DTYPE_CONTEXT;
+			cmd |= IXL_TX_CTX_DESC_CMD_TSO;
+			cmd |= paylen << IXL_TX_CTX_DESC_TLEN_SHIFT;
+			cmd |= outlen << IXL_TX_CTX_DESC_MSS_SHIFT;
+
+			htolem64(&txd->addr, 0);
+			htolem64(&txd->cmd, cmd);
+
+			tcpstat_add(tcps_outpkttso,
+			    (paylen + outlen - 1) / outlen);
+		} else
+			tcpstat_inc(tcps_outbadtso);
 	}
 
 	return (offload);
@@ -2906,7 +2916,8 @@ ixl_start(struct ifqueue *ifq)
 	mask = sc->sc_tx_ring_ndescs - 1;
 
 	for (;;) {
-		if (free <= IXL_TX_PKT_DESCS) {
+		/* We need one extra descriptor for TSO packets. */
+		if (free <= (IXL_TX_PKT_DESCS + 1)) {
 			ifq_set_oactive(ifq);
 			break;
 		}
@@ -2915,10 +2926,16 @@ ixl_start(struct ifqueue *ifq)
 		if (m == NULL)
 			break;
 
-		offload = ixl_tx_setup_offload(m);
+		offload = ixl_tx_setup_offload(m, txr, prod);
 
 		txm = &txr->txr_maps[prod];
 		map = txm->txm_map;
+
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO)) {
+			prod++;
+			prod &= mask;
+			free--;
+		}
 
 		if (ixl_load_mbuf(sc->sc_dmat, map, m) != 0) {
 			ifq->ifq_errors++;
@@ -3517,9 +3534,7 @@ ixl_link_state_update_iaq(struct ixl_softc *sc, void *arg)
 		return;
 	}
 
-	KERNEL_LOCK();
 	link_state = ixl_set_link_status(sc, iaq);
-	KERNEL_UNLOCK();
 	mtx_enter(&sc->sc_link_state_mtx);
 	if (ifp->if_link_state != link_state) {
 		ifp->if_link_state = link_state;
@@ -3637,7 +3652,7 @@ ixl_atq_post(struct ixl_softc *sc, struct ixl_atq *iatq)
 	struct ixl_aq_desc *atq, *slot;
 	unsigned int prod;
 
-	/* assert locked */
+	mtx_enter(&sc->sc_atq_mtx);
 
 	atq = IXL_DMA_KVA(&sc->sc_atq);
 	prod = sc->sc_atq_prod;
@@ -3656,6 +3671,8 @@ ixl_atq_post(struct ixl_softc *sc, struct ixl_atq *iatq)
 	prod &= IXL_AQ_MASK;
 	sc->sc_atq_prod = prod;
 	ixl_wr(sc, sc->sc_aq_regs->atq_tail, prod);
+
+	mtx_leave(&sc->sc_atq_mtx);
 }
 
 static void
@@ -3666,11 +3683,15 @@ ixl_atq_done(struct ixl_softc *sc)
 	unsigned int cons;
 	unsigned int prod;
 
+	mtx_enter(&sc->sc_atq_mtx);
+
 	prod = sc->sc_atq_prod;
 	cons = sc->sc_atq_cons;
 
-	if (prod == cons)
+	if (prod == cons) {
+		mtx_leave(&sc->sc_atq_mtx);
 		return;
+	}
 
 	atq = IXL_DMA_KVA(&sc->sc_atq);
 
@@ -3683,6 +3704,7 @@ ixl_atq_done(struct ixl_softc *sc)
 		if (!ISSET(slot->iaq_flags, htole16(IXL_AQ_DD)))
 			break;
 
+		KASSERT(slot->iaq_cookie != 0);
 		iatq = (struct ixl_atq *)slot->iaq_cookie;
 		iatq->iatq_desc = *slot;
 
@@ -3699,6 +3721,8 @@ ixl_atq_done(struct ixl_softc *sc)
 	    BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE);
 
 	sc->sc_atq_cons = cons;
+
+	mtx_leave(&sc->sc_atq_mtx);
 }
 
 static void
@@ -3729,6 +3753,8 @@ ixl_atq_poll(struct ixl_softc *sc, struct ixl_aq_desc *iaq, unsigned int tm)
 	unsigned int prod;
 	unsigned int t = 0;
 
+	mtx_enter(&sc->sc_atq_mtx);
+
 	atq = IXL_DMA_KVA(&sc->sc_atq);
 	prod = sc->sc_atq_prod;
 	slot = atq + prod;
@@ -3750,8 +3776,10 @@ ixl_atq_poll(struct ixl_softc *sc, struct ixl_aq_desc *iaq, unsigned int tm)
 	while (ixl_rd(sc, sc->sc_aq_regs->atq_head) != prod) {
 		delaymsec(1);
 
-		if (t++ > tm)
+		if (t++ > tm) {
+			mtx_leave(&sc->sc_atq_mtx);
 			return (ETIMEDOUT);
+		}
 	}
 
 	bus_dmamap_sync(sc->sc_dmat, IXL_DMA_MAP(&sc->sc_atq),
@@ -3762,6 +3790,7 @@ ixl_atq_poll(struct ixl_softc *sc, struct ixl_aq_desc *iaq, unsigned int tm)
 
 	sc->sc_atq_cons = prod;
 
+	mtx_leave(&sc->sc_atq_mtx);
 	return (0);
 }
 
@@ -4489,9 +4518,6 @@ ixl_set_link_status(struct ixl_softc *sc, const struct ixl_aq_desc *iaq)
 {
 	const struct ixl_aq_link_status *status;
 	const struct ixl_phy_type *itype;
-
-	KERNEL_ASSERT_LOCKED();
-
 	uint64_t ifm_active = IFM_ETHER;
 	uint64_t ifm_status = IFM_AVALID;
 	int link_state = LINK_STATE_DOWN;
@@ -4517,9 +4543,11 @@ ixl_set_link_status(struct ixl_softc *sc, const struct ixl_aq_desc *iaq)
 	baudrate = ixl_search_link_speed(status->link_speed);
 
 done:
+	mtx_enter(&sc->sc_link_state_mtx);
 	sc->sc_media_active = ifm_active;
 	sc->sc_media_status = ifm_status;
 	sc->sc_ac.ac_if.if_baudrate = baudrate;
+	mtx_leave(&sc->sc_link_state_mtx);
 
 	return (link_state);
 }

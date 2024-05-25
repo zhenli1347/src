@@ -1,4 +1,4 @@
-/*	$OpenBSD: eso.c,v 1.53 2022/10/26 20:19:08 kn Exp $	*/
+/*	$OpenBSD: eso.c,v 1.55 2024/05/24 06:02:53 jsg Exp $	*/
 /*	$NetBSD: eso.c,v 1.48 2006/12/18 23:13:39 kleink Exp $	*/
 
 /*
@@ -35,7 +35,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 
@@ -46,7 +45,6 @@
 #include <dev/audio_if.h>
 #include <dev/midi_if.h>
 
-#include <dev/ic/mpuvar.h>
 #include <dev/ic/i8237reg.h>
 #include <dev/pci/esoreg.h>
 #include <dev/pci/esovar.h>
@@ -628,7 +626,6 @@ eso_reset(struct eso_softc *sc)
 }
 
 
-/* ARGSUSED */
 int
 eso_open(void *hdl, int flags)
 {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_socket.c,v 1.143 2022/08/13 21:01:46 mvs Exp $	*/
+/*	$OpenBSD: nfs_socket.c,v 1.150 2024/04/30 17:05:20 miod Exp $	*/
 /*	$NetBSD: nfs_socket.c,v 1.27 1996/04/15 20:20:00 thorpej Exp $	*/
 
 /*
@@ -63,16 +63,16 @@
 #include <nfs/nfsproto.h>
 #include <nfs/nfs.h>
 #include <nfs/xdr_subs.h>
-#include <nfs/nfsm_subs.h>
 #include <nfs/nfsmount.h>
 #include <nfs/nfs_var.h>
+#include <nfs/nfsm_subs.h>
 
 /* External data, mostly RPC constants in XDR form. */
 extern u_int32_t rpc_reply, rpc_msgdenied, rpc_mismatch, rpc_vers,
 	rpc_auth_unix, rpc_msgaccepted, rpc_call, rpc_autherr;
 extern u_int32_t nfs_prog;
 extern struct nfsstats nfsstats;
-extern int nfsv3_procid[NFS_NPROCS];
+extern const int nfsv3_procid[NFS_NPROCS];
 extern int nfs_ticks;
 
 extern struct pool nfsrv_descript_pl;
@@ -92,10 +92,10 @@ extern struct pool nfsrv_descript_pl;
  */
 #define	NFS_CWNDSCALE	256
 #define	NFS_MAXCWND	(NFS_CWNDSCALE * 32)
-int nfs_backoff[8] = { 2, 4, 8, 16, 32, 64, 128, 256 };
+static const int nfs_backoff[8] = { 2, 4, 8, 16, 32, 64, 128, 256 };
 
 /* RTT estimator */
-enum nfs_rto_timers nfs_ptimers[NFS_NPROCS] = {
+static const enum nfs_rto_timers nfs_ptimers[NFS_NPROCS] = {
 	NFS_DEFAULT_TIMER,	/* NULL */
 	NFS_GETATTR_TIMER,	/* GETATTR */
 	NFS_DEFAULT_TIMER,	/* SETATTR */
@@ -158,7 +158,7 @@ nfs_init_rtt(struct nfsmount *nmp)
  * 
  * Use a gain of 0.125 on the mean and a gain of 0.25 on the deviation.
  *
- * NB: Since the timer resolution of NFS_HZ is so course, it can often
+ * NB: Since the timer resolution of NFS_HZ is so coarse, it can often
  * result in r_rtt == 0. Since r_rtt == N means that the actual RTT is
  * between N + dt and N + 2 - dt ticks, add 1 before calculating the
  * update values.
@@ -258,7 +258,6 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 		MGET(nam, M_WAIT, MT_SONAME);
 
 	so = nmp->nm_so;
-	solock(so);
 	nmp->nm_soflags = so->so_proto->pr_flags;
 
 	/*
@@ -282,7 +281,9 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 		sin->sin_family = AF_INET;
 		sin->sin_addr.s_addr = INADDR_ANY;
 		sin->sin_port = htons(0);
+		solock(so);
 		error = sobind(so, nam, &proc0);
+		sounlock(so);
 		if (error)
 			goto bad;
 
@@ -304,9 +305,10 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 			goto bad;
 		}
 	} else {
+		solock(so);
 		error = soconnect(so, nmp->nm_nam);
 		if (error)
-			goto bad;
+			goto bad_locked;
 
 		/*
 		 * Wait for the connection to complete. Cribbed from the
@@ -320,24 +322,29 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 			    so->so_error == 0 && rep &&
 			    (error = nfs_sigintr(nmp, rep, rep->r_procp)) != 0){
 				so->so_state &= ~SS_ISCONNECTING;
-				goto bad;
+				goto bad_locked;
 			}
 		}
 		if (so->so_error) {
 			error = so->so_error;
 			so->so_error = 0;
-			goto bad;
+			goto bad_locked;
 		}
+		sounlock(so);
 	}
 	/*
 	 * Always set receive timeout to detect server crash and reconnect.
 	 * Otherwise, we can get stuck in soreceive forever.
 	 */
+	mtx_enter(&so->so_rcv.sb_mtx);
 	so->so_rcv.sb_timeo_nsecs = SEC_TO_NSEC(5);
+	mtx_leave(&so->so_rcv.sb_mtx);
+	mtx_enter(&so->so_snd.sb_mtx);
 	if (nmp->nm_flag & (NFSMNT_SOFT | NFSMNT_INT))
 		so->so_snd.sb_timeo_nsecs = SEC_TO_NSEC(5);
 	else
 		so->so_snd.sb_timeo_nsecs = INFSLP;
+	mtx_leave(&so->so_snd.sb_mtx);
 	if (nmp->nm_sotype == SOCK_DGRAM) {
 		sndreserve = nmp->nm_wsize + NFS_MAXPKTHDR;
 		rcvreserve = (max(nmp->nm_rsize, nmp->nm_readdirsize) +
@@ -360,10 +367,13 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 	} else {
 		panic("%s: nm_sotype %d", __func__, nmp->nm_sotype);
 	}
+	solock(so);
 	error = soreserve(so, sndreserve, rcvreserve);
 	if (error)
-		goto bad;
+		goto bad_locked;
+	mtx_enter(&so->so_rcv.sb_mtx);
 	so->so_rcv.sb_flags |= SB_NOINTR;
+	mtx_leave(&so->so_rcv.sb_mtx);
 	so->so_snd.sb_flags |= SB_NOINTR;
 	sounlock(so);
 
@@ -377,8 +387,9 @@ nfs_connect(struct nfsmount *nmp, struct nfsreq *rep)
 	nmp->nm_timeouts = 0;
 	return (0);
 
-bad:
+bad_locked:
 	sounlock(so);
+bad:
 
 	m_freem(mopt);
 	m_freem(nam);
@@ -735,8 +746,7 @@ nfs_reply(struct nfsreq *myrep)
 	struct nfsmount *nmp = myrep->r_nmp;
 	struct nfsm_info	info;
 	struct mbuf *nam;
-	u_int32_t rxid, *tl, t1;
-	caddr_t cp2;
+	u_int32_t rxid, *tl;
 	int error;
 
 	/*
@@ -777,7 +787,10 @@ nfs_reply(struct nfsreq *myrep)
 		 */
 		info.nmi_md = info.nmi_mrep;
 		info.nmi_dpos = mtod(info.nmi_md, caddr_t);
-		nfsm_dissect(tl, u_int32_t *, 2 * NFSX_UNSIGNED);
+		info.nmi_errorp = &error;
+		tl = (uint32_t *)nfsm_dissect(&info, 2 * NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
 		rxid = *tl++;
 		if (*tl != rpc_reply) {
 			nfsstats.rpcinvalid++;
@@ -850,8 +863,7 @@ nfs_request(struct vnode *vp, int procnum, struct nfsm_info *infop)
 	struct mbuf *m;
 	u_int32_t *tl;
 	struct nfsmount *nmp;
-	caddr_t cp2;
-	int t1, i, error = 0;
+	int i, error = 0;
 	int trylater_delay;
 	struct nfsreq *rep;
 	struct nfsm_info info;
@@ -959,6 +971,7 @@ tryagain:
 	info.nmi_mrep = rep->r_mrep;
 	info.nmi_md = rep->r_md;
 	info.nmi_dpos = rep->r_dpos;
+	info.nmi_errorp = &error;
 	if (error) {
 		infop->nmi_mrep = NULL;
 		goto nfsmout1;
@@ -967,7 +980,9 @@ tryagain:
 	/*
 	 * break down the rpc header and check if ok
 	 */
-	nfsm_dissect(tl, u_int32_t *, 3 * NFSX_UNSIGNED);
+	tl = (uint32_t *)nfsm_dissect(&info, 3 * NFSX_UNSIGNED);
+	if (tl == NULL)
+		goto nfsmout;
 	if (*tl++ == rpc_msgdenied) {
 		if (*tl == rpc_mismatch)
 			error = EOPNOTSUPP;
@@ -984,13 +999,20 @@ tryagain:
 	 */
 	tl++;			/* Step over verifer type */
 	i = fxdr_unsigned(int32_t, *tl);
-	if (i > 0)
-		nfsm_adv(nfsm_rndup(i));	/* Should not happen */
+	if (i > 0) {
+		/* Should not happen */
+		if (nfsm_adv(&info, nfsm_rndup(i)) != 0)
+			goto nfsmout;
+	}
 
-	nfsm_dissect(tl, u_int32_t *, NFSX_UNSIGNED);
+	tl = (uint32_t *)nfsm_dissect(&info, NFSX_UNSIGNED);
+	if (tl == NULL)
+		goto nfsmout;
 	/* 0 == ok */
 	if (*tl == 0) {
-		nfsm_dissect(tl, u_int32_t *, NFSX_UNSIGNED);
+		tl = (uint32_t *)nfsm_dissect(&info, NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
 		if (*tl != 0) {
 			error = fxdr_unsigned(int, *tl);
 			if ((nmp->nm_flag & NFSMNT_NFSV3) &&
@@ -1423,8 +1445,6 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 {
 	int len, i;
 	u_int32_t *tl;
-	int32_t t1;
-	caddr_t cp2;
 	u_int32_t nfsvers, auth_type;
 	int error = 0;
 	struct nfsm_info info;
@@ -1432,15 +1452,21 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 	info.nmi_mrep = nd->nd_mrep;
 	info.nmi_md = nd->nd_md;
 	info.nmi_dpos = nd->nd_dpos;
+	info.nmi_errorp = &error;
 	if (has_header) {
-		nfsm_dissect(tl, u_int32_t *, 10 * NFSX_UNSIGNED);
+		tl = (uint32_t *)nfsm_dissect(&info, 10 * NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
 		nd->nd_retxid = fxdr_unsigned(u_int32_t, *tl++);
 		if (*tl++ != rpc_call) {
 			m_freem(info.nmi_mrep);
 			return (EBADRPC);
 		}
-	} else
-		nfsm_dissect(tl, u_int32_t *, 8 * NFSX_UNSIGNED);
+	} else {
+		tl = (uint32_t *)nfsm_dissect(&info, 8 * NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
+	}
 	nd->nd_repstat = 0;
 	nd->nd_flag = 0;
 	if (*tl++ != rpc_vers) {
@@ -1488,8 +1514,11 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 			m_freem(info.nmi_mrep);
 			return (EBADRPC);
 		}
-		nfsm_adv(nfsm_rndup(len));
-		nfsm_dissect(tl, u_int32_t *, 3 * NFSX_UNSIGNED);
+		if (nfsm_adv(&info, nfsm_rndup(len)) != 0)
+			goto nfsmout;
+		tl = (uint32_t *)nfsm_dissect(&info, 3 * NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
 		memset(&nd->nd_cr, 0, sizeof (struct ucred));
 		refcnt_init(&nd->nd_cr.cr_refcnt);
 		nd->nd_cr.cr_uid = fxdr_unsigned(uid_t, *tl++);
@@ -1499,7 +1528,10 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 			m_freem(info.nmi_mrep);
 			return (EBADRPC);
 		}
-		nfsm_dissect(tl, u_int32_t *, (len + 2) * NFSX_UNSIGNED);
+		tl = (uint32_t *)
+		    nfsm_dissect(&info, (len + 2) * NFSX_UNSIGNED);
+		if (tl == NULL)
+			goto nfsmout;
 		for (i = 0; i < len; i++) {
 			if (i < NGROUPS_MAX)
 				nd->nd_cr.cr_groups[i] =
@@ -1513,8 +1545,10 @@ nfs_getreq(struct nfsrv_descript *nd, struct nfsd *nfsd, int has_header)
 			m_freem(info.nmi_mrep);
 			return (EBADRPC);
 		}
-		if (len > 0)
-			nfsm_adv(nfsm_rndup(len));
+		if (len > 0) {
+			if (nfsm_adv(&info, nfsm_rndup(len)) != 0)
+				goto nfsmout;
+		}
 	} else {
 		nd->nd_repstat = (NFSERR_AUTHERR | AUTH_REJECTCRED);
 		nd->nd_procnum = NFSPROC_NOOP;
@@ -1577,7 +1611,7 @@ nfsrv_rcv(struct socket *so, caddr_t arg, int waitflag)
 		 */
 		auio.uio_resid = 1000000000;
 		flags = MSG_DONTWAIT;
-		error = soreceive(so, &nam, &auio, &mp, NULL,
+		error = soreceive(so, NULL, &auio, &mp, NULL,
 		    &flags, 0);
 		if (error || mp == NULL) {
 			if (error == EWOULDBLOCK)
@@ -1615,11 +1649,8 @@ nfsrv_rcv(struct socket *so, caddr_t arg, int waitflag)
 			error = soreceive(so, &nam, &auio, &mp,
 			    NULL, &flags, 0);
 			if (mp) {
-				if (nam) {
-					m = nam;
-					m->m_next = mp;
-				} else
-					m = mp;
+				m = nam;
+				m->m_next = mp;
 				if (slp->ns_recend)
 					slp->ns_recend->m_nextpkt = m;
 				else

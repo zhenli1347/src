@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_dwge.c,v 1.13 2021/12/20 04:21:32 jmatthew Exp $	*/
+/*	$OpenBSD: if_dwge.c,v 1.22 2024/02/08 20:50:34 kettenis Exp $	*/
 /*
  * Copyright (c) 2008, 2019 Mark Kettenis <kettenis@openbsd.org>
  * Copyright (c) 2017 Patrick Wildt <patrick@blueri.se>
@@ -21,6 +21,7 @@
  */
 
 #include "bpfilter.h"
+#include "kstat.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -52,6 +53,10 @@
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
+#endif
+
+#if NKSTAT > 0
+#include <sys/kstat.h>
 #endif
 
 #include <netinet/in.h>
@@ -97,8 +102,24 @@
 #define  GMAC_INT_MASK_RIM		(1 << 0)
 #define GMAC_MAC_ADDR0_HI	0x0040
 #define GMAC_MAC_ADDR0_LO	0x0044
+#define GMAC_MAC_MMC_CTRL	0x0100
+#define  GMAC_MAC_MMC_CTRL_ROR	(1 << 2)
+#define  GMAC_MAC_MMC_CTRL_CR	(1 << 0)
 #define GMAC_MMC_RX_INT_MSK	0x010c
 #define GMAC_MMC_TX_INT_MSK	0x0110
+#define GMAC_MMC_TXOCTETCNT_GB	0x0114
+#define GMAC_MMC_TXFRMCNT_GB	0x0118
+#define GMAC_MMC_TXUNDFLWERR	0x0148
+#define GMAC_MMC_TXCARERR	0x0160
+#define GMAC_MMC_TXOCTETCNT_G	0x0164
+#define GMAC_MMC_TXFRMCNT_G	0x0168
+#define GMAC_MMC_RXFRMCNT_GB	0x0180
+#define GMAC_MMC_RXOCTETCNT_GB	0x0184
+#define GMAC_MMC_RXOCTETCNT_G	0x0188
+#define GMAC_MMC_RXMCFRMCNT_G	0x0190
+#define GMAC_MMC_RXCRCERR	0x0194
+#define GMAC_MMC_RXLENERR	0x01c8
+#define GMAC_MMC_RXFIFOOVRFLW	0x01d4
 #define GMAC_MMC_IPC_INT_MSK	0x0200
 #define GMAC_BUS_MODE		0x1000
 #define  GMAC_BUS_MODE_8XPBL		(1 << 24)
@@ -113,6 +134,7 @@
 #define GMAC_RX_DESC_LIST_ADDR	0x100c
 #define GMAC_TX_DESC_LIST_ADDR	0x1010
 #define GMAC_STATUS		0x1014
+#define  GMAC_STATUS_MMC		(1 << 27)
 #define  GMAC_STATUS_RI			(1 << 6)
 #define  GMAC_STATUS_TU			(1 << 2)
 #define  GMAC_STATUS_TI			(1 << 0)
@@ -146,6 +168,8 @@
 #define  GMAC_AXI_BUS_MODE_BLEN_16		(1 << 3)
 #define  GMAC_AXI_BUS_MODE_BLEN_8		(1 << 2)
 #define  GMAC_AXI_BUS_MODE_BLEN_4		(1 << 1)
+#define GMAC_HW_FEATURE		0x1058
+#define  GMAC_HW_FEATURE_ENHDESSEL	(1 << 24)
 
 /*
  * DWGE descriptors.
@@ -170,7 +194,12 @@ struct dwge_desc {
 #define TDES0_PCE		(1 << 12)
 #define TDES0_JT		(1 << 14)
 #define TDES0_IHE		(1 << 16)
-#define TDES0_OWN		(1 << 31)
+#define TDES0_OWN		(1U << 31)
+
+#define ETDES0_TCH		(1 << 20)
+#define ETDES0_FS		(1 << 28)
+#define ETDES0_LS		(1 << 29)
+#define ETDES0_IC		(1 << 30)
 
 /* Rx status bits */
 #define RDES0_PE		(1 << 0)
@@ -185,10 +214,11 @@ struct dwge_desc {
 #define RDES0_OE		(1 << 11)
 #define RDES0_SAF		(1 << 13)
 #define RDES0_DE		(1 << 14)
+#define RDES0_ES		(1 << 15)
 #define RDES0_FL_MASK		0x3fff
 #define RDES0_FL_SHIFT		16
 #define RDES0_AFM		(1 << 30)
-#define RDES0_OWN		(1 << 31)
+#define RDES0_OWN		(1U << 31)
 
 /* Tx size bits */
 #define TDES1_TBS1		(0xfff << 0)
@@ -200,12 +230,14 @@ struct dwge_desc {
 #define TDES1_CIC_FULL		(3 << 27)
 #define TDES1_FS		(1 << 29)
 #define TDES1_LS		(1 << 30)
-#define TDES1_IC		(1 << 31)
+#define TDES1_IC		(1U << 31)
 
 /* Rx size bits */
 #define RDES1_RBS1		(0xfff << 0)
 #define RDES1_RCH		(1 << 24)
-#define RDES1_DIC		(1 << 31)
+#define RDES1_DIC		(1U << 31)
+
+#define ERDES1_RCH		(1 << 14)
 
 struct dwge_buf {
 	bus_dmamap_t	tb_map;
@@ -236,13 +268,18 @@ struct dwge_softc {
 	bus_dma_tag_t		sc_dmat;
 	void			*sc_ih;
 
+	struct if_device	sc_ifd;
+
 	struct arpcom		sc_ac;
 #define sc_lladdr	sc_ac.ac_enaddr
 	struct mii_data		sc_mii;
 #define sc_media	sc_mii.mii_media
+	uint64_t		sc_fixed_media;
 	int			sc_link;
 	int			sc_phyloc;
 	int			sc_force_thresh_dma_mode;
+	int			sc_enh_desc;
+	int			sc_defrag;
 
 	struct dwge_dmamem	*sc_txring;
 	struct dwge_buf		*sc_txbuf;
@@ -266,6 +303,11 @@ struct dwge_softc {
 	uint32_t		sc_clk_sel_125;
 	uint32_t		sc_clk_sel_25;
 	uint32_t		sc_clk_sel_2_5;
+
+#if NKSTAT > 0
+	struct mutex		sc_kstat_mtx;
+	struct kstat		*sc_kstat;
+#endif
 };
 
 #define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
@@ -323,6 +365,11 @@ void	dwge_dmamem_free(struct dwge_softc *, struct dwge_dmamem *);
 struct mbuf *dwge_alloc_mbuf(struct dwge_softc *, bus_dmamap_t);
 void	dwge_fill_rx_ring(struct dwge_softc *);
 
+#if NKSTAT > 0
+int	dwge_kstat_read(struct kstat *);
+void	dwge_kstat_attach(struct dwge_softc *);
+#endif
+
 int
 dwge_match(struct device *parent, void *cfdata, void *aux)
 {
@@ -343,11 +390,12 @@ dwge_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct dwge_softc *sc = (void *)self;
 	struct fdt_attach_args *faa = aux;
-	struct ifnet *ifp;
+	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	uint32_t phy, phy_supply;
 	uint32_t axi_config;
 	uint32_t mode, pbl;
 	uint32_t version;
+	uint32_t feature;
 	int node;
 
 	sc->sc_node = faa->fa_node;
@@ -389,6 +437,24 @@ dwge_attach(struct device *parent, struct device *self, void *aux)
 	version = dwge_read(sc, GMAC_VERSION);
 	printf(": rev 0x%02x", version & GMAC_VERSION_SNPS_MASK);
 
+	if ((version & GMAC_VERSION_SNPS_MASK) > 0x35) {
+		feature = dwge_read(sc, GMAC_HW_FEATURE);
+		if (feature & GMAC_HW_FEATURE_ENHDESSEL)
+			sc->sc_enh_desc = 1;
+	}
+
+	/*
+	 * The GMAC on the StarFive JH7100 (core version 3.70)
+	 * sometimes transmits corrupted packets.  The exact
+	 * conditions under which this happens are unclear, but
+	 * defragmenting mbufs before transmitting them fixes the
+	 * issue.
+	 */
+	/* XXX drop "starfive,jh7100-gmac" in the future */
+	if (OF_is_compatible(faa->fa_node, "starfive,jh7100-gmac") ||
+	    OF_is_compatible(faa->fa_node, "starfive,jh7100-dwmac"))
+		sc->sc_defrag = 1;
+
 	/* Power up PHY. */
 	phy_supply = OF_getpropint(faa->fa_node, "phy-supply", 0);
 	if (phy_supply)
@@ -396,6 +462,30 @@ dwge_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Reset PHY */
 	dwge_reset_phy(sc);
+
+	node = OF_getnodebyname(faa->fa_node, "fixed-link");
+	if (node) {
+		ifp->if_baudrate = IF_Mbps(OF_getpropint(node, "speed", 0));
+
+		switch (OF_getpropint(node, "speed", 0)) {
+		case 1000:
+			sc->sc_fixed_media = IFM_ETHER | IFM_1000_T;
+			break;
+		case 100:
+			sc->sc_fixed_media = IFM_ETHER | IFM_100_TX;
+			break;
+		default:
+			sc->sc_fixed_media = IFM_ETHER | IFM_AUTO;
+			break;
+		}
+		
+		if (OF_getpropbool(node, "full-duplex")) {
+			ifp->if_link_state = LINK_STATE_FULL_DUPLEX;
+			sc->sc_fixed_media |= IFM_FDX;
+		} else {
+			ifp->if_link_state = LINK_STATE_UP;
+		}
+	}
 
 	sc->sc_clk = clock_get_frequency(faa->fa_node, "stmmaceth");
 	if (sc->sc_clk > 250000000)
@@ -419,14 +509,13 @@ dwge_attach(struct device *parent, struct device *self, void *aux)
 	timeout_set(&sc->sc_tick, dwge_tick, sc);
 	timeout_set(&sc->sc_rxto, dwge_rxtick, sc);
 
-	ifp = &sc->sc_ac.ac_if;
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_xflags = IFXF_MPSAFE;
 	ifp->if_ioctl = dwge_ioctl;
 	ifp->if_qstart = dwge_start;
 	ifp->if_watchdog = dwge_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, DWGE_NTXDESC - 1);
+	ifq_init_maxlen(&ifp->if_snd, DWGE_NTXDESC - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
@@ -516,30 +605,44 @@ dwge_attach(struct device *parent, struct device *self, void *aux)
 		dwge_write(sc, GMAC_AXI_BUS_MODE, mode);
 	}
 
-	mii_attach(self, &sc->sc_mii, 0xffffffff, sc->sc_phyloc,
-	    (sc->sc_phyloc == MII_PHY_ANY) ? 0 : MII_OFFSET_ANY, 0);
-	if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
-		printf("%s: no PHY found!\n", sc->sc_dev.dv_xname);
-		ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_MANUAL, 0, NULL);
-		ifmedia_set(&sc->sc_media, IFM_ETHER|IFM_MANUAL);
-	} else
-		ifmedia_set(&sc->sc_media, IFM_ETHER|IFM_AUTO);
+	if (sc->sc_fixed_media == 0) {
+		mii_attach(self, &sc->sc_mii, 0xffffffff, sc->sc_phyloc,
+		    (sc->sc_phyloc == MII_PHY_ANY) ? 0 : MII_OFFSET_ANY, 0);
+		if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
+			printf("%s: no PHY found!\n", sc->sc_dev.dv_xname);
+			ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_MANUAL, 0,
+			    NULL);
+			ifmedia_set(&sc->sc_media, IFM_ETHER|IFM_MANUAL);
+		} else
+			ifmedia_set(&sc->sc_media, IFM_ETHER|IFM_AUTO);
+	} else {
+		ifmedia_add(&sc->sc_media, sc->sc_fixed_media, 0, NULL);
+		ifmedia_set(&sc->sc_media, sc->sc_fixed_media);
+
+		/* force a configuration of the clocks/mac */
+		sc->sc_mii.mii_statchg(self);
+	}
 
 	if_attach(ifp);
 	ether_ifattach(ifp);
+#if NKSTAT > 0
+	dwge_kstat_attach(sc);
+#endif
 
 	/* Disable interrupts. */
 	dwge_write(sc, GMAC_INT_ENA, 0);
 	dwge_write(sc, GMAC_INT_MASK,
 	    GMAC_INT_MASK_LPIIM | GMAC_INT_MASK_PIM | GMAC_INT_MASK_RIM);
-	dwge_write(sc, GMAC_MMC_RX_INT_MSK, 0xffffffff);
-	dwge_write(sc, GMAC_MMC_TX_INT_MSK, 0xffffffff);
 	dwge_write(sc, GMAC_MMC_IPC_INT_MSK, 0xffffffff);
 
 	sc->sc_ih = fdt_intr_establish(faa->fa_node, IPL_NET | IPL_MPSAFE,
 	    dwge_intr, sc, sc->sc_dev.dv_xname);
 	if (sc->sc_ih == NULL)
 		printf("%s: can't establish interrupt\n", sc->sc_dev.dv_xname);
+
+	sc->sc_ifd.if_node = faa->fa_node;
+	sc->sc_ifd.if_ifp = ifp;
+	if_register(&sc->sc_ifd);
 }
 
 void
@@ -698,7 +801,10 @@ dwge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t addr)
 
 	case SIOCGIFMEDIA:
 	case SIOCSIFMEDIA:
-		error = ifmedia_ioctl(ifp, ifr, &sc->sc_media, cmd);
+		if (sc->sc_fixed_media != 0)
+			error = ENOTTY;
+		else
+			error = ifmedia_ioctl(ifp, ifr, &sc->sc_media, cmd);
 		break;
 
 	case SIOCGIFRXR:
@@ -797,11 +903,16 @@ dwge_mii_statchg(struct device *self)
 {
 	struct dwge_softc *sc = (void *)self;
 	uint32_t conf;
+	uint64_t media_active;
 
 	conf = dwge_read(sc, GMAC_MAC_CONF);
 	conf &= ~(GMAC_MAC_CONF_PS | GMAC_MAC_CONF_FES);
 
-	switch (IFM_SUBTYPE(sc->sc_mii.mii_media_active)) {
+	media_active = sc->sc_fixed_media;
+	if (media_active == 0)
+		media_active = sc->sc_mii.mii_media_active;
+
+	switch (IFM_SUBTYPE(media_active)) {
 	case IFM_1000_SX:
 	case IFM_1000_LX:
 	case IFM_1000_CX:
@@ -825,7 +936,7 @@ dwge_mii_statchg(struct device *self)
 		return;
 
 	conf &= ~GMAC_MAC_CONF_DM;
-	if ((sc->sc_mii.mii_media_active & IFM_GMASK) == IFM_FDX)
+	if ((media_active & IFM_GMASK) == IFM_FDX)
 		conf |= GMAC_MAC_CONF_DM;
 
 	/* XXX: RX/TX flow control? */
@@ -893,6 +1004,14 @@ dwge_intr(void *arg)
 	    reg & GMAC_STATUS_TU)
 		dwge_tx_proc(sc);
 
+#if NKSTAT > 0
+	if (reg & GMAC_STATUS_MMC) {
+		mtx_enter(&sc->sc_kstat_mtx);
+		dwge_kstat_read(sc->sc_kstat);
+		mtx_leave(&sc->sc_kstat_mtx);
+	}
+#endif
+
 	return (1);
 }
 
@@ -934,7 +1053,7 @@ dwge_tx_proc(struct dwge_softc *sc)
 		else
 			sc->sc_tx_cons++;
 
-		txd->sd_status = 0;
+		txd->sd_status = sc->sc_enh_desc ? ETDES0_TCH : 0;
 	}
 
 	if (sc->sc_tx_cons == sc->sc_tx_prod)
@@ -981,15 +1100,20 @@ dwge_rx_proc(struct dwge_softc *sc)
 		    len, BUS_DMASYNC_POSTREAD);
 		bus_dmamap_unload(sc->sc_dmat, rxb->tb_map);
 
-		/* Strip off CRC. */
-		len -= ETHER_CRC_LEN;
-		KASSERT(len > 0);
-
 		m = rxb->tb_m;
 		rxb->tb_m = NULL;
-		m->m_pkthdr.len = m->m_len = len;
+		if (rxd->sd_status & RDES0_ES) {
+			ifp->if_ierrors++;
+			m_freem(m);
+		} else {
+			/* Strip off CRC. */
+			len -= ETHER_CRC_LEN;
+			KASSERT(len > 0);
 
-		ml_enqueue(&ml, m);
+			m->m_pkthdr.len = m->m_len = len;
+
+			ml_enqueue(&ml, m);
+		}
 
 		put++;
 		if (sc->sc_rx_cons == (DWGE_NRXDESC - 1))
@@ -1034,6 +1158,10 @@ dwge_up(struct dwge_softc *sc)
 		sc->sc_txdesc[i].sd_next =
 		    DWGE_DMA_DVA(sc->sc_txring) +
 		    ((i+1) % DWGE_NTXDESC) * sizeof(struct dwge_desc);
+		if (sc->sc_enh_desc)
+			sc->sc_txdesc[i].sd_status = ETDES0_TCH;
+		else
+			sc->sc_txdesc[i].sd_len = TDES1_TCH;
 	}
 
 	bus_dmamap_sync(sc->sc_dmat, DWGE_DMA_MAP(sc->sc_txring),
@@ -1060,6 +1188,8 @@ dwge_up(struct dwge_softc *sc)
 		sc->sc_rxdesc[i].sd_next =
 		    DWGE_DMA_DVA(sc->sc_rxring) +
 		    ((i+1) % DWGE_NRXDESC) * sizeof(struct dwge_desc);
+		sc->sc_rxdesc[i].sd_len =
+		    sc->sc_enh_desc ? ERDES1_RCH : RDES1_RCH;
 	}
 
 	if_rxr_init(&sc->sc_rx_ring, 2, DWGE_NRXDESC);
@@ -1103,7 +1233,8 @@ dwge_up(struct dwge_softc *sc)
 	dwge_write(sc, GMAC_MAC_CONF, dwge_read(sc, GMAC_MAC_CONF) |
 	    GMAC_MAC_CONF_TE | GMAC_MAC_CONF_RE);
 
-	timeout_add_sec(&sc->sc_tick, 1);
+	if (sc->sc_fixed_media == 0)
+		timeout_add_sec(&sc->sc_tick, 1);
 }
 
 void
@@ -1115,7 +1246,8 @@ dwge_down(struct dwge_softc *sc)
 	int i;
 
 	timeout_del(&sc->sc_rxto);
-	timeout_del(&sc->sc_tick);
+	if (sc->sc_fixed_media == 0)
+		timeout_del(&sc->sc_tick);
 
 	ifp->if_flags &= ~IFF_RUNNING;
 	ifq_clr_oactive(&ifp->if_snd);
@@ -1229,6 +1361,11 @@ dwge_encap(struct dwge_softc *sc, struct mbuf *m, int *idx, int *used)
 	cur = frag = *idx;
 	map = sc->sc_txbuf[cur].tb_map;
 
+	if (sc->sc_defrag) {
+		if (m_defrag(m, M_DONTWAIT))
+			return (ENOBUFS);
+	}
+
 	if (bus_dmamap_load_mbuf(sc->sc_dmat, map, m, BUS_DMA_NOWAIT)) {
 		if (m_defrag(m, M_DONTWAIT))
 			return (EFBIG);
@@ -1243,13 +1380,23 @@ dwge_encap(struct dwge_softc *sc, struct mbuf *m, int *idx, int *used)
 	txd = txd_start = &sc->sc_txdesc[frag];
 	for (i = 0; i < map->dm_nsegs; i++) {
 		txd->sd_addr = map->dm_segs[i].ds_addr;
-		txd->sd_len = map->dm_segs[i].ds_len | TDES1_TCH;
-		if (i == 0)
-			txd->sd_len |= TDES1_FS;
-		if (i == (map->dm_nsegs - 1))
-			txd->sd_len |= TDES1_LS | TDES1_IC;
+		if (sc->sc_enh_desc) {
+			txd->sd_status = ETDES0_TCH;
+			txd->sd_len = map->dm_segs[i].ds_len;
+			if (i == 0)
+				txd->sd_status |= ETDES0_FS;
+			if (i == (map->dm_nsegs - 1))
+				txd->sd_status |= ETDES0_LS | ETDES0_IC;
+		} else {
+			txd->sd_status = 0;
+			txd->sd_len = map->dm_segs[i].ds_len | TDES1_TCH;
+			if (i == 0)
+				txd->sd_len |= TDES1_FS;
+			if (i == (map->dm_nsegs - 1))
+				txd->sd_len |= TDES1_LS | TDES1_IC;
+		}
 		if (i != 0)
-			txd->sd_status = TDES0_OWN;
+			txd->sd_status |= TDES0_OWN;
 
 		bus_dmamap_sync(sc->sc_dmat, DWGE_DMA_MAP(sc->sc_txring),
 		    frag * sizeof(*txd), sizeof(*txd), BUS_DMASYNC_PREWRITE);
@@ -1265,10 +1412,9 @@ dwge_encap(struct dwge_softc *sc, struct mbuf *m, int *idx, int *used)
 		KASSERT(frag != sc->sc_tx_cons);
 	}
 
-	txd_start->sd_status = TDES0_OWN;
+	txd_start->sd_status |= TDES0_OWN;
 	bus_dmamap_sync(sc->sc_dmat, DWGE_DMA_MAP(sc->sc_txring),
 	    *idx * sizeof(*txd), sizeof(*txd), BUS_DMASYNC_PREWRITE);
-
 
 	KASSERT(sc->sc_txbuf[cur].tb_m == NULL);
 	sc->sc_txbuf[*idx].tb_map = sc->sc_txbuf[cur].tb_map;
@@ -1401,7 +1547,8 @@ dwge_fill_rx_ring(struct dwge_softc *sc)
 			break;
 
 		rxd = &sc->sc_rxdesc[sc->sc_rx_prod];
-		rxd->sd_len = rxb->tb_map->dm_segs[0].ds_len | RDES1_RCH;
+		rxd->sd_len = rxb->tb_map->dm_segs[0].ds_len;
+		rxd->sd_len |= sc->sc_enh_desc ? ERDES1_RCH : RDES1_RCH;
 		rxd->sd_addr = rxb->tb_map->dm_segs[0].ds_addr;
 		rxd->sd_status = RDES0_OWN;
 
@@ -1589,6 +1736,7 @@ dwge_mii_statchg_rockchip(struct device *self)
 	struct regmap *rm;
 	uint32_t grf;
 	uint32_t gmac_clk_sel = 0;
+	uint64_t media_active;
 
 	dwge_mii_statchg(self);
 
@@ -1597,7 +1745,11 @@ dwge_mii_statchg_rockchip(struct device *self)
 	if (rm == NULL)
 		return;
 
-	switch (IFM_SUBTYPE(sc->sc_mii.mii_media_active)) {
+	media_active = sc->sc_fixed_media;
+	if (media_active == 0)
+		media_active = sc->sc_mii.mii_media_active;
+
+	switch (IFM_SUBTYPE(media_active)) {
 	case IFM_10_T:
 		gmac_clk_sel = sc->sc_clk_sel_2_5;
 		break;
@@ -1611,3 +1763,77 @@ dwge_mii_statchg_rockchip(struct device *self)
 
 	regmap_write_4(rm, sc->sc_clk_sel, gmac_clk_sel);
 }
+
+#if NKSTAT > 0
+
+struct dwge_counter {
+	const char		*c_name;
+	enum kstat_kv_unit	c_unit;
+	uint32_t		c_reg;
+};
+
+const struct dwge_counter dwge_counters[] = {
+	{ "tx octets total", KSTAT_KV_U_BYTES, GMAC_MMC_TXOCTETCNT_GB },
+	{ "tx frames total", KSTAT_KV_U_PACKETS, GMAC_MMC_TXFRMCNT_GB },
+	{ "tx underflow", KSTAT_KV_U_PACKETS, GMAC_MMC_TXUNDFLWERR },
+	{ "tx carrier err", KSTAT_KV_U_PACKETS, GMAC_MMC_TXCARERR },
+	{ "tx good octets", KSTAT_KV_U_BYTES, GMAC_MMC_TXOCTETCNT_G },
+	{ "tx good frames", KSTAT_KV_U_PACKETS, GMAC_MMC_TXFRMCNT_G },
+	{ "rx frames total", KSTAT_KV_U_PACKETS, GMAC_MMC_RXFRMCNT_GB },
+	{ "rx octets total", KSTAT_KV_U_BYTES, GMAC_MMC_RXOCTETCNT_GB },
+	{ "rx good octets", KSTAT_KV_U_BYTES, GMAC_MMC_RXOCTETCNT_G },
+	{ "rx good mcast", KSTAT_KV_U_PACKETS, GMAC_MMC_RXMCFRMCNT_G },
+	{ "rx crc errors", KSTAT_KV_U_PACKETS, GMAC_MMC_RXCRCERR },
+	{ "rx len errors", KSTAT_KV_U_PACKETS, GMAC_MMC_RXLENERR },
+	{ "rx fifo err", KSTAT_KV_U_PACKETS, GMAC_MMC_RXFIFOOVRFLW },
+};
+
+void
+dwge_kstat_attach(struct dwge_softc *sc)
+{
+	struct kstat *ks;
+	struct kstat_kv *kvs;
+	int i;
+
+	mtx_init(&sc->sc_kstat_mtx, IPL_NET);
+
+	/* clear counters, enable reset-on-read */
+	dwge_write(sc, GMAC_MAC_MMC_CTRL, GMAC_MAC_MMC_CTRL_ROR |
+	    GMAC_MAC_MMC_CTRL_CR);
+
+	ks = kstat_create(DEVNAME(sc), 0, "dwge-stats", 0,
+	    KSTAT_T_KV, 0);
+	if (ks == NULL)
+		return;
+
+	kvs = mallocarray(nitems(dwge_counters), sizeof(*kvs), M_DEVBUF,
+	    M_WAITOK | M_ZERO);
+	for (i = 0; i < nitems(dwge_counters); i++) {
+		kstat_kv_unit_init(&kvs[i], dwge_counters[i].c_name,
+		    KSTAT_KV_T_COUNTER64, dwge_counters[i].c_unit);
+	}
+
+	kstat_set_mutex(ks, &sc->sc_kstat_mtx);
+	ks->ks_softc = sc;
+	ks->ks_data = kvs;
+	ks->ks_datalen = nitems(dwge_counters) * sizeof(*kvs);
+	ks->ks_read = dwge_kstat_read;
+	sc->sc_kstat = ks;
+	kstat_install(ks);
+}
+
+int
+dwge_kstat_read(struct kstat *ks)
+{
+	struct kstat_kv *kvs = ks->ks_data;
+	struct dwge_softc *sc = ks->ks_softc;
+	int i;
+
+	for (i = 0; i < nitems(dwge_counters); i++)
+		kstat_kv_u64(&kvs[i]) += dwge_read(sc, dwge_counters[i].c_reg);
+
+	getnanouptime(&ks->ks_updated);
+	return 0;
+}
+
+#endif

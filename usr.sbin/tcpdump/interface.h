@@ -1,4 +1,4 @@
-/*	$OpenBSD: interface.h,v 1.86 2020/08/17 06:29:29 dlg Exp $	*/
+/*	$OpenBSD: interface.h,v 1.88 2024/05/21 05:00:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 1988, 1989, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997
@@ -20,7 +20,7 @@
  * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  *
- * @(#) $Id: interface.h,v 1.86 2020/08/17 06:29:29 dlg Exp $ (LBL)
+ * @(#) $Id: interface.h,v 1.88 2024/05/21 05:00:48 jsg Exp $ (LBL)
  */
 
 #ifndef tcpdump_interface_h
@@ -166,8 +166,6 @@ extern void safeputs(const char *);
 extern void safeputchar(int);
 extern void printb(char *, unsigned short, char *);
 
-extern void wrapup(int);
-
 extern __dead void error(const char *, ...)
     __attribute__((__format__ (printf, 1, 2)));
 extern void warning(const char *, ...)
@@ -199,13 +197,9 @@ extern void bootp_print(const u_char *, u_int, u_short, u_short);
 extern void bgp_print(const u_char *, int);
 extern void decnet_print(const u_char *, u_int, u_int);
 extern void default_print(const u_char *, u_int);
-extern void default_print_unaligned(const u_char *, u_int);
 extern void dvmrp_print(const u_char *, u_int);
-extern void egp_print(const u_char *, u_int, const u_char *);
 extern void enc_if_print(u_char *, const struct pcap_pkthdr *, const u_char *);
 extern void pflog_if_print(u_char *, const struct pcap_pkthdr *,
-        const u_char *);
-extern void pflog_old_if_print(u_char *, const struct pcap_pkthdr *,
         const u_char *);
 extern void pfsync_if_print(u_char *, const struct pcap_pkthdr *,
         const u_char *);

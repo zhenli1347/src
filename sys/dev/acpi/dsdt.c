@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.c,v 1.264 2021/12/09 20:21:35 patrick Exp $ */
+/* $OpenBSD: dsdt.c,v 1.268 2024/05/14 08:26:13 jsg Exp $ */
 /*
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
  *
@@ -56,8 +56,6 @@ struct aml_scope	*aml_load(struct acpi_softc *, struct aml_scope *,
 
 void			aml_copyvalue(struct aml_value *, struct aml_value *);
 
-void			aml_setvalue(struct aml_scope *, struct aml_value *,
-			    struct aml_value *, int64_t);
 void			aml_freevalue(struct aml_value *);
 struct aml_value	*aml_allocvalue(int, int64_t, const void *);
 struct aml_value	*_aml_setvalue(struct aml_value *, int, int64_t,
@@ -77,16 +75,6 @@ void			aml_delref(struct aml_value **, const char *);
 void			aml_bufcpy(void *, int, const void *, int, int);
 
 int			aml_pc(uint8_t *);
-
-struct aml_value	*aml_parseop(struct aml_scope *, struct aml_value *,int);
-struct aml_value	*aml_parsetarget(struct aml_scope *, struct aml_value *,
-			    struct aml_value **);
-struct aml_value	*aml_parseterm(struct aml_scope *, struct aml_value *);
-
-struct aml_value	*aml_evaltarget(struct aml_scope *scope,
-			    struct aml_value *res);
-int			aml_evalterm(struct aml_scope *scope,
-			    struct aml_value *raw, struct aml_value *dst);
 
 struct aml_opcode	*aml_findopcode(int);
 
@@ -634,8 +622,9 @@ __aml_search(struct aml_node *root, uint8_t *nameseg, int create)
 
 		SIMPLEQ_INIT(&node->son);
 		SIMPLEQ_INSERT_TAIL(&root->son, node, sib);
+		return node;
 	}
-	return node;
+	return NULL;
 }
 
 /* Get absolute pathname of AML node */
@@ -3742,8 +3731,6 @@ aml_loadtable(struct acpi_softc *sc, const char *signature,
 	struct acpi_dsdt *p_dsdt;
 	struct acpi_q *entry;
 
-	if (strlen(rootpath) > 0)
-		aml_die("LoadTable: RootPathString unsupported");
 	if (strlen(parameterpath) > 0)
 		aml_die("LoadTable: ParameterPathString unsupported");
 
@@ -3755,8 +3742,8 @@ aml_loadtable(struct acpi_softc *sc, const char *signature,
 		    strncmp(hdr->oemtableid, oemtableid,
 		    sizeof(hdr->oemtableid)) == 0) {
 			p_dsdt = entry->q_table;
-			acpi_parse_aml(sc, p_dsdt->aml, p_dsdt->hdr_length -
-			    sizeof(p_dsdt->hdr));
+			acpi_parse_aml(sc, rootpath, p_dsdt->aml,
+			    p_dsdt->hdr_length - sizeof(p_dsdt->hdr));
 			return aml_allocvalue(AML_OBJTYPE_DDBHANDLE, 0, 0);
 		}
 	}
@@ -4250,7 +4237,7 @@ aml_parse(struct aml_scope *scope, int ret_type, const char *stype)
 		/* Name: Nt */
 		rv = opargs[0];
 		aml_freevalue(rv);
-			aml_copyvalue(rv, opargs[1]);
+		aml_copyvalue(rv, opargs[1]);
 		break;
 	case AMLOP_ALIAS:
 		/* Alias: nN */
@@ -4520,10 +4507,18 @@ parse_error:
 }
 
 int
-acpi_parse_aml(struct acpi_softc *sc, uint8_t *start, uint32_t length)
+acpi_parse_aml(struct acpi_softc *sc, const char *rootpath,
+    uint8_t *start, uint32_t length)
 {
+	struct aml_node *root = &aml_root;
 	struct aml_scope *scope;
 	struct aml_value res;
+
+	if (rootpath) {
+		root = aml_searchname(&aml_root, rootpath);
+		if (root == NULL)
+			aml_die("Invalid RootPathName %s\n", rootpath);
+	}
 
 	aml_root.start = start;
 	memset(&res, 0, sizeof(res));

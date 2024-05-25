@@ -1,4 +1,4 @@
-/* $OpenBSD: stack.h,v 1.1 2022/11/11 19:18:55 beck Exp $ */
+/* $OpenBSD: stack.h,v 1.3 2024/03/02 11:20:36 tb Exp $ */
 /*
  * Copyright (c) 2022 Bob Beck <beck@openbsd.org>
  *
@@ -18,7 +18,11 @@
 #ifndef _LIBCRYPTO_STACK_H
 #define _LIBCRYPTO_STACK_H
 
+#ifndef _MSC_VER
 #include_next <openssl/stack.h>
+#else
+#include "../include/openssl/stack.h"
+#endif
 #include "crypto_namespace.h"
 
 LCRYPTO_USED(sk_num);
@@ -32,7 +36,6 @@ LCRYPTO_USED(sk_insert);
 LCRYPTO_USED(sk_delete);
 LCRYPTO_USED(sk_delete_ptr);
 LCRYPTO_USED(sk_find);
-LCRYPTO_USED(sk_find_ex);
 LCRYPTO_USED(sk_push);
 LCRYPTO_USED(sk_unshift);
 LCRYPTO_USED(sk_shift);

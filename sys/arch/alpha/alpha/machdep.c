@@ -1,4 +1,4 @@
-/* $OpenBSD: machdep.c,v 1.199 2022/10/30 17:43:39 guenther Exp $ */
+/* $OpenBSD: machdep.c,v 1.203 2023/04/11 00:45:06 jsg Exp $ */
 /* $NetBSD: machdep.c,v 1.210 2000/06/01 17:12:38 thorpej Exp $ */
 
 /*-
@@ -387,12 +387,6 @@ nobootinfo:
 #endif
 
 	/* NO MORE FIRMWARE ACCESS ALLOWED */
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-	/*
-	 * XXX (unless _PMAP_MAY_USE_PROM_CONSOLE is defined and
-	 * XXX pmap_uses_prom_console() evaluates to non-zero.)
-	 */
-#endif
 
 #ifndef SMALL_KERNEL
 	/*
@@ -402,7 +396,7 @@ nobootinfo:
 	 * read-only eventually (although this is not the case at the moment).
 	 */
 	if (alpha_implver() >= ALPHA_IMPLVER_EV5) {
-		if (~alpha_amask(ALPHA_AMASK_BWX) != 0) {
+		if ((~alpha_amask(ALPHA_AMASK_BWX) & ALPHA_AMASK_BWX) != 0) {
 			extern vaddr_t __bwx_switch0, __bwx_switch1,
 			    __bwx_switch2, __bwx_switch3;
 			u_int32_t *dst, *src, *end;
@@ -442,7 +436,7 @@ nobootinfo:
 	/*
 	 * Find out how much memory is available, by looking at
 	 * the memory cluster descriptors.  This also tries to do
-	 * its best to detect things things that have never been seen
+	 * its best to detect things that have never been seen
 	 * before...
 	 */
 	mddtp = (struct mddt *)(((caddr_t)hwrpb) + hwrpb->rpb_memdat_off);
@@ -506,14 +500,6 @@ nobootinfo:
 		 * software use.  We must determine if this cluster
 		 * holds the kernel.
 		 */
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-		/*
-		 * XXX If the kernel uses the PROM console, we only use the
-		 * XXX memory after the kernel in the first system segment,
-		 * XXX to avoid clobbering prom mapping, data, etc.
-		 */
-	    if (!pmap_uses_prom_console() || physmem == 0) {
-#endif /* _PMAP_MAY_USE_PROM_CONSOLE */
 		physmem += memc->mddt_pg_cnt;
 		pfn0 = memc->mddt_pfn;
 		pfn1 = memc->mddt_pfn + memc->mddt_pg_cnt;
@@ -525,9 +511,6 @@ nobootinfo:
 #if 0
 			printf("Cluster %d contains kernel\n", i);
 #endif
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-		    if (!pmap_uses_prom_console()) {
-#endif /* _PMAP_MAY_USE_PROM_CONSOLE */
 			if (pfn0 < kernstartpfn) {
 				/*
 				 * There is a chunk before the kernel.
@@ -539,9 +522,6 @@ nobootinfo:
 				uvm_page_physload(pfn0, kernstartpfn,
 				    pfn0, kernstartpfn, 0);
 			}
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-		    }
-#endif /* _PMAP_MAY_USE_PROM_CONSOLE */
 			if (kernendpfn < pfn1) {
 				/*
 				 * There is a chunk after the kernel.
@@ -563,9 +543,6 @@ nobootinfo:
 #endif
 			uvm_page_physload(pfn0, pfn1, pfn0, pfn1, 0);
 		}
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-	    }
-#endif /* _PMAP_MAY_USE_PROM_CONSOLE */
 	}
 
 #ifdef DEBUG
@@ -773,15 +750,10 @@ nobootinfo:
 void
 consinit()
 {
-
 	/*
 	 * Everything related to console initialization is done
 	 * in alpha_init().
 	 */
-#if defined(DIAGNOSTIC) && defined(_PMAP_MAY_USE_PROM_CONSOLE)
-	printf("consinit: %susing prom console\n",
-	    pmap_uses_prom_console() ? "" : "not ");
-#endif
 }
 
 void
@@ -1474,7 +1446,6 @@ sendsig(sig_t catcher, int sig, sigset_t mask, const siginfo_t *ksip,
  * psl to gain improper privileges or to cause
  * a machine fault.
  */
-/* ARGSUSED */
 int
 sys_sigreturn(struct proc *p, void *v, register_t *retval)
 {

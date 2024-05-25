@@ -1,4 +1,4 @@
-/* $OpenBSD: vm_machdep.c,v 1.49 2022/10/25 15:15:38 guenther Exp $ */
+/* $OpenBSD: vm_machdep.c,v 1.53 2024/05/21 23:16:06 jsg Exp $ */
 /* $NetBSD: vm_machdep.c,v 1.55 2000/03/29 03:49:48 simonb Exp $ */
 
 /*
@@ -59,7 +59,7 @@ cpu_exit(p)
 	/*
 	 * Deactivate the exiting address space before the vmspace
 	 * is freed.  Note that we will continue to run on this
-	 * vmspace's context until the switch to idle in switch_exit().
+	 * vmspace's context until the switch to idle in sched_exit().
 	 */
 	pmap_deactivate(p);
 	sched_exit(p);
@@ -133,8 +133,10 @@ cpu_fork(struct proc *p1, struct proc *p2, void *stack, void *tcb,
 	 */
 	if (p1 != curproc && p1 != &proc0)
 		panic("cpu_fork: curproc");
+#ifdef DEBUG
 	if ((up->u_pcb.pcb_hw.apcb_flags & ALPHA_PCB_FLAGS_FEN) != 0)
 		printf("DANGER WILL ROBINSON: FEN SET IN cpu_fork!\n");
+#endif
 #endif
 
 	/*
@@ -160,15 +162,7 @@ cpu_fork(struct proc *p1, struct proc *p2, void *stack, void *tcb,
 	up->u_pcb.pcb_context[2] = (u_int64_t)arg;
 	up->u_pcb.pcb_context[7] =
 	    (u_int64_t)proc_trampoline;		/* ra: assembly magic */
-#ifdef MULTIPROCESSOR
-	/*
-	 * MULTIPROCESSOR kernels will reuse the IPL of the parent
-	 * process, and will lower to IPL_NONE in proc_trampoline_mp().
-	 */
 	up->u_pcb.pcb_context[8] = IPL_SCHED;	/* ps: IPL */
-#else
-	up->u_pcb.pcb_context[8] = IPL_NONE;	/* ps: IPL */
-#endif
 }
 
 struct kmem_va_mode kv_physwait = {
@@ -203,7 +197,7 @@ vmapbuf(struct buf *bp, vsize_t len)
 	 * the pmap_extract().
 	 *
 	 * no need to flush TLB since we expect nothing to be mapped
-	 * where we we just allocated (TLB will be flushed when our
+	 * where we just allocated (TLB will be flushed when our
 	 * mapping is removed).
 	 */
 	while (len) {

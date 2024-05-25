@@ -1,4 +1,4 @@
-/*	$OpenBSD: session.h,v 1.158 2022/08/29 14:57:27 claudio Exp $ */
+/*	$OpenBSD: session.h,v 1.170 2024/05/18 11:17:30 jsg Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -106,36 +106,10 @@ enum opt_params {
 	OPT_PARAM_EXT_LEN=255,
 };
 
-enum capa_codes {
-	CAPA_NONE = 0,
-	CAPA_MP = 1,
-	CAPA_REFRESH = 2,
-	CAPA_ROLE = 9,
-	CAPA_RESTART = 64,
-	CAPA_AS4BYTE = 65,
-	CAPA_ADD_PATH = 69,
-	CAPA_ENHANCED_RR = 70,
-};
-
 struct bgp_msg {
 	struct ibuf	*buf;
 	enum msg_type	 type;
 	uint16_t	 len;
-};
-
-struct msg_header {
-	u_char		 marker[MSGSIZE_HEADER_MARKER];
-	uint16_t	 len;
-	uint8_t		 type;
-};
-
-struct msg_open {
-	struct msg_header	 header;
-	uint32_t		 bgpid;
-	uint16_t		 myas;
-	uint16_t		 holdtime;
-	uint8_t			 version;
-	uint8_t			 optparamlen;
 };
 
 struct bgpd_sysdep {
@@ -145,7 +119,7 @@ struct bgpd_sysdep {
 
 struct ctl_conn {
 	TAILQ_ENTRY(ctl_conn)	entry;
-	struct imsgbuf		ibuf;
+	struct imsgbuf		imsgbuf;
 	int			restricted;
 	int			throttled;
 	int			terminate;
@@ -201,6 +175,7 @@ enum Timer {
 	Timer_Rtr_Refresh,
 	Timer_Rtr_Retry,
 	Timer_Rtr_Expire,
+	Timer_Rtr_Active,
 	Timer_Max
 };
 
@@ -239,10 +214,12 @@ struct peer {
 	int			 lasterr;
 	u_int			 errcnt;
 	u_int			 IdleHoldTime;
+	unsigned int		 if_scope;	/* interface scope for IPv6 */
 	uint32_t		 remote_bgpid;
 	enum session_state	 state;
 	enum session_state	 prev_state;
 	enum reconf_action	 reconf_action;
+	enum role		 remote_role;
 	uint16_t		 short_as;
 	uint16_t		 holdtime;
 	uint16_t		 local_port;
@@ -285,7 +262,7 @@ char	*log_fmt_peer(const struct peer_config *);
 void	 log_statechange(struct peer *, enum session_state,
 	    enum session_events);
 void	 log_notification(const struct peer *, uint8_t, uint8_t,
-	    u_char *, uint16_t, const char *);
+	    const struct ibuf *, const char *);
 void	 log_conn_attempt(const struct peer *, struct sockaddr *,
 	    socklen_t);
 
@@ -323,16 +300,19 @@ struct rtr_session	*rtr_new(uint32_t, char *);
 struct rtr_session	*rtr_get(uint32_t);
 void			 rtr_free(struct rtr_session *);
 void			 rtr_open(struct rtr_session *, int);
-struct roa_tree		*rtr_get_roa(struct rtr_session *);
 void			 rtr_config_prep(void);
 void			 rtr_config_merge(void);
 void			 rtr_config_keep(struct rtr_session *);
 void			 rtr_roa_merge(struct roa_tree *);
+void			 rtr_aspa_merge(struct aspa_tree *);
 void			 rtr_shutdown(void);
 void			 rtr_show(struct rtr_session *, pid_t);
 
 /* rtr.c */
-void	roa_insert(struct roa_tree *, struct roa *);
+void	rtr_sem_acquire(int);
+void	rtr_sem_release(int);
+void	rtr_roa_insert(struct roa_tree *, struct roa *);
+void	rtr_aspa_insert(struct aspa_tree *, struct aspa_set *);
 void	rtr_main(int, int);
 void	rtr_imsg_compose(int, uint32_t, pid_t, void *, size_t);
 void	rtr_recalc(void);
@@ -347,9 +327,10 @@ struct peer	*getpeerbydesc(struct bgpd_config *, const char *);
 struct peer	*getpeerbyip(struct bgpd_config *, struct sockaddr *);
 struct peer	*getpeerbyid(struct bgpd_config *, uint32_t);
 int		 peer_matched(struct peer *, struct ctl_neighbor *);
-int		 imsg_ctl_parent(int, uint32_t, pid_t, void *, uint16_t);
-int		 imsg_ctl_rde(int, pid_t, void *, uint16_t);
-void		 session_stop(struct peer *, uint8_t);
+int		 imsg_ctl_parent(struct imsg *);
+int		 imsg_ctl_rde(struct imsg *);
+int		 imsg_ctl_rde_msg(int, uint32_t, pid_t);
+void		 session_stop(struct peer *, uint8_t, const char *);
 
 /* timer.c */
 struct timer	*timer_get(struct timer_head *, enum Timer);

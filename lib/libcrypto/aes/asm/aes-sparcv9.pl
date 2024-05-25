@@ -79,7 +79,7 @@ $code.=<<___ if ($bits==64);
 .register	%g3,#scratch
 ___
 $code.=<<___;
-.section	".text",#alloc,#execinstr
+.section	".rodata",#alloc
 
 .align	256
 AES_Te:
@@ -185,6 +185,7 @@ $code.=<<___;
 .type	AES_Te,#object
 .size	AES_Te,(.-AES_Te)
 
+.section	".text",#alloc,#execinstr
 .align	64
 .skip	16
 _sparcv9_AES_encrypt:
@@ -510,20 +511,32 @@ _sparcv9_AES_encrypt:
 .size	_sparcv9_AES_encrypt,(.-_sparcv9_AES_encrypt)
 
 .align	32
-.globl	AES_encrypt
-AES_encrypt:
-	or	%o0,%o1,%g1
+.globl	aes_encrypt_internal
+aes_encrypt_internal:
+	save	%sp,-$frame,%sp
+#ifdef __PIC__
+	sethi	%hi(_GLOBAL_OFFSET_TABLE_-4), %o5
+	rd	%pc, %o4
+	or	%o5, %lo(_GLOBAL_OFFSET_TABLE_+4), %o5
+	add	%o5, %o4, %o5
+#endif
+
+	or	%i0,%i1,%g1
 	andcc	%g1,3,%g0
 	bnz,pn	%xcc,.Lunaligned_enc
-	save	%sp,-$frame,%sp
+	 nop
 
 	ld	[%i0+0],%o0
 	ld	[%i0+4],%o1
 	ld	[%i0+8],%o2
 	ld	[%i0+12],%o3
 
-1:	call	.+8
-	add	%o7,AES_Te-1b,%o4
+#ifdef __PIC__
+	set	AES_Te, %o4
+	ldx	[%o4+%o5], %o4
+#else
+	set	AES_Te, %o4
+#endif
 	call	_sparcv9_AES_encrypt
 	mov	%i2,%o5
 
@@ -582,8 +595,12 @@ AES_encrypt:
 	or	%l7,%l6,%l6
 	or	%l4,%l6,%o3
 
-1:	call	.+8
-	add	%o7,AES_Te-1b,%o4
+#ifdef __PIC__
+	set	AES_Te, %o4
+	ldx	[%o4+%o5], %o4
+#else
+	set	AES_Te, %o4
+#endif
 	call	_sparcv9_AES_encrypt
 	mov	%i2,%o5
 
@@ -621,12 +638,13 @@ AES_encrypt:
 
 	ret
 	restore
-.type	AES_encrypt,#function
-.size	AES_encrypt,(.-AES_encrypt)
+.type	aes_encrypt_internal,#function
+.size	aes_encrypt_internal,(.-aes_encrypt_internal)
 
 ___
 
 $code.=<<___;
+.section	".rodata",#alloc
 .align	256
 AES_Td:
 ___
@@ -731,6 +749,7 @@ $code.=<<___;
 .type	AES_Td,#object
 .size	AES_Td,(.-AES_Td)
 
+.section	".text",#alloc,#execinstr
 .align	64
 .skip	16
 _sparcv9_AES_decrypt:
@@ -1056,20 +1075,32 @@ _sparcv9_AES_decrypt:
 .size	_sparcv9_AES_decrypt,(.-_sparcv9_AES_decrypt)
 
 .align	32
-.globl	AES_decrypt
-AES_decrypt:
-	or	%o0,%o1,%g1
+.globl	aes_decrypt_internal
+aes_decrypt_internal:
+	save	%sp,-$frame,%sp
+#ifdef __PIC__
+	sethi	%hi(_GLOBAL_OFFSET_TABLE_-4), %o5
+	rd	%pc, %o4
+	or	%o5, %lo(_GLOBAL_OFFSET_TABLE_+4), %o5
+	add	%o5, %o4, %o5
+#endif
+
+	or	%i0,%i1,%g1
 	andcc	%g1,3,%g0
 	bnz,pn	%xcc,.Lunaligned_dec
-	save	%sp,-$frame,%sp
+	 nop
 
 	ld	[%i0+0],%o0
 	ld	[%i0+4],%o1
 	ld	[%i0+8],%o2
 	ld	[%i0+12],%o3
 
-1:	call	.+8
-	add	%o7,AES_Td-1b,%o4
+#ifdef __PIC__
+	set	AES_Td, %o4
+	ldx	[%o4+%o5], %o4
+#else
+	set	AES_Td, %o4
+#endif
 	call	_sparcv9_AES_decrypt
 	mov	%i2,%o5
 
@@ -1128,8 +1159,12 @@ AES_decrypt:
 	or	%l7,%l6,%l6
 	or	%l4,%l6,%o3
 
-1:	call	.+8
-	add	%o7,AES_Td-1b,%o4
+#ifdef __PIC__
+	set	AES_Td, %o4
+	ldx	[%o4+%o5], %o4
+#else
+	set	AES_Td, %o4
+#endif
 	call	_sparcv9_AES_decrypt
 	mov	%i2,%o5
 
@@ -1167,8 +1202,8 @@ AES_decrypt:
 
 	ret
 	restore
-.type	AES_decrypt,#function
-.size	AES_decrypt,(.-AES_decrypt)
+.type	aes_decrypt_internal,#function
+.size	aes_decrypt_internal,(.-aes_decrypt_internal)
 ___
 
 # fmovs instructions substituting for FP nops were originally added

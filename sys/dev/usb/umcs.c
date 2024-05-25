@@ -1,4 +1,4 @@
-/* $OpenBSD: umcs.c,v 1.10 2022/04/09 20:07:44 naddy Exp $ */
+/* $OpenBSD: umcs.c,v 1.12 2024/05/23 03:21:09 jsg Exp $ */
 /* $NetBSD: umcs.c,v 1.8 2014/08/23 21:37:56 martin Exp $ */
 /* $FreeBSD: head/sys/dev/usb/serial/umcs.c 260559 2014-01-12 11:44:28Z hselasky $ */
 
@@ -42,7 +42,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/tty.h>
 #include <sys/device.h>
@@ -50,7 +49,6 @@
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
-#include <dev/usb/usbdi_util.h>
 #include <dev/usb/usbdevs.h>
 
 #include <dev/usb/ucomvar.h>
@@ -542,9 +540,9 @@ umcs_param(void *self, int portno, struct termios *t)
 	if (t->c_cflag & PARENB) {
 		lcr |= UMCS_LCR_PARITYON;
 		if (t->c_cflag & PARODD) {
-			lcr = UMCS_LCR_PARITYODD;
+			lcr |= UMCS_LCR_PARITYODD;
 		} else {
-			lcr = UMCS_LCR_PARITYEVEN;
+			lcr |= UMCS_LCR_PARITYEVEN;
 		}
 	} else {
 		lcr &= ~UMCS_LCR_PARITYON;

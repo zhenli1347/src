@@ -1,4 +1,4 @@
-/* $OpenBSD: bn_word.c,v 1.16 2022/11/26 16:08:51 tb Exp $ */
+/* $OpenBSD: bn_word.c,v 1.21 2023/07/08 12:21:58 beck Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -100,6 +100,7 @@ BN_mod_word(const BIGNUM *a, BN_ULONG w)
 	}
 	return ((BN_ULONG)ret);
 }
+LCRYPTO_ALIAS(BN_mod_word);
 
 BN_ULONG
 BN_div_word(BIGNUM *a, BN_ULONG w)
@@ -125,15 +126,19 @@ BN_div_word(BIGNUM *a, BN_ULONG w)
 		BN_ULONG l, d;
 
 		l = a->d[i];
-		d = bn_div_words(ret, l, w);
-		ret = (l - ((d*w)&BN_MASK2))&BN_MASK2;
+		bn_div_rem_words(ret, l, w, &d, &ret);
 		a->d[i] = d;
 	}
 	if ((a->top > 0) && (a->d[a->top - 1] == 0))
 		a->top--;
 	ret >>= j;
+
+	/* Set negative again, to handle -0 case. */
+	BN_set_negative(a, a->neg);
+
 	return (ret);
 }
+LCRYPTO_ALIAS(BN_div_word);
 
 int
 BN_add_word(BIGNUM *a, BN_ULONG w)
@@ -153,8 +158,7 @@ BN_add_word(BIGNUM *a, BN_ULONG w)
 	if (a->neg) {
 		a->neg = 0;
 		i = BN_sub_word(a, w);
-		if (!BN_is_zero(a))
-			a->neg=!(a->neg);
+		BN_set_negative(a, !a->neg);
 		return (i);
 	}
 	for (i = 0; w != 0 && i < a->top; i++) {
@@ -169,6 +173,7 @@ BN_add_word(BIGNUM *a, BN_ULONG w)
 	}
 	return (1);
 }
+LCRYPTO_ALIAS(BN_add_word);
 
 int
 BN_sub_word(BIGNUM *a, BN_ULONG w)
@@ -191,13 +196,13 @@ BN_sub_word(BIGNUM *a, BN_ULONG w)
 	if (a->neg) {
 		a->neg = 0;
 		i = BN_add_word(a, w);
-		a->neg = 1;
+		BN_set_negative(a, !a->neg);
 		return (i);
 	}
 
 	if ((a->top == 1) && (a->d[0] < w)) {
 		a->d[0] = w - a->d[0];
-		a->neg = 1;
+		BN_set_negative(a, 1);
 		return (1);
 	}
 	i = 0;
@@ -215,6 +220,7 @@ BN_sub_word(BIGNUM *a, BN_ULONG w)
 		a->top--;
 	return (1);
 }
+LCRYPTO_ALIAS(BN_sub_word);
 
 int
 BN_mul_word(BIGNUM *a, BN_ULONG w)
@@ -236,3 +242,4 @@ BN_mul_word(BIGNUM *a, BN_ULONG w)
 	}
 	return (1);
 }
+LCRYPTO_ALIAS(BN_mul_word);

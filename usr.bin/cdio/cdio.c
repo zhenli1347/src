@@ -1,4 +1,4 @@
-/*	$OpenBSD: cdio.c,v 1.84 2022/02/15 08:17:50 jsg Exp $	*/
+/*	$OpenBSD: cdio.c,v 1.86 2023/03/08 04:43:10 guenther Exp $	*/
 
 /*  Copyright (c) 1995 Serge V. Vakulenko
  * All rights reserved.
@@ -227,7 +227,8 @@ help(void)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-sv] [-d host:port] [-f device] [command args ...]\n",
+	fprintf(stderr, "usage: %s [-sv] [-d host:port] [-f device] "
+	    "[command [arg ...]]\n",
 	    __progname);
 	exit(1);
 }
@@ -1024,7 +1025,6 @@ play_msf:
 	return play_msf(m1, s1, f1, m2, s2, f2);
 }
 
-/* ARGSUSED */
 int
 play_prev(char *arg)
 {
@@ -1049,7 +1049,6 @@ play_prev(char *arg)
 	return (0);
 }
 
-/* ARGSUSED */
 int
 play_same(char *arg)
 {
@@ -1069,7 +1068,6 @@ play_same(char *arg)
 	return (0);
 }
 
-/* ARGSUSED */
 int
 play_next(char *arg)
 {
@@ -1121,7 +1119,6 @@ strstatus(int sts)
 	}
 }
 
-/* ARGSUSED */
 int
 pstatus(char *arg)
 {
@@ -1209,7 +1206,6 @@ cdid(void)
 	return id ? 0 : 1;
 }
 
-/* ARGSUSED */
 int
 info(char *arg)
 {

@@ -1,4 +1,4 @@
-/*	$OpenBSD: qcgpio.c,v 1.7 2022/11/06 15:33:58 patrick Exp $	*/
+/*	$OpenBSD: qcgpio.c,v 1.9 2023/04/11 04:45:11 mglocker Exp $	*/
 /*
  * Copyright (c) 2022 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -104,7 +104,6 @@ void	qcgpio_write_pin(void *, int, int);
 void	qcgpio_intr_establish(void *, int, int, int (*)(void *), void *);
 void	qcgpio_intr_enable(void *, int);
 void	qcgpio_intr_disable(void *, int);
-int	qcgpio_pin_intr(struct qcgpio_softc *, int);
 int	qcgpio_intr(void *);
 
 int
@@ -186,10 +185,13 @@ qcgpio_sc7180_pin_map(int pin, bus_size_t *off)
 	case 30:
 		*off = QCGPIO_SC7180_SOUTH;
 		return 30;
+#if 0
+	/* XXX: Disable until we can fix the interrupt storm. */
 	case 32:
 	case 0x140:
 		*off = QCGPIO_SC7180_NORTH;
 		return 32;
+#endif
 	case 33:
 	case 0x180:
 		*off = QCGPIO_SC7180_NORTH;
@@ -349,10 +351,10 @@ qcgpio_intr(void *arg)
 		stat = HREAD4(sc, off + TLMM_GPIO_INTR_STATUS(pin));
 		if (stat & TLMM_GPIO_INTR_STATUS_INTR_STATUS) {
 			sc->sc_pin_ih[pin].ih_func(sc->sc_pin_ih[pin].ih_arg);
+			HWRITE4(sc, off + TLMM_GPIO_INTR_STATUS(pin),
+			    stat & ~TLMM_GPIO_INTR_STATUS_INTR_STATUS);
 			handled = 1;
 		}
-		HWRITE4(sc, off + TLMM_GPIO_INTR_STATUS(pin),
-		    stat & ~TLMM_GPIO_INTR_STATUS_INTR_STATUS);
 	}
 
 	return handled;

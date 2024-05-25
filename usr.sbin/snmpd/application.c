@@ -1,4 +1,4 @@
-/*	$OpenBSD: application.c,v 1.16 2022/09/13 10:22:07 martijn Exp $	*/
+/*	$OpenBSD: application.c,v 1.43 2024/02/08 17:34:09 martijn Exp $	*/
 
 /*
  * Copyright (c) 2021 Martijn van Duren <martijn@openbsd.org>
@@ -17,7 +17,9 @@
  */
 
 #include <sys/queue.h>
+#include <sys/time.h>
 #include <sys/tree.h>
+#include <sys/types.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -29,17 +31,35 @@
 
 #include "application.h"
 #include "log.h"
+#include "mib.h"
 #include "smi.h"
 #include "snmp.h"
+#include "snmpd.h"
 #include "snmpe.h"
-#include "mib.h"
+
+#define OID(...)		(struct ber_oid){ { __VA_ARGS__ },	\
+    (sizeof((uint32_t []) { __VA_ARGS__ }) / sizeof(uint32_t)) }
 
 TAILQ_HEAD(, appl_context) contexts = TAILQ_HEAD_INITIALIZER(contexts);
+
+struct appl_agentcap {
+	struct appl_backend *aa_backend;
+	struct appl_context *aa_context;
+	uint32_t aa_index;
+	struct ber_oid aa_oid;
+	char aa_descr[256];
+	int aa_uptime;
+
+	TAILQ_ENTRY(appl_agentcap) aa_entry;
+};
 
 struct appl_context {
 	char ac_name[APPL_CONTEXTNAME_MAX + 1];
 
 	RB_HEAD(appl_regions, appl_region) ac_regions;
+	TAILQ_HEAD(, appl_agentcap) ac_agentcaps;
+	int ac_agentcap_lastid;
+	int ac_agentcap_lastchange;
 
 	TAILQ_ENTRY(appl_context) ac_entries;
 };
@@ -59,10 +79,12 @@ struct appl_region {
 struct appl_request_upstream {
 	struct appl_context *aru_ctx;
 	struct snmp_message *aru_statereference;
+	enum snmp_pdutype aru_requesttype;
+	enum snmp_pdutype aru_responsetype;
 	int32_t aru_requestid; /* upstream requestid */
 	int32_t aru_transactionid; /* RFC 2741 section 6.1 */
-	int16_t aru_nonrepeaters;
-	int16_t aru_maxrepetitions;
+	uint16_t aru_nonrepeaters;
+	uint16_t aru_maxrepetitions;
 	struct appl_varbind_internal *aru_vblist;
 	size_t aru_varbindlen;
 	enum appl_error aru_error;
@@ -70,15 +92,14 @@ struct appl_request_upstream {
 	int aru_locked; /* Prevent recursion through appl_request_send */
 
 	enum snmp_version aru_pduversion;
-	struct ber_element *aru_pdu; /* Original requested pdu */
 };
 
 struct appl_request_downstream {
 	struct appl_request_upstream *ard_request;
 	struct appl_backend *ard_backend;
 	enum snmp_pdutype ard_requesttype;
-	int16_t ard_nonrepeaters;
-	int16_t ard_maxrepetitions;
+	uint16_t ard_nonrepeaters;
+	uint16_t ard_maxrepetitions;
 	int32_t ard_requestid;
 	uint8_t ard_retries;
 
@@ -99,6 +120,7 @@ struct appl_varbind_internal {
 	enum appl_varbind_state avi_state;
 	struct appl_varbind avi_varbind;
 	struct appl_region *avi_region;
+	struct ber_oid avi_origid;
 	int16_t avi_index;
 	struct appl_request_upstream *avi_request_upstream;
 	struct appl_request_downstream *avi_request_downstream;
@@ -112,9 +134,12 @@ struct snmp_target_mib {
 	uint32_t		snmp_unknowncontexts;
 } snmp_target_mib;
 
+void appl_agentcap_free(struct appl_agentcap *);
 enum appl_error appl_region(struct appl_context *, uint32_t, uint8_t,
-    struct ber_oid *, int, int, struct appl_backend *);
+    struct ber_oid *, uint8_t, int, int, struct appl_backend *);
 void appl_region_free(struct appl_context *, struct appl_region *);
+enum appl_error appl_region_unregister_match(struct appl_context *, uint8_t,
+    struct ber_oid *, char *, struct appl_backend *, int);
 struct appl_region *appl_region_find(struct appl_context *,
     const struct ber_oid *);
 struct appl_region *appl_region_next(struct appl_context *,
@@ -125,12 +150,12 @@ void appl_request_upstream_resolve(struct appl_request_upstream *);
 void appl_request_downstream_send(struct appl_request_downstream *);
 void appl_request_downstream_timeout(int, short, void *);
 void appl_request_upstream_reply(struct appl_request_upstream *);
-int appl_varbind_valid(struct appl_varbind *, struct appl_varbind *, int, int,
-    int, const char **);
+int appl_varbind_valid(struct appl_varbind *, struct appl_varbind_internal *,
+    int, int, int, const char **);
+int appl_error_valid(enum appl_error, enum snmp_pdutype);
+unsigned int appl_ber_any(struct ber_element *);
 int appl_varbind_backend(struct appl_varbind_internal *);
 void appl_varbind_error(struct appl_varbind_internal *, enum appl_error);
-void appl_report(struct snmp_message *, int32_t, struct ber_oid *,
-    struct ber_element *);
 void appl_pdu_log(struct appl_backend *, enum snmp_pdutype, int32_t, uint16_t,
     uint16_t, struct appl_varbind *);
 void ober_oid_nextsibling(struct ber_oid *);
@@ -155,7 +180,7 @@ void
 appl_init(void)
 {
 	appl_blocklist_init();
-	appl_legacy_init();
+	appl_internal_init();
 	appl_agentx_init();
 }
 
@@ -165,17 +190,18 @@ appl_shutdown(void)
 	struct appl_context *ctx, *tctx;
 
 	appl_blocklist_shutdown();
-	appl_legacy_shutdown();
+	appl_internal_shutdown();
 	appl_agentx_shutdown();
 
 	TAILQ_FOREACH_SAFE(ctx, &contexts, ac_entries, tctx) {
 		assert(RB_EMPTY(&(ctx->ac_regions)));
+		assert(TAILQ_EMPTY(&(ctx->ac_agentcaps)));
 		TAILQ_REMOVE(&contexts, ctx, ac_entries);
 		free(ctx);
 	}
 }
 
-static struct appl_context *
+struct appl_context *
 appl_context(const char *name, int create)
 {
 	struct appl_context *ctx;
@@ -204,25 +230,245 @@ appl_context(const char *name, int create)
 
 	strlcpy(ctx->ac_name, name, sizeof(ctx->ac_name));
 	RB_INIT(&(ctx->ac_regions));
+	TAILQ_INIT(&(ctx->ac_agentcaps));
+	ctx->ac_agentcap_lastid = 0;
+	ctx->ac_agentcap_lastchange = 0;
 
 	TAILQ_INSERT_TAIL(&contexts, ctx, ac_entries);
 	return ctx;
 }
 
+/* Name from RFC 2741 section 6.2.14 */
+enum appl_error
+appl_addagentcaps(const char *ctxname, struct ber_oid *oid, const char *descr,
+    struct appl_backend *backend)
+{
+	struct appl_context *ctx;
+	struct appl_agentcap *cap;
+	char oidbuf[1024];
+
+	if (ctxname == NULL)
+		ctxname = "";
+
+	mib_oid2string(oid, oidbuf, sizeof(oidbuf), snmpd_env->sc_oidfmt);
+	log_info("%s: Adding agent capabilities %s context(%s)",
+		backend->ab_name, oidbuf, ctxname);
+
+	if ((ctx = appl_context(ctxname, 0)) == NULL) {
+		log_info("%s: Can't add agent capabilities %s: "
+		    "Unsupported context \"%s\"", backend->ab_name, oidbuf,
+		    ctxname);
+		return APPL_ERROR_UNSUPPORTEDCONTEXT;
+	}
+
+	if ((cap = malloc(sizeof(*cap))) == NULL) {
+		log_warn("%s: Can't add agent capabilities %s",
+		    backend->ab_name, oidbuf);
+		return APPL_ERROR_PROCESSINGERROR;
+	}
+
+	cap->aa_backend = backend;
+	cap->aa_context = ctx;
+	cap->aa_index = ++ctx->ac_agentcap_lastid;
+	cap->aa_oid = *oid;
+	cap->aa_uptime = smi_getticks();
+	if (strlcpy(cap->aa_descr, descr,
+	    sizeof(cap->aa_descr)) >= sizeof(cap->aa_descr)) {
+		log_info("%s: Can't add agent capabilities %s: "
+		    "Invalid description", backend->ab_name, oidbuf);
+		free(cap);
+		return APPL_ERROR_PARSEERROR;
+	}
+
+	TAILQ_INSERT_TAIL(&(ctx->ac_agentcaps), cap, aa_entry);
+	ctx->ac_agentcap_lastchange = cap->aa_uptime;
+
+	return APPL_ERROR_NOERROR;
+}
+
+/* Name from RFC2741 section 6.2.15 */
+enum appl_error
+appl_removeagentcaps(const char *ctxname, struct ber_oid *oid,
+    struct appl_backend *backend)
+{
+	struct appl_context *ctx;
+	struct appl_agentcap *cap, *tmp;
+	char oidbuf[1024];
+	int found = 0;
+
+	if (ctxname == NULL)
+		ctxname = "";
+
+	mib_oid2string(oid, oidbuf, sizeof(oidbuf), snmpd_env->sc_oidfmt);
+	log_info("%s: Removing agent capabilities %s context(%s)",
+	    backend->ab_name, oidbuf, ctxname);
+
+	if ((ctx = appl_context(ctxname, 0)) == NULL) {
+		log_info("%s: Can't remove agent capabilities %s: "
+		    "Unsupported context \"%s\"", backend->ab_name, oidbuf,
+		    ctxname);
+		return APPL_ERROR_UNSUPPORTEDCONTEXT;
+	}
+
+	TAILQ_FOREACH_SAFE(cap, &(ctx->ac_agentcaps), aa_entry, tmp) {
+		/* No duplicate oid check, just continue */
+		if (cap->aa_backend != backend ||
+		    ober_oid_cmp(oid, &(cap->aa_oid)) != 0)
+			continue;
+		found = 1;
+		appl_agentcap_free(cap);
+	}
+
+	if (found)
+		return APPL_ERROR_NOERROR;
+
+	log_info("%s: Can't remove agent capabilities %s: not found",
+	    backend->ab_name, oidbuf);
+	return APPL_ERROR_UNKNOWNAGENTCAPS;
+}
+
+void
+appl_agentcap_free(struct appl_agentcap *cap)
+{
+	TAILQ_REMOVE(&(cap->aa_context->ac_agentcaps), cap, aa_entry);
+	cap->aa_context->ac_agentcap_lastchange = smi_getticks();
+	free(cap);
+}
+
+struct ber_element *
+appl_sysorlastchange(struct ber_oid *oid)
+{
+	struct appl_context *ctx;
+	struct ber_element *value;
+
+	ctx = appl_context(NULL, 0);
+	value = ober_add_integer(NULL, ctx->ac_agentcap_lastchange);
+	if (value != NULL)
+		ober_set_header(value, BER_CLASS_APPLICATION, SNMP_T_TIMETICKS);
+	else
+		log_warn("ober_add_integer");
+
+	return value;
+}
+
+#define SYSORIDX_POS 10
+struct ber_element *
+appl_sysortable(struct ber_oid *oid)
+{
+	struct appl_context *ctx;
+	struct appl_agentcap *cap;
+	struct ber_element *value = NULL;
+
+	if (oid->bo_n != SYSORIDX_POS + 1)
+		goto notfound;
+
+	ctx = appl_context(NULL, 0);
+	TAILQ_FOREACH(cap, &(ctx->ac_agentcaps), aa_entry) {
+		if (cap->aa_index == oid->bo_id[SYSORIDX_POS])
+			break;
+	}
+	if (cap == NULL)
+		goto notfound;
+
+	if (ober_oid_cmp(&OID(MIB_sysORID), oid) == -2)
+		value = ober_add_oid(NULL, &(cap->aa_oid));
+	else if (ober_oid_cmp(&OID(MIB_sysORDescr), oid) == -2)
+		value = ober_add_string(NULL, cap->aa_descr);
+	else if (ober_oid_cmp(&OID(MIB_sysORUpTime), oid) == -2) {
+		if ((value = ober_add_integer(NULL, cap->aa_uptime)) != NULL)
+			ober_set_header(value,
+			    BER_CLASS_APPLICATION, SNMP_T_TIMETICKS);
+	}
+	if (value == NULL)
+		log_warn("ober_add_*");
+	return value;
+
+ notfound:
+	if ((value = appl_exception(APPL_EXC_NOSUCHINSTANCE)) == NULL)
+		log_warn("appl_exception");
+	return value;
+}
+
+struct ber_element *
+appl_sysortable_getnext(int8_t include, struct ber_oid *oid)
+{
+	struct appl_context *ctx;
+	struct appl_agentcap *cap;
+	struct ber_element *value = NULL;
+
+	if (oid->bo_n < SYSORIDX_POS + 1) {
+		include = 1;
+		oid->bo_id[SYSORIDX_POS] = 0;
+	} else if (oid->bo_n < SYSORIDX_POS + 1)
+		include = 0;
+
+	ctx = appl_context(NULL, 0);
+	TAILQ_FOREACH(cap, &(ctx->ac_agentcaps), aa_entry) {
+		if (cap->aa_index > oid->bo_id[SYSORIDX_POS])
+			break;
+		if (cap->aa_index == oid->bo_id[SYSORIDX_POS] && include)
+			break;
+	}
+	if (cap == NULL) {
+		value = appl_exception(APPL_EXC_NOSUCHINSTANCE);
+		goto done;
+	}
+
+	oid->bo_id[SYSORIDX_POS] = cap->aa_index;
+	oid->bo_n = SYSORIDX_POS + 1;
+
+	if (ober_oid_cmp(&OID(MIB_sysORID), oid) == -2)
+		value = ober_add_oid(NULL, &(cap->aa_oid));
+	else if (ober_oid_cmp(&OID(MIB_sysORDescr), oid) == -2)
+		value = ober_add_string(NULL, cap->aa_descr);
+	else if (ober_oid_cmp(&OID(MIB_sysORUpTime), oid) == -2) {
+		if ((value = ober_add_integer(NULL, cap->aa_uptime)) != NULL)
+			ober_set_header(value,
+			    BER_CLASS_APPLICATION, SNMP_T_TIMETICKS);
+	}
+ done:
+	if (value == NULL)
+		log_warn("ober_add_*");
+	return value;
+}
+
+struct ber_element *
+appl_targetmib(struct ber_oid *oid)
+{
+	struct ber_element *value = NULL;
+
+	if (ober_oid_cmp(oid, &OID(MIB_snmpUnavailableContexts, 0)) == 0)
+		value = ober_add_integer(NULL,
+		    snmp_target_mib.snmp_unavailablecontexts);
+	else if (ober_oid_cmp(oid, &OID(MIB_snmpUnknownContexts, 0)) == 0)
+		value = ober_add_integer(NULL,
+		    snmp_target_mib.snmp_unknowncontexts);
+
+	if (value != NULL)
+		ober_set_header(value, BER_CLASS_APPLICATION, SNMP_T_COUNTER32);
+	return value;
+}
+
 enum appl_error
 appl_region(struct appl_context *ctx, uint32_t timeout, uint8_t priority,
-    struct ber_oid *oid, int instance, int subtree,
+    struct ber_oid *oid, uint8_t range_subid, int instance, int subtree,
     struct appl_backend *backend)
 {
 	struct appl_region *region = NULL, *nregion;
 	char oidbuf[1024], regionbuf[1024], subidbuf[11];
-	size_t i;
+	size_t i, bo_n;
 
-	/* Don't use smi_oid2string, because appl_register can't use it */
-	oidbuf[0] = '\0';
-	for (i = 0; i < oid->bo_n; i++) {
-		if (i != 0)
-			strlcat(oidbuf, ".", sizeof(oidbuf));
+	bo_n = oid->bo_n;
+	if (range_subid != 0)
+		oid->bo_n = range_subid;
+	mib_oid2string(oid, oidbuf, sizeof(oidbuf), snmpd_env->sc_oidfmt);
+	if (range_subid != 0) {
+		oid->bo_n = bo_n;
+		i = range_subid + 1;
+	} else
+		i = oid->bo_n;
+	for (; i < oid->bo_n; i++) {
+		strlcat(oidbuf, ".", sizeof(oidbuf));
 		snprintf(subidbuf, sizeof(subidbuf), "%"PRIu32,
 		    oid->bo_id[i]);
 		strlcat(oidbuf, subidbuf, sizeof(oidbuf));
@@ -301,15 +547,21 @@ appl_register(const char *ctxname, uint32_t timeout, uint8_t priority,
 	struct appl_region *region, search;
 	char oidbuf[1024], subidbuf[11];
 	enum appl_error error;
-	size_t i;
+	size_t i, bo_n;
 	uint32_t lower_bound;
 
-	oidbuf[0] = '\0';
-	/* smi_oid2string can't do ranges */
-	for (i = 0; i < oid->bo_n; i++) {
+	bo_n = oid->bo_n;
+	if (range_subid != 0)
+		oid->bo_n = range_subid;
+	mib_oid2string(oid, oidbuf, sizeof(oidbuf), snmpd_env->sc_oidfmt);
+	if (range_subid != 0) {
+		oid->bo_n = bo_n;
+		i = range_subid + 1;
+	} else
+		i = oid->bo_n;
+	for (; i < oid->bo_n; i++) {
+		strlcat(oidbuf, ".", sizeof(oidbuf));
 		snprintf(subidbuf, sizeof(subidbuf), "%"PRIu32, oid->bo_id[i]);
-		if (i != 0)
-			strlcat(oidbuf, ".", sizeof(oidbuf));
 		if (range_subid == i + 1) {
 			strlcat(oidbuf, "[", sizeof(oidbuf));
 			strlcat(oidbuf, subidbuf, sizeof(oidbuf));
@@ -347,30 +599,32 @@ appl_register(const char *ctxname, uint32_t timeout, uint8_t priority,
 		    backend->ab_name, oidbuf);
 		return APPL_ERROR_PARSEERROR;
 	}
-	if (range_subid > oid->bo_n) {
+
+	if (range_subid == 0)
+		return appl_region(ctx, timeout, priority, oid, range_subid,
+		    instance, subtree, backend);
+
+	range_subid--;
+	if (range_subid >= oid->bo_n) {
 		log_warnx("%s: Can't register %s: range_subid too large",
 		    backend->ab_name, oidbuf);
 		return APPL_ERROR_PARSEERROR;
 	}
-	if (range_subid != 0 && oid->bo_id[range_subid] >= upper_bound) {
-		log_warnx("%s: Can't register %s: upper bound smaller or equal "
-		    "to range_subid", backend->ab_name, oidbuf);
+	if (oid->bo_id[range_subid] > upper_bound) {
+		log_warnx("%s: Can't register %s: upper bound smaller than "
+		    "range_subid", backend->ab_name, oidbuf);
 		return APPL_ERROR_PARSEERROR;
 	}
-	if (range_subid != 0)
-		lower_bound = oid->bo_id[range_subid];
 
-	if (range_subid == 0)
-		return appl_region(ctx, timeout, priority, oid, instance,
-		    subtree, backend);
-
+	lower_bound = oid->bo_id[range_subid];
 	do {
-		if ((error = appl_region(ctx, timeout, priority, oid, instance,
-		    subtree, backend)) != APPL_ERROR_NOERROR)
+		if ((error = appl_region(ctx, timeout, priority, oid,
+		    range_subid, instance, subtree,
+		    backend)) != APPL_ERROR_NOERROR)
 			goto fail;
-	} while (oid->bo_id[range_subid] != upper_bound);
-	if ((error = appl_region(ctx, timeout, priority, oid, instance, subtree,
-	    backend)) != APPL_ERROR_NOERROR)
+	} while (oid->bo_id[range_subid]++ != upper_bound);
+	if ((error = appl_region(ctx, timeout, priority, oid, range_subid,
+	    instance, subtree, backend)) != APPL_ERROR_NOERROR)
 		goto fail;
 
 	return APPL_ERROR_NOERROR;
@@ -399,9 +653,10 @@ enum appl_error
 appl_unregister(const char *ctxname, uint8_t priority, struct ber_oid *oid,
     uint8_t range_subid, uint32_t upper_bound, struct appl_backend *backend)
 {
-	struct appl_region *region, search;
 	struct appl_context *ctx;
 	char oidbuf[1024], subidbuf[11];
+	enum appl_error error;
+	uint32_t lower_bound;
 	size_t i;
 
 	oidbuf[0] = '\0';
@@ -443,34 +698,45 @@ appl_unregister(const char *ctxname, uint8_t priority, struct ber_oid *oid,
 		return APPL_ERROR_PARSEERROR;
 	}
 
-	if (range_subid > oid->bo_n) {
+	if (range_subid == 0)
+		return appl_region_unregister_match(ctx, priority, oid, oidbuf,
+		    backend, 1);
+
+	range_subid--;
+	if (range_subid >= oid->bo_n) {
 		log_warnx("%s: Can't unregiser %s: range_subid too large",
 		    backend->ab_name, oidbuf);
 		return APPL_ERROR_PARSEERROR;
 	}
-	if (range_subid != 0 && oid->bo_id[range_subid] >= upper_bound) {
-		log_warnx("%s: Can't unregister %s: upper bound smaller or "
-		    "equal to range_subid", backend->ab_name, oidbuf);
+	if (oid->bo_id[range_subid] > upper_bound) {
+		log_warnx("%s: Can't unregister %s: upper bound smaller than "
+		    "range_subid", backend->ab_name, oidbuf);
 		return APPL_ERROR_PARSEERROR;
 	}
 
+	lower_bound = oid->bo_id[range_subid];
+	do {
+		if ((error = appl_region_unregister_match(ctx, priority, oid,
+		    oidbuf, backend, 0)) != APPL_ERROR_NOERROR)
+			return error;
+	} while (oid->bo_id[range_subid]++ != upper_bound);
+
+	oid->bo_id[range_subid] = lower_bound;
+	do {
+		(void)appl_region_unregister_match(ctx, priority, oid, oidbuf,
+		    backend, 1);
+	} while (oid->bo_id[range_subid]++ != upper_bound);
+
+	return APPL_ERROR_NOERROR;
+}
+
+enum appl_error
+appl_region_unregister_match(struct appl_context *ctx, uint8_t priority,
+    struct ber_oid *oid, char *oidbuf, struct appl_backend *backend, int dofree)
+{
+	struct appl_region *region, search;
+
 	search.ar_oid = *oid;
-	while (range_subid != 0 &&
-	    search.ar_oid.bo_id[range_subid] != upper_bound) {
-		region = RB_FIND(appl_regions, &(ctx->ac_regions), &search);
-		while (region != NULL && region->ar_priority < priority)
-			region = region->ar_next;
-		if (region == NULL || region->ar_priority != priority) {
-			log_warnx("%s: Can't unregister %s: region not found",
-			    backend->ab_name, oidbuf);
-			return APPL_ERROR_UNKNOWNREGISTRATION;
-		}
-		if (region->ar_backend != backend) {
-			log_warnx("%s: Can't unregister %s: region not owned "
-			    "by backend", backend->ab_name, oidbuf);
-			return APPL_ERROR_UNKNOWNREGISTRATION;
-		}
-	}
 	region = RB_FIND(appl_regions, &(ctx->ac_regions), &search);
 	while (region != NULL && region->ar_priority < priority)
 		region = region->ar_next;
@@ -484,20 +750,8 @@ appl_unregister(const char *ctxname, uint8_t priority, struct ber_oid *oid,
 		    "by backend", backend->ab_name, oidbuf);
 		return APPL_ERROR_UNKNOWNREGISTRATION;
 	}
-
-	search.ar_oid = *oid;
-	while (range_subid != 0 &&
-	    search.ar_oid.bo_id[range_subid] != upper_bound) {
-		region = RB_FIND(appl_regions, &(ctx->ac_regions), &search);
-		while (region != NULL && region->ar_priority != priority)
-			region = region->ar_next;
+	if (dofree)
 		appl_region_free(ctx, region);
-	}
-	region = RB_FIND(appl_regions, &(ctx->ac_regions), &search);
-	while (region != NULL && region->ar_priority != priority)
-		region = region->ar_next;
-	appl_region_free(ctx, region);
-
 	return APPL_ERROR_NOERROR;
 }
 
@@ -527,10 +781,15 @@ void
 appl_close(struct appl_backend *backend)
 {
 	struct appl_context *ctx;
+	struct appl_agentcap *cap, *tcap;
 	struct appl_region *region, *tregion, *nregion;
 	struct appl_request_downstream *request, *trequest;
 
 	TAILQ_FOREACH(ctx, &contexts, ac_entries) {
+		TAILQ_FOREACH_SAFE(cap, &(ctx->ac_agentcaps), aa_entry, tcap) {
+			if (cap->aa_backend == backend)
+				appl_agentcap_free(cap);
+		}
 		RB_FOREACH_SAFE(region, appl_regions,
 		    &(ctx->ac_regions), tregion) {
 			while (region != NULL) {
@@ -609,8 +868,7 @@ appl_processpdu(struct snmp_message *statereference, const char *ctxname,
 {
 	struct appl_context *ctx;
 	struct appl_request_upstream *ureq;
-	struct ber_oid oid;
-	struct ber_element *value, *varbind, *varbindlist;
+	struct ber_element *varbind, *varbindlist;
 	long long nonrepeaters, maxrepetitions;
 	static uint32_t transactionid;
 	int32_t requestid;
@@ -622,12 +880,9 @@ appl_processpdu(struct snmp_message *statereference, const char *ctxname,
 
 	/* RFC 3413, section 3.2, processPDU, item 5, final bullet */
 	if ((ctx = appl_context(ctxname, 0)) == NULL) {
-		oid = BER_OID(MIB_snmpUnknownContexts, 0);
 		snmp_target_mib.snmp_unknowncontexts++;
-		if ((value = ober_add_integer(NULL,
-		    snmp_target_mib.snmp_unknowncontexts)) == NULL)
-			fatal("ober_add_integer");
-		appl_report(statereference, requestid, &oid, value);
+		appl_report(statereference, requestid,
+		    &OID(MIB_snmpUnknownContexts, 0));
 		return;
 	}
 
@@ -637,6 +892,8 @@ appl_processpdu(struct snmp_message *statereference, const char *ctxname,
 	ureq->aru_ctx = ctx;
 	ureq->aru_statereference = statereference;
 	ureq->aru_transactionid = transactionid++;
+	ureq->aru_requesttype = pdu->be_type;
+	ureq->aru_responsetype = SNMP_C_RESPONSE;
 	ureq->aru_requestid = requestid;
 	ureq->aru_error = APPL_ERROR_NOERROR;
 	ureq->aru_index = 0;
@@ -645,7 +902,6 @@ appl_processpdu(struct snmp_message *statereference, const char *ctxname,
 	ureq->aru_varbindlen = 0;
 	ureq->aru_locked = 0;
 	ureq->aru_pduversion = pduversion;
-	ureq->aru_pdu = pdu;
 
 	varbind = varbindlist->be_sub;
 	for (; varbind != NULL; varbind = varbind->be_next)
@@ -672,19 +928,19 @@ appl_processpdu(struct snmp_message *statereference, const char *ctxname,
 			ureq->aru_vblist[i - repeaterlen].avi_sub =
 			    &(ureq->aru_vblist[i]);
 			ureq->aru_vblist[i].avi_state = APPL_VBSTATE_MUSTFILL;
+			ureq->aru_vblist[i].avi_index =
+			    ureq->aru_vblist[i - repeaterlen].avi_index;
 			continue;
 		}
 		ober_get_oid(varbind->be_sub,
 		    &(ureq->aru_vblist[i].avi_varbind.av_oid));
-		if (i + 1 < ureq->aru_varbindlen) {
-			ureq->aru_vblist[i].avi_next =
-			    &(ureq->aru_vblist[i + 1]);
+		ureq->aru_vblist[i].avi_origid =
+		    ureq->aru_vblist[i].avi_varbind.av_oid;
+		if (i + 1 < varbindlen)
 			ureq->aru_vblist[i].avi_varbind.av_next =
 			    &(ureq->aru_vblist[i + 1].avi_varbind);
-		} else {
-			ureq->aru_vblist[i].avi_next = NULL;
+		else
 			ureq->aru_vblist[i].avi_varbind.av_next = NULL;
-		}
 		varbind = varbind->be_next;
 	}
 
@@ -703,6 +959,7 @@ appl_request_upstream_free(struct appl_request_upstream *ureq)
 	if (ureq == NULL)
 		return;
 
+	ureq->aru_locked = 1;
 	for (i = 0; i < ureq->aru_varbindlen && ureq->aru_vblist != NULL; i++) {
 		vb = &(ureq->aru_vblist[i]);
 		ober_free_elements(vb->avi_varbind.av_value);
@@ -719,7 +976,6 @@ void
 appl_request_downstream_free(struct appl_request_downstream *dreq)
 {
 	struct appl_varbind_internal *vb;
-	int retry = 0;
 
 	if (dreq == NULL)
 		return;
@@ -729,14 +985,11 @@ appl_request_downstream_free(struct appl_request_downstream *dreq)
 
 	for (vb = dreq->ard_vblist; vb != NULL; vb = vb->avi_next) {
 		vb->avi_request_downstream = NULL;
-		if (vb->avi_state == APPL_VBSTATE_PENDING) {
+		if (vb->avi_state == APPL_VBSTATE_PENDING)
 			vb->avi_state = APPL_VBSTATE_NEW;
-			retry = 1;
-		}
 	}
 
-	if (retry)
-		appl_request_upstream_resolve(dreq->ard_request);
+	appl_request_upstream_resolve(dreq->ard_request);
 	free(dreq);
 }
 
@@ -756,7 +1009,7 @@ appl_request_upstream_resolve(struct appl_request_upstream *ureq)
 		return;
 	ureq->aru_locked = 1;
 
-	if (ureq->aru_pdu->be_type == SNMP_C_SETREQ) {
+	if (ureq->aru_requesttype == SNMP_C_SETREQ) {
 		ureq->aru_error = APPL_ERROR_NOTWRITABLE;
 		ureq->aru_index = 1;
 		appl_request_upstream_reply(ureq);
@@ -817,7 +1070,7 @@ appl_request_upstream_resolve(struct appl_request_upstream *ureq)
 			dreq->ard_vblist = vb;
 			dreq->ard_backend = vb->avi_region->ar_backend;
 			dreq->ard_retries = dreq->ard_backend->ab_retries;
-			dreq->ard_requesttype = ureq->aru_pdu->be_type;
+			dreq->ard_requesttype = ureq->aru_requesttype;
 			/*
 			 * We don't yet fully handle bulkrequest responses.
 			 * It's completely valid to map onto getrequest.
@@ -970,17 +1223,18 @@ appl_request_upstream_reply(struct appl_request_upstream *ureq)
 	}
 	/* RFC 3416 section 4.2.{1,2,3} reset original varbinds */
 	if (ureq->aru_error != APPL_ERROR_NOERROR) {
-		ober_scanf_elements(ureq->aru_pdu, "{SSS{e", &varbind);
-		for (varbindlen = 0; varbind != NULL;
-		    varbindlen++, varbind = varbind->be_next) {
-			vb = &(ureq->aru_vblist[varbindlen]);
-			ober_get_oid(varbind->be_sub,
-			    &(vb->avi_varbind.av_oid));
+		if (ureq->aru_requesttype == SNMP_C_GETBULKREQ)
+			varbindlen =
+			    (ureq->aru_varbindlen - ureq->aru_nonrepeaters) /
+			    ureq->aru_maxrepetitions;
+		for (i = 0; i < varbindlen; i++) {
+			vb = &(ureq->aru_vblist[i]);
+			vb->avi_varbind.av_oid = vb->avi_origid;
 			ober_free_elements(vb->avi_varbind.av_value);
-			vb->avi_varbind.av_value = ober_add_null(NULL);;
+			vb->avi_varbind.av_value = ober_add_null(NULL);
 		}
 	/* RFC 3416 section 4.2.3: Strip excessive EOMV */
-	} else if (ureq->aru_pdu->be_type == SNMP_C_GETBULKREQ) {
+	} else if (ureq->aru_requesttype == SNMP_C_GETBULKREQ) {
 		repvarbinds = (ureq->aru_varbindlen - ureq->aru_nonrepeaters) /
 		    ureq->aru_maxrepetitions;
 		for (i = ureq->aru_nonrepeaters;
@@ -1005,10 +1259,14 @@ appl_request_upstream_reply(struct appl_request_upstream *ureq)
 		vb = &(ureq->aru_vblist[i]);
 		vb->avi_varbind.av_next =
 		    &(ureq->aru_vblist[i + 1].avi_varbind);
+		value = vb->avi_varbind.av_value;
+		if (value->be_class == BER_CLASS_CONTEXT &&
+		    value->be_type == APPL_EXC_ENDOFMIBVIEW)
+			vb->avi_varbind.av_oid = vb->avi_origid;
 	}
 
 	ureq->aru_vblist[i - 1].avi_varbind.av_next = NULL;
-	appl_pdu_log(NULL, SNMP_C_RESPONSE, ureq->aru_requestid,
+	appl_pdu_log(NULL, ureq->aru_responsetype, ureq->aru_requestid,
 	    ureq->aru_error, ureq->aru_index,
 	    &(ureq->aru_vblist[0].avi_varbind));
 
@@ -1023,7 +1281,7 @@ appl_request_upstream_reply(struct appl_request_upstream *ureq)
 			varbindlist = varbind;
 	}
 
-	snmpe_send(ureq->aru_statereference, SNMP_C_RESPONSE,
+	snmpe_send(ureq->aru_statereference, ureq->aru_responsetype,
 	    ureq->aru_requestid, ureq->aru_error, ureq->aru_index, varbindlist);
 	ureq->aru_statereference = NULL;
 	appl_request_upstream_free(ureq);
@@ -1038,7 +1296,6 @@ appl_response(struct appl_backend *backend, int32_t requestid,
 	struct appl_request_upstream *ureq = NULL;
 	const char *errstr;
 	char oidbuf[1024];
-	enum snmp_pdutype pdutype;
 	struct appl_varbind *vb;
 	struct appl_varbind_internal *origvb = NULL;
 	int invalid = 0;
@@ -1055,19 +1312,22 @@ appl_response(struct appl_backend *backend, int32_t requestid,
 		/* Continue to verify validity */
 	} else {
 		ureq = dreq->ard_request;
-		pdutype = ureq->aru_pdu->be_type;
-		next = pdutype == SNMP_C_GETNEXTREQ ||
-		    pdutype == SNMP_C_GETBULKREQ;
+		next = ureq->aru_requesttype == SNMP_C_GETNEXTREQ ||
+		    ureq->aru_requesttype == SNMP_C_GETBULKREQ;
 		origvb = dreq->ard_vblist;
+		if (!appl_error_valid(error, dreq->ard_requesttype)) {
+			log_warnx("%s: %"PRIu32" Invalid error",
+			    backend->ab_name, requestid);
+			invalid = 1;
+		}
 	}
 
 	vb = vblist;
 	for (i = 1; vb != NULL; vb = vb->av_next, i++) {
-                if (!appl_varbind_valid(vb, origvb == NULL ?
-		    NULL : &(origvb->avi_varbind), next,
-                    error != APPL_ERROR_NOERROR, backend->ab_range, &errstr)) {
-			smi_oid2string(&(vb->av_oid), oidbuf,
-			    sizeof(oidbuf), 0);
+		if (!appl_varbind_valid(vb, origvb, next,
+		    error != APPL_ERROR_NOERROR, backend->ab_range, &errstr)) {
+			mib_oid2string(&(vb->av_oid), oidbuf, sizeof(oidbuf),
+			    snmpd_env->sc_oidfmt);
 			log_warnx("%s: %"PRIu32" %s: %s",
 			    backend->ab_name, requestid, oidbuf, errstr);
 			invalid = 1;
@@ -1088,7 +1348,7 @@ appl_response(struct appl_backend *backend, int32_t requestid,
 			 */
 			eomv |= !backend->ab_range && next &&
 			    ober_oid_cmp(&(vb->av_oid),
-			    &(origvb->avi_varbind.av_oid_end)) > 0;
+			    &(origvb->avi_varbind.av_oid_end)) >= 0;
 			/* RFC 3584 section 4.2.2.1 */
 			if (ureq->aru_pduversion == SNMP_V1 &&
 			    vb->av_value != NULL &&
@@ -1120,6 +1380,8 @@ appl_response(struct appl_backend *backend, int32_t requestid,
 			if (origvb->avi_sub != NULL &&
 			    origvb->avi_state == APPL_VBSTATE_DONE) {
 				origvb->avi_sub->avi_varbind.av_oid =
+				    origvb->avi_varbind.av_oid;
+				origvb->avi_sub->avi_origid =
 				    origvb->avi_varbind.av_oid;
 				origvb->avi_sub->avi_state = APPL_VBSTATE_NEW;
 			}
@@ -1157,17 +1419,23 @@ appl_response(struct appl_backend *backend, int32_t requestid,
 		    backend->ab_name);
 		backend->ab_fn->ab_close(backend, APPL_CLOSE_REASONPARSEERROR);
 	}
-
-	if (ureq != NULL)
-		appl_request_upstream_resolve(ureq);
 }
 
 int
-appl_varbind_valid(struct appl_varbind *varbind, struct appl_varbind *request,
-    int next, int null, int range, const char **errstr)
+appl_varbind_valid(struct appl_varbind *varbind,
+    struct appl_varbind_internal *request, int next, int null, int range,
+    const char **errstr)
 {
 	int cmp;
 	int eomv = 0;
+	long long intval;
+	void *buf;
+	size_t len;
+	struct ber ber;
+	struct ber_element *elm;
+
+	if (null)
+		next = 0;
 
 	if (varbind->av_value == NULL) {
 		if (!null) {
@@ -1176,36 +1444,111 @@ appl_varbind_valid(struct appl_varbind *varbind, struct appl_varbind *request,
 		}
 		return 1;
 	}
+
+	if (null) {
+		if (varbind->av_value->be_class != BER_CLASS_UNIVERSAL ||
+		    varbind->av_value->be_type != BER_TYPE_NULL) {
+			*errstr = "expecting null value";
+			return 0;
+		}
+	} else {
+		if (varbind->av_value->be_class == BER_CLASS_UNIVERSAL &&
+		    varbind->av_value->be_type == BER_TYPE_NULL) {
+			*errstr = "unexpected null value";
+			return 0;
+		}
+	}
+
 	if (varbind->av_value->be_class == BER_CLASS_UNIVERSAL) {
 		switch (varbind->av_value->be_type) {
 		case BER_TYPE_NULL:
-			if (null)
-				break;
-			*errstr = "not expecting null value";
-			return 0;
+			/* Checked above */
+			break;
 		case BER_TYPE_INTEGER:
+			(void)ober_get_integer(varbind->av_value, &intval);
+			if (intval < SMI_INTEGER_MIN) {
+				*errstr = "INTEGER value too small";
+				return 0;
+			}
+			if (intval > SMI_INTEGER_MAX) {
+				*errstr = "INTEGER value too large";
+				return 0;
+			}
+			break;
 		case BER_TYPE_OCTETSTRING:
+			(void)ober_get_nstring(varbind->av_value, NULL, &len);
+			if (len > SMI_OCTETSTRING_MAX) {
+				*errstr = "OCTET STRING too long";
+				return 0;
+			}
+			break;
 		case BER_TYPE_OBJECT:
-			if (!null)
-				break;
-			/* FALLTHROUGH */
+			/* validated by ber.c */
+			break;
 		default:
-			*errstr = "invalid value";
+			*errstr = "invalid value encoding";
 			return 0;
 		}
 	} else if (varbind->av_value->be_class == BER_CLASS_APPLICATION) {
 		switch (varbind->av_value->be_type) {
 		case SNMP_T_IPADDR:
+			(void)ober_get_nstring(varbind->av_value, NULL, &len);
+			if (len != SMI_IPADDRESS_MAX) {
+				*errstr = "invalid IpAddress size";
+				return 0;
+			}
+			break;
 		case SNMP_T_COUNTER32:
+			(void)ober_get_integer(varbind->av_value, &intval);
+			if (intval < SMI_COUNTER32_MIN) {
+				*errstr = "Counter32 value too small";
+				return 0;
+			}
+			if (intval > SMI_COUNTER32_MAX) {
+				*errstr = "Counter32 value too large";
+				return 0;
+			}
+			break;
 		case SNMP_T_GAUGE32:
+			(void)ober_get_integer(varbind->av_value, &intval);
+			if (intval < SMI_GAUGE32_MIN) {
+				*errstr = "Gauge32 value too small";
+				return 0;
+			}
+			if (intval > SMI_GAUGE32_MAX) {
+				*errstr = "Gauge32 value too large";
+				return 0;
+			}
+			break;
 		case SNMP_T_TIMETICKS:
+			(void)ober_get_integer(varbind->av_value, &intval);
+			if (intval < SMI_TIMETICKS_MIN) {
+				*errstr = "TimeTicks value too small";
+				return 0;
+			}
+			if (intval > SMI_TIMETICKS_MAX) {
+				*errstr = "TimeTicks value too large";
+				return 0;
+			}
+			break;
 		case SNMP_T_OPAQUE:
+			(void)ober_get_nstring(varbind->av_value, &buf, &len);
+			memset(&ber, 0, sizeof(ber));
+			ober_set_application(&ber, appl_ber_any);
+			ober_set_readbuf(&ber, buf, len);
+			elm = ober_read_elements(&ber, NULL);
+			if (elm == NULL || ober_calc_len(elm) != len) {
+				ober_free_elements(elm);
+				*errstr = "Opaque not valid ber encoded value";
+				return 0;
+			}
+			ober_free_elements(elm);
+			break;
 		case SNMP_T_COUNTER64:
-			if (!null)
-				break;
-			/* FALLTHROUGH */
+			/* Maximum value supported by ber.c */
+			break;
 		default:
-			*errstr = "expecting null value";
+			*errstr = "invalid value encoding";
 			return 0;
 		}
 	} else if (varbind->av_value->be_class == BER_CLASS_CONTEXT) {
@@ -1215,22 +1558,14 @@ appl_varbind_valid(struct appl_varbind *varbind, struct appl_varbind *request,
 				*errstr = "Unexpected noSuchObject";
 				return 0;
 			}
-			/* FALLTHROUGH */
+			break;
 		case APPL_EXC_NOSUCHINSTANCE:
-			if (null) {
-				*errstr = "expecting null value";
-				return 0;
-			}
 			if (next && request != NULL) {
 				*errstr = "Unexpected noSuchInstance";
 				return 0;
 			}
 			break;
 		case APPL_EXC_ENDOFMIBVIEW:
-			if (null) {
-				*errstr = "expecting null value";
-				return 0;
-			}
 			if (!next && request != NULL) {
 				*errstr = "Unexpected endOfMibView";
 				return 0;
@@ -1238,34 +1573,42 @@ appl_varbind_valid(struct appl_varbind *varbind, struct appl_varbind *request,
 			eomv = 1;
 			break;
 		default:
-			*errstr = "invalid exception";
+			*errstr = "invalid value encoding";
 			return 0;
 		}
 	} else {
-		*errstr = "invalid value";
+		*errstr = "invalid value encoding";
 		return 0;
 	}
 
 	if (request == NULL)
 		return 1;
 
-	cmp = ober_oid_cmp(&(request->av_oid), &(varbind->av_oid));
-	if (next && !eomv) {
-		if (request->av_include) {
-			if (cmp > 0) {
-				*errstr = "oid not incrementing";
-				return 0;
-			}
-		} else {
-			if (cmp >= 0) {
-				*errstr = "oid not incrementing";
-				return 0;
-			}
-		}
-		if (range && ober_oid_cmp(&(varbind->av_oid),
-		    &(request->av_oid_end)) > 0) {
-			*errstr = "end oid not honoured";
+	cmp = ober_oid_cmp(&(request->avi_varbind.av_oid), &(varbind->av_oid));
+	if (next) {
+		if (request->avi_region->ar_instance &&
+		    ober_oid_cmp(&(request->avi_region->ar_oid),
+		    &(varbind->av_oid)) != 0) {
+			*errstr = "oid below instance";
 			return 0;
+		}
+		if (!eomv) {
+			if (request->avi_varbind.av_include) {
+				if (cmp > 0) {
+					*errstr = "oid not incrementing";
+					return 0;
+				}
+			} else {
+				if (cmp >= 0) {
+					*errstr = "oid not incrementing";
+					return 0;
+				}
+			}
+			if (range && ober_oid_cmp(&(varbind->av_oid),
+			    &(request->avi_varbind.av_oid_end)) >= 0) {
+				*errstr = "end oid not honoured";
+				return 0;
+			}
 		}
 	} else {
 		if (cmp != 0) {
@@ -1274,6 +1617,43 @@ appl_varbind_valid(struct appl_varbind *varbind, struct appl_varbind *request,
 		}
 	}
 	return 1;
+}
+
+unsigned int
+appl_ber_any(struct ber_element *elm)
+{
+	return BER_TYPE_OCTETSTRING;
+}
+
+int
+appl_error_valid(enum appl_error error, enum snmp_pdutype type)
+{
+	switch (error) {
+	case APPL_ERROR_NOERROR:
+	case APPL_ERROR_TOOBIG:
+	case APPL_ERROR_NOSUCHNAME:
+	case APPL_ERROR_GENERR:
+		return 1;
+	case APPL_ERROR_BADVALUE:
+	case APPL_ERROR_READONLY:
+	case APPL_ERROR_NOACCESS:
+	case APPL_ERROR_WRONGTYPE:
+	case APPL_ERROR_WRONGLENGTH:
+	case APPL_ERROR_WRONGENCODING:
+	case APPL_ERROR_WRONGVALUE:
+	case APPL_ERROR_NOCREATION:
+	case APPL_ERROR_INCONSISTENTVALUE:
+	case APPL_ERROR_RESOURCEUNAVAILABLE:
+	case APPL_ERROR_COMMITFAILED:
+	case APPL_ERROR_UNDOFAILED:
+	case APPL_ERROR_NOTWRITABLE:
+	case APPL_ERROR_INCONSISTENTNAME:
+		return type == SNMP_C_SETREQ;
+	case APPL_ERROR_AUTHORIZATIONERROR:
+		return type == SNMP_C_GETREQ || type == SNMP_C_SETREQ;
+	default:
+		return 0;
+	}
 }
 
 int
@@ -1285,8 +1665,8 @@ appl_varbind_backend(struct appl_varbind_internal *ivb)
 	struct ber_oid oid, nextsibling;
 	int next, cmp;
 
-	next = ureq->aru_pdu->be_type == SNMP_C_GETNEXTREQ ||
-	    ureq->aru_pdu->be_type == SNMP_C_GETBULKREQ;
+	next = ureq->aru_requesttype == SNMP_C_GETNEXTREQ ||
+	    ureq->aru_requesttype == SNMP_C_GETBULKREQ;
 
 	region = appl_region_find(ureq->aru_ctx, &(vb->av_oid));
 	if (region == NULL) {
@@ -1316,19 +1696,17 @@ appl_varbind_backend(struct appl_varbind_internal *ivb)
 					return -1;
 				return 0;
 			}
-			if ((region = appl_region_next(ureq->aru_ctx,
-			    &(vb->av_oid), region)) == NULL)
-				goto eomv;
 			vb->av_oid = region->ar_oid;
+			ober_oid_nextsibling(&(vb->av_oid));
 			vb->av_include = 1;
+			return appl_varbind_backend(ivb);
 		}
 	} else if (cmp == 0) {
 		if (region->ar_instance && next && !vb->av_include) {
-			if ((region = appl_region_next(ureq->aru_ctx,
-			    &(vb->av_oid), region)) == NULL)
-				goto eomv;
 			vb->av_oid = region->ar_oid;
+			ober_oid_nextsibling(&(vb->av_oid));
 			vb->av_include = 1;
+			return appl_varbind_backend(ivb);
 		}
 	}
 	ivb->avi_region = region;
@@ -1378,9 +1756,11 @@ appl_varbind_backend(struct appl_varbind_internal *ivb)
 		ivb->avi_state = APPL_VBSTATE_DONE;
 		if (ivb->avi_varbind.av_value == NULL)
 			return -1;
-		if (ivb->avi_sub != NULL)
+		if (ivb->avi_sub != NULL) {
 			ivb->avi_sub->avi_varbind.av_oid =
 			    ivb->avi_varbind.av_oid;
+			ivb->avi_sub->avi_origid = ivb->avi_origid;
+		}
 		ivb = ivb->avi_sub;
 	} while (ivb != NULL);
 
@@ -1401,20 +1781,41 @@ appl_varbind_error(struct appl_varbind_internal *avi, enum appl_error error)
 }
 
 void
-appl_report(struct snmp_message *msg, int32_t requestid, struct ber_oid *oid,
-    struct ber_element *value)
+appl_report(struct snmp_message *statereference, int32_t requestid,
+    struct ber_oid *oid)
 {
-	struct ber_element *varbind;
+	struct appl_request_upstream *ureq;
 
-	varbind = ober_printf_elements(NULL, "{Oe}", oid, value);
-	if (varbind == NULL) {
-		log_warn("%"PRId32": ober_printf_elements", requestid);
-		ober_free_elements(value);
-		snmp_msgfree(msg);
-		return;
-	}
+	if ((ureq = calloc(1, sizeof(*ureq))) == NULL)
+		fatal("malloc");
+	ureq->aru_ctx = appl_context(NULL, 0);
+	ureq->aru_statereference = statereference;
+	ureq->aru_requesttype = SNMP_C_GETREQ;
+	ureq->aru_responsetype = SNMP_C_REPORT;
+	ureq->aru_requestid = requestid;
+	ureq->aru_transactionid = 0;
+	ureq->aru_nonrepeaters = 0;
+	ureq->aru_maxrepetitions = 0;
+	if ((ureq->aru_vblist = calloc(1, sizeof(*ureq->aru_vblist))) == NULL)
+		fatal("malloc");
+	ureq->aru_varbindlen = 1;
+	ureq->aru_error = APPL_ERROR_NOERROR;
+	ureq->aru_index = 0;
+	ureq->aru_locked = 0;
+	ureq->aru_pduversion = SNMP_V3;
 
-	snmpe_send(msg, SNMP_C_REPORT, requestid, 0, 0, varbind);
+	ureq->aru_vblist[0].avi_state = APPL_VBSTATE_NEW;
+	ureq->aru_vblist[0].avi_varbind.av_oid = *oid;
+	ureq->aru_vblist[0].avi_varbind.av_value = NULL;
+	ureq->aru_vblist[0].avi_varbind.av_next = NULL;
+	ureq->aru_vblist[0].avi_origid = *oid;
+	ureq->aru_vblist[0].avi_index = 1;
+	ureq->aru_vblist[0].avi_request_upstream = ureq;
+	ureq->aru_vblist[0].avi_request_downstream = NULL;
+	ureq->aru_vblist[0].avi_next = NULL;
+	ureq->aru_vblist[0].avi_sub = NULL;
+	
+	appl_request_upstream_resolve(ureq);
 }
 
 struct ber_element *
@@ -1448,15 +1849,16 @@ appl_pdu_log(struct appl_backend *backend, enum snmp_pdutype pdutype,
 	buf[0] = '\0';
 	for (vb = vblist; vb != NULL; vb = vb->av_next) {
 		strlcat(buf, "{", sizeof(buf));
-		strlcat(buf, smi_oid2string(&(vb->av_oid), oidbuf,
-		    sizeof(oidbuf), 0), sizeof(buf));
+		strlcat(buf, mib_oid2string(&(vb->av_oid), oidbuf,
+		    sizeof(oidbuf), snmpd_env->sc_oidfmt), sizeof(buf));
 		if (next) {
 			if (vb->av_include)
 				strlcat(buf, "(incl)", sizeof(buf));
 			if (vb->av_oid_end.bo_n > 0) {
 				strlcat(buf, "-", sizeof(buf));
-				strlcat(buf, smi_oid2string(&(vb->av_oid_end),
-				    oidbuf, sizeof(oidbuf), 0), sizeof(buf));
+				strlcat(buf, mib_oid2string(&(vb->av_oid_end),
+				    oidbuf, sizeof(oidbuf),
+				    snmpd_env->sc_oidfmt), sizeof(buf));
 			}
 		}
 		strlcat(buf, ":", sizeof(buf));

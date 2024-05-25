@@ -1,4 +1,4 @@
-/*	$OpenBSD: pm_direct.c,v 1.33 2022/10/23 08:00:10 kn Exp $	*/
+/*	$OpenBSD: pm_direct.c,v 1.35 2023/11/22 18:14:35 tobhe Exp $	*/
 /*	$NetBSD: pm_direct.c,v 1.9 2000/06/08 22:10:46 tsubai Exp $	*/
 
 /*
@@ -200,11 +200,7 @@ extern	void	adb_pass_up(struct adbCommand *);
  * This function dumps contents of the PMData
  */
 void
-pm_printerr(ttl, rval, num, data)
-	char *ttl;
-	int rval;
-	int num;
-	char *data;
+pm_printerr(char *ttl, int rval, int num, char *data)
 {
 	int i;
 
@@ -857,3 +853,22 @@ pmu_fileserver_mode(int on)
 	}
 	pmgrop(&p);
 }
+
+int
+pmu_set_kbl(unsigned int level)
+{
+	if (level > 0xff)
+		return (EINVAL);
+
+	PMData p;
+
+	p.command = 0x4F;
+	p.num_data = 3;
+	p.s_buf = p.r_buf = p.data;
+	p.data[0] = 0;
+	p.data[1] = 0;
+	p.data[2] = level;
+	pmgrop(&p);
+	return (0);
+}
+

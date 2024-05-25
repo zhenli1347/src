@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_task.c,v 1.33 2022/08/15 11:38:35 mvs Exp $ */
+/*	$OpenBSD: kern_task.c,v 1.35 2024/05/14 08:26:13 jsg Exp $ */
 
 /*
  * Copyright (c) 2013 David Gwynne <dlg@openbsd.org>
@@ -128,8 +128,6 @@ struct taskq *const systqmp = &taskq_sys_mp;
 void	taskq_init(void); /* called in init_main.c */
 void	taskq_create_thread(void *);
 void	taskq_barrier_task(void *);
-int	taskq_sleep(const volatile void *, struct mutex *, int,
-	    const char *, int);
 int	taskq_next_work(struct taskq *, struct task *);
 void	taskq_thread(void *);
 
@@ -363,7 +361,8 @@ task_add(struct taskq *tq, struct task *w)
 		SET(w->t_flags, TASK_ONQUEUE);
 		TAILQ_INSERT_TAIL(&tq->tq_worklist, w, t_entry);
 #if NKCOV > 0
-		w->t_process = curproc->p_p;
+		if (!kcov_cold)
+			w->t_process = curproc->p_p;
 #endif
 	}
 	mtx_leave(&tq->tq_mtx);

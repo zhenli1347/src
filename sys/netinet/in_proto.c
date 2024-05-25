@@ -1,4 +1,4 @@
-/*	$OpenBSD: in_proto.c,v 1.99 2022/08/15 09:11:38 mvs Exp $	*/
+/*	$OpenBSD: in_proto.c,v 1.104 2024/04/14 20:46:27 bluhm Exp $	*/
 /*	$NetBSD: in_proto.c,v 1.14 1996/02/18 18:58:32 christos Exp $	*/
 
 /*
@@ -210,7 +210,7 @@ const struct protosw inetsw[] = {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inetdomain,
   .pr_protocol	= IPPROTO_RAW,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= rip_input,
   .pr_ctloutput	= rip_ctloutput,
   .pr_usrreqs	= &rip_usrreqs,
@@ -343,7 +343,7 @@ const struct protosw inetsw[] = {
   .pr_domain	= &inetdomain,
   .pr_protocol	= IPPROTO_PFSYNC,
   .pr_flags	= PR_ATOMIC|PR_ADDR,
-  .pr_input	= pfsync_input,
+  .pr_input	= pfsync_input4,
   .pr_ctloutput	= rip_ctloutput,
   .pr_usrreqs	= &rip_usrreqs,
   .pr_sysctl	= pfsync_sysctl
@@ -377,7 +377,7 @@ const struct protosw inetsw[] = {
   /* raw wildcard */
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inetdomain,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= rip_input,
   .pr_ctloutput	= rip_ctloutput,
   .pr_usrreqs	= &rip_usrreqs,
@@ -387,7 +387,7 @@ const struct protosw inetsw[] = {
 
 const struct domain inetdomain = {
   .dom_family = AF_INET,
-  .dom_name = "internet",
+  .dom_name = "inet",
   .dom_init = in_init,
   .dom_protosw = inetsw,
   .dom_protoswNPROTOSW = &inetsw[nitems(inetsw)],

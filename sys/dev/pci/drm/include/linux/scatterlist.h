@@ -1,4 +1,4 @@
-/*	$OpenBSD: scatterlist.h,v 1.4 2021/07/07 02:38:36 jsg Exp $	*/
+/*	$OpenBSD: scatterlist.h,v 1.7 2024/01/06 09:33:08 kettenis Exp $	*/
 /*
  * Copyright (c) 2013, 2014, 2015 Mark Kettenis
  *
@@ -23,6 +23,7 @@
 #include <uvm/uvm_extern.h>
 
 #include <linux/mm.h>
+#include <linux/fwnode.h> /* via asm/io.h -> logic_pio.h */
 
 struct scatterlist {
 	struct vm_page *__page;
@@ -36,6 +37,7 @@ struct sg_table {
 	struct scatterlist *sgl;
 	unsigned int nents;
 	unsigned int orig_nents;
+	bus_dmamap_t dmamap;
 };
 
 struct sg_page_iter {
@@ -118,7 +120,6 @@ sg_set_page(struct scatterlist *sgl, struct vm_page *page,
 	sgl->dma_address = page ? VM_PAGE_TO_PHYS(page) : 0;
 	sgl->offset = offset;
 	sgl->length = length;
-	sgl->end = false;
 }
 
 #define sg_dma_address(sg)	((sg)->dma_address)

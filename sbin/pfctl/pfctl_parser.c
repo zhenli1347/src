@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfctl_parser.c,v 1.347 2022/11/09 23:00:00 sashan Exp $ */
+/*	$OpenBSD: pfctl_parser.c,v 1.351 2024/04/22 13:30:22 bluhm Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -61,6 +61,10 @@
 
 #include "pfctl_parser.h"
 #include "pfctl.h"
+
+#ifndef nitems
+#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
+#endif
 
 void		 print_op (u_int8_t, const char *, const char *);
 void		 print_port (u_int8_t, u_int16_t, u_int16_t, const char *, int);
@@ -224,17 +228,15 @@ copy_satopfaddr(struct pf_addr *pfa, struct sockaddr *sa)
 const struct icmptypeent *
 geticmptypebynumber(u_int8_t type, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
-		for (i=0; i < (sizeof (icmp_type) / sizeof(icmp_type[0]));
-		    i++) {
+		for (i = 0; i < nitems(icmp_type); i++) {
 			if (type == icmp_type[i].type)
 				return (&icmp_type[i]);
 		}
 	} else {
-		for (i=0; i < (sizeof (icmp6_type) /
-		    sizeof(icmp6_type[0])); i++) {
+		for (i = 0; i < nitems(icmp6_type); i++) {
 			if (type == icmp6_type[i].type)
 				 return (&icmp6_type[i]);
 		}
@@ -245,17 +247,15 @@ geticmptypebynumber(u_int8_t type, sa_family_t af)
 const struct icmptypeent *
 geticmptypebyname(char *w, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
-		for (i=0; i < (sizeof (icmp_type) / sizeof(icmp_type[0]));
-		    i++) {
+		for (i = 0; i < nitems(icmp_type); i++) {
 			if (!strcmp(w, icmp_type[i].name))
 				return (&icmp_type[i]);
 		}
 	} else {
-		for (i=0; i < (sizeof (icmp6_type) /
-		    sizeof(icmp6_type[0])); i++) {
+		for (i = 0; i < nitems(icmp6_type); i++) {
 			if (!strcmp(w, icmp6_type[i].name))
 				return (&icmp6_type[i]);
 		}
@@ -266,18 +266,16 @@ geticmptypebyname(char *w, sa_family_t af)
 const struct icmpcodeent *
 geticmpcodebynumber(u_int8_t type, u_int8_t code, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
-		for (i=0; i < (sizeof (icmp_code) / sizeof(icmp_code[0]));
-		    i++) {
+		for (i = 0; i < nitems(icmp_code); i++) {
 			if (type == icmp_code[i].type &&
 			    code == icmp_code[i].code)
 				return (&icmp_code[i]);
 		}
 	} else {
-		for (i=0; i < (sizeof (icmp6_code) /
-		    sizeof(icmp6_code[0])); i++) {
+		for (i = 0; i < nitems(icmp6_code); i++) {
 			if (type == icmp6_code[i].type &&
 			    code == icmp6_code[i].code)
 				return (&icmp6_code[i]);
@@ -289,18 +287,16 @@ geticmpcodebynumber(u_int8_t type, u_int8_t code, sa_family_t af)
 const struct icmpcodeent *
 geticmpcodebyname(u_long type, char *w, sa_family_t af)
 {
-	unsigned int	i;
+	size_t	i;
 
 	if (af != AF_INET6) {
-		for (i=0; i < (sizeof (icmp_code) / sizeof(icmp_code[0]));
-		    i++) {
+		for (i = 0; i < nitems(icmp_code); i++) {
 			if (type == icmp_code[i].type &&
 			    !strcmp(w, icmp_code[i].name))
 				return (&icmp_code[i]);
 		}
 	} else {
-		for (i=0; i < (sizeof (icmp6_code) /
-		    sizeof(icmp6_code[0])); i++) {
+		for (i = 0; i < nitems(icmp6_code); i++) {
 			if (type == icmp6_code[i].type &&
 			    !strcmp(w, icmp6_code[i].name))
 				return (&icmp6_code[i]);
@@ -523,7 +519,8 @@ print_pool(struct pf_pool *pool, u_int16_t p1, u_int16_t p2,
 const char	*pf_reasons[PFRES_MAX+1] = PFRES_NAMES;
 const char	*pf_lcounters[LCNT_MAX+1] = LCNT_NAMES;
 const char	*pf_fcounters[FCNT_MAX+1] = FCNT_NAMES;
-const char	*pf_scounters[FCNT_MAX+1] = FCNT_NAMES;
+const char	*pf_scounters[SCNT_MAX+1] = FCNT_NAMES;
+const char	*pf_ncounters[NCNT_MAX+1] = FCNT_NAMES;
 
 void
 print_status(struct pf_status *s, struct pfctl_watermarks *synflwats, int opts)
@@ -617,6 +614,20 @@ print_status(struct pf_status *s, struct pfctl_watermarks *synflwats, int opts)
 			if (runtime > 0)
 				printf("%14.1f/s\n",
 				    (double)s->scounters[i] / (double)runtime);
+			else
+				printf("%14s\n", "");
+		}
+	}
+	if (opts & PF_OPT_VERBOSE) {
+		printf("Fragments\n");
+		printf("  %-25s %14u %14s\n", "current entries",
+		    s->fragments, "");
+		for (i = 0; i < NCNT_MAX; i++) {
+			printf("  %-25s %14lld ", pf_ncounters[i],
+				    s->ncounters[i]);
+			if (runtime > 0)
+				printf("%14.1f/s\n",
+				    (double)s->ncounters[i] / (double)runtime);
 			else
 				printf("%14s\n", "");
 		}
@@ -724,17 +735,23 @@ print_rule(struct pf_rule *r, const char *anchor_call, int opts)
 	if (verbose)
 		printf("@%d ", r->nr);
 
-	if (r->action > PF_MATCH)
-		printf("action(%d)", r->action);
-	else if (anchor_call[0]) {
-		p = strrchr(anchor_call, '/');
-		if (p ? p[1] == '_' : anchor_call[0] == '_')
-			printf("%s", anchortypes[r->action]);
+	if (anchor_call[0]) {
+		if (r->action >= nitems(anchortypes)) {
+			printf("anchor(%d)", r->action);
+		} else {
+			p = strrchr(anchor_call, '/');
+			if (p ? p[1] == '_' : anchor_call[0] == '_')
+				printf("%s", anchortypes[r->action]);
+			else
+				printf("%s \"%s\"", anchortypes[r->action],
+				    anchor_call);
+		}
+	} else {
+		if (r->action >= nitems(actiontypes))
+			printf("action(%d)", r->action);
 		else
-			printf("%s \"%s\"", anchortypes[r->action],
-			    anchor_call);
-	} else
-		printf("%s", actiontypes[r->action]);
+			printf("%s", actiontypes[r->action]);
+	}
 	if (r->action == PF_DROP) {
 		if (r->rule_flag & PFRULE_RETURN)
 			printf(" return");
@@ -1643,7 +1660,7 @@ host(const char *s, int opts)
 	for (n = h; n != NULL; n = n->next) {
 		n->addr.type = PF_ADDR_ADDRMASK;
 		n->weight = 0;
-	}	
+	}
 
 error:
 	free(ps);
@@ -1806,7 +1823,7 @@ error:
 int
 append_addr(struct pfr_buffer *b, char *s, int test, int opts)
 {
-	static int 		 previous = 0;
+	static int		 previous = 0;
 	static int		 expect = 0;
 	struct pfr_addr		*a;
 	struct node_host	*h, *n;
@@ -1814,13 +1831,13 @@ append_addr(struct pfr_buffer *b, char *s, int test, int opts)
 	const char		*errstr;
 	int			 rv, not = 0, i = 0;
 	u_int16_t		 weight;
-	
+
 	/* skip weight if given */
 	if (strcmp(s, "weight") == 0) {
 		expect = 1;
 		return (1); /* expecting further call */
 	}
-	
+
 	/* check if previous host is set */
 	if (expect) {
 		/* parse and append load balancing weight */
@@ -1837,7 +1854,6 @@ append_addr(struct pfr_buffer *b, char *s, int test, int opts)
 				}
 			}
 		}
-		
 		expect = 0;
 		return (0);
 	}
@@ -1877,7 +1893,7 @@ append_addr_host(struct pfr_buffer *b, struct node_host *n, int test, int not)
 		addr.pfra_net = unmask(&n->addr.v.a.mask);
 		if (n->ifname) {
 			if (strlcpy(addr.pfra_ifname, n->ifname,
-		 	   sizeof(addr.pfra_ifname)) >= sizeof(addr.pfra_ifname))
+			   sizeof(addr.pfra_ifname)) >= sizeof(addr.pfra_ifname))
 				errx(1, "append_addr_host: strlcpy");
 			addr.pfra_type = PFRKE_ROUTE;
 		}

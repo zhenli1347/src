@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_filter.c,v 1.129 2022/07/28 13:11:51 deraadt Exp $ */
+/*	$OpenBSD: rde_filter.c,v 1.136 2023/05/09 13:11:19 claudio Exp $ */
 
 /*
  * Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -212,7 +212,7 @@ rde_prefix_match(struct filter_prefix *fp, struct bgpd_addr *prefix,
 static int
 rde_filter_match(struct filter_rule *f, struct rde_peer *peer,
     struct rde_peer *from, struct filterstate *state,
-    struct bgpd_addr *prefix, uint8_t plen, uint8_t vstate)
+    struct bgpd_addr *prefix, uint8_t plen)
 {
 	struct rde_aspath *asp = &state->aspath;
 	int i;
@@ -223,7 +223,12 @@ rde_filter_match(struct filter_rule *f, struct rde_peer *peer,
 		return (0);
 
 	if (f->match.ovs.is_set) {
-		if (vstate != f->match.ovs.validity)
+		if ((state->vstate & ROA_MASK) != f->match.ovs.validity)
+			return (0);
+	}
+
+	if (f->match.avs.is_set) {
+		if (((state->vstate >> 4) & ASPA_MASK) != f->match.avs.validity)
 			return (0);
 	}
 
@@ -314,7 +319,7 @@ rde_filter_match(struct filter_rule *f, struct rde_peer *peer,
 }
 
 /* return true when the rule f can never match for this peer */
-static int
+int
 rde_filter_skip_rule(struct rde_peer *peer, struct filter_rule *f)
 {
 	/* if any of the two is unset then rule can't be skipped */
@@ -345,8 +350,7 @@ rde_filter_skip_rule(struct rde_peer *peer, struct filter_rule *f)
 }
 
 int
-rde_filter_equal(struct filter_head *a, struct filter_head *b,
-    struct rde_peer *peer)
+rde_filter_equal(struct filter_head *a, struct filter_head *b)
 {
 	struct filter_rule	*fa, *fb;
 	struct rde_prefixset	*psa, *psb, *osa, *osb;
@@ -357,16 +361,6 @@ rde_filter_equal(struct filter_head *a, struct filter_head *b,
 	fb = b ? TAILQ_FIRST(b) : NULL;
 
 	while (fa != NULL || fb != NULL) {
-		/* skip all rules with wrong peer */
-		if (rde_filter_skip_rule(peer, fa)) {
-			fa = TAILQ_NEXT(fa, entry);
-			continue;
-		}
-		if (rde_filter_skip_rule(peer, fb)) {
-			fb = TAILQ_NEXT(fb, entry);
-			continue;
-		}
-
 		/* compare the two rules */
 		if ((fa == NULL && fb != NULL) || (fa != NULL && fb == NULL))
 			/* new rule added or removed */
@@ -426,18 +420,59 @@ rde_filter_equal(struct filter_head *a, struct filter_head *b,
 }
 
 void
-rde_filterstate_prep(struct filterstate *state, struct rde_aspath *asp,
-    struct rde_community *communities, struct nexthop *nh, uint8_t nhflags)
+rde_filterstate_init(struct filterstate *state)
 {
 	memset(state, 0, sizeof(*state));
-
 	path_prep(&state->aspath);
+}
+
+static void
+rde_filterstate_set(struct filterstate *state, struct rde_aspath *asp,
+    struct rde_community *communities, struct nexthop *nh, uint8_t nhflags,
+    uint8_t vstate)
+{
+	rde_filterstate_init(state);
+
 	if (asp)
 		path_copy(&state->aspath, asp);
 	if (communities)
 		communities_copy(&state->communities, communities);
 	state->nexthop = nexthop_ref(nh);
 	state->nhflags = nhflags;
+	state->vstate = vstate;
+}
+
+/*
+ * Build a filterstate based on the prefix p.
+ */
+void
+rde_filterstate_prep(struct filterstate *state, struct prefix *p)
+{
+	rde_filterstate_set(state, prefix_aspath(p), prefix_communities(p),
+	    prefix_nexthop(p), prefix_nhflags(p), p->validation_state);
+}
+
+/*
+ * Copy a filterstate to a new filterstate.
+ */
+void
+rde_filterstate_copy(struct filterstate *state, struct filterstate *src)
+{
+	rde_filterstate_set(state, &src->aspath, &src->communities,
+	    src->nexthop, src->nhflags, src->vstate);
+}
+
+/*
+ * Set the vstate based on the aspa_state and the supplied roa vstate.
+ * This function must be called after rde_filterstate_init().
+ * rde_filterstate_prep() and rde_filterstate_copy() set the right vstate.
+ */
+void
+rde_filterstate_set_vstate(struct filterstate *state, uint8_t roa_vstate,
+    uint8_t aspa_state)
+{
+	state->vstate = aspa_state << 4;
+	state->vstate |= roa_vstate & ROA_MASK;
 }
 
 void
@@ -548,6 +583,12 @@ filterset_copy(struct filter_set_head *source, struct filter_set_head *dest)
 		if ((t = malloc(sizeof(struct filter_set))) == NULL)
 			fatal(NULL);
 		memcpy(t, s, sizeof(struct filter_set));
+		if (t->type == ACTION_RTLABEL_ID)
+			rtlabel_ref(t->action.id);
+		else if (t->type == ACTION_PFTABLE_ID)
+			pftable_ref(t->action.id);
+		else if (t->type == ACTION_SET_NEXTHOP_REF)
+			nexthop_ref(t->action.nh_ref);
 		TAILQ_INSERT_TAIL(dest, t, entry);
 	}
 }
@@ -759,12 +800,12 @@ rde_filter_calc_skip_steps(struct filter_head *rules)
 	for (i = 0; i < RDE_FILTER_SKIP_COUNT; ++i)
 		head[i] = cur;
 	while (cur != NULL) {
+		if (cur->peer.peerid != prev->peer.peerid)
+			RDE_FILTER_SET_SKIP_STEPS(RDE_FILTER_SKIP_PEERID);
 		if (cur->peer.groupid != prev->peer.groupid)
 			RDE_FILTER_SET_SKIP_STEPS(RDE_FILTER_SKIP_GROUPID);
 		if (cur->peer.remote_as != prev->peer.remote_as)
 			RDE_FILTER_SET_SKIP_STEPS(RDE_FILTER_SKIP_REMOTE_AS);
-		if (cur->peer.peerid != prev->peer.peerid)
-			RDE_FILTER_SET_SKIP_STEPS(RDE_FILTER_SKIP_PEERID);
 		prev = cur;
 		cur = TAILQ_NEXT(cur, entry);
 	}
@@ -784,7 +825,7 @@ rde_filter_calc_skip_steps(struct filter_head *rules)
 enum filter_actions
 rde_filter(struct filter_head *rules, struct rde_peer *peer,
     struct rde_peer *from, struct bgpd_addr *prefix, uint8_t plen,
-    uint8_t vstate, struct filterstate *state)
+    struct filterstate *state)
 {
 	struct filter_rule	*f;
 	enum filter_actions	 action = ACTION_DENY; /* default deny */
@@ -799,8 +840,15 @@ rde_filter(struct filter_head *rules, struct rde_peer *peer,
 	if (rules == NULL)
 		return (action);
 
+	if (prefix->aid == AID_FLOWSPECv4 || prefix->aid == AID_FLOWSPECv6)
+		return (ACTION_ALLOW);
+
 	f = TAILQ_FIRST(rules);
 	while (f != NULL) {
+		RDE_FILTER_TEST_ATTRIB(
+		    (f->peer.peerid &&
+		     f->peer.peerid != peer->conf.id),
+		     f->skip[RDE_FILTER_SKIP_PEERID]);
 		RDE_FILTER_TEST_ATTRIB(
 		    (f->peer.groupid &&
 		     f->peer.groupid != peer->conf.groupid),
@@ -809,13 +857,8 @@ rde_filter(struct filter_head *rules, struct rde_peer *peer,
 		    (f->peer.remote_as &&
 		     f->peer.remote_as != peer->conf.remote_as),
 		     f->skip[RDE_FILTER_SKIP_REMOTE_AS]);
-		RDE_FILTER_TEST_ATTRIB(
-		    (f->peer.peerid &&
-		     f->peer.peerid != peer->conf.id),
-		     f->skip[RDE_FILTER_SKIP_PEERID]);
 
-		if (rde_filter_match(f, peer, from, state, prefix, plen,
-		    vstate)) {
+		if (rde_filter_match(f, peer, from, state, prefix, plen)) {
 			rde_apply_set(&f->set, peer, from, state, prefix->aid);
 			if (f->action != ACTION_NONE)
 				action = f->action;

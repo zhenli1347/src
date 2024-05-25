@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.174 2022/09/02 20:06:56 miod Exp $	*/
+/*	$OpenBSD: conf.c,v 1.176 2023/03/06 17:20:06 miod Exp $	*/
 /*	$NetBSD: conf.c,v 1.75 1996/05/03 19:40:20 christos Exp $	*/
 
 /*
@@ -32,10 +32,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/buf.h>
 #include <sys/device.h>
 #include <sys/disklabel.h>
-#include <sys/ioctl.h>
 #include <sys/tty.h>
 #include <sys/vnode.h>
 
@@ -311,7 +309,7 @@ dev_t	swapdev = makedev(1, 0);
 int
 iskmemdev(dev_t dev)
 {
-	return (major(dev) == mem_no && (minor(dev) < 2 || minor(dev) == 14));
+	return (major(dev) == mem_no && minor(dev) < 2);
 }
 
 /*

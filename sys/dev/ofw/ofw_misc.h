@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofw_misc.h,v 1.26 2022/11/09 19:18:11 kettenis Exp $	*/
+/*	$OpenBSD: ofw_misc.h,v 1.31 2023/09/21 20:26:17 kettenis Exp $	*/
 /*
  * Copyright (c) 2017-2021 Mark Kettenis
  *
@@ -30,6 +30,23 @@ struct regmap *regmap_byphandle(uint32_t);
 uint32_t regmap_read_4(struct regmap *, bus_size_t);
 void	regmap_write_4(struct regmap *, bus_size_t, uint32_t);
 
+/* Interface support */
+
+struct ifnet;
+
+struct if_device {
+	int		 if_node;
+	struct ifnet	*if_ifp;
+
+	LIST_ENTRY(if_device) if_list;
+	uint32_t	 if_phandle;
+};
+
+void	if_register(struct if_device *);
+
+struct ifnet *if_bynode(int);
+struct ifnet *if_byphandle(uint32_t);
+
 /* PHY support */
 
 #define PHY_NONE	0
@@ -51,6 +68,7 @@ struct phy_device {
 
 void	phy_register(struct phy_device *);
 
+int	phy_enable_prop_idx(int, char *, int);
 int	phy_enable_idx(int, int);
 int	phy_enable(int, const char *);
 
@@ -166,6 +184,13 @@ enum endpoint_type {
 	EP_DRM_ENCODER,		/* struct drm_encoder */
 	EP_DRM_PANEL,		/* struct drm_panel */
 	EP_DAI_DEVICE,		/* struct dai_device */
+	EP_USB_CONTROLLER_PORT,	/* struct usb_controller_port */
+};
+
+struct usb_controller_port {
+	void *up_cookie;
+	void (*up_connect)(void *);
+	void (*up_disconnect)(void *);
 };
 
 struct endpoint {
@@ -253,6 +278,8 @@ struct iommu_device {
 };
 
 void	iommu_device_register(struct iommu_device *);
+int	iommu_device_lookup(int, uint32_t *, uint32_t *);
+int	iommu_device_lookup_pci(int, uint32_t, uint32_t *, uint32_t *);
 bus_dma_tag_t iommu_device_map(int, bus_dma_tag_t);
 bus_dma_tag_t iommu_device_map_pci(int, uint32_t, bus_dma_tag_t);
 void	iommu_reserve_region_pci(int, uint32_t, bus_addr_t, bus_size_t);
@@ -287,5 +314,23 @@ struct mbox_channel *mbox_channel_idx(int, int, struct mbox_client *);
 
 int	mbox_send(struct mbox_channel *, const void *, size_t);
 int	mbox_recv(struct mbox_channel *, void *, size_t);
+
+/* hwlock support */
+
+struct hwlock_device {
+	int	hd_node;
+	void	*hd_cookie;
+	int	(*hd_lock)(void *, uint32_t *, int);
+
+	LIST_ENTRY(hwlock_device) hd_list;
+	uint32_t hd_phandle;
+	uint32_t hd_cells;
+};
+
+void	hwlock_register(struct hwlock_device *);
+
+int	hwlock_lock_idx(int, int);
+int	hwlock_lock_idx_timeout(int, int, int);
+int	hwlock_unlock_idx(int, int);
 
 #endif /* _DEV_OFW_MISC_H_ */

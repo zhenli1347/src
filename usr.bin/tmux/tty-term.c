@@ -1,4 +1,4 @@
-/* $OpenBSD: tty-term.c,v 1.96 2022/11/11 08:44:11 nicm Exp $ */
+/* $OpenBSD: tty-term.c,v 1.101 2023/10/17 09:55:32 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -264,6 +264,7 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_SETRGBB] = { TTYCODE_STRING, "setrgbb" },
 	[TTYC_SETRGBF] = { TTYCODE_STRING, "setrgbf" },
 	[TTYC_SETULC] = { TTYCODE_STRING, "Setulc" },
+	[TTYC_SETULC1] = { TTYCODE_STRING, "Setulc1" },
 	[TTYC_SE] = { TTYCODE_STRING, "Se" },
 	[TTYC_SXL] =  { TTYCODE_FLAG, "Sxl" },
 	[TTYC_SGR0] = { TTYCODE_STRING, "sgr0" },
@@ -709,7 +710,7 @@ tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
 			s = tmp;
 			break;
 		case TTYCODE_FLAG:
-			n = tigetflag((char *) ent->name);
+			n = tigetflag((char *)ent->name);
 			if (n == -1)
 				continue;
 			if (n)
@@ -717,6 +718,8 @@ tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
 			else
 				s = "0";
 			break;
+		default:
+			fatalx("unknown capability type");
 		}
 		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
 		xasprintf(&(*caps)[*ncaps], "%s=%s", ent->name, s);
@@ -754,35 +757,70 @@ tty_term_string(struct tty_term *term, enum tty_code_code code)
 }
 
 const char *
-tty_term_string1(struct tty_term *term, enum tty_code_code code, int a)
+tty_term_string_i(struct tty_term *term, enum tty_code_code code, int a)
 {
-	return (tparm((char *) tty_term_string(term, code), a));
+	const char	*x = tty_term_string(term, code), *s;
+
+	s = tiparm_s(1, 0, x, a);
+	if (s == NULL) {
+		log_debug("could not expand %s", tty_term_codes[code].name);
+		return ("");
+	}
+	return (s);
 }
 
 const char *
-tty_term_string2(struct tty_term *term, enum tty_code_code code, int a, int b)
+tty_term_string_ii(struct tty_term *term, enum tty_code_code code, int a, int b)
 {
-	return (tparm((char *) tty_term_string(term, code), a, b));
+	const char	*x = tty_term_string(term, code), *s;
+
+	s = tiparm_s(2, 0, x, a, b);
+	if (s == NULL) {
+		log_debug("could not expand %s", tty_term_codes[code].name);
+		return ("");
+	}
+	return (s);
 }
 
 const char *
-tty_term_string3(struct tty_term *term, enum tty_code_code code, int a, int b,
-    int c)
+tty_term_string_iii(struct tty_term *term, enum tty_code_code code, int a,
+    int b, int c)
 {
-	return (tparm((char *) tty_term_string(term, code), a, b, c));
+	const char	*x = tty_term_string(term, code), *s;
+
+	s = tiparm_s(3, 0, x, a, b, c);
+	if (s == NULL) {
+		log_debug("could not expand %s", tty_term_codes[code].name);
+		return ("");
+	}
+	return (s);
 }
 
 const char *
-tty_term_ptr1(struct tty_term *term, enum tty_code_code code, const void *a)
+tty_term_string_s(struct tty_term *term, enum tty_code_code code, const char *a)
 {
-	return (tparm((char *) tty_term_string(term, code), a));
+	const char	*x = tty_term_string(term, code), *s;
+
+	s = tiparm_s(1, 1, x, a);
+	if (s == NULL) {
+		log_debug("could not expand %s", tty_term_codes[code].name);
+		return ("");
+	}
+	return (s);
 }
 
 const char *
-tty_term_ptr2(struct tty_term *term, enum tty_code_code code, const void *a,
-    const void *b)
+tty_term_string_ss(struct tty_term *term, enum tty_code_code code,
+    const char *a, const char *b)
 {
-	return (tparm((char *) tty_term_string(term, code), a, b));
+	const char	*x = tty_term_string(term, code), *s;
+
+	s = tiparm_s(2, 3, x, a, b);
+	if (s == NULL) {
+		log_debug("could not expand %s", tty_term_codes[code].name);
+		return ("");
+	}
+	return (s);
 }
 
 int

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_meter.c,v 1.42 2020/12/28 14:01:23 mpi Exp $	*/
+/*	$OpenBSD: uvm_meter.c,v 1.50 2023/09/16 09:33:27 mpi Exp $	*/
 /*	$NetBSD: uvm_meter.c,v 1.21 2001/07/14 06:36:03 matt Exp $	*/
 
 /*
@@ -63,84 +63,11 @@
 #define	MAXSLP	20
 
 int maxslp = MAXSLP;	/* patchable ... */
-struct loadavg averunnable;
 
-/*
- * constants for averages over 1, 5, and 15 minutes when sampling at
- * 5 second intervals.
- */
+extern struct loadavg averunnable;
 
-static fixpt_t cexp[3] = {
-	0.9200444146293232 * FSCALE,	/* exp(-1/12) */
-	0.9834714538216174 * FSCALE,	/* exp(-1/60) */
-	0.9944598480048967 * FSCALE,	/* exp(-1/180) */
-};
-
-
-static void uvm_loadav(struct loadavg *);
 void uvm_total(struct vmtotal *);
 void uvmexp_read(struct uvmexp *);
-
-/*
- * uvm_meter: calculate load average and wake up the swapper (if needed)
- */
-void
-uvm_meter(void)
-{
-	if ((gettime() % 5) == 0)
-		uvm_loadav(&averunnable);
-	if (proc0.p_slptime > (maxslp / 2))
-		wakeup(&proc0);
-}
-
-/*
- * uvm_loadav: compute a tenex style load average of a quantity on
- * 1, 5, and 15 minute intervals.
- */
-static void
-uvm_loadav(struct loadavg *avg)
-{
-	CPU_INFO_ITERATOR cii;
-	struct cpu_info *ci;
-	int i, nrun;
-	struct proc *p;
-	int nrun_cpu[MAXCPUS];
-
-	nrun = 0;
-	memset(nrun_cpu, 0, sizeof(nrun_cpu));
-
-	LIST_FOREACH(p, &allproc, p_list) {
-		switch (p->p_stat) {
-		case SSTOP:
-		case SSLEEP:
-			break;
-		case SRUN:
-		case SONPROC:
-			if (p == p->p_cpu->ci_schedstate.spc_idleproc)
-				continue;
-		/* FALLTHROUGH */
-		case SIDL:
-			nrun++;
-			if (p->p_cpu)
-				nrun_cpu[CPU_INFO_UNIT(p->p_cpu)]++;
-		}
-	}
-
-	for (i = 0; i < 3; i++) {
-		avg->ldavg[i] = (cexp[i] * avg->ldavg[i] +
-		    nrun * FSCALE * (FSCALE - cexp[i])) >> FSHIFT;
-	}
-
-	CPU_INFO_FOREACH(cii, ci) {
-		struct schedstate_percpu *spc = &ci->ci_schedstate;
-
-		if (nrun_cpu[CPU_INFO_UNIT(ci)] == 0)
-			continue;
-		spc->spc_ldavg = (cexp[0] * spc->spc_ldavg +
-		    nrun_cpu[CPU_INFO_UNIT(ci)] * FSCALE *
-		    (FSCALE - cexp[0])) >> FSHIFT;
-	}
-}
 
 char malloc_conf[16];
 
@@ -322,11 +249,12 @@ uvm_total(struct vmtotal *totalp)
 void
 uvmexp_read(struct uvmexp *uexp)
 {
-		uint64_t counters[exp_ncounters];
+		uint64_t counters[exp_ncounters], scratch[exp_ncounters];
 
 		memcpy(uexp, &uvmexp, sizeof(*uexp));
 
-		counters_read(uvmexp_counters, counters, exp_ncounters);
+		counters_read(uvmexp_counters, counters, exp_ncounters,
+		    scratch);
 
 		/* stat counters */
 		uexp->faults = (int)counters[faults];

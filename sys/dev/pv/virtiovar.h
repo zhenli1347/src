@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtiovar.h,v 1.14 2019/05/26 15:22:31 sf Exp $	*/
+/*	$OpenBSD: virtiovar.h,v 1.18 2024/05/17 16:37:10 sf Exp $	*/
 /*	$NetBSD: virtiovar.h,v 1.1 2011/10/30 12:12:21 hannken Exp $	*/
 
 /*
@@ -138,7 +138,7 @@ struct virtqueue {
 };
 
 struct virtio_feature_name {
-	uint32_t	 bit;
+	uint64_t	 bit;
 	const char	*name;
 };
 
@@ -154,6 +154,7 @@ struct virtio_ops {
 	void		(*write_dev_cfg_8)(struct virtio_softc *, int, uint64_t);
 	uint16_t	(*read_queue_size)(struct virtio_softc *, uint16_t);
 	void		(*setup_queue)(struct virtio_softc *, struct virtqueue *, uint64_t);
+	int		(*get_status)(struct virtio_softc *);
 	void		(*set_status)(struct virtio_softc *, int);
 	int		(*neg_features)(struct virtio_softc *, const struct virtio_feature_name *);
 	int		(*poll_intr)(void *);
@@ -197,13 +198,14 @@ struct virtio_softc {
 #define	virtio_setup_queue(sc, i, v)		(sc)->sc_ops->setup_queue(sc, i, v)
 #define	virtio_negotiate_features(sc, n)	(sc)->sc_ops->neg_features(sc, n)
 #define	virtio_poll_intr(sc)			(sc)->sc_ops->poll_intr(sc)
+#define	virtio_get_status(sc)			(sc)->sc_ops->get_status(sc)
+#define	virtio_set_status(sc, i)		(sc)->sc_ops->set_status(sc, i)
 
 /* only for transport drivers */
-#define	virtio_set_status(sc, i)		(sc)->sc_ops->set_status(sc, i)
 #define	virtio_device_reset(sc)			virtio_set_status((sc), 0)
 
 static inline int
-virtio_has_feature(struct virtio_softc *sc, unsigned int fbit)
+virtio_has_feature(struct virtio_softc *sc, uint64_t fbit)
 {
 	if (sc->sc_active_features & fbit)
 		return 1;
@@ -231,8 +233,8 @@ void virtio_enqueue_trim(struct virtqueue*, int, int);
 int virtio_dequeue(struct virtio_softc*, struct virtqueue*, int *, int *);
 int virtio_dequeue_commit(struct virtqueue*, int);
 
-int virtio_intr(void *arg);
 int virtio_check_vqs(struct virtio_softc *);
+int virtio_check_vq(struct virtio_softc *, struct virtqueue *);
 void virtio_stop_vq_intr(struct virtio_softc *, struct virtqueue *);
 int virtio_start_vq_intr(struct virtio_softc *, struct virtqueue *);
 

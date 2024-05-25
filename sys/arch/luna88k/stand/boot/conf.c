@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.4 2020/12/09 18:10:19 krw Exp $	*/
+/*	$OpenBSD: conf.c,v 1.6 2023/06/18 13:13:00 aoyama Exp $	*/
 /*	$NetBSD: conf.c,v 1.3 2013/01/16 15:46:20 tsutsui Exp $	*/
 
 /*
@@ -97,7 +97,9 @@ int	n_netif_drivers = sizeof(netif_drivers) / sizeof(netif_drivers[0]);
 	__CONCAT(fs,_read), \
 	__CONCAT(fs,_write), \
 	__CONCAT(fs,_seek), \
-	__CONCAT(fs,_stat) }
+	__CONCAT(fs,_stat), \
+	__CONCAT(fs,_readdir), \
+	__CONCAT(fs,_fchmod) }
 #ifdef SUPPORT_DISK
 struct fs_ops file_system_disk[] = {
 	FS_OPS(ufs),
@@ -105,6 +107,7 @@ struct fs_ops file_system_disk[] = {
 int	nfsys_disk = sizeof(file_system_disk) / sizeof(file_system_disk[0]);
 #endif
 #ifdef SUPPORT_ETHERNET
+#define	nfs_fchmod	NULL
 struct fs_ops file_system_nfs[] = { FS_OPS(nfs) };
 #endif
 

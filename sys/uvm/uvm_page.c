@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_page.c,v 1.170 2022/08/29 02:58:13 jsg Exp $	*/
+/*	$OpenBSD: uvm_page.c,v 1.177 2024/05/01 12:54:27 mpi Exp $	*/
 /*	$NetBSD: uvm_page.c,v 1.44 2000/11/27 08:40:04 chs Exp $	*/
 
 /*
@@ -877,13 +877,11 @@ uvm_pagerealloc_multi(struct uvm_object *obj, voff_t off, vsize_t size,
  * => only one of obj or anon can be non-null
  * => caller must activate/deactivate page if it is not wired.
  */
-
 struct vm_page *
 uvm_pagealloc(struct uvm_object *obj, voff_t off, struct vm_anon *anon,
     int flags)
 {
-	struct vm_page *pg;
-	struct pglist pgl;
+	struct vm_page *pg = NULL;
 	int pmr_flags;
 
 	KASSERT(obj == NULL || anon == NULL);
@@ -906,13 +904,10 @@ uvm_pagealloc(struct uvm_object *obj, voff_t off, struct vm_anon *anon,
 
 	if (flags & UVM_PGA_ZERO)
 		pmr_flags |= UVM_PLA_ZERO;
-	TAILQ_INIT(&pgl);
-	if (uvm_pmr_getpages(1, 0, 0, 1, 0, 1, pmr_flags, &pgl) != 0)
-		goto fail;
 
-	pg = TAILQ_FIRST(&pgl);
-	KASSERT(pg != NULL && TAILQ_NEXT(pg, pageq) == NULL);
-
+	pg = uvm_pmr_cache_get(pmr_flags);
+	if (pg == NULL)
+		return NULL;
 	uvm_pagealloc_pg(pg, obj, off, anon);
 	KASSERT((pg->pg_flags & PG_DEV) == 0);
 	if (flags & UVM_PGA_ZERO)
@@ -921,9 +916,6 @@ uvm_pagealloc(struct uvm_object *obj, voff_t off, struct vm_anon *anon,
 		atomic_setbits_int(&pg->pg_flags, PG_CLEAN);
 
 	return pg;
-
-fail:
-	return NULL;
 }
 
 /*
@@ -1024,25 +1016,22 @@ uvm_pageclean(struct vm_page *pg)
 void
 uvm_pagefree(struct vm_page *pg)
 {
-	if ((pg->pg_flags & (PG_TABLED|PQ_ACTIVE|PQ_INACTIVE)) &&
-	    (pg->uobject == NULL || !UVM_OBJ_IS_PMAP(pg->uobject)))
-		MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
-
 	uvm_pageclean(pg);
-	uvm_pmr_freepages(pg, 1);
+	uvm_pmr_cache_put(pg);
 }
 
 /*
  * uvm_page_unbusy: unbusy an array of pages.
  *
  * => pages must either all belong to the same object, or all belong to anons.
+ * => if pages are object-owned, object must be locked.
  * => if pages are anon-owned, anons must have 0 refcount.
+ * => caller must make sure that anon-owned pages are not PG_RELEASED.
  */
 void
 uvm_page_unbusy(struct vm_page **pgs, int npgs)
 {
 	struct vm_page *pg;
-	struct uvm_object *uobj;
 	int i;
 
 	for (i = 0; i < npgs; i++) {
@@ -1052,35 +1041,20 @@ uvm_page_unbusy(struct vm_page **pgs, int npgs)
 			continue;
 		}
 
-#if notyet
-		/*
-                 * XXX swap case in uvm_aio_aiodone() is not holding the lock.
-		 *
-		 * This isn't compatible with the PG_RELEASED anon case below.
-		 */
 		KASSERT(uvm_page_owner_locked_p(pg));
-#endif
 		KASSERT(pg->pg_flags & PG_BUSY);
 
 		if (pg->pg_flags & PG_WANTED) {
 			wakeup(pg);
 		}
 		if (pg->pg_flags & PG_RELEASED) {
-			uobj = pg->uobject;
-			if (uobj != NULL) {
-				uvm_lock_pageq();
-				pmap_page_protect(pg, PROT_NONE);
-				/* XXX won't happen right now */
-				if (pg->pg_flags & PQ_AOBJ)
-					uao_dropswap(uobj,
-					    pg->offset >> PAGE_SHIFT);
-				uvm_pagefree(pg);
-				uvm_unlock_pageq();
-			} else {
-				rw_enter(pg->uanon->an_lock, RW_WRITE);
-				uvm_anon_release(pg->uanon);
-			}
+			KASSERT(pg->uobject != NULL ||
+			    (pg->uanon != NULL && pg->uanon->an_ref > 0));
+			atomic_clearbits_int(&pg->pg_flags, PG_RELEASED);
+			pmap_page_protect(pg, PROT_NONE);
+			uvm_pagefree(pg);
 		} else {
+			KASSERT((pg->pg_flags & PG_FAKE) == 0);
 			atomic_clearbits_int(&pg->pg_flags, PG_WANTED|PG_BUSY);
 			UVM_PAGE_OWN(pg, NULL);
 		}
@@ -1158,7 +1132,7 @@ vm_physseg_find(paddr_t pframe, int *offp)
 	int	start, len, try;
 
 	/*
-	 * if try is too large (thus target is less than than try) we reduce
+	 * if try is too large (thus target is less than try) we reduce
 	 * the length to trunc(len/2) [i.e. everything smaller than "try"]
 	 *
 	 * if the try is too small (thus target is greater than try) then
@@ -1233,10 +1207,15 @@ struct vm_page *
 uvm_pagelookup(struct uvm_object *obj, voff_t off)
 {
 	/* XXX if stack is too much, handroll */
-	struct vm_page pg;
+	struct vm_page p, *pg;
 
-	pg.offset = off;
-	return RBT_FIND(uvm_objtree, &obj->memt, &pg);
+	p.offset = off;
+	pg = RBT_FIND(uvm_objtree, &obj->memt, &p);
+
+	KASSERT(pg == NULL || obj->uo_npages != 0);
+	KASSERT(pg == NULL || (pg->pg_flags & PG_RELEASED) == 0 ||
+	    (pg->pg_flags & PG_BUSY) != 0);
+	return (pg);
 }
 
 /*

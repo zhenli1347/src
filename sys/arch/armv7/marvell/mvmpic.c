@@ -1,4 +1,4 @@
-/* $OpenBSD: mvmpic.c,v 1.5 2021/10/24 17:52:27 mpi Exp $ */
+/* $OpenBSD: mvmpic.c,v 1.7 2023/04/10 04:21:20 jsg Exp $ */
 /*
  * Copyright (c) 2007,2009,2011 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2015 Patrick Wildt <patrick@blueri.se>
@@ -129,7 +129,7 @@ mpic_attach(struct device *parent, struct device *self, void *args)
 	/* Clear pending IPIs */
 	bus_space_write_4(sc->sc_iot, sc->sc_c_ioh, MPIC_DOORBELL_CAUSE, 0);
 
-	/* Enable hardware priorization selection */
+	/* Enable hardware prioritization selection */
 	bus_space_write_4(sc->sc_iot, sc->sc_m_ioh, MPIC_CTRL,
 	    MPIC_CTRL_PRIO_EN);
 
@@ -257,7 +257,7 @@ mpic_intr_establish(void *cookie, int *cells, int level,
 	ih = malloc(sizeof(*ih), M_DEVBUF, M_WAITOK);
 	ih->ih_func = func;
 	ih->ih_arg = arg;
-	ih->ih_ipl = level;
+	ih->ih_ipl = level & IPL_IRQMASK;
 	ih->ih_irq = irqno;
 	ih->ih_name = name;
 	ih->ih_sc = sc;

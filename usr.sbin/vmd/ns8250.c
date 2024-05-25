@@ -1,4 +1,4 @@
-/* $OpenBSD: ns8250.c,v 1.32 2021/07/16 16:21:22 dv Exp $ */
+/* $OpenBSD: ns8250.c,v 1.38 2023/10/25 12:44:28 dv Exp $ */
 /*
  * Copyright (c) 2016 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -82,7 +82,6 @@ ratelimit(int fd, short type, void *arg)
 	com1_dev.regs.iir &= ~IIR_NOPEND;
 
 	vcpu_assert_pic_irq(com1_dev.vmid, 0, com1_dev.irq);
-	vcpu_deassert_pic_irq(com1_dev.vmid, 0, com1_dev.irq);
 	mutex_unlock(&com1_dev.mutex);
 }
 
@@ -160,7 +159,6 @@ com_rcv_event(int fd, short kind, void *arg)
 	if ((com1_dev.regs.iir & IIR_NOPEND) == 0) {
 		/* XXX: vcpu_id */
 		vcpu_assert_pic_irq((uintptr_t)arg, 0, com1_dev.irq);
-		vcpu_deassert_pic_irq((uintptr_t)arg, 0, com1_dev.irq);
 	}
 
 	mutex_unlock(&com1_dev.mutex);
@@ -299,7 +297,7 @@ vcpu_process_com_data(struct vm_exit *vei, uint32_t vm_id, uint32_t vcpu_id)
 			com1_dev.regs.lsr &= ~LSR_RXRDY;
 		} else {
 			set_return_data(vei, com1_dev.regs.data);
-			log_warnx("%s: guest reading com1 when not ready",
+			log_debug("%s: guest reading com1 when not ready",
 			    __func__);
 		}
 
@@ -326,7 +324,7 @@ vcpu_process_com_data(struct vm_exit *vei, uint32_t vm_id, uint32_t vcpu_id)
  *
  * Emulate in/out instructions to the com1 (ns8250) UART line control register
  *
- * Paramters:
+ * Parameters:
  *  vei: vm exit information from vmm(4) containing information on the in/out
  *      instruction being performed
  */
@@ -682,7 +680,7 @@ ns8250_restore(int fd, int con_fd, uint32_t vmid)
 }
 
 void
-ns8250_stop()
+ns8250_stop(void)
 {
 	if(event_del(&com1_dev.event))
 		log_warn("could not delete ns8250 event handler");
@@ -691,7 +689,7 @@ ns8250_stop()
 }
 
 void
-ns8250_start()
+ns8250_start(void)
 {
 	event_add(&com1_dev.event, NULL);
 	event_add(&com1_dev.wake, NULL);

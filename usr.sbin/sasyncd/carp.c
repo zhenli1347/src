@@ -1,4 +1,4 @@
-/*	$OpenBSD: carp.c,v 1.17 2019/01/22 09:25:29 krw Exp $	*/
+/*	$OpenBSD: carp.c,v 1.19 2024/04/23 13:34:51 jsg Exp $	*/
 
 /*
  * Copyright (c) 2005 Håkan Olsson.  All rights reserved.
@@ -127,7 +127,7 @@ carp_demote(int demote, int force)
 			log_msg(1, "carp_demote: unable to get "
 			    "the demote state of group '%s'",
 			    cfgstate.carp_ifgroup);
-			    goto done;
+			goto done;
 		}
 
 		if (ifgr.ifgr_attrib.ifg_carp_demoted == 0)
@@ -181,7 +181,7 @@ carp_update_state(enum RUNSTATE current_state)
 }
 
 void
-carp_check_state()
+carp_check_state(void)
 {
 	carp_update_state(carp_get_state(cfgstate.carp_ifname));
 }

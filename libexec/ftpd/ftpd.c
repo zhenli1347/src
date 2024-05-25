@@ -1,4 +1,4 @@
-/*	$OpenBSD: ftpd.c,v 1.232 2021/05/23 17:01:21 jan Exp $	*/
+/*	$OpenBSD: ftpd.c,v 1.234 2024/05/09 08:35:03 florian Exp $	*/
 /*	$NetBSD: ftpd.c,v 1.15 1995/06/03 22:46:47 mycroft Exp $	*/
 
 /*
@@ -608,7 +608,6 @@ main(int argc, char *argv[])
 /*
  * Signal handlers.
  */
-/*ARGSUSED*/
 static void
 lostconn(int signo)
 {
@@ -1978,7 +1977,6 @@ nack(const char *s)
 	reply(502, "%s command not implemented.", s);
 }
 
-/* ARGSUSED */
 void
 yyerror(char *s)
 {
@@ -2157,7 +2155,6 @@ dologout(int status)
 	_exit(status);
 }
 
-/*ARGSUSED*/
 static void
 sigurg(int signo)
 {
@@ -2719,7 +2716,6 @@ out:
 	}
 }
 
-/*ARGSUSED*/
 static void
 reapchild(int signo)
 {
@@ -2743,7 +2739,10 @@ logxfer(const char *name, off_t size, time_t start)
 	int len;
 
 	if ((statfd >= 0) && (getcwd(dir, sizeof(dir)) != NULL)) {
+		char *cnow;
+
 		time(&now);
+		cnow = ctime(&now);
 
 		vpw = malloc(strlen(guest ? guestpw : pw->pw_name) * 4 + 1);
 		if (vpw == NULL)
@@ -2759,7 +2758,8 @@ logxfer(const char *name, off_t size, time_t start)
 
 		len = snprintf(buf, sizeof(buf),
 		    "%.24s %lld %s %lld %s %c %s %c %c %s ftp %d %s %s\n",
-		    ctime(&now), (long long)(now - start + (now == start)),
+		    cnow ? cnow : "?",
+		    (long long)(now - start + (now == start)),
 		    vremotehost, (long long)size, vpath,
 		    ((type == TYPE_A) ? 'a' : 'b'), "*" /* none yet */,
 		    'o', ((guest) ? 'a' : 'r'),

@@ -1,4 +1,4 @@
-/*	$OpenBSD: frontend.c,v 1.76 2022/11/27 14:31:22 tb Exp $	*/
+/*	$OpenBSD: frontend.c,v 1.81 2024/05/21 05:00:48 jsg Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -144,7 +144,6 @@ void			 handle_route_message(struct rt_msghdr *,
 			     struct sockaddr **);
 void			 get_rtaddrs(int, struct sockaddr *,
 			     struct sockaddr **);
-void			 rtmget_default(void);
 struct pending_query	*find_pending_query(uint64_t);
 void			 parse_trust_anchor(struct trust_anchor_head *, int);
 void			 send_trust_anchors(struct trust_anchor_head *);
@@ -340,7 +339,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 				    "to frontend", __func__);
 				break;
 			}
-			if ((fd = imsg.fd) == -1) {
+			if ((fd = imsg_get_fd(&imsg)) == -1) {
 				fatalx("%s: expected to receive imsg fd to "
 				   "frontend but didn't receive any",
 				   __func__);
@@ -382,7 +381,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (udp6sock != -1)
 				fatalx("%s: received unexpected udp6sock",
 				    __func__);
-			if ((udp6sock = imsg.fd) == -1)
+			if ((udp6sock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "UDP6 fd but didn't receive any", __func__);
 			event_set(&udp6ev.ev, udp6sock, EV_READ | EV_PERSIST,
@@ -393,7 +392,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (udp4sock != -1)
 				fatalx("%s: received unexpected udp4sock",
 				    __func__);
-			if ((udp4sock = imsg.fd) == -1)
+			if ((udp4sock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "UDP4 fd but didn't receive any", __func__);
 			event_set(&udp4ev.ev, udp4sock, EV_READ | EV_PERSIST,
@@ -404,7 +403,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (tcp4sock != -1)
 				fatalx("%s: received unexpected tcp4sock",
 				    __func__);
-			if ((tcp4sock = imsg.fd) == -1)
+			if ((tcp4sock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "TCP4 fd but didn't receive any", __func__);
 			event_set(&tcp4ev.ev, tcp4sock, EV_READ | EV_PERSIST,
@@ -416,7 +415,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (tcp6sock != -1)
 				fatalx("%s: received unexpected tcp6sock",
 				    __func__);
-			if ((tcp6sock = imsg.fd) == -1)
+			if ((tcp6sock = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "TCP6 fd but didn't receive any", __func__);
 			event_set(&tcp6ev.ev, tcp6sock, EV_READ | EV_PERSIST,
@@ -430,7 +429,7 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			if (routesock != -1)
 				fatalx("%s: received unexpected routesock",
 				    __func__);
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg "
 				    "routesocket fd but didn't receive any",
 				    __func__);
@@ -443,20 +442,20 @@ frontend_dispatch_main(int fd, short event, void *bula)
 			frontend_startup();
 			break;
 		case IMSG_CONTROLFD:
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg control "
 				    "fd but didn't receive any", __func__);
 			/* Listen on control socket. */
 			control_listen(fd);
 			break;
 		case IMSG_TAFD:
-			if ((ta_fd = imsg.fd) != -1)
+			if ((ta_fd = imsg_get_fd(&imsg)) != -1)
 				parse_trust_anchor(&trust_anchors, ta_fd);
 			if (!TAILQ_EMPTY(&trust_anchors))
 				send_trust_anchors(&trust_anchors);
 			break;
 		case IMSG_BLFD:
-			if ((fd = imsg.fd) == -1)
+			if ((fd = imsg_get_fd(&imsg)) == -1)
 				fatalx("%s: expected to receive imsg block "
 				   "list fd but didn't receive any", __func__);
 			parse_blocklist(fd);
@@ -773,7 +772,7 @@ handle_query(struct pending_query *pq)
 	}
 
 	rcode = parse_edns_from_query_pkt(pq->qbuf, &pq->edns, NULL, NULL,
-	    pq->region);
+	    NULL, 0, pq->region);
 	if (rcode != LDNS_RCODE_NOERROR) {
 		error_answer(pq, rcode);
 		goto send_answer;
@@ -927,7 +926,7 @@ synthesize_dns64_answer(struct pending_query *pq)
 	    rinfo->qdcount, rinfo->ttl, rinfo->prefetch_ttl,
 	    rinfo->serve_expired_ttl, rinfo->an_numrrsets,
 	    rinfo->ns_numrrsets, rinfo->ar_numrrsets, rinfo->rrset_count,
-	    rinfo->security);
+	    rinfo->security, rinfo->reason_bogus);
 
 	if (!synth_rinfo)
 		goto srvfail;
@@ -1059,7 +1058,7 @@ resend_dns64_query(struct pending_query *opq)
 	}
 
 	rcode = parse_edns_from_query_pkt(pq->qbuf, &pq->edns, NULL, NULL,
-	    pq->region);
+	    NULL, 0, pq->region);
 	if (rcode != LDNS_RCODE_NOERROR) {
 		error_answer(pq, rcode);
 		goto send_answer;
@@ -1747,6 +1746,7 @@ tcp_response(int fd, short events, void *arg)
 		if (errno == EAGAIN || errno == EINTR)
 			return;
 		free_pending_query(pq);
+		return;
 	}
 	sldns_buffer_skip(pq->abuf, n);
 	if (sldns_buffer_remaining(pq->abuf) == 0)
@@ -1760,7 +1760,7 @@ tcp_timeout(int fd, short events, void *arg)
 }
 
 void
-check_available_af()
+check_available_af(void)
 {
 	static int		 available_af = HAVE_IPV4 | HAVE_IPV6;
 	static int		 rtable = -1;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: top.c,v 1.107 2022/09/10 16:58:51 cheloha Exp $	*/
+/*	$OpenBSD: top.c,v 1.109 2023/03/08 04:43:12 guenther Exp $	*/
 
 /*
  *  Top users/processes display for Unix
@@ -544,7 +544,7 @@ restart:
 		 * don't display stats for offline CPUs: resize if we're
 		 * interactive and CPUs have toggled on or offline
 		 */
-		if (interactive && !combine_cpus) {
+		if (interactive) {
 			for (i = ncpuonline_now = 0; i < ncpu; i++)
 				if (system_info.cpuonline[i])
 					ncpuonline_now++;
@@ -1095,28 +1095,24 @@ reset_display(void)
 	}
 }
 
-/* ARGSUSED */
 void
 leave(int signo)
 {
 	leaveflag = 1;
 }
 
-/* ARGSUSED */
 void
 tstop(int signo)
 {
 	tstopflag = 1;
 }
 
-/* ARGSUSED */
 void
 sigwinch(int signo)
 {
 	winchflag = 1;
 }
 
-/* ARGSUSED */
 void
 onalrm(int signo)
 {

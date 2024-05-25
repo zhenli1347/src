@@ -1,4 +1,4 @@
-/*	$OpenBSD: print.c,v 1.22 2022/12/01 12:41:34 job Exp $ */
+/*	$OpenBSD: print.c,v 1.52 2024/02/26 10:02:37 job Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -28,6 +28,7 @@
 #include <openssl/evp.h>
 
 #include "extern.h"
+#include "json.h"
 
 static const char *
 pretty_key_id(const char *hex)
@@ -49,6 +50,22 @@ pretty_key_id(const char *hex)
 }
 
 char *
+nid2str(int nid)
+{
+	static char buf[128];
+	const char *name;
+
+	if ((name = OBJ_nid2ln(nid)) == NULL)
+		name = OBJ_nid2sn(nid);
+	if (name == NULL)
+		name = "unknown";
+
+	snprintf(buf, sizeof(buf), "nid %d (%s)", nid, name);
+
+	return buf;
+}
+
+char *
 time2str(time_t t)
 {
 	static char buf[64];
@@ -57,7 +74,8 @@ time2str(time_t t)
 	if (gmtime_r(&t, &tm) == NULL)
 		return "could not convert time";
 
-	strftime(buf, sizeof(buf), "%h %d %T %Y %Z", &tm);
+	strftime(buf, sizeof(buf), "%a %d %b %Y %T %z", &tm);
+
 	return buf;
 }
 
@@ -65,51 +83,37 @@ void
 tal_print(const struct tal *p)
 {
 	char			*ski;
-	EVP_PKEY		*pk;
-	RSA			*r;
 	const unsigned char	*der;
-	unsigned char		*rder = NULL;
-	unsigned char		 md[SHA_DIGEST_LENGTH];
-	int			 rder_len;
+	X509_PUBKEY		*pubkey;
 	size_t			 i;
 
 	der = p->pkey;
-	pk = d2i_PUBKEY(NULL, &der, p->pkeysz);
-	if (pk == NULL)
-		errx(1, "d2i_PUBKEY failed in %s", __func__);
+	if ((pubkey = d2i_X509_PUBKEY(NULL, &der, p->pkeysz)) == NULL)
+		errx(1, "d2i_X509_PUBKEY failed");
 
-	r = EVP_PKEY_get0_RSA(pk);
-	if (r == NULL)
-		errx(1, "EVP_PKEY_get0_RSA failed in %s", __func__);
-	if ((rder_len = i2d_RSAPublicKey(r, &rder)) <= 0)
-		errx(1, "i2d_RSAPublicKey failed in %s", __func__);
-
-	if (!EVP_Digest(rder, rder_len, md, NULL, EVP_sha1(), NULL))
-		errx(1, "EVP_Digest failed in %s", __func__);
-
-	ski = hex_encode(md, SHA_DIGEST_LENGTH);
+	if ((ski = x509_pubkey_get_ski(pubkey, p->descr)) == NULL)
+		errx(1, "x509_pubkey_get_ski failed");
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"tal\",\n");
-		printf("\t\"name\": \"%s\",\n", p->descr);
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(ski));
-		printf("\t\"trust_anchor_locations\": [");
-		for (i = 0; i < p->urisz; i++) {
-			printf("\"%s\"", p->uri[i]);
-			if (i + 1 < p->urisz)
-				printf(", ");
-		}
-		printf("],\n");
+		json_do_string("type", "tal");
+		json_do_string("name", p->descr);
+		json_do_string("ski", pretty_key_id(ski));
+		json_do_array("trust_anchor_locations");
+		for (i = 0; i < p->urisz; i++)
+			json_do_string("tal", p->uri[i]);
+		json_do_end();
 	} else {
 		printf("Trust anchor name:        %s\n", p->descr);
 		printf("Subject key identifier:   %s\n", pretty_key_id(ski));
-		printf("Trust anchor locations:\n");
-		for (i = 0; i < p->urisz; i++)
-			printf("%5zu: %s\n", i + 1, p->uri[i]);
+		printf("Trust anchor locations:   ");
+		for (i = 0; i < p->urisz; i++) {
+			if (i > 0)
+				printf("%26s", "");
+			printf("%s\n", p->uri[i]);
+		}
 	}
 
-	EVP_PKEY_free(pk);
-	free(rder);
+	X509_PUBKEY_free(pubkey);
 	free(ski);
 }
 
@@ -117,61 +121,172 @@ void
 x509_print(const X509 *x)
 {
 	const ASN1_INTEGER	*xserial;
+	const X509_NAME		*xissuer;
+	char			*issuer = NULL;
 	char			*serial = NULL;
 
-	xserial = X509_get0_serialNumber(x);
-	if (xserial == NULL) {
-		warnx("X509_get0_serialNumber failed in %s", __func__);
+	if ((xissuer = X509_get_issuer_name(x)) == NULL) {
+		warnx("X509_get_issuer_name failed");
 		goto out;
 	}
 
-	serial = x509_convert_seqnum(__func__, xserial);
-	if (serial == NULL) {
-		warnx("x509_convert_seqnum failed in %s", __func__);
+	if ((issuer = X509_NAME_oneline(xissuer, NULL, 0)) == NULL) {
+		warnx("X509_NAME_oneline failed");
 		goto out;
 	}
+
+	if ((xserial = X509_get0_serialNumber(x)) == NULL) {
+		warnx("X509_get0_serialNumber failed");
+		goto out;
+	}
+
+	if ((serial = x509_convert_seqnum(__func__, xserial)) == NULL)
+		goto out;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"cert_serial\": \"%s\",\n", serial);
+		json_do_string("cert_issuer", issuer);
+		json_do_string("cert_serial", serial);
 	} else {
+		printf("Certificate issuer:       %s\n", issuer);
 		printf("Certificate serial:       %s\n", serial);
 	}
 
  out:
+	free(issuer);
 	free(serial);
+}
+
+static void
+as_resources_print(struct cert_as *as, size_t asz)
+{
+	size_t i;
+
+	for (i = 0; i < asz; i++) {
+		if (outformats & FORMAT_JSON)
+			json_do_object("resource", 1);
+		switch (as[i].type) {
+		case CERT_AS_ID:
+			if (outformats & FORMAT_JSON) {
+				json_do_uint("asid", as[i].id);
+			} else {
+				if (i > 0)
+					printf("%26s", "");
+				printf("AS: %u", as[i].id);
+			}
+			break;
+		case CERT_AS_INHERIT:
+			if (outformats & FORMAT_JSON) {
+				json_do_bool("asid_inherit", 1);
+			} else {
+				if (i > 0)
+					printf("%26s", "");
+				printf("AS: inherit");
+			}
+			break;
+		case CERT_AS_RANGE:
+			if (outformats & FORMAT_JSON) {
+				json_do_object("asrange", 1);
+				json_do_uint("min", as[i].range.min);
+				json_do_uint("max", as[i].range.max);
+				json_do_end();
+			} else {
+				if (i > 0)
+					printf("%26s", "");
+				printf("AS: %u -- %u", as[i].range.min,
+				    as[i].range.max);
+			}
+			break;
+		}
+		if (outformats & FORMAT_JSON)
+			json_do_end();
+		else
+			printf("\n");
+	}
+}
+
+static void
+ip_resources_print(struct cert_ip *ips, size_t ipsz, size_t asz)
+{
+	char buf1[64], buf2[64];
+	size_t i;
+	int sockt;
+
+
+	for (i = 0; i < ipsz; i++) {
+		if (outformats & FORMAT_JSON)
+			json_do_object("resource", 1);
+		switch (ips[i].type) {
+		case CERT_IP_INHERIT:
+			if (outformats & FORMAT_JSON) {
+				json_do_bool("ip_inherit", 1);
+			} else {
+				if (i > 0 || asz > 0)
+					printf("%26s", "");
+				printf("IP: inherit");
+			}
+			break;
+		case CERT_IP_ADDR:
+			ip_addr_print(&ips[i].ip, ips[i].afi, buf1,
+			    sizeof(buf1));
+			if (outformats & FORMAT_JSON) {
+				json_do_string("ip_prefix", buf1);
+			} else {
+				if (i > 0 || asz > 0)
+					printf("%26s", "");
+				printf("IP: %s", buf1);
+			}
+			break;
+		case CERT_IP_RANGE:
+			sockt = (ips[i].afi == AFI_IPV4) ?
+			    AF_INET : AF_INET6;
+			inet_ntop(sockt, ips[i].min, buf1, sizeof(buf1));
+			inet_ntop(sockt, ips[i].max, buf2, sizeof(buf2));
+			if (outformats & FORMAT_JSON) {
+				json_do_object("ip_range", 1);
+				json_do_string("min", buf1);
+				json_do_string("max", buf2);
+				json_do_end();
+			} else {
+				if (i > 0 || asz > 0)
+					printf("%26s", "");
+				printf("IP: %s -- %s", buf1, buf2);
+			}
+			break;
+		}
+		if (outformats & FORMAT_JSON)
+			json_do_end();
+		else
+			printf("\n");
+	}
 }
 
 void
 cert_print(const struct cert *p)
 {
-	size_t			 i, j;
-	char			 buf1[64], buf2[64];
-	int			 sockt;
-	char			 tbuf[21];
-
-	strftime(tbuf, sizeof(tbuf), "%FT%TZ", gmtime(&p->expires));
-
 	if (outformats & FORMAT_JSON) {
 		if (p->pubkey != NULL)
-			printf("\t\"type\": \"router_key\",\n");
+			json_do_string("type", "router_key");
 		else
-			printf("\t\"type\": \"ca_cert\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+			json_do_string("type", "ca_cert");
+		json_do_string("ski", pretty_key_id(p->ski));
 		if (p->aki != NULL)
-			printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
+			json_do_string("aki", pretty_key_id(p->aki));
 		x509_print(p->x509);
 		if (p->aia != NULL)
-			printf("\t\"aia\": \"%s\",\n", p->aia);
+			json_do_string("aia", p->aia);
 		if (p->mft != NULL)
-			printf("\t\"manifest\": \"%s\",\n", p->mft);
+			json_do_string("manifest", p->mft);
 		if (p->repo != NULL)
-			printf("\t\"carepository\": \"%s\",\n", p->repo);
+			json_do_string("carepository", p->repo);
 		if (p->notify != NULL)
-			printf("\t\"notify_url\": \"%s\",\n", p->notify);
+			json_do_string("notify_url", p->notify);
 		if (p->pubkey != NULL)
-			printf("\t\"router_key\": \"%s\",\n", p->pubkey);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
-		printf("\t\"subordinate_resources\": [\n");
+			json_do_string("router_key", p->pubkey);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_array("subordinate_resources");
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		if (p->aki != NULL)
@@ -189,79 +304,24 @@ cert_print(const struct cert *p)
 		if (p->pubkey != NULL) {
 			printf("BGPsec ECDSA public key:  %s\n",
 			    p->pubkey);
-			printf("Router key valid until:   %s\n", tbuf);
-		} else
-			printf("Certificate valid until:  %s\n", tbuf);
-		printf("Subordinate resources:\n");
+			printf("Router key not before:    %s\n",
+			    time2str(p->notbefore));
+			printf("Router key not after:     %s\n",
+			    time2str(p->notafter));
+		} else {
+			printf("Certificate not before:   %s\n",
+			    time2str(p->notbefore));
+			printf("Certificate not after:    %s\n",
+			    time2str(p->notafter));
+		}
+		printf("Subordinate resources:    ");
 	}
 
-	for (i = 0; i < p->asz; i++) {
-		switch (p->as[i].type) {
-		case CERT_AS_ID:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"asid\": %u }", p->as[i].id);
-			else
-				printf("%5zu: AS: %u", i + 1, p->as[i].id);
-			break;
-		case CERT_AS_INHERIT:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"asid_inherit\": \"true\" }");
-			else
-				printf("%5zu: AS: inherit", i + 1);
-			break;
-		case CERT_AS_RANGE:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"asrange\": { \"min\": %u, "
-				    "\"max\": %u }}", p->as[i].range.min,
-				    p->as[i].range.max);
-			else
-				printf("%5zu: AS: %u -- %u", i + 1,
-				    p->as[i].range.min, p->as[i].range.max);
-			break;
-		}
-		if (outformats & FORMAT_JSON && i + 1 < p->asz + p->ipsz)
-			printf(",\n");
-		else
-			printf("\n");
-	}
-
-	for (j = 0; j < p->ipsz; j++) {
-		switch (p->ips[j].type) {
-		case CERT_IP_INHERIT:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"ip_inherit\": \"true\" }");
-			else
-				printf("%5zu: IP: inherit", i + j + 1);
-			break;
-		case CERT_IP_ADDR:
-			ip_addr_print(&p->ips[j].ip,
-			    p->ips[j].afi, buf1, sizeof(buf1));
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"ip_prefix\": \"%s\" }", buf1);
-			else
-				printf("%5zu: IP: %s", i + j + 1, buf1);
-			break;
-		case CERT_IP_RANGE:
-			sockt = (p->ips[j].afi == AFI_IPV4) ?
-			    AF_INET : AF_INET6;
-			inet_ntop(sockt, p->ips[j].min, buf1, sizeof(buf1));
-			inet_ntop(sockt, p->ips[j].max, buf2, sizeof(buf2));
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"ip_range\": { \"min\": \"%s\""
-				    ", \"max\": \"%s\" }}", buf1, buf2);
-			else
-				printf("%5zu: IP: %s -- %s", i + j + 1, buf1,
-				    buf2);
-			break;
-		}
-		if (outformats & FORMAT_JSON && i + j + 1 < p->asz + p->ipsz)
-			printf(",\n");
-		else
-			printf("\n");
-	}
+	as_resources_print(p->as, p->asz);
+	ip_resources_print(p->ips, p->ipsz, p->asz);
 
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_end();
 }
 
 void
@@ -269,35 +329,39 @@ crl_print(const struct crl *p)
 {
 	STACK_OF(X509_REVOKED)	*revlist;
 	X509_REVOKED *rev;
-	ASN1_INTEGER *crlnum;
+	X509_NAME *xissuer;
 	int i;
-	char *serial;
+	char *issuer, *serial;
 	time_t t;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"crl\",\n");
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
+		json_do_string("type", "crl");
+		json_do_string("aki", pretty_key_id(p->aki));
 	} else
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 
-	crlnum = X509_CRL_get_ext_d2i(p->x509_crl, NID_crl_number, NULL, NULL);
-	serial = x509_convert_seqnum(__func__, crlnum);
-	if (serial != NULL) {
-		if (outformats & FORMAT_JSON)
-			printf("\t\"crl_serial\": \"%s\",\n", serial);
-		else
-			printf("CRL Serial Number:        %s\n", serial);
+	xissuer = X509_CRL_get_issuer(p->x509_crl);
+	issuer = X509_NAME_oneline(xissuer, NULL, 0);
+	if (issuer != NULL && p->number != NULL) {
+		if (outformats & FORMAT_JSON) {
+			json_do_string("crl_issuer", issuer);
+			json_do_string("crl_serial", p->number);
+		} else {
+			printf("CRL issuer:               %s\n", issuer);
+			printf("CRL serial number:        %s\n", p->number);
+		}
 	}
-	free(serial);
-	ASN1_INTEGER_free(crlnum);
+	free(issuer);
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"valid_since\": %lld,\n", (long long)p->issued);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
-		printf("\t\"revoked_certs\": [\n");
+		json_do_int("valid_since", p->thisupdate);
+		json_do_int("valid_until", p->nextupdate);
+		json_do_array("revoked_certs");
 	} else {
-		printf("CRL valid since:          %s\n", time2str(p->issued));
-		printf("CRL valid until:          %s\n", time2str(p->expires));
+		printf("CRL this update:          %s\n",
+		    time2str(p->thisupdate));
+		printf("CRL next update:          %s\n",
+		    time2str(p->nextupdate));
 		printf("Revoked Certificates:\n");
 	}
 
@@ -309,20 +373,19 @@ crl_print(const struct crl *p)
 		x509_get_time(X509_REVOKED_get0_revocationDate(rev), &t);
 		if (serial != NULL) {
 			if (outformats & FORMAT_JSON) {
-				printf("\t\t{ \"serial\": \"%s\"", serial);
-				printf(", \"date\": \"%s\" }", time2str(t));
-				if (i + 1 < sk_X509_REVOKED_num(revlist))
-					printf(",");
-				printf("\n");
+				json_do_object("cert", 1);
+				json_do_string("serial", serial);
+				json_do_string("date", time2str(t));
+				json_do_end();
 			} else
-				printf("    Serial: %8s   Revocation Date: %s"
-				    "\n", serial, time2str(t));
+				printf("%25s Serial: %8s   Revocation Date: %s"
+				    "\n", "", serial, time2str(t));
 		}
 		free(serial);
 	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_end();
 	else if (i == 0)
 		printf("No Revoked Certificates\n");
 }
@@ -334,51 +397,57 @@ mft_print(const X509 *x, const struct mft *p)
 	char *hash;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"manifest\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "manifest");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"sia\": \"%s\",\n", p->sia);
-		printf("\t\"manifest_number\": \"%s\",\n", p->seqnum);
-		printf("\t\"valid_since\": %lld,\n", (long long)p->valid_since);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->valid_until);
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		json_do_string("sia", p->sia);
+		json_do_string("manifest_number", p->seqnum);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->thisupdate);
+		json_do_int("valid_until", p->nextupdate);
+		if (p->expires)
+			json_do_int("expires", p->expires);
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		x509_print(x);
 		printf("Authority info access:    %s\n", p->aia);
 		printf("Subject info access:      %s\n", p->sia);
-		printf("Manifest Number:          %s\n", p->seqnum);
-		printf("Manifest valid since:     %s\n", time2str(p->valid_since));
-		printf("Manifest valid until:     %s\n", time2str(p->valid_until));
-		printf("Files and hashes:\n");
+		printf("Manifest number:          %s\n", p->seqnum);
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("Manifest this update:     %s\n", time2str(p->thisupdate));
+		printf("Manifest next update:     %s\n", time2str(p->nextupdate));
+		printf("Files and hashes:         ");
 	}
 
+	if (outformats & FORMAT_JSON)
+		json_do_array("filesandhashes");
 	for (i = 0; i < p->filesz; i++) {
-		if (i == 0 && outformats & FORMAT_JSON)
-			printf("\t\"filesandhashes\": [\n");
-
 		if (base64_encode(p->files[i].hash, sizeof(p->files[i].hash),
 		    &hash) == -1)
 			errx(1, "base64_encode failure");
 
 		if (outformats & FORMAT_JSON) {
-			printf("\t\t{ \"filename\": \"%s\",", p->files[i].file);
-			printf(" \"hash\": \"%s\" }", hash);
-			if (i + 1 < p->filesz)
-				printf(",");
-			printf("\n");
+			json_do_object("filehash", 1);
+			json_do_string("filename", p->files[i].file);
+			json_do_string("hash", hash);
+			json_do_end();
 		} else {
-			printf("%5zu: %s\n", i + 1, p->files[i].file);
-			printf("\thash %s\n", hash);
+			if (i > 0)
+				printf("%26s", "");
+			printf("%zu: %s (hash: %s)\n", i + 1, p->files[i].file,
+			    hash);
 		}
 
 		free(hash);
 	}
-
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_end();
 }
 
 void
@@ -388,77 +457,139 @@ roa_print(const X509 *x, const struct roa *p)
 	size_t	 i;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"roa\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "roa");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"sia\": \"%s\",\n", p->sia);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		json_do_string("sia", p->sia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		x509_print(x);
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		printf("Authority info access:    %s\n", p->aia);
 		printf("Subject info access:      %s\n", p->sia);
-		printf("ROA valid until:          %s\n", time2str(p->expires));
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("ROA not before:           %s\n",
+		    time2str(p->notbefore));
+		printf("ROA not after:            %s\n", time2str(p->notafter));
 		printf("asID:                     %u\n", p->asid);
-		printf("IP address blocks:\n");
+		printf("IP address blocks:        ");
 	}
 
+	if (outformats & FORMAT_JSON)
+		json_do_array("vrps");
 	for (i = 0; i < p->ipsz; i++) {
-		if (i == 0 && outformats & FORMAT_JSON)
-			printf("\t\"vrps\": [\n");
-
 		ip_addr_print(&p->ips[i].addr,
 		    p->ips[i].afi, buf, sizeof(buf));
 
 		if (outformats & FORMAT_JSON) {
-			printf("\t\t{ \"prefix\": \"%s\",", buf);
-			printf(" \"asid\": %u,", p->asid);
-			printf(" \"maxlen\": %hhu }", p->ips[i].maxlength);
-			if (i + 1 < p->ipsz)
-				printf(",");
-			printf("\n");
-		} else
-			printf("%5zu: %s maxlen: %hhu\n", i + 1, buf,
-			    p->ips[i].maxlength);
+			json_do_object("vrp", 1);
+			json_do_string("prefix", buf);
+			json_do_uint("asid", p->asid);
+			json_do_uint("maxlen", p->ips[i].maxlength);
+			json_do_end();
+		} else {
+			if (i > 0)
+				printf("%26s", "");
+			printf("%s maxlen: %hhu\n", buf, p->ips[i].maxlength);
+		}
+	}
+	if (outformats & FORMAT_JSON)
+		json_do_end();
+}
+
+void
+spl_print(const X509 *x, const struct spl *s)
+{
+	char	 buf[128];
+	size_t	 i;
+
+	if (outformats & FORMAT_JSON) {
+		json_do_string("type", "spl");
+		json_do_string("ski", pretty_key_id(s->ski));
+		x509_print(x);
+		json_do_string("aki", pretty_key_id(s->aki));
+		json_do_string("aia", s->aia);
+		json_do_string("sia", s->sia);
+		if (s->signtime != 0)
+			json_do_int("signing_time", s->signtime);
+		json_do_int("valid_since", s->notbefore);
+		json_do_int("valid_until", s->notafter);
+		if (s->expires)
+			json_do_int("expires", s->expires);
+		json_do_int("asid", s->asid);
+	} else {
+		printf("Subject key identifier:   %s\n", pretty_key_id(s->ski));
+		x509_print(x);
+		printf("Authority key identifier: %s\n", pretty_key_id(s->aki));
+		printf("Authority info access:    %s\n", s->aia);
+		printf("Subject info access:      %s\n", s->sia);
+		if (s->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(s->signtime));
+		printf("SPL not before:           %s\n",
+		    time2str(s->notbefore));
+		printf("SPL not after:            %s\n", time2str(s->notafter));
+		printf("asID:                     %u\n", s->asid);
+		printf("Originated IP Prefixes:   ");
 	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_array("prefixes");
+	for (i = 0; i < s->pfxsz; i++) {
+		ip_addr_print(&s->pfxs[i].prefix, s->pfxs[i].afi, buf,
+		    sizeof(buf));
+
+		if (outformats & FORMAT_JSON) {
+			json_do_string("prefix", buf);
+		} else {
+			if (i > 0)
+				printf("%26s", "");
+			printf("%s\n", buf);
+		}
+	}
+	if (outformats & FORMAT_JSON)
+		json_do_end();
 }
 
 void
 gbr_print(const X509 *x, const struct gbr *p)
 {
-	size_t	i;
-
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"gbr\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "gbr");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"sia\": \"%s\",\n", p->sia);
-		printf("\t\"vcard\": \"");
-		for (i = 0; i < strlen(p->vcard); i++) {
-			if (p->vcard[i] == '"')
-				printf("\\\"");
-			if (p->vcard[i] == '\r')
-				continue;
-			if (p->vcard[i] == '\n')
-				printf("\\r\\n");
-			else
-				putchar(p->vcard[i]);
-		}
-		printf("\",\n");
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		json_do_string("sia", p->sia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_string("vcard", p->vcard);
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		x509_print(x);
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		printf("Authority info access:    %s\n", p->aia);
 		printf("Subject info access:      %s\n", p->sia);
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("GBR not before:           %s\n",
+		    time2str(p->notbefore));
+		printf("GBR not after:            %s\n", time2str(p->notafter));
 		printf("vcard:\n%s", p->vcard);
 	}
 }
@@ -466,93 +597,44 @@ gbr_print(const X509 *x, const struct gbr *p)
 void
 rsc_print(const X509 *x, const struct rsc *p)
 {
-	char	 buf1[64], buf2[64], tbuf[21];
 	char	*hash;
-	int	 sockt;
-	size_t	 i, j;
-
-	strftime(tbuf, sizeof(tbuf), "%FT%TZ", gmtime(&p->expires));
+	size_t	 i;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
+		json_do_string("type", "rsc");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
-		printf("\t\"signed_with_resources\": [\n");
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_array("signed_with_resources");
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		x509_print(x);
 		printf("Authority info access:    %s\n", p->aia);
-		printf("Valid until:              %s\n", tbuf);
-		printf("Signed with resources:\n");
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("RSC not before:           %s\n",
+		    time2str(p->notbefore));
+		printf("RSC not after:            %s\n", time2str(p->notafter));
+		printf("Signed with resources:    ");
 	}
 
-	for (i = 0; i < p->asz; i++) {
-		switch (p->as[i].type) {
-		case CERT_AS_ID:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"asid\": %u }", p->as[i].id);
-			else
-				printf("%5zu: AS: %u", i + 1, p->as[i].id);
-			break;
-		case CERT_AS_RANGE:
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"asrange\": { \"min\": %u, "
-				    "\"max\": %u }}", p->as[i].range.min,
-				    p->as[i].range.max);
-			else
-				printf("%5zu: AS: %u -- %u", i + 1,
-				    p->as[i].range.min, p->as[i].range.max);
-			break;
-		case CERT_AS_INHERIT:
-			/* inheritance isn't possible in RSC */
-			break;
-		}
-		if (outformats & FORMAT_JSON && i + 1 < p->asz + p->ipsz)
-			printf(",\n");
-		else
-			printf("\n");
-	}
-
-	for (j = 0; j < p->ipsz; j++) {
-		switch (p->ips[j].type) {
-		case CERT_IP_ADDR:
-			ip_addr_print(&p->ips[j].ip,
-			    p->ips[j].afi, buf1, sizeof(buf1));
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"ip_prefix\": \"%s\" }", buf1);
-			else
-				printf("%5zu: IP: %s", i + j + 1, buf1);
-			break;
-		case CERT_IP_RANGE:
-			sockt = (p->ips[j].afi == AFI_IPV4) ?
-			    AF_INET : AF_INET6;
-			inet_ntop(sockt, p->ips[j].min, buf1, sizeof(buf1));
-			inet_ntop(sockt, p->ips[j].max, buf2, sizeof(buf2));
-			if (outformats & FORMAT_JSON)
-				printf("\t\t{ \"ip_range\": { \"min\": \"%s\""
-				    ", \"max\": \"%s\" }}", buf1, buf2);
-			else
-				printf("%5zu: IP: %s -- %s", i + j + 1, buf1,
-				    buf2);
-			break;
-		case CERT_IP_INHERIT:
-			/* inheritance isn't possible in RSC */
-			break;
-		}
-		if (outformats & FORMAT_JSON && i + j + 1 < p->asz + p->ipsz)
-			printf(",\n");
-		else
-			printf("\n");
-	}
+	as_resources_print(p->as, p->asz);
+	ip_resources_print(p->ips, p->ipsz, p->asz);
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t],\n");
-		printf("\t\"filenamesandhashes\": [\n");
+		json_do_end();
+		json_do_array("filenamesandhashes");
 	} else
-		printf("Filenames and hashes:\n");
+		printf("Filenames and hashes:     ");
 
 	for (i = 0; i < p->filesz; i++) {
 		if (base64_encode(p->files[i].hash, sizeof(p->files[i].hash),
@@ -560,23 +642,25 @@ rsc_print(const X509 *x, const struct rsc *p)
 			errx(1, "base64_encode failure");
 
 		if (outformats & FORMAT_JSON) {
-			printf("\t\t{ \"filename\": \"%s\",",
-			    p->files[i].filename ? p->files[i].filename : "");
-			printf(" \"hash_digest\": \"%s\" }", hash);
-			if (i + 1 < p->filesz)
-				printf(",");
-			printf("\n");
+			json_do_object("filehash", 1);
+			if (p->files[i].filename)
+				json_do_string("filename",
+				    p->files[i].filename);
+			json_do_string("hash_digest", hash);
+			json_do_end();
 		} else {
-			printf("%5zu: %s\n", i + 1, p->files[i].filename
-			    ? p->files[i].filename : "no filename");
-			printf("\thash %s\n", hash);
+			if (i > 0)
+				printf("%26s", "");
+			printf("%zu: %s (hash: %s)\n", i + 1,
+			    p->files[i].filename ? p->files[i].filename
+			    : "no filename", hash);
 		}
 
 		free(hash);
 	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_end();
 }
 
 void
@@ -585,49 +669,48 @@ aspa_print(const X509 *x, const struct aspa *p)
 	size_t	i;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"aspa\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "aspa");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"sia\": \"%s\",\n", p->sia);
-		printf("\t\"customer_asid\": %u,\n", p->custasid);
-		printf("\t\"provider_set\": [\n");
-		for (i = 0; i < p->providersz; i++) {
-			printf("\t\t{ \"asid\": %u", p->providers[i].as);
-			if (p->providers[i].afi == AFI_IPV4)
-				printf(", \"afi_limit\": \"ipv4\"");
-			if (p->providers[i].afi == AFI_IPV6)
-				printf(", \"afi_limit\": \"ipv6\"");
-			printf(" }");
-			if (i + 1 < p->providersz)
-				printf(",");
-			printf("\n");
-		}
-		printf("\t],\n");
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		json_do_string("sia", p->sia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_uint("customer_asid", p->custasid);
+		json_do_array("providers");
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		x509_print(x);
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		printf("Authority info access:    %s\n", p->aia);
 		printf("Subject info access:      %s\n", p->sia);
-		printf("Customer AS:              %u\n", p->custasid);
-		printf("Provider Set:\n");
-		for (i = 0; i < p->providersz; i++) {
-			printf("%5zu: AS: %d", i + 1, p->providers[i].as);
-			switch (p->providers[i].afi) {
-			case AFI_IPV4:
-				printf(" (IPv4 only)");
-				break;
-			case AFI_IPV6:
-				printf(" (IPv6 only)");
-				break;
-			default:
-				break;
-			}
-			printf("\n");
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("ASPA not before:          %s\n",
+		    time2str(p->notbefore));
+		printf("ASPA not after:           %s\n", time2str(p->notafter));
+		printf("Customer ASID:            %u\n", p->custasid);
+		printf("Providers:                ");
+	}
+
+	for (i = 0; i < p->providersz; i++) {
+		if (outformats & FORMAT_JSON)
+			json_do_uint("asid", p->providers[i]);
+		else {
+			if (i > 0)
+				printf("%26s", "");
+			printf("AS: %u\n", p->providers[i]);
 		}
 	}
+
+	if (outformats & FORMAT_JSON)
+		json_do_end();
 }
 
 static void
@@ -640,42 +723,33 @@ takey_print(char *name, const struct takey *t)
 		errx(1, "base64_encode failed in %s", __func__);
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\t{\n\t\t\t\"name\": \"%s\",\n", name);
-		printf("\t\t\t\"comments\": [");
-		for (i = 0; i < t->commentsz; i++) {
-			printf("\"%s\"", t->comments[i]);
-			if (i + 1 < t->commentsz)
-				printf(", ");
-		}
-		printf("],\n");
-		printf("\t\t\t\"uris\": [");
-		for (i = 0; i < t->urisz; i++) {
-			printf("\"%s\"", t->uris[i]);
-			if (i + 1 < t->urisz)
-				printf(", ");
-		}
-		printf("],\n");
-		printf("\t\t\t\"spki\": \"%s\"\n\t\t}", spki);
+		json_do_object("takey", 0);
+		json_do_string("name", name);
+		json_do_array("comments");
+		for (i = 0; i < t->commentsz; i++)
+			json_do_string("comment", t->comments[i]);
+		json_do_end();
+		json_do_array("uris");
+		for (i = 0; i < t->urisz; i++)
+			json_do_string("uri", t->uris[i]);
+		json_do_end();
+		json_do_string("spki", spki);
+		json_do_end();
 	} else {
 		printf("TAL derived from the '%s' Trust Anchor Key:\n\n", name);
 
-		for (i = 0; i < t->commentsz; i++) {
+		for (i = 0; i < t->commentsz; i++)
 			printf("\t# %s\n", t->comments[i]);
-		}
-
-		for (i = 0; i < t->urisz; i++) {
-			printf("\t%s\n\n\t", t->uris[i]);
-		}
-
+		if (t->commentsz > 0)
+			printf("\n");
+		for (i = 0; i < t->urisz; i++)
+			printf("\t%s\n", t->uris[i]);
+		printf("\n\t");
 		for (i = 0; i < strlen(spki); i++) {
 			printf("%c", spki[i]);
-			j++;
-			if (j == 64) {
+			if ((++j % 64) == 0)
 				printf("\n\t");
-				j = 0;
-			}
 		}
-
 		printf("\n\n");
 	}
 
@@ -685,43 +759,42 @@ takey_print(char *name, const struct takey *t)
 void
 tak_print(const X509 *x, const struct tak *p)
 {
-	char	tbuf[21];
-
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"tak\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "tak");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"sia\": \"%s\",\n", p->sia);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
-		printf("\t\"takeys\": [\n");
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		json_do_string("sia", p->sia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_array("takeys");
 	} else {
-		strftime(tbuf, sizeof(tbuf), "%FT%TZ", gmtime(&p->expires));
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		x509_print(x);
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		printf("Authority info access:    %s\n", p->aia);
 		printf("Subject info access:      %s\n", p->sia);
-		printf("TAK valid until:          %s\n", tbuf);
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("TAK not before:           %s\n",
+		    time2str(p->notbefore));
+		printf("TAK not after:            %s\n", time2str(p->notafter));
 	}
 
 	takey_print("current", p->current);
-
-	if (p->predecessor != NULL) {
-		if (outformats & FORMAT_JSON)
-			printf(",\n");
+	if (p->predecessor != NULL)
 		takey_print("predecessor", p->predecessor);
-	}
-
-	if (p->successor != NULL) {
-		if (outformats & FORMAT_JSON)
-			printf(",\n");
+	if (p->successor != NULL)
 		takey_print("successor", p->successor);
-	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\n\t],\n");
+		json_do_end();
 }
 
 void
@@ -731,20 +804,30 @@ geofeed_print(const X509 *x, const struct geofeed *p)
 	size_t	 i;
 
 	if (outformats & FORMAT_JSON) {
-		printf("\t\"type\": \"geofeed\",\n");
-		printf("\t\"ski\": \"%s\",\n", pretty_key_id(p->ski));
+		json_do_string("type", "geofeed");
+		json_do_string("ski", pretty_key_id(p->ski));
 		x509_print(x);
-		printf("\t\"aki\": \"%s\",\n", pretty_key_id(p->aki));
-		printf("\t\"aia\": \"%s\",\n", p->aia);
-		printf("\t\"valid_until\": %lld,\n", (long long)p->expires);
-		printf("\t\"records\": [\n");
+		json_do_string("aki", pretty_key_id(p->aki));
+		json_do_string("aia", p->aia);
+		if (p->signtime != 0)
+			json_do_int("signing_time", p->signtime);
+		json_do_int("valid_since", p->notbefore);
+		json_do_int("valid_until", p->notafter);
+		if (p->expires)
+			json_do_int("expires", p->expires);
+		json_do_array("records");
 	} else {
 		printf("Subject key identifier:   %s\n", pretty_key_id(p->ski));
 		x509_print(x);
 		printf("Authority key identifier: %s\n", pretty_key_id(p->aki));
 		printf("Authority info access:    %s\n", p->aia);
-		printf("Geofeed valid until:      %s\n", time2str(p->expires));
-		printf("Geofeed CSV records:\n");
+		if (p->signtime != 0)
+			printf("Signing time:             %s\n",
+			    time2str(p->signtime));
+		printf("Geofeed not before:       %s\n",
+		    time2str(p->notbefore));
+		printf("Geofeed not after:        %s\n", time2str(p->notafter));
+		printf("Geofeed CSV records:      ");
 	}
 
 	for (i = 0; i < p->geoipsz; i++) {
@@ -753,19 +836,18 @@ geofeed_print(const X509 *x, const struct geofeed *p)
 
 		ip_addr_print(&p->geoips[i].ip->ip, p->geoips[i].ip->afi, buf,
 		    sizeof(buf));
-		if (outformats & FORMAT_JSON)
-			printf("\t\t{ \"prefix\": \"%s\", \"location\": \"%s\""
-			    "}", buf, p->geoips[i].loc);
-		else
-			printf("%5zu: IP: %s (%s)", i + 1, buf,
-			    p->geoips[i].loc);
-
-		if (outformats & FORMAT_JSON && i + 1 < p->geoipsz)
-			printf(",\n");
-		else
-			printf("\n");
+		if (outformats & FORMAT_JSON) {
+			json_do_object("geoip", 1);
+			json_do_string("prefix", buf);
+			json_do_string("location", p->geoips[i].loc);
+			json_do_end();
+		} else {
+			if (i > 0)
+				printf("%26s", "");
+			printf("IP: %s (%s)\n", buf, p->geoips[i].loc);
+		}
 	}
 
 	if (outformats & FORMAT_JSON)
-		printf("\t],\n");
+		json_do_end();
 }

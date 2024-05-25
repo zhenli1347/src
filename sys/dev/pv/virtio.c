@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.c,v 1.21 2022/01/09 05:42:58 jsg Exp $	*/
+/*	$OpenBSD: virtio.c,v 1.25 2024/05/24 10:05:55 jsg Exp $	*/
 /*	$NetBSD: virtio.c,v 1.3 2011/11/02 23:05:52 njoly Exp $	*/
 
 /*
@@ -29,9 +29,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
-#include <sys/mutex.h>
 #include <sys/atomic.h>
 #include <sys/malloc.h>
 
@@ -64,7 +62,13 @@ static const char * const virtio_device_name[] = {
 	"Rpmsg",		/* 7 */
 	"SCSI host",		/* 8 */
 	"9P Transport",		/* 9 */
-	"mac80211 wlan"		/* 10 */
+	"mac80211 wlan",	/* 10 */
+	NULL,			/* 11 */
+	NULL,			/* 12 */
+	NULL,			/* 13 */
+	NULL,			/* 14 */
+	NULL,			/* 15 */
+	"GPU",			/* 16 */
 };
 #define NDEVNAMES	(sizeof(virtio_device_name)/sizeof(char*))
 
@@ -91,7 +95,7 @@ virtio_log_features(uint64_t host, uint64_t neg,
 	const struct virtio_feature_name *namep;
 	int i;
 	char c;
-	uint32_t bit;
+	uint64_t bit;
 
 	for (i = 0; i < 64; i++) {
 		if (i == 30) {
@@ -101,13 +105,17 @@ virtio_log_features(uint64_t host, uint64_t neg,
 			 */
 			continue;
 		}
-		bit = 1 << i;
+		bit = 1ULL << i;
 		if ((host&bit) == 0)
 			continue;
-		namep = (i < 24 || i > 37) ? guest_feature_names :
-		    transport_feature_names;
+		namep = guest_feature_names;
 		while (namep->bit && namep->bit != bit)
 			namep++;
+		if (namep->name == NULL) {
+			namep = transport_feature_names;
+			while (namep->bit && namep->bit != bit)
+				namep++;
+		}
 		c = (neg&bit) ? '+' : '-';
 		if (namep->name)
 			printf(" %c%s", c, namep->name);
@@ -212,24 +220,29 @@ vq_sync_indirect(struct virtio_softc *sc, struct virtqueue *vq, int slot,
 int
 virtio_check_vqs(struct virtio_softc *sc)
 {
-	struct virtqueue *vq;
 	int i, r = 0;
 
 	/* going backwards is better for if_vio */
-	for (i = sc->sc_nvqs - 1; i >= 0; i--) {
-		vq = &sc->sc_vqs[i];
-		if (vq->vq_queued) {
-			vq->vq_queued = 0;
-			vq_sync_aring(sc, vq, BUS_DMASYNC_POSTWRITE);
-		}
-		vq_sync_uring(sc, vq, BUS_DMASYNC_POSTREAD);
-		if (vq->vq_used_idx != vq->vq_used->idx) {
-			if (vq->vq_done)
-				r |= (vq->vq_done)(vq);
-		}
-	}
+	for (i = sc->sc_nvqs - 1; i >= 0; i--)
+		r |= virtio_check_vq(sc, &sc->sc_vqs[i]);
 
 	return r;
+}
+
+int
+virtio_check_vq(struct virtio_softc *sc, struct virtqueue *vq)
+{
+	if (vq->vq_queued) {
+		vq->vq_queued = 0;
+		vq_sync_aring(sc, vq, BUS_DMASYNC_POSTWRITE);
+	}
+	vq_sync_uring(sc, vq, BUS_DMASYNC_POSTREAD);
+	if (vq->vq_used_idx != vq->vq_used->idx) {
+		if (vq->vq_done)
+			return (vq->vq_done)(vq);
+	}
+
+	return 0;
 }
 
 /*

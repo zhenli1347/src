@@ -1,4 +1,4 @@
-/*	$OpenBSD: timestamp.c,v 1.10 2013/05/22 12:14:08 espie Exp $ */
+/*	$OpenBSD: timestamp.c,v 1.12 2024/04/09 15:08:21 cheloha Exp $ */
 
 /*
  * Copyright (c) 2001 Marc Espie.
@@ -27,18 +27,11 @@
 #include <sys/time.h>
 #include <stdio.h>
 #include <string.h>
-#include "config.h"
 #include "defines.h"
 #include "timestamp.h"
 
 
 struct timespec starttime;
-
-int
-set_times(const char *f)
-{
-    return utimes(f, NULL);
-}
 
 #define PLACEHOLDER "XXXXXXXXX "
 char *

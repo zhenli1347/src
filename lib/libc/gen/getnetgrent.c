@@ -1,4 +1,4 @@
-/*	$OpenBSD: getnetgrent.c,v 1.29 2022/08/02 17:00:15 deraadt Exp $	*/
+/*	$OpenBSD: getnetgrent.c,v 1.32 2024/01/22 17:21:52 deraadt Exp $	*/
 
 /*
  * Copyright (c) 1994 Christos Zoulas
@@ -12,11 +12,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by Christos Zoulas.
- * 4. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
  * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
@@ -522,12 +517,14 @@ _ng_makekey(const char *s1, const char *s2, size_t len)
 	return buf;
 }
 
+#ifdef DEBUG_NG
 static void
 _ng_print(char *buf, size_t len, const struct netgroup *ng)
 {
 	(void) snprintf(buf, len, "(%s,%s,%s)", _NG_EMPTY(ng->ng_host),
 	    _NG_EMPTY(ng->ng_user), _NG_EMPTY(ng->ng_domain));
 }
+#endif
 
 
 /*
@@ -633,7 +630,7 @@ setnetgrent(const char *ng)
 		return;
 
 	if (_ng_db == NULL)
-		_ng_db = dbopen(_PATH_NETGROUP_DB, O_RDONLY, 0, DB_HASH, NULL);
+		_ng_db = __hash_open(_PATH_NETGROUP_DB, O_RDONLY, 0, NULL, 0);
 
 #ifdef YP
 	/*
@@ -685,7 +682,7 @@ innetgr(const char *grp, const char *host, const char *user, const char *domain)
 	struct stringlist *sl;
 
 	if (_ng_db == NULL)
-		_ng_db = dbopen(_PATH_NETGROUP_DB, O_RDONLY, 0, DB_HASH, NULL);
+		_ng_db = __hash_open(_PATH_NETGROUP_DB, O_RDONLY, 0, NULL, 0);
 
 #ifdef YP
 	/*

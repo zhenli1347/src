@@ -1,4 +1,4 @@
-/* $OpenBSD: mfi.c,v 1.188 2022/04/16 19:19:59 naddy Exp $ */
+/* $OpenBSD: mfi.c,v 1.191 2023/11/28 09:29:20 jsg Exp $ */
 /*
  * Copyright (c) 2006 Marco Peereboom <marco@peereboom.us>
  *
@@ -925,7 +925,9 @@ mfi_poll(struct mfi_softc *sc, struct mfi_ccb *ccb)
 void
 mfi_exec(struct mfi_softc *sc, struct mfi_ccb *ccb)
 {
-	struct mutex m = MUTEX_INITIALIZER(IPL_BIO);
+	struct mutex m;
+
+	mtx_init(&m, IPL_BIO);
 
 #ifdef DIAGNOSTIC
 	if (ccb->ccb_cookie != NULL || ccb->ccb_done != NULL)
@@ -2504,7 +2506,7 @@ mfi_refresh_sensors(void *arg)
 			break;
 
 		case BIOC_SVINVALID:
-			/* FALLTRHOUGH */
+			/* FALLTHROUGH */
 		default:
 			sc->sc_sensors[i].value = 0; /* unknown */
 			sc->sc_sensors[i].status = SENSOR_S_UNKNOWN;

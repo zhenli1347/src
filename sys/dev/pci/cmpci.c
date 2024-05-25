@@ -1,4 +1,4 @@
-/*	$OpenBSD: cmpci.c,v 1.52 2022/10/26 20:19:08 kn Exp $	*/
+/*	$OpenBSD: cmpci.c,v 1.54 2024/05/24 06:02:53 jsg Exp $	*/
 /*	$NetBSD: cmpci.c,v 1.25 2004/10/26 06:32:20 xtraeme Exp $	*/
 
 /*
@@ -51,7 +51,6 @@ int cmpcidebug = 0;
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 
@@ -60,7 +59,6 @@ int cmpcidebug = 0;
 
 #include <sys/audioio.h>
 #include <dev/audio_if.h>
-#include <dev/midi_if.h>
 
 #include <dev/pci/cmpcireg.h>
 #include <dev/pci/cmpcivar.h>
@@ -802,7 +800,6 @@ cmpci_set_params(void *handle, int setmode, int usemode,
 	return 0;
 }
 
-/* ARGSUSED */
 int
 cmpci_round_blocksize(void *handle, int block)
 {
@@ -1745,7 +1742,6 @@ cmpci_get_port(void *handle, mixer_ctrl_t *cp)
 	return 0;
 }
 
-/* ARGSUSED */
 size_t
 cmpci_round_buffersize(void *handle, int direction, size_t bufsize)
 {

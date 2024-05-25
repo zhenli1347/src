@@ -1,4 +1,4 @@
-/*	$OpenBSD: rcsprog.c,v 1.163 2021/01/18 00:51:15 mortimer Exp $	*/
+/*	$OpenBSD: rcsprog.c,v 1.165 2023/08/11 05:02:21 guenther Exp $	*/
 /*
  * Copyright (c) 2005 Jean-Francois Brousseau <jfb@openbsd.org>
  * All rights reserved.
@@ -67,7 +67,6 @@ struct wklhead temp_files;
 void sighdlr(int);
 static void  rcs_attach_symbol(RCSFILE *, const char *);
 
-/* ARGSUSED */
 void
 sighdlr(int sig)
 {
@@ -192,7 +191,7 @@ rcs_main(int argc, char **argv)
 	RCSFILE *file;
 	RCSNUM *logrev;
 	struct rcs_access *acp;
-	time_t rcs_mtime = -1;
+	struct timespec rcs_mtime = { .tv_sec = 0, .tv_nsec = UTIME_OMIT };
 
 	kflag = RCS_KWEXP_ERR;
 	lkmode = RCS_LOCK_INVAL;

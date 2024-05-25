@@ -1,4 +1,4 @@
-/* $OpenBSD: ui.h,v 1.1 2022/11/12 13:16:10 beck Exp $ */
+/* $OpenBSD: ui.h,v 1.3 2023/07/05 21:14:54 bcook Exp $ */
 /*
  * Copyright (c) 2022 Bob Beck <beck@openbsd.org>
  *
@@ -18,7 +18,11 @@
 #ifndef _LIBCRYPTO_UI_H
 #define _LIBCRYPTO_UI_H
 
+#ifndef _MSC_VER
 #include_next <openssl/ui.h>
+#else
+#include "../include/openssl/ui.h"
+#endif
 #include "crypto_namespace.h"
 
 LCRYPTO_USED(UI_new);
@@ -48,6 +52,7 @@ LCRYPTO_USED(UI_get_default_method);
 LCRYPTO_USED(UI_get_method);
 LCRYPTO_USED(UI_set_method);
 LCRYPTO_USED(UI_OpenSSL);
+LCRYPTO_USED(UI_null);
 LCRYPTO_USED(UI_create_method);
 LCRYPTO_USED(UI_destroy_method);
 LCRYPTO_USED(UI_method_set_opener);

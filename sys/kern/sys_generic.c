@@ -1,4 +1,4 @@
-/*	$OpenBSD: sys_generic.c,v 1.150 2022/08/16 13:32:16 visa Exp $	*/
+/*	$OpenBSD: sys_generic.c,v 1.157 2024/04/10 10:05:26 claudio Exp $	*/
 /*	$NetBSD: sys_generic.c,v 1.24 1996/03/29 00:25:32 cgd Exp $	*/
 
 /*
@@ -74,8 +74,8 @@ int kqpoll_debug = 0;
 	printf(x);							\
 }
 
-int pselregister(struct proc *, fd_set *[], fd_set *[], int, int *, int *);
-int pselcollect(struct proc *, struct kevent *, fd_set *[], int *);
+int pselregister(struct proc *, fd_set **, fd_set **, int, int *, int *);
+int pselcollect(struct proc *, struct kevent *, fd_set **, int *);
 void ppollregister(struct proc *, struct pollfd *, int, int *, int *);
 int ppollcollect(struct proc *, struct kevent *, struct pollfd *, u_int);
 
@@ -596,15 +596,16 @@ dopselect(struct proc *p, int nd, fd_set *in, fd_set *ou, fd_set *ex,
 	struct timespec zerots = {};
 	fd_mask bits[6];
 	fd_set *pibits[3], *pobits[3];
-	int error, ncollected = 0, nevents = 0;
+	int error, nfiles, ncollected = 0, nevents = 0;
 	u_int ni;
 
 	if (nd < 0)
 		return (EINVAL);
-	if (nd > p->p_fd->fd_nfiles) {
-		/* forgiving; slightly wrong */
-		nd = p->p_fd->fd_nfiles;
-	}
+
+	nfiles = READ_ONCE(p->p_fd->fd_nfiles);
+	if (nd > nfiles)
+		nd = nfiles;
+
 	ni = howmany(nd, NFDBITS) * sizeof(fd_mask);
 	if (ni > sizeof(bits[0])) {
 		caddr_t mbits;
@@ -765,12 +766,6 @@ pselregister(struct proc *p, fd_set *pibits[3], fd_set *pobits[3], int nfd,
 						 * __EV_SELECT */
 					error = 0;
 					break;
-				case EPIPE:	/* Specific to pipes */
-					KASSERT(kev.filter == EVFILT_WRITE);
-					FD_SET(kev.ident, pobits[1]);
-					(*ncollected)++;
-					error = 0;
-					break;
 				case ENXIO:	/* Device has been detached */
 				default:
 					goto bad;
@@ -832,7 +827,7 @@ void
 selwakeup(struct selinfo *sip)
 {
 	KERNEL_LOCK();
-	KNOTE(&sip->si_note, NOTE_SUBMIT);
+	knote_locked(&sip->si_note, NOTE_SUBMIT);
 	KERNEL_UNLOCK();
 }
 
@@ -1065,10 +1060,6 @@ again:
 				kevp->filter = EVFILT_EXCEPT;
 				goto again;
 			}
-			break;
-		case EPIPE:	/* Specific to pipes */
-			KASSERT(kevp->filter == EVFILT_WRITE);
-			pl->revents |= POLLHUP;
 			break;
 		default:
 			DPRINTFN(0, "poll err %lu fd %d revents %02x serial"

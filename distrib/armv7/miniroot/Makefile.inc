@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.inc,v 1.29 2022/02/07 20:24:30 krw Exp $
+#	$OpenBSD: Makefile.inc,v 1.33 2024/04/09 11:13:51 kettenis Exp $
 
 FS=		miniroot-${BOARD}-${OSrev}.img
 FSSIZE=		71424	# ffs+msdos, actually
@@ -6,7 +6,7 @@ MOUNT_POINT=	/mnt
 
 MKUBOOT?=	mkuboot
 
-DISKTYPE=	miniroot
+FSDISKTYPE=	miniroot
 MSDOSSTART=	32768
 MSDOSSIZE=	8192
 
@@ -17,14 +17,14 @@ all: ${FS}
 
 ${FS}: bsd.rd
 	dd if=/dev/zero of=${FS} bs=512 count=${FSSIZE}
-	vnconfig -v -t ${DISKTYPE} ${FS} > vnd
+	vnconfig -v -t ${FSDISKTYPE} ${FS} > vnd
 	fdisk -iy -b "${MSDOSSIZE}@${MSDOSSTART}:c" `cat vnd` >/dev/null
-	echo 'a a\n\n\n\nw\nq\n' | disklabel -E `cat vnd` >/dev/null
+	echo '/ *' | disklabel -wAT- `cat vnd`
 	newfs -O 1 -t msdos -L boot /dev/r`cat vnd`i
 	mount -o-l /dev/`cat vnd`i ${MOUNT_POINT}
 
 .for DTB in ${DTBS}
-	cp ${PDTB}/${DTB} ${MOUNT_POINT}/
+	cp ${PDTB}/${DTBDIR}${DTB} ${MOUNT_POINT}/
 .endfor
 .if ${PLATFORM} == "OMAP"
 	cp ${PUBOOT}/${UBOOT}/{MLO,u-boot.img} ${MOUNT_POINT}/
@@ -37,10 +37,6 @@ ${FS}: bsd.rd
 	dd if=${PUBOOT}/${UBOOT}/SPL of=/dev/r`cat vnd`c bs=1024 seek=1
 	dd if=${PUBOOT}/${UBOOT}/u-boot.img of=/dev/r`cat vnd`c \
 	    bs=1024 seek=69 conv=sync
-.endif
-.if ${PLATFORM} == "SUNXI"
-	dd if=${PUBOOT}/${UBOOT}/u-boot-sunxi-with-spl.bin \
-	    of=/dev/r`cat vnd`c bs=1024 seek=8 conv=sync
 .endif
 
 	mkdir -p ${MOUNT_POINT}/efi/boot

@@ -1,4 +1,4 @@
-/* $OpenBSD: pfkeyv2.c,v 1.254 2022/10/17 14:49:01 mvs Exp $ */
+/* $OpenBSD: pfkeyv2.c,v 1.262 2024/05/17 19:02:04 mvs Exp $ */
 
 /*
  *	@(#)COPYRIGHT	1.1 (NRL) 17 January 1995
@@ -225,7 +225,7 @@ const struct protosw pfkeysw[] = {
 
 const struct domain pfkeydomain = {
   .dom_family = PF_KEY,
-  .dom_name = "PF_KEY",
+  .dom_name = "pfkey",
   .dom_init = pfkey_init,
   .dom_protosw = pfkeysw,
   .dom_protoswNPROTOSW = &pfkeysw[nitems(pfkeysw)],
@@ -443,8 +443,7 @@ pfkey_sendup(struct pkpcb *kp, struct mbuf *m0, int more)
 {
 	struct socket *so = kp->kcb_socket;
 	struct mbuf *m;
-
-	soassertlocked(so);
+	int ret;
 
 	if (more) {
 		if (!(m = m_dup_pkt(m0, 0, M_DONTWAIT)))
@@ -452,7 +451,11 @@ pfkey_sendup(struct pkpcb *kp, struct mbuf *m0, int more)
 	} else
 		m = m0;
 
-	if (!sbappendaddr(so, &so->so_rcv, &pfkey_addr, m, NULL)) {
+	mtx_enter(&so->so_rcv.sb_mtx);
+	ret = sbappendaddr(so, &so->so_rcv, &pfkey_addr, m, NULL);
+	mtx_leave(&so->so_rcv.sb_mtx);
+
+	if (ret == 0) {
 		m_freem(m);
 		return (ENOBUFS);
 	}
@@ -515,9 +518,7 @@ pfkeyv2_sendmessage(void **headers, int mode, struct socket *so,
 		 * Send message to the specified socket, plus all
 		 * promiscuous listeners.
 		 */
-		solock(so);
 		pfkey_sendup(sotokeycb(so), packet, 0);
-		sounlock(so);
 
 		/*
 		 * Promiscuous messages contain the original message
@@ -544,10 +545,8 @@ pfkeyv2_sendmessage(void **headers, int mode, struct socket *so,
 			if (kp->kcb_socket == so || kp->kcb_rdomain != rdomain)
 				continue;
 
-			keylock(kp);
 			if (kp->kcb_flags & PFKEYV2_SOCKETFLAGS_PROMISC)
 				pfkey_sendup(kp, packet, 1);
-			keyunlock(kp);
 		}
 		SRPL_LEAVE(&sr);
 		m_freem(packet);
@@ -562,18 +561,18 @@ pfkeyv2_sendmessage(void **headers, int mode, struct socket *so,
 			if (kp->kcb_rdomain != rdomain)
 				continue;
 
-			keylock(kp);
 			if (kp->kcb_flags & PFKEYV2_SOCKETFLAGS_REGISTERED) {
 				if (!satype) {
 					/* Just send to everyone registered */
 					pfkey_sendup(kp, packet, 1);
 				} else {
+					keylock(kp);
 					/* Check for specified satype */
 					if ((1 << satype) & kp->kcb_reg)
 						pfkey_sendup(kp, packet, 1);
+					keyunlock(kp);
 				}
 			}
-			keyunlock(kp);
 		}
 		SRPL_LEAVE(&sr);
 		/* Free last/original copy of the packet */
@@ -595,14 +594,14 @@ pfkeyv2_sendmessage(void **headers, int mode, struct socket *so,
 
 		/* Send to all registered promiscuous listeners */
 		SRPL_FOREACH(kp, &sr, &pkptable.pkp_list, kcb_list) {
+			int flags = READ_ONCE(kp->kcb_flags);
+
 			if (kp->kcb_rdomain != rdomain)
 				continue;
 
-			keylock(kp);
-			if ((kp->kcb_flags & PFKEYV2_SOCKETFLAGS_PROMISC) &&
-			    !(kp->kcb_flags & PFKEYV2_SOCKETFLAGS_REGISTERED))
+			if ((flags & PFKEYV2_SOCKETFLAGS_PROMISC) &&
+			    !(flags & PFKEYV2_SOCKETFLAGS_REGISTERED))
 				pfkey_sendup(kp, packet, 1);
-			keyunlock(kp);
 		}
 		SRPL_LEAVE(&sr);
 		m_freem(packet);
@@ -614,9 +613,7 @@ pfkeyv2_sendmessage(void **headers, int mode, struct socket *so,
 			if (kp->kcb_rdomain != rdomain)
 				continue;
 
-			keylock(kp);
 			pfkey_sendup(kp, packet, 1);
-			keyunlock(kp);
 		}
 		SRPL_LEAVE(&sr);
 		m_freem(packet);
@@ -868,6 +865,9 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp,
 		i += sizeof(struct sadb_x_tap);
 #endif
 
+	if (ISSET(tdb->tdb_flags, TDBF_IFACE))
+		i += sizeof(struct sadb_x_iface);
+
 	if (lenp)
 		*lenp = i;
 
@@ -978,6 +978,12 @@ pfkeyv2_get(struct tdb *tdb, void **headers, void **buffer, int *lenp,
 		export_tap(&p, tdb);
 	}
 #endif
+
+	/* Export sec(4) interface information, if present */
+	if (ISSET(tdb->tdb_flags, TDBF_IFACE)) {
+		headers[SADB_X_EXT_IFACE] = p;
+		export_iface(&p, tdb);
+	}
 
 	headers[SADB_X_EXT_COUNTER] = p;
 	export_counter(&p, tdb);
@@ -1153,6 +1159,10 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 
 	rdomain = kp->kcb_rdomain;
 
+	/* Validate message format */
+	if ((rval = pfkeyv2_parsemessage(message, len, headers)) != 0)
+		goto ret;
+
 	/* If we have any promiscuous listeners, send them a copy of the message */
 	if (promisc) {
 		struct mbuf *packet;
@@ -1183,10 +1193,8 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 			if (bkp->kcb_rdomain != kp->kcb_rdomain)
 				continue;
 
-			keylock(bkp);
 			if (bkp->kcb_flags & PFKEYV2_SOCKETFLAGS_PROMISC)
 				pfkey_sendup(bkp, packet, 1);
-			keyunlock(bkp);
 		}
 		SRPL_LEAVE(&sr);
 
@@ -1198,10 +1206,6 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 		freeme = NULL;
 		freeme_sz = 0;
 	}
-
-	/* Validate message format */
-	if ((rval = pfkeyv2_parsemessage(message, len, headers)) != 0)
-		goto ret;
 
 	/* use specified rdomain */
 	srdomain = (struct sadb_x_rdomain *) headers[SADB_X_EXT_RDOMAIN];
@@ -1360,6 +1364,7 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 			import_tag(newsa, headers[SADB_X_EXT_TAG]);
 			import_tap(newsa, headers[SADB_X_EXT_TAP]);
 #endif
+			import_iface(newsa, headers[SADB_X_EXT_IFACE]);
 
 			/* Exclude sensitive data from reply message. */
 			headers[SADB_EXT_KEY_AUTH] = NULL;
@@ -1381,6 +1386,9 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 
 			/* Delete old version of the SA, insert new one */
 			tdb_delete(sa2);
+
+			tdb_addtimeouts(newsa);
+
 			puttdb(newsa);
 		} else {
 			/*
@@ -1411,6 +1419,10 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 			import_tag(sa2, headers[SADB_X_EXT_TAG]);
 			import_tap(sa2, headers[SADB_X_EXT_TAP]);
 #endif
+			import_iface(sa2, headers[SADB_X_EXT_IFACE]);
+
+			tdb_addtimeouts(sa2);
+
 			if (headers[SADB_EXT_ADDRESS_SRC] ||
 			    headers[SADB_EXT_ADDRESS_PROXY]) {
 				mtx_enter(&tdb_sadb_mtx);
@@ -1535,6 +1547,7 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 			import_tag(newsa, headers[SADB_X_EXT_TAG]);
 			import_tap(newsa, headers[SADB_X_EXT_TAP]);
 #endif
+			import_iface(newsa, headers[SADB_X_EXT_IFACE]);
 
 			/* Exclude sensitive data from reply message. */
 			headers[SADB_EXT_KEY_AUTH] = NULL;
@@ -1551,6 +1564,8 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 				NET_UNLOCK();
 				goto ret;
 			}
+
+			tdb_addtimeouts(newsa);
 
 			/* Add TDB in table */
 			puttdb(newsa);
@@ -2029,14 +2044,13 @@ pfkeyv2_dosend(struct socket *so, void *message, int len)
 				goto ret;
 
 			SRPL_FOREACH(bkp, &sr, &pkptable.pkp_list, kcb_list) {
-				if (bkp == kp || bkp->kcb_rdomain != kp->kcb_rdomain)
+				if (bkp == kp ||
+				    bkp->kcb_rdomain != kp->kcb_rdomain)
 					continue;
 
 				if (!smsg->sadb_msg_seq ||
 				    (smsg->sadb_msg_seq == kp->kcb_pid)) {
-					keylock(bkp);
 					pfkey_sendup(bkp, packet, 1);
-					keyunlock(bkp);
 				}
 			}
 			SRPL_LEAVE(&sr);
@@ -2604,7 +2618,7 @@ pfkeyv2_sysctl_policydumper(struct ipsec_policy *ipo, void *arg,
     unsigned int tableid)
 {
 	struct pfkeyv2_sysctl_walk *w = (struct pfkeyv2_sysctl_walk *)arg;
-	void *buffer = 0;
+	void *buffer = NULL;
 	int i, buflen, error = 0;
 
 	if (w->w_where) {
@@ -2685,7 +2699,10 @@ pfkeyv2_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	if (namelen < 1)
 		return (EINVAL);
 	w.w_op = name[0];
-	w.w_satype = name[1];
+	if (namelen >= 2)
+		w.w_satype = name[1];
+	else
+		w.w_satype = SADB_SATYPE_UNSPEC;
 	w.w_where = oldp;
 	w.w_len = oldp ? *oldlenp : 0;
 
@@ -2711,10 +2728,10 @@ pfkeyv2_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		break;
 
 	case NET_KEY_SPD_DUMP:
-		NET_LOCK();
+		NET_LOCK_SHARED();
 		error = spd_table_walk(rdomain,
 		    pfkeyv2_sysctl_policydumper, &w);
-		NET_UNLOCK();
+		NET_UNLOCK_SHARED();
 		if (oldp)
 			*oldlenp = w.w_where - oldp;
 		else

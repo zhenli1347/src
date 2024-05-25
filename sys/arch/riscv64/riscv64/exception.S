@@ -1,4 +1,4 @@
-/*	$OpenBSD: exception.S,v 1.6 2022/12/02 12:27:08 jca Exp $	*/
+/*	$OpenBSD: exception.S,v 1.8 2023/11/24 07:57:39 miod Exp $	*/
 
 /*-
  * Copyright (c) 2015-2018 Ruslan Bukin <br@bsdpad.com>
@@ -202,12 +202,17 @@
 
 	/* handle the ast */
 	mv	a0, sp
-	la	t0, ast
-	jalr	t0
+	call	ast
 	j	1b
 2:
 .endm
 
+	/*
+	 * cpu_exception_handler needs to be aligned to a 32-bit
+	 * boundary, but ENTRY() only enforces 16-bit alignment.
+	 */
+	.text
+	.p2align 2
 ENTRY(cpu_exception_handler)
 	csrrw	sp, sscratch, sp
 	beqz	sp, 1f

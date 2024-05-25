@@ -1,4 +1,4 @@
-.\"	$OpenBSD: softraid.4,v 1.51 2022/11/14 09:34:51 kn Exp $
+.\"	$OpenBSD: softraid.4,v 1.55 2024/04/25 07:21:43 stsp Exp $
 .\"
 .\" Copyright (c) 2007 Todd T. Fries   <todd@OpenBSD.org>
 .\" Copyright (c) 2007 Marco Peereboom <marco@OpenBSD.org>
@@ -15,7 +15,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: November 14 2022 $
+.Dd $Mdocdate: April 25 2024 $
 .Dt SOFTRAID 4
 .Os
 .Sh NAME
@@ -118,9 +118,10 @@ may be used to install
 in the boot storage area of the
 .Nm
 volume.
-Boot support is currently limited to the CRYPTO and RAID 1 disciplines
-on the amd64, arm64, i386, and sparc64 platforms.
-amd64, arm64 and sparc64 also have boot support for the RAID 1C discipline.
+All chunks in the volume will then be bootable.
+Boot support is currently limited to the CRYPTO, RAID 1 disciplines
+on the amd64, arm64, i386, riscv64 and sparc64 platforms.
+amd64, arm64, riscv64 and sparc64 also have boot support for the RAID 1C discipline.
 On sparc64, bootable chunks must be RAID partitions using the letter
 .Sq a .
 At the
@@ -184,10 +185,9 @@ Initialize the partition tables of all disks:
 .Pp
 Now create RAID partitions on all disks:
 .Bd -literal -offset indent
-$ echo 'RAID 1M-* 100%' > template
-# disklabel -wAT template wd1
-# disklabel -wAT template wd2
-# disklabel -wAT template wd3
+# echo 'RAID *' | disklabel -wAT- wd1
+# echo 'RAID *' | disklabel -wAT- wd2
+# echo 'RAID *' | disklabel -wAT- wd3
 .Ed
 .Pp
 Assemble the RAID volume:
@@ -211,7 +211,7 @@ Initialize the partition table and create a filesystem on the
 new RAID volume:
 .Bd -literal -offset indent
 # fdisk -iy sd0
-# printf "a\en\en\en\en4.2BSD\enw\enq\en" | disklabel -E sd0
+# echo '/ *' | disklabel -wAT- sd0
 # newfs /dev/rsd0a
 .Ed
 .Pp
@@ -222,7 +222,7 @@ for more information on configuration of RAID sets.
 .Pp
 Install
 .Xr boot 8
-on the RAID volume:
+on the RAID volume, writing boot loaders to all 3 chunks:
 .Bd -literal -offset indent
 # installboot sd0
 .Ed

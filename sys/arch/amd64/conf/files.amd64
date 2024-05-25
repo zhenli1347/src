@@ -1,4 +1,4 @@
-#	$OpenBSD: files.amd64,v 1.106 2022/10/16 15:03:39 kettenis Exp $
+#	$OpenBSD: files.amd64,v 1.109 2023/07/08 08:01:10 tobhe Exp $
 
 maxpartitions 16
 maxusers 2 16 128
@@ -237,6 +237,7 @@ attach	acpi at bios
 file	arch/amd64/amd64/acpi_machdep.c		acpi
 file	arch/amd64/amd64/acpi_wakecode.S	acpi & !small_kernel
 file	dev/acpi/acpi_x86.c			acpi & suspend & !small_kernel
+file	dev/acpi/acpi_apm.c			acpi
 
 device	acpipci
 attach	acpipci at acpi
@@ -245,16 +246,17 @@ file	arch/amd64/pci/acpipci.c		acpipci
 #
 # EFI
 #
-device	efi
+include "dev/efi/files.efi"
 attach	efi at bios
-file	arch/amd64/amd64/efi_machdep.c		efi needs-flag
+file	arch/amd64/amd64/efi_machdep.c		efi
 
 #
 # VMM
 #
 device vmm {}
 attach vmm at mainbus
-file	arch/amd64/amd64/vmm.c			vmm		needs-flag
+file	dev/vmm/vmm.c				vmm		needs-flag
+file	arch/amd64/amd64/vmm_machdep.c		vmm		needs-flag
 file	arch/amd64/amd64/vmm_support.S		vmm
 
 #

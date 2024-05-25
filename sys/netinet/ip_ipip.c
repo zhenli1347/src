@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipip.c,v 1.98 2022/01/02 22:36:04 jsg Exp $ */
+/*	$OpenBSD: ip_ipip.c,v 1.102 2024/05/17 20:44:36 bluhm Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -60,6 +60,7 @@
 #include <netinet/ip.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
+#include <netinet6/ip6_var.h>
 #include <netinet/ip_ecn.h>
 #include <netinet/ip_ipip.h>
 
@@ -480,9 +481,9 @@ ipip_output(struct mbuf **mp, struct tdb *tdb)
 		ip6o->ip6_vfc &= ~IPV6_VERSION_MASK;
 		ip6o->ip6_vfc |= IPV6_VERSION;
 		ip6o->ip6_plen = htons(m->m_pkthdr.len - sizeof(*ip6o));
-		ip6o->ip6_hlim = ip_defttl;
-		in6_embedscope(&ip6o->ip6_src, &tdb->tdb_src.sin6, NULL);
-		in6_embedscope(&ip6o->ip6_dst, &tdb->tdb_dst.sin6, NULL);
+		ip6o->ip6_hlim = ip6_defhlim;
+		in6_embedscope(&ip6o->ip6_src, &tdb->tdb_src.sin6, NULL, NULL);
+		in6_embedscope(&ip6o->ip6_dst, &tdb->tdb_dst.sin6, NULL, NULL);
 
 		if (tp == IPVERSION) {
 			/* Save ECN notification */
@@ -573,7 +574,8 @@ ipip_sysctl_ipipstat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(ipipstat) == (ipips_ncounters * sizeof(uint64_t)));
 	memset(&ipipstat, 0, sizeof ipipstat);
-	counters_read(ipipcounters, (uint64_t *)&ipipstat, ipips_ncounters);
+	counters_read(ipipcounters, (uint64_t *)&ipipstat, ipips_ncounters,
+	    NULL);
 	return (sysctl_rdstruct(oldp, oldlenp, newp,
 	    &ipipstat, sizeof(ipipstat)));
 }

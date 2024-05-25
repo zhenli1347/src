@@ -1,4 +1,4 @@
-/*	$OpenBSD: application.h,v 1.5 2022/09/01 14:34:17 martijn Exp $	*/
+/*	$OpenBSD: application.h,v 1.13 2023/11/12 16:07:34 martijn Exp $	*/
 
 /*
  * Copyright (c) 2021 Martijn van Duren <martijn@openbsd.org>
@@ -88,6 +88,7 @@ struct appl_varbind {
 struct snmp_message;
 enum snmp_version;
 struct appl_backend;
+struct appl_context;
 
 struct appl_backend_functions {
 	void (*ab_close)(struct appl_backend *, enum appl_close_reason);
@@ -121,6 +122,15 @@ struct appl_backend {
 void appl(void);
 void appl_init(void);
 void appl_shutdown(void);
+struct appl_context *appl_context(const char *, int);
+enum appl_error appl_addagentcaps(const char *, struct ber_oid *, const char *,
+    struct appl_backend *);
+enum appl_error appl_removeagentcaps(const char *, struct ber_oid *,
+    struct appl_backend *);
+struct ber_element *appl_sysorlastchange(struct ber_oid *);
+struct ber_element *appl_sysortable(struct ber_oid *);
+struct ber_element *appl_sysortable_getnext(int8_t, struct ber_oid *);
+struct ber_element *appl_targetmib(struct ber_oid *);
 enum appl_error appl_register(const char *, uint32_t, uint8_t, struct ber_oid *,
     int, int, uint8_t, uint32_t, struct appl_backend *);
 enum appl_error appl_unregister(const char *, uint8_t, struct ber_oid *,
@@ -130,11 +140,8 @@ void appl_processpdu(struct snmp_message *, const char *,
     enum snmp_version , struct ber_element *);
 void appl_response(struct appl_backend *, int32_t, enum appl_error, int16_t,
     struct appl_varbind *);
+void appl_report(struct snmp_message *, int32_t, struct ber_oid *);
 struct ber_element *appl_exception(enum appl_exception);
-
-/* application_legacy.c */
-void	 appl_legacy_init(void);
-void	 appl_legacy_shutdown(void);
 
 /* application_agentx.c */
 void	 appl_agentx(void);
@@ -145,3 +152,9 @@ void	 appl_agentx_backend(int);
 /* application_blocklist.c */
 void	 appl_blocklist_init(void);
 void	 appl_blocklist_shutdown(void);
+
+/* application_internal.c */
+void	 appl_internal_init(void);
+void	 appl_internal_shutdown(void);
+const char *appl_internal_object_int(struct ber_oid *, int32_t);
+const char *appl_internal_object_string(struct ber_oid *, char *);

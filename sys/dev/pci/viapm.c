@@ -1,4 +1,4 @@
-/*	$OpenBSD: viapm.c,v 1.21 2022/03/11 18:00:52 mpi Exp $	*/
+/*	$OpenBSD: viapm.c,v 1.23 2024/05/24 06:02:58 jsg Exp $	*/
 
 /*
  * Copyright (c) 2005 Mark Kettenis <kettenis@openbsd.org>
@@ -60,7 +60,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/device.h>
-#include <sys/kernel.h>
 #include <sys/rwlock.h>
 #include <sys/sensors.h>
 #include <sys/timeout.h>
@@ -173,7 +172,6 @@ u_int	viapm_get_timecount(struct timecounter *tc);
 
 static struct timecounter viapm_timecounter = {
 	.tc_get_timecount = viapm_get_timecount,
-	.tc_poll_pps = 0,
 	.tc_counter_mask = 0xffffff,
 	.tc_frequency = VIAPM_FREQUENCY,
 	.tc_name = "VIAPM",

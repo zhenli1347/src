@@ -1,4 +1,4 @@
-/* $OpenBSD: tmux.c,v 1.210 2022/11/10 22:58:39 jmc Exp $ */
+/* $OpenBSD: tmux.c,v 1.212 2024/05/15 09:59:12 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -239,6 +239,24 @@ fail:
 	return (NULL);
 }
 
+char *
+shell_argv0(const char *shell, int is_login)
+{
+	const char	*slash, *name;
+	char		*argv0;
+
+	slash = strrchr(shell, '/');
+	if (slash != NULL && slash[1] != '\0')
+		name = slash + 1;
+	else
+		name = shell;
+	if (is_login)
+		xasprintf(&argv0, "-%s", name);
+	else
+		xasprintf(&argv0, "%s", name);
+	return (argv0);
+}
+
 void
 setblocking(int fd, int state)
 {
@@ -401,7 +419,7 @@ main(int argc, char **argv)
 			cfg_quiet = 0;
 			break;
  		case 'V':
-			printf("%s %s\n", getprogname(), getversion());
+			printf("tmux %s\n", getversion());
  			exit(0);
 		case 'l':
 			flags |= CLIENT_LOGIN;

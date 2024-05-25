@@ -1,4 +1,4 @@
-/*	$OpenBSD: privsep.c,v 1.74 2021/10/24 21:24:19 deraadt Exp $	*/
+/*	$OpenBSD: privsep.c,v 1.77 2023/10/12 22:36:54 bluhm Exp $	*/
 
 /*
  * Copyright (c) 2003 Anil Madhavapeddy <anil@recoil.org>
@@ -319,8 +319,8 @@ priv_exec(char *conf, int numeric, int child, int argc, char *argv[])
 		case PRIV_CONFIG_MODIFIED:
 			log_debug("[priv]: msg PRIV_CONFIG_MODIFIED received");
 			if (stat(conf, &cf_stat) == -1 ||
-			    timespeccmp(&cf_info.st_mtimespec,
-			    &cf_stat.st_mtimespec, <) ||
+			    timespeccmp(&cf_info.st_mtim,
+			    &cf_stat.st_mtim, <) ||
 			    cf_info.st_size != cf_stat.st_size) {
 				log_debug("config file modified: restarting");
 				restart = result = 1;
@@ -742,8 +742,8 @@ priv_config_parse_done(void)
 /* Name/service to address translation.  Response is placed into addr.
  * Return 0 for success or < 0 for error like getaddrinfo(3) */
 int
-priv_getaddrinfo(char *proto, char *host, char *serv, struct sockaddr *addr,
-    size_t addr_len)
+priv_getaddrinfo(const char *proto, const char *host, const char *serv,
+    struct sockaddr *addr, size_t addr_len)
 {
 	char protocpy[5], hostcpy[NI_MAXHOST], servcpy[NI_MAXSERV];
 	int cmd, ret_len;
@@ -833,7 +833,6 @@ sig_pass_to_chld(int sig)
 }
 
 /* When child dies, move into the shutdown state */
-/* ARGSUSED */
 static void
 sig_got_chld(int sig)
 {

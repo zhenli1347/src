@@ -1,4 +1,4 @@
-/* $OpenBSD: ssl_local.h,v 1.2 2022/11/26 17:23:18 tb Exp $ */
+/* $OpenBSD: ssl_local.h,v 1.16 2024/05/19 07:12:50 jsg Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -174,18 +174,6 @@ __BEGIN_HIDDEN_DECLS
 #define LIBRESSL_HAS_DTLS1_2
 #endif
 
-#ifndef LIBRESSL_HAS_TLS1_3_CLIENT
-#define LIBRESSL_HAS_TLS1_3_CLIENT
-#endif
-
-#ifndef LIBRESSL_HAS_TLS1_3_SERVER
-#define LIBRESSL_HAS_TLS1_3_SERVER
-#endif
-
-#if defined(LIBRESSL_HAS_TLS1_3_CLIENT) || defined(LIBRESSL_HAS_TLS1_3_SERVER)
-#define LIBRESSL_HAS_TLS1_3
-#endif
-
 /* LOCAL STUFF */
 
 #define SSL_DECRYPT	0
@@ -209,7 +197,6 @@ __BEGIN_HIDDEN_DECLS
 #define SSL_kRSA		0x00000001L /* RSA key exchange */
 #define SSL_kDHE		0x00000008L /* tmp DH key no DH cert */
 #define SSL_kECDHE		0x00000080L /* ephemeral ECDH */
-#define SSL_kGOST		0x00000200L /* GOST key exchange */
 #define SSL_kTLS1_3		0x00000400L /* TLSv1.3 key exchange */
 
 /* Bits for algorithm_auth (server authentication) */
@@ -217,7 +204,6 @@ __BEGIN_HIDDEN_DECLS
 #define SSL_aDSS		0x00000002L /* DSS auth */
 #define SSL_aNULL		0x00000004L /* no auth (i.e. use ADH or AECDH) */
 #define SSL_aECDSA              0x00000040L /* ECDSA auth*/
-#define SSL_aGOST01		0x00000200L /* GOST R 34.10-2001 signature auth */
 #define SSL_aTLS1_3		0x00000400L /* TLSv1.3 authentication */
 
 /* Bits for algorithm_enc (symmetric encryption) */
@@ -230,7 +216,6 @@ __BEGIN_HIDDEN_DECLS
 #define SSL_AES256		0x00000040L
 #define SSL_CAMELLIA128		0x00000080L
 #define SSL_CAMELLIA256		0x00000100L
-#define SSL_eGOST2814789CNT	0x00000200L
 #define SSL_AES128GCM		0x00000400L
 #define SSL_AES256GCM		0x00000800L
 #define SSL_CHACHA20POLY1305	0x00001000L
@@ -243,8 +228,6 @@ __BEGIN_HIDDEN_DECLS
 
 #define SSL_MD5			0x00000001L
 #define SSL_SHA1		0x00000002L
-#define SSL_GOST94      0x00000004L
-#define SSL_GOST89MAC   0x00000008L
 #define SSL_SHA256		0x00000010L
 #define SSL_SHA384		0x00000020L
 /* Not a real MAC, just an indication it is part of cipher */
@@ -263,10 +246,8 @@ __BEGIN_HIDDEN_DECLS
 #define SSL_HANDSHAKE_MAC_MASK		0xff0
 #define SSL_HANDSHAKE_MAC_MD5		0x010
 #define SSL_HANDSHAKE_MAC_SHA		0x020
-#define SSL_HANDSHAKE_MAC_GOST94	0x040
 #define SSL_HANDSHAKE_MAC_SHA256	0x080
 #define SSL_HANDSHAKE_MAC_SHA384	0x100
-#define SSL_HANDSHAKE_MAC_STREEBOG256	0x200
 #define SSL_HANDSHAKE_MAC_DEFAULT (SSL_HANDSHAKE_MAC_MD5 | SSL_HANDSHAKE_MAC_SHA)
 
 #define SSL3_CK_ID		0x03000000
@@ -279,29 +260,7 @@ __BEGIN_HIDDEN_DECLS
 #define TLS1_PRF_SHA1 (SSL_HANDSHAKE_MAC_SHA << TLS1_PRF_DGST_SHIFT)
 #define TLS1_PRF_SHA256 (SSL_HANDSHAKE_MAC_SHA256 << TLS1_PRF_DGST_SHIFT)
 #define TLS1_PRF_SHA384 (SSL_HANDSHAKE_MAC_SHA384 << TLS1_PRF_DGST_SHIFT)
-#define TLS1_PRF_GOST94 (SSL_HANDSHAKE_MAC_GOST94 << TLS1_PRF_DGST_SHIFT)
-#define TLS1_PRF_STREEBOG256 (SSL_HANDSHAKE_MAC_STREEBOG256 << TLS1_PRF_DGST_SHIFT)
 #define TLS1_PRF (TLS1_PRF_MD5 | TLS1_PRF_SHA1)
-
-/*
- * Stream MAC for GOST ciphersuites from cryptopro draft
- * (currently this also goes into algorithm2).
- */
-#define TLS1_STREAM_MAC 0x04
-
-/*
- * SSL_CIPHER_ALGORITHM2_VARIABLE_NONCE_IN_RECORD is an algorithm2 flag that
- * indicates that the variable part of the nonce is included as a prefix of
- * the record (AES-GCM, for example, does this with an 8-byte variable nonce.)
- */
-#define SSL_CIPHER_ALGORITHM2_VARIABLE_NONCE_IN_RECORD (1 << 22)
-
-/*
- * SSL_CIPHER_AEAD_FIXED_NONCE_LEN returns the number of bytes of fixed nonce
- * for an SSL_CIPHER with an algorithm_mac of SSL_AEAD.
- */
-#define SSL_CIPHER_AEAD_FIXED_NONCE_LEN(ssl_cipher) \
-	(((ssl_cipher->algorithm2 >> 24) & 0xf) * 2)
 
 /*
  * Cipher strength information.
@@ -336,8 +295,7 @@ __BEGIN_HIDDEN_DECLS
 
 #define SSL_PKEY_RSA		0
 #define SSL_PKEY_ECC		1
-#define SSL_PKEY_GOST01		2
-#define SSL_PKEY_NUM		3
+#define SSL_PKEY_NUM		2
 
 #define SSL_MAX_EMPTY_RECORDS	32
 
@@ -627,6 +585,9 @@ typedef struct ssl_handshake_st {
 	/* Extensions seen in this handshake. */
 	uint32_t extensions_seen;
 
+	/* Extensions processed in this handshake. */
+	uint32_t extensions_processed;
+
 	/* Signature algorithms selected for use (static pointers). */
 	const struct ssl_sigalg *our_sigalg;
 	const struct ssl_sigalg *peer_sigalg;
@@ -650,6 +611,9 @@ typedef struct ssl_handshake_st {
 	/* List of certificates received from our peer. */
 	STACK_OF(X509) *peer_certs;
 	STACK_OF(X509) *peer_certs_no_leaf;
+
+	/* Certificate chain resulting from X.509 verification. */
+	STACK_OF(X509) *verified_chain;
 
 	SSL_HANDSHAKE_TLS12 tls12;
 	SSL_HANDSHAKE_TLS13 tls13;
@@ -874,12 +838,6 @@ struct ssl_ctx_st {
 	 */
 	unsigned int max_send_fragment;
 
-#ifndef OPENSSL_NO_ENGINE
-	/* Engine to pass requests for client certs to
-	 */
-	ENGINE *client_cert_engine;
-#endif
-
 	/* RFC 4507 session ticket keys */
 	unsigned char tlsext_tick_key_name[16];
 	unsigned char tlsext_tick_hmac_key[16];
@@ -973,6 +931,9 @@ struct ssl_st {
 				 * SSLv3/TLS rollback check */
 
 	unsigned int max_send_fragment;
+
+	const struct tls_extension **tlsext_build_order;
+	size_t tlsext_build_order_len;
 
 	char *tlsext_hostname;
 
@@ -1086,9 +1047,6 @@ struct ssl_st {
 	/* for server side, keep the list of CA_dn we can use */
 	STACK_OF(X509_NAME) *client_CA;
 
-	/* set this flag to 1 and a sleep(1) is put into all SSL_read()
-	 * and SSL_write() calls, good for nbio debuging :-) */
-	int debug;
 	long max_cert_list;
 	int first_packet;
 
@@ -1127,7 +1085,6 @@ struct ssl_st {
 	int empty_record_count;
 
 	size_t num_tickets; /* Unused, for OpenSSL compatibility */
-	STACK_OF(X509) *verified_chain;
 };
 
 typedef struct ssl3_record_internal_st {
@@ -1317,9 +1274,6 @@ SSL_SESSION *ssl_session_dup(SSL_SESSION *src, int include_ticket);
 int ssl_get_new_session(SSL *s, int session);
 int ssl_get_prev_session(SSL *s, CBS *session_id, CBS *ext_block,
     int *alert);
-int ssl_cipher_id_cmp(const SSL_CIPHER *a, const SSL_CIPHER *b);
-SSL_CIPHER *OBJ_bsearch_ssl_cipher_id(SSL_CIPHER *key, SSL_CIPHER const *base,
-    int num);
 int ssl_cipher_list_to_bytes(SSL *s, STACK_OF(SSL_CIPHER) *ciphers, CBB *cbb);
 STACK_OF(SSL_CIPHER) *ssl_bytes_to_cipher_list(SSL *s, CBS *cbs);
 STACK_OF(SSL_CIPHER) *ssl_create_cipher_list(const SSL_METHOD *meth,
@@ -1351,14 +1305,13 @@ int ssl_verify_alarm_type(long type);
 
 int SSL_SESSION_ticket(SSL_SESSION *ss, unsigned char **out, size_t *out_len);
 
-const SSL_CIPHER *ssl3_get_cipher_by_char(const unsigned char *p);
 int ssl3_do_write(SSL *s, int type);
 int ssl3_send_alert(SSL *s, int level, int desc);
 int ssl3_get_req_cert_types(SSL *s, CBB *cbb);
 int ssl3_get_message(SSL *s, int st1, int stn, int mt, long max);
 int ssl3_num_ciphers(void);
 const SSL_CIPHER *ssl3_get_cipher(unsigned int u);
-const SSL_CIPHER *ssl3_get_cipher_by_id(unsigned int id);
+const SSL_CIPHER *ssl3_get_cipher_by_id(unsigned long id);
 const SSL_CIPHER *ssl3_get_cipher_by_value(uint16_t value);
 uint16_t ssl3_cipher_get_value(const SSL_CIPHER *c);
 int ssl3_renegotiate(SSL *ssl);

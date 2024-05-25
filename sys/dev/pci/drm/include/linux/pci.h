@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci.h,v 1.12 2022/10/03 10:07:01 jsg Exp $	*/
+/*	$OpenBSD: pci.h,v 1.16 2024/01/16 23:38:13 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -31,7 +31,7 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/kobject.h>
-#include <linux/dma-mapping.h> /* pci-dma-compat.h -> dma-mapping.h */
+#include <linux/dma-mapping.h>
 #include <linux/mod_devicetable.h>
 
 struct pci_dev;
@@ -72,6 +72,12 @@ struct pci_dev {
 	struct pci_acpi dev;
 };
 #define PCI_ANY_ID (uint16_t) (~0U)
+
+#define PCI_DEVICE(v, p)		\
+	.vendor = (v),			\
+	.device = (p),			\
+	.subvendor = PCI_ANY_ID,	\
+	.subdevice = PCI_ANY_ID
 
 #ifndef PCI_MEM_START
 #define PCI_MEM_START	0
@@ -300,6 +306,27 @@ pcie_capability_write_word(struct pci_dev *pdev, int off, u16 val)
 }
 
 static inline int
+pcie_capability_set_word(struct pci_dev *pdev, int off, u16 val)
+{
+	u16 r;
+	pcie_capability_read_word(pdev, off, &r);
+	r |= val;
+	pcie_capability_write_word(pdev, off, r);
+	return 0;
+}
+
+static inline int
+pcie_capability_clear_and_set_word(struct pci_dev *pdev, int off, u16 c, u16 s)
+{
+	u16 r;
+	pcie_capability_read_word(pdev, off, &r);
+	r &= ~c;
+	r |= s;
+	pcie_capability_write_word(pdev, off, r);
+	return 0;
+}
+
+static inline int
 pcie_get_readrq(struct pci_dev *pdev)
 {
 	uint16_t val;
@@ -415,6 +442,12 @@ pci_disable_device(struct pci_dev *pdev)
 {
 }
 
+static inline int
+pci_wait_for_pending_transaction(struct pci_dev *pdev)
+{
+	return 0;
+}
+
 static inline bool
 pci_is_thunderbolt_attached(struct pci_dev *pdev)
 {
@@ -449,14 +482,46 @@ pci_set_power_state(struct pci_dev *dev, int state)
 	return 0;
 }
 
+struct pci_driver;
+
+static inline int
+pci_register_driver(struct pci_driver *pci_drv)
+{
+	return 0;
+}
+
 static inline void
 pci_unregister_driver(void *d)
 {
+}
+
+static inline u16
+pci_dev_id(struct pci_dev *dev)
+{
+	return dev->devfn | (dev->bus->number << 8);
+}
+
+static inline const struct pci_device_id *
+pci_match_id(const struct pci_device_id *ids, struct pci_dev *pdev)
+{
+	int i = 0;
+
+	for (i = 0; ids[i].vendor != 0; i++) {
+		if ((ids[i].vendor == pdev->vendor) &&
+		    (ids[i].device == pdev->device ||
+		     ids[i].device == PCI_ANY_ID) &&
+		    (ids[i].subvendor == PCI_ANY_ID) &&
+		    (ids[i].subdevice == PCI_ANY_ID))
+			return &ids[i];
+	}
+	return NULL;
 }
 
 #define PCI_CLASS_DISPLAY_VGA \
     ((PCI_CLASS_DISPLAY << 8) | PCI_SUBCLASS_DISPLAY_VGA)
 #define PCI_CLASS_DISPLAY_OTHER \
     ((PCI_CLASS_DISPLAY << 8) | PCI_SUBCLASS_DISPLAY_MISC)
+#define PCI_CLASS_ACCELERATOR_PROCESSING \
+    (PCI_CLASS_ACCELERATOR << 8)
 
 #endif /* _LINUX_PCI_H_ */

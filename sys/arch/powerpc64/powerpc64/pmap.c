@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.58 2022/09/10 20:35:28 miod Exp $ */
+/*	$OpenBSD: pmap.c,v 1.61 2024/04/03 19:30:59 gkoehler Exp $ */
 
 /*
  * Copyright (c) 2015 Martin Pieuchot
@@ -67,9 +67,7 @@ extern char _start[], _etext[], _erodata[], _end[];
 
 #ifdef MULTIPROCESSOR
 
-struct mutex pmap_hash_lock;
-
-#define PMAP_HASH_LOCK_INIT()	mtx_init(&pmap_hash_lock, IPL_HIGH)
+struct mutex pmap_hash_lock = MUTEX_INITIALIZER(IPL_HIGH);
 
 #define	PMAP_HASH_LOCK(s)						\
 do {									\
@@ -104,7 +102,6 @@ do {									\
 
 #else
 
-#define	PMAP_HASH_LOCK_INIT()		/* nothing */
 #define	PMAP_HASH_LOCK(s)		(void)s
 #define	PMAP_HASH_UNLOCK(s)		/* nothing */
 
@@ -738,6 +735,9 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 		pte->pte_lo |= PTE_M;
 	else
 		pte->pte_lo |= (PTE_M | PTE_I | PTE_G);
+
+	if ((prot & (PROT_READ | PROT_WRITE)) == 0)
+		pte->pte_lo |= PTE_AC;
 }
 
 void
@@ -1033,8 +1033,6 @@ pmap_init(void)
 	    "slbd", NULL);
 	pool_setlowat(&pmap_slbd_pool, 5);
 
-	PMAP_HASH_LOCK_INIT();
-
 	LIST_INIT(&pmap_kernel()->pm_slbd);
 	for (i = 0; i < nitems(kernel_slb_desc); i++) {
 		LIST_INSERT_HEAD(&pmap_kernel()->pm_slbd,
@@ -1042,12 +1040,6 @@ pmap_init(void)
 	}
 
 	pmap_initialized = 1;
-}
-
-void
-pmap_copy(pmap_t dst_pmap, pmap_t src_pmap, vaddr_t dst_addr,
-    vsize_t len, vaddr_t src_addr)
-{
 }
 
 int
@@ -1194,6 +1186,9 @@ pmap_pted_ro(struct pte_desc *pted, vm_prot_t prot)
 
 	if ((prot & PROT_EXEC) == 0)
 		pted->pted_pte.pte_lo |= PTE_N;
+
+	if ((prot & (PROT_READ | PROT_WRITE)) == 0)
+		pted->pted_pte.pte_lo |= PTE_AC;
 
 	PMAP_HASH_LOCK(s);
 	if ((pte = pmap_ptedinhash(pted)) != NULL) {

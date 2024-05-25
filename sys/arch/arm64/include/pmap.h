@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.h,v 1.21 2022/11/21 20:19:21 kettenis Exp $ */
+/* $OpenBSD: pmap.h,v 1.25 2023/12/11 22:12:53 kettenis Exp $ */
 /*
  * Copyright (c) 2008,2009,2014 Dale Rahn <drahn@dalerahn.com>
  *
@@ -66,10 +66,16 @@ struct pmap {
 	} pm_vp;
 	uint64_t pm_pt0pa;
 	uint64_t pm_asid;
+	uint64_t pm_guarded;
 	int have_4_level_pt;
 	int pm_privileged;
 	int pm_refs;				/* ref count */
 	struct pmap_statistics  pm_stats;	/* pmap statistics */
+	uint64_t pm_apiakey[2];
+	uint64_t pm_apdakey[2];
+	uint64_t pm_apibkey[2];
+	uint64_t pm_apdbkey[2];
+	uint64_t pm_apgakey[2];
 };
 
 #define PMAP_PA_MASK	~((paddr_t)PAGE_MASK) /* to remove the flags */
@@ -95,9 +101,14 @@ extern struct pmap kernel_pmap_;
 
 vaddr_t pmap_bootstrap(long kvo, paddr_t lpt1,  long kernelstart,
     long kernelend, long ram_start, long ram_end);
+void pmap_postinit(void);
+void pmap_init_percpu(void);
+
 void pmap_kenter_cache(vaddr_t va, paddr_t pa, vm_prot_t prot, int cacheable);
 void pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot);
 void pmap_page_rw(pmap_t pm, vaddr_t va);
+
+void pmap_setpauthkeys(struct pmap *);
 
 paddr_t pmap_steal_avail(size_t size, int align, void **kva);
 void pmap_avail_fixup(void);
@@ -110,14 +121,12 @@ struct pv_entry;
 /* investigate */
 #define pmap_unuse_final(p)		do { /* nothing */ } while (0)
 int	pmap_fault_fixup(pmap_t, vaddr_t, vm_prot_t);
-void pmap_postinit(void);
 
 #define __HAVE_PMAP_MPSAFE_ENTER_COW
 
 #endif /* _KERNEL && !_LOCORE */
 
 #ifndef _LOCORE
-#define __HAVE_VM_PAGE_MD
 struct vm_page_md {
 	struct mutex pv_mtx;
 	LIST_HEAD(,pte_desc) pv_list;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.122 2022/09/13 17:14:54 kettenis Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.127 2024/05/13 19:56:37 kettenis Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -69,9 +69,9 @@ struct acpi_attach_args {
 	struct aml_node *aaa_node;
 	const char	*aaa_dev;
 	const char	*aaa_cdev;
-	uint64_t	 aaa_addr[4];
-	uint64_t	 aaa_size[4];
-	bus_space_tag_t	 aaa_bst[4];
+	uint64_t	 aaa_addr[8];
+	uint64_t	 aaa_size[8];
+	bus_space_tag_t	 aaa_bst[8];
 	int		 aaa_naddr;
 	uint32_t	 aaa_irq[8];
 	uint32_t	 aaa_irq_flags[8];
@@ -105,6 +105,7 @@ struct acpi_wakeq {
 	struct aml_value		*q_wakepkg;
 	int				 q_gpe;
 	int				 q_state;
+	int				 q_enabled;
 };
 
 #if NACPIPWRRES > 0
@@ -268,6 +269,7 @@ struct acpi_softc {
 	struct aml_node		*sc_sst;
 	struct aml_node		*sc_wak;
 	int			sc_state;
+	time_t			sc_resume_time;
 	struct acpiec_softc	*sc_ec;		/* XXX assume single EC */
 
 	struct acpi_ac_head	sc_ac;
@@ -339,7 +341,7 @@ int	 acpi_sleep_cpu(struct acpi_softc *, int);
 void	 acpi_sleep_pm(struct acpi_softc *, int);
 void	 acpi_resume_pm(struct acpi_softc *, int);
 void	 acpi_resume_cpu(struct acpi_softc *, int);
-void	 acpi_sleep_walk(struct acpi_softc *, int);
+int	 acpi_resuming(struct acpi_softc *);
 
 #define ACPI_IOREAD 0
 #define ACPI_IOWRITE 1
@@ -353,12 +355,9 @@ void	acpi_register_gsb(struct acpi_softc *, struct aml_node *);
 
 int	acpi_set_gpehandler(struct acpi_softc *, int,
 	    int (*)(struct acpi_softc *, int, void *), void *, int);
-void	acpi_enable_gpe(struct acpi_softc *, uint32_t);
 
-int	acpiec_intr(struct acpiec_softc *);
 void	acpiec_read(struct acpiec_softc *, uint8_t, int, uint8_t *);
 void	acpiec_write(struct acpiec_softc *, uint8_t, int, uint8_t *);
-void	acpiec_handle_events(struct acpiec_softc *);
 
 #if NACPIPWRRES > 0
 int	acpipwrres_ref_incr(struct acpipwrres_softc *, struct aml_node *);
@@ -384,6 +383,7 @@ void	acpi_indicator(struct acpi_softc *, int);
 void	acpi_disable_allgpes(struct acpi_softc *);
 void	acpi_enable_wakegpes(struct acpi_softc *, int);
 
+int	acpi_batcount(struct acpi_softc *);
 struct apm_power_info;
 int	acpi_apminfo(struct apm_power_info *);
 
@@ -414,6 +414,8 @@ struct acpi_q *acpi_maptable(struct acpi_softc *sc, paddr_t,
 	    const char *, const char *, const char *, int);
 
 bus_dma_tag_t acpi_iommu_device_map(struct aml_node *, bus_dma_tag_t);
+
+int	acpi_toggle_wakedev(struct acpi_softc *, struct aml_node *, int);
 
 #endif
 

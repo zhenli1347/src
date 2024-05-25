@@ -1,4 +1,4 @@
-/*	$OpenBSD: output_ometric.c,v 1.9 2022/12/08 17:24:39 cheloha Exp $ */
+/*	$OpenBSD: output_ometric.c,v 1.13 2024/01/23 15:55:20 claudio Exp $ */
 
 /*
  * Copyright (c) 2022 Claudio Jeker <claudio@openbsd.org>
@@ -41,9 +41,9 @@ struct ometric *peer_info, *peer_state, *peer_state_raw, *peer_last_change,
 struct ometric *peer_prefixes_transmit, *peer_prefixes_receive;
 struct ometric *peer_message_transmit, *peer_message_receive;
 struct ometric *peer_update_transmit, *peer_update_pending,
-		   *peer_update_receive;
+		    *peer_update_receive;
 struct ometric *peer_withdraw_transmit, *peer_withdraw_pending,
-		   *peer_withdraw_receive;
+		    *peer_withdraw_receive;
 struct ometric *peer_rr_req_transmit, *peer_rr_req_receive;
 struct ometric *peer_rr_borr_transmit, *peer_rr_borr_receive;
 struct ometric *peer_rr_eorr_transmit, *peer_rr_eorr_receive;
@@ -275,9 +275,9 @@ ometric_rib_mem(struct rde_memstats *stats)
 	for (i = 0; i < AID_MAX; i++) {
 		if (stats->pt_cnt[i] == 0)
 			continue;
-		pts += stats->pt_cnt[i] * pt_sizes[i];
+		pts += stats->pt_size[i];
 		ometric_rib_mem_element(aid_vals[i].name, stats->pt_cnt[i],
-		    stats->pt_cnt[i] * pt_sizes[i], UINT64_MAX);
+		    stats->pt_size[i], UINT64_MAX);
 	}
 	ometric_rib_mem_element("rib", stats->rib_cnt,
 	    stats->rib_cnt * sizeof(struct rib_entry), UINT64_MAX);
@@ -297,7 +297,7 @@ ometric_rib_mem(struct rde_memstats *stats)
 	ometric_rib_mem_element("attributes", stats->attr_dcnt,
 	    stats->attr_data, UINT64_MAX);
 
-	ometric_rib_mem_element("total", UINT64_MAX, 
+	ometric_rib_mem_element("total", UINT64_MAX,
 	    pts + stats->prefix_cnt * sizeof(struct prefix) +
 	    stats->rib_cnt * sizeof(struct rib_entry) +
 	    stats->path_cnt * sizeof(struct rde_aspath) +
@@ -314,7 +314,7 @@ ometric_rib_mem(struct rde_memstats *stats)
 	    OKV("type"), OKV("prefix_set"), NULL);
 	ometric_set_int_with_labels(rde_set_count, stats->pset_cnt,
 	    OKV("type"), OKV("prefix_set"), NULL);
-	ometric_rib_mem_element("set_total", UINT64_MAX, 
+	ometric_rib_mem_element("set_total", UINT64_MAX,
 	    stats->aset_size + stats->pset_size, UINT64_MAX);
 }
 
@@ -322,13 +322,11 @@ static void
 ometric_tail(void)
 {
 	struct timespec elapsed_time;
-	struct timeval tv;
 
 	clock_gettime(CLOCK_MONOTONIC, &end_time);
 	timespecsub(&end_time, &start_time, &elapsed_time);
-	TIMESPEC_TO_TIMEVAL(&tv, &elapsed_time);
 
-	ometric_set_timeval(bgpd_scrape_time, &tv, NULL);
+	ometric_set_timespec(bgpd_scrape_time, &elapsed_time, NULL);
 	ometric_output_all(stdout);
 
 	ometric_free_all();

@@ -1,4 +1,4 @@
-/*	$OpenBSD: unistd.h,v 1.106 2018/07/13 09:25:22 beck Exp $ */
+/*	$OpenBSD: unistd.h,v 1.109 2024/05/18 05:20:22 guenther Exp $ */
 /*	$NetBSD: unistd.h,v 1.26.4.1 1996/05/28 02:31:51 mrg Exp $	*/
 
 /*-
@@ -357,6 +357,9 @@ int	 isatty(int);
 int	 link(const char *, const char *);
 off_t	 lseek(int, off_t, int);
 long	 pathconf(const char *, int);
+#if __BSD_VISIBLE
+long	 pathconfat(int, const char *, int, int);
+#endif
 int	 pause(void);
 int	 pipe(int *);
 ssize_t	 read(int, void *, size_t)
@@ -488,6 +491,7 @@ mode_t	 getmode(const void *, mode_t);
 int	 getresgid(gid_t *, gid_t *, gid_t *);
 int	 getresuid(uid_t *, uid_t *, uid_t *);
 pid_t	 getthrid(void);
+int	 getthrname(pid_t, char *, size_t);
 char	*getusershell(void);
 int	 initgroups(const char *, gid_t);
 int	 issetugid(void);
@@ -517,10 +521,10 @@ void	*setmode(const char *);
 int	 setpgrp(pid_t _pid, pid_t _pgrp);	/* BSD compat version */
 int	 setresgid(gid_t, gid_t, gid_t);
 int	 setresuid(uid_t, uid_t, uid_t);
+int	 setthrname(pid_t, const char *);
 void	 setusershell(void);
 int	 strtofflags(char **, u_int32_t *, u_int32_t *);
 int	 swapctl(int cmd, const void *arg, int misc);
-int	 syscall(int, ...);
 int	 getentropy(void *, size_t);
 int	 pledge(const char *, const char *);
 int	 unveil(const char *, const char *);

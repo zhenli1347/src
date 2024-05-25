@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmparam.h,v 1.33 2021/08/03 04:45:54 semarie Exp $	*/
+/*	$OpenBSD: vmparam.h,v 1.35 2024/03/29 21:06:14 miod Exp $	*/
 /*	$NetBSD: vmparam.h,v 1.18 2001/05/01 02:19:19 thorpej Exp $ */
 
 /*
@@ -103,6 +103,9 @@
 #define VM_MIN_ADDRESS		((vaddr_t)PAGE_SIZE)
 #define VM_MAX_ADDRESS		((vaddr_t)-1)
 #define VM_MAXUSER_ADDRESS	((vaddr_t)-PAGE_SIZE)
+#ifdef _KERNEL
+#define VM_MIN_STACK_ADDRESS	((vaddr_t)0xfffffe0000000000L)
+#endif
 
 /* map PIE into the first quarter of the address space before hole */
 #define VM_PIE_MIN_ADDR		PAGE_SIZE
@@ -118,9 +121,4 @@
 #define VM_PHYSSEG_STRAT        VM_PSTRAT_BSEARCH
 #define VM_PHYSSEG_NOADD                /* can't add RAM after vm_mem_init */
 
-#if defined (_KERNEL) && !defined(_LOCORE)
-struct vm_map;
-vaddr_t		dvma_mapin(struct vm_map *, vaddr_t, int, int);
-void		dvma_mapout(vaddr_t, vaddr_t, int);
-#endif
 #endif

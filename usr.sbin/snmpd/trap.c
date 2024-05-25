@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.37 2021/09/02 05:41:02 martijn Exp $	*/
+/*	$OpenBSD: trap.c,v 1.43 2024/02/06 15:36:11 martijn Exp $	*/
 
 /*
  * Copyright (c) 2008 Reyk Floeter <reyk@openbsd.org>
@@ -17,38 +17,27 @@
  */
 
 #include <sys/queue.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/tree.h>
 
-#include <net/if.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
+#include <ber.h>
+#include <stdint.h>
 #include <stdlib.h>
-#include <stdio.h>
-#include <errno.h>
-#include <event.h>
-#include <fcntl.h>
 #include <string.h>
-#include <unistd.h>
-#include <pwd.h>
 
-#include "snmpd.h"
+#include "log.h"
 #include "mib.h"
+#include "smi.h"
+#include "snmp.h"
+#include "snmpd.h"
 
 void
 trap_init(void)
 {
-	struct ber_oid	 trapoid = OID(MIB_coldStart);
-
 	/*
 	 * Send a coldStart to notify that the daemon has been
 	 * started and re-initialized.
 	 */
-	trap_send(&trapoid, NULL);
+	trap_send(&OID(MIB_coldStart), NULL);
 }
 
 int
@@ -56,28 +45,17 @@ trap_send(struct ber_oid *oid, struct ber_element *elm)
 {
 	struct trap_address	*tr;
 	struct ber_element	*vblist, *trap;
-	struct			 ber_oid uptime = OID(MIB_sysUpTime);
-	struct			 ber_oid trapoid = OID(MIB_snmpTrapOID);
+	struct			 ber_oid uptime = OID(MIB_sysUpTime, 0);
+	struct			 ber_oid trapoid = OID(MIB_snmpTrapOID, 0);
 	char			 ostr[SNMP_MAX_OID_STRLEN];
-	struct oid		 oa, ob;
 	struct snmp_message	*msg;
+	int			 r;
 
 	if (TAILQ_EMPTY(&snmpd_env->sc_trapreceivers))
 		return (0);
 
-	smi_scalar_oidlen(&uptime);
-	smi_scalar_oidlen(&trapoid);
-	smi_scalar_oidlen(oid);
-
-	smi_oid2string(oid, ostr, sizeof(ostr), 0);
+	mib_oid2string(oid, ostr, sizeof(ostr), snmpd_env->sc_oidfmt);
 	log_debug("trap_send: oid %s", ostr);
-
-	/* Setup OIDs to compare against the trap receiver MIB */
-	bzero(&oa, sizeof(oa));
-	bcopy(oid->bo_id, &oa.o_oid, sizeof(oa.o_oid));
-	oa.o_oidlen = oid->bo_n;
-	bzero(&ob, sizeof(ob));
-	ob.o_flags = OID_TABLE;
 
 	/* Add mandatory varbind elements */
 	trap = ober_add_sequence(NULL);
@@ -89,12 +67,10 @@ trap_send(struct ber_oid *oid, struct ber_element *elm)
 		ober_link_elements(vblist, elm);
 
 	TAILQ_FOREACH(tr, &snmpd_env->sc_trapreceivers, entry) {
-		if (tr->ta_oid != NULL && tr->ta_oid->bo_n) {
+		if (tr->ta_oid.bo_n) {
 			/* The trap receiver may want only a specified MIB */
-			bcopy(&tr->ta_oid->bo_id, &ob.o_oid,
-			    sizeof(ob.o_oid));
-			ob.o_oidlen = tr->ta_oid->bo_n;
-			if (smi_oid_cmp(&oa, &ob) != 0)
+			r = ober_oid_cmp(oid, &tr->ta_oid);
+			if (r != 0 && r != 2)
 				continue;
 		}
 

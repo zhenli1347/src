@@ -1,32 +1,16 @@
-# $OpenBSD: Makefile.inc,v 1.4 2019/05/11 13:05:25 tb Exp $
+# $OpenBSD: Makefile.inc,v 1.18 2024/03/29 11:00:57 jsing Exp $
 
 # sparc64-specific libcrypto build rules
 
 # aes
-SRCS+= aes_core.c aes_cbc.c 
 CFLAGS+= -DAES_ASM
 SSLASM+= aes aes-sparcv9 aes-sparcv9
-# bf
-SRCS+= bf_enc.c
+CFLAGS+= -DHAVE_AES_ENCRYPT_INTERNAL
+CFLAGS+= -DHAVE_AES_DECRYPT_INTERNAL
 # bn
-SRCS+= bn_asm.c
-# camellia
-SRCS+= camellia.c cmll_cbc.c cmll_misc.c
-# des
-SRCS+= fcrypt_b.c
-SRCS+= des_enc-sparc.S
-GENERATED+= des_enc-sparc.S
-des_enc-sparc.S: ${LCRYPTO_SRC}/des/asm/des_enc.m4
-	m4 ${LCRYPTO_SRC}/des/asm/des_enc.m4 > ${.TARGET}
-# # ec
-# CFLAGS+= -DECP_NISTZ256_ASM
-# SRCS+=	ecp_nistz256.c
-# SSLASM+= ec ecp_nistz256-sparcv9
 # modes
 CFLAGS+= -DGHASH_ASM
 SSLASM+= modes ghash-sparcv9 ghash-sparcv9
-# rc4
-SRCS+= rc4_enc.c rc4_skey.c
 # sha
 SSLASM+= sha sha1-sparcv9 sha1-sparcv9
 CFLAGS+= -DSHA1_ASM
@@ -34,8 +18,6 @@ SSLASM+= sha sha512-sparcv9 sha256-sparcv9
 CFLAGS+= -DSHA256_ASM
 SSLASM+= sha sha512-sparcv9 sha512-sparcv9
 CFLAGS+= -DSHA512_ASM
-# whrlpool
-SRCS+= wp_block.c
 
 .for dir src dst in ${SSLASM}
 SRCS+=	${dst}.S

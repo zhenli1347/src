@@ -1,4 +1,4 @@
-/*	$OpenBSD: xhci_fdt.c,v 1.19 2022/06/06 09:46:07 kettenis Exp $	*/
+/*	$OpenBSD: xhci_fdt.c,v 1.24 2023/07/23 11:49:17 kettenis Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis <kettenis@openbsd.org>
  *
@@ -19,6 +19,7 @@
 #include <sys/systm.h>
 #include <sys/device.h>
 #include <sys/malloc.h>
+#include <sys/task.h>
 
 #include <machine/bus.h>
 #include <machine/fdt.h>
@@ -47,16 +48,23 @@ struct xhci_fdt_softc {
 	bus_addr_t		sc_otg_base;
 	bus_size_t		sc_otg_size;
 	bus_space_handle_t	sc_otg_ioh;
+
+	struct device_ports	sc_ports;
+	struct usb_controller_port sc_usb_controller_port;
+	struct task		sc_snps_connect_task;
 };
 
 int	xhci_fdt_match(struct device *, void *, void *);
 void	xhci_fdt_attach(struct device *, struct device *, void *);
+int	xhci_fdt_activate(struct device *, int);
 
 const struct cfattach xhci_fdt_ca = {
-	sizeof(struct xhci_fdt_softc), xhci_fdt_match, xhci_fdt_attach
+	sizeof(struct xhci_fdt_softc), xhci_fdt_match, xhci_fdt_attach, NULL,
+	xhci_fdt_activate
 };
 
-int	xhci_cdns_init(struct xhci_fdt_softc *);
+int	xhci_cdns_attach(struct xhci_fdt_softc *);
+int	xhci_snps_attach(struct xhci_fdt_softc *);
 int	xhci_snps_init(struct xhci_fdt_softc *);
 void	xhci_init_phys(struct xhci_fdt_softc *);
 
@@ -123,6 +131,7 @@ xhci_fdt_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Set up power and clocks */
 	power_domain_enable(sc->sc_node);
+	reset_deassert_all(sc->sc_node);
 	clock_set_assigned(sc->sc_node);
 	clock_enable_all(sc->sc_node);
 
@@ -132,9 +141,9 @@ xhci_fdt_attach(struct device *parent, struct device *self, void *aux)
 	 * functionality.
 	 */
 	if (OF_is_compatible(sc->sc_node, "cdns,usb3"))
-		error = xhci_cdns_init(sc);
+		error = xhci_cdns_attach(sc);
 	if (OF_is_compatible(sc->sc_node, "snps,dwc3"))
-		error = xhci_snps_init(sc);
+		error = xhci_snps_attach(sc);
 	if (error) {
 		printf(": can't initialize hardware\n");
 		goto disestablish_ret;
@@ -163,6 +172,31 @@ unmap:
 	bus_space_unmap(sc->sc.iot, sc->sc.ioh, sc->sc.sc_size);
 }
 
+int
+xhci_fdt_activate(struct device *self, int act)
+{
+	struct xhci_fdt_softc *sc = (struct xhci_fdt_softc *)self;
+	int rv = 0;
+
+	switch (act) {
+	case DVACT_POWERDOWN:
+		rv = xhci_activate(self, act);
+		power_domain_disable(sc->sc_node);
+		break;
+	case DVACT_RESUME:
+		power_domain_enable(sc->sc_node);
+		if (OF_is_compatible(sc->sc_node, "snps,dwc3"))
+			xhci_snps_init(sc);
+		rv = xhci_activate(self, act);
+		break;
+	default:
+		rv = xhci_activate(self, act);
+		break;
+	}
+
+	return rv;
+}
+
 /*
  * Cadence USB3 controller.
  */
@@ -176,7 +210,7 @@ unmap:
 #define  OTG_STS_XHCI_READY	(1 << 26)
 
 int
-xhci_cdns_init(struct xhci_fdt_softc *sc)
+xhci_cdns_attach(struct xhci_fdt_softc *sc)
 {
 	uint32_t did, sts;
 	int timo;
@@ -221,6 +255,49 @@ xhci_cdns_init(struct xhci_fdt_softc *sc)
 #define  USB3_GUSB2PHYCFG0_ENBLSLPM	(1 << 8)
 #define  USB3_GUSB2PHYCFG0_SUSPENDUSB20	(1 << 6)
 #define  USB3_GUSB2PHYCFG0_PHYIF	(1 << 3)
+
+void
+xhci_snps_do_connect(void *arg)
+{
+	struct xhci_fdt_softc *sc = arg;
+	
+	xhci_reinit(&sc->sc);
+}
+
+void
+xhci_snps_connect(void *cookie)
+{
+	struct xhci_fdt_softc *sc = cookie;
+
+	task_add(systq, &sc->sc_snps_connect_task);
+}
+
+void *
+xhci_snps_ep_get_cookie(void *cookie, struct endpoint *ep)
+{
+	return cookie;
+}
+
+int
+xhci_snps_attach(struct xhci_fdt_softc *sc)
+{
+	/*
+	 * On Apple hardware we need to reset the controller when we
+	 * see a new connection.
+	 */
+	if (OF_is_compatible(sc->sc_node, "apple,dwc3")) {
+		sc->sc_usb_controller_port.up_cookie = sc;
+		sc->sc_usb_controller_port.up_connect = xhci_snps_connect;
+		task_set(&sc->sc_snps_connect_task, xhci_snps_do_connect, sc);
+
+		sc->sc_ports.dp_node = sc->sc_node;
+		sc->sc_ports.dp_cookie = &sc->sc_usb_controller_port;
+		sc->sc_ports.dp_ep_get_cookie = xhci_snps_ep_get_cookie;
+		device_ports_register(&sc->sc_ports, EP_USB_CONTROLLER_PORT);
+	}
+
+	return xhci_snps_init(sc);
+}
 
 int
 xhci_snps_init(struct xhci_fdt_softc *sc)
@@ -318,30 +395,14 @@ xhci_init_phy(struct xhci_fdt_softc *sc, uint32_t *cells)
 }
 
 void
-xhci_init_phys(struct xhci_fdt_softc *sc)
+xhci_phy_enable(struct xhci_fdt_softc *sc, char *name)
 {
 	uint32_t *phys;
 	uint32_t *phy;
-	uint32_t usb_phy;
-	int len, idx;
+	int idx, len;
 
-	/*
-	 * Legacy binding; assume there only is a single USB PHY.
-	 */
-	usb_phy = OF_getpropint(sc->sc_node, "usb-phy", 0);
-	if (usb_phy) {
-		xhci_init_phy(sc, &usb_phy);
-		return;
-	}
-
-	/*
-	 * Generic PHY binding; only initialize USB 3 PHY for now.
-	 */
-	idx = OF_getindex(sc->sc_node, "usb3-phy", "phy-names");
+	idx = OF_getindex(sc->sc_node, name, "phy-names");
 	if (idx < 0)
-		return;
-
-	if (phy_enable_idx(sc->sc_node, idx) != ENXIO)
 		return;
 
 	len = OF_getproplen(sc->sc_node, "phys");
@@ -363,6 +424,26 @@ xhci_init_phys(struct xhci_fdt_softc *sc)
 		idx--;
 	}
 	free(phys, M_TEMP, len);
+}
+
+void
+xhci_init_phys(struct xhci_fdt_softc *sc)
+{
+	int rv;
+
+	rv = phy_enable_prop_idx(sc->sc_node, "usb-phy", 0);
+	if (rv != 0) {
+		rv = phy_enable(sc->sc_node, "usb2-phy");
+		if (rv != 0)
+			xhci_phy_enable(sc, "usb2-phy");
+	}
+
+	rv = phy_enable_prop_idx(sc->sc_node, "usb-phy", 1);
+	if (rv != 0) {
+		rv = phy_enable(sc->sc_node, "usb3-phy");
+		if (rv != 0)
+			xhci_phy_enable(sc, "usb3-phy");
+	}
 }
 
 /*

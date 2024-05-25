@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.128 2022/12/04 23:50:48 cheloha Exp $ */
+/*	$OpenBSD: main.c,v 1.132 2023/09/04 11:35:11 espie Exp $ */
 /*	$NetBSD: main.c,v 1.34 1997/03/24 20:56:36 gwr Exp $	*/
 
 /*
@@ -45,7 +45,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "config.h"
 #include "defines.h"
 #include "var.h"
 #include "lowparse.h"
@@ -86,6 +85,8 @@ bool 		touchFlag;	/* -t flag */
 bool 		ignoreErrors;	/* -i flag */
 bool 		beSilent;	/* -s flag */
 bool		dumpData;	/* -p flag */
+
+static LIST 	unreadable;
 
 struct dirs {
 	char *current;
@@ -515,7 +516,7 @@ figure_out_CURDIR()
 	struct stat sa, sb;
 
 	/* curdir is cwd... */
-	cwd = dogetcwd();
+	cwd = getcwd(NULL, 0);
 	if (cwd == NULL)
 		err(2, "getcwd");
 
@@ -826,6 +827,48 @@ main(int argc, char **argv)
 		return 0;
 }
 
+struct unreadable {
+	char *fname;
+	int errcode;
+};
+
+void
+dump_unreadable(void)
+{
+	struct unreadable *u;
+
+	if (Lst_IsEmpty(&unreadable))
+		return;
+
+	fprintf(stderr, "Makefile(s) that couldn't be read:\n");
+
+	while ((u = Lst_Pop(&unreadable))) {
+		fprintf(stderr, "\t%s: %s\n", u->fname, strerror(u->errcode));
+		free(u->fname);
+		free(u);
+	}
+}
+
+static FILE *
+open_makefile(const char *fname)
+{
+	FILE *stream;
+	struct unreadable *u;
+
+	stream = fopen(fname, "r");
+	if (stream != NULL)
+		return stream;
+
+	if (errno != ENOENT) {
+		u = emalloc(sizeof *u);
+		u->fname = estrdup(fname);
+		u->errcode = errno;
+		Lst_AtEnd(&unreadable, u);
+	}
+
+	return NULL;
+}
+
 /*-
  * ReadMakefile  --
  *	Open and parse the given makefile.
@@ -848,14 +891,14 @@ ReadMakefile(void *p, void *q)
 		Var_Set("MAKEFILE", "");
 		Parse_File(estrdup("(stdin)"), stdin);
 	} else {
-		if ((stream = fopen(fname, "r")) != NULL)
+		if ((stream = open_makefile(fname)) != NULL)
 			goto found;
 		/* if we've chdir'd, rebuild the path name */
 		if (d->current != d->object && *fname != '/') {
 			char *path;
 
 			path = Str_concat(d->current, fname, '/');
-			if ((stream = fopen(path, "r")) == NULL)
+			if ((stream = open_makefile(path)) == NULL)
 				free(path);
 			else {
 				fname = path;
@@ -866,7 +909,14 @@ ReadMakefile(void *p, void *q)
 		name = Dir_FindFile(fname, userIncludePath);
 		if (!name)
 			name = Dir_FindFile(fname, systemIncludePath);
-		if (!name || !(stream = fopen(name, "r")))
+		if (!name)
+			return false;
+		/* do not try to open a file we already have, so that
+		 * dump_unreadable() yields non-confusing results.
+		 */
+		if (strcmp(name, fname) == 0)
+			return false;
+		if ((stream = open_makefile(name)) == NULL)
 			return false;
 		fname = name;
 		/*
@@ -890,8 +940,8 @@ usage()
 {
 	(void)fprintf(stderr,
 "usage: make [-BeiknpqrSst] [-C directory] [-D variable] [-d flags] [-f mk]\n\
-	    [-I directory] [-j max_processes] [-m directory] [-V variable]\n\
-	    [NAME=value] [target ...]\n");
+	    [-I directory] [-j max_jobs] [-m directory] [-V variable]\n\
+	    [NAME=value ...] [target ...]\n");
 	exit(2);
 }
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: md_init.h,v 1.11 2020/10/15 16:30:23 deraadt Exp $ */
+/* $OpenBSD: md_init.h,v 1.13 2023/11/18 16:26:16 deraadt Exp $ */
 
 /*-
  * Copyright (c) 2001 Ross Harvey
@@ -38,18 +38,13 @@
 	"	call " #func "\n"		\
 	"	.previous")
 
-/*
- * Align is after because we want the function to start at the first
- * address of the section, but overall we want the section to be
- * aligned by the align amount.
- */
 #define MD_SECTION_PROLOGUE(sect, entry_pt)	\
 	__asm (					\
 	".section "#sect",\"ax\",@progbits	\n" \
 	"	.globl " #entry_pt "		\n" \
 	"	.type " #entry_pt ",@function	\n" \
-	#entry_pt":				\n" \
 	"	.align 16			\n" \
+	#entry_pt":				\n" \
 	"	pushl	%ebp			\n" \
 	"	movl	%esp,%ebp		\n" \
 	"	andl	$~15,%esp		\n" \
@@ -119,10 +114,8 @@
 	"	call	___start	# ___start(argc,argv,envp,0) \n" \
 	"					\n" \
 	"	.align	4			\n" \
-	"	.globl	_dl_exit		\n" \
-	"	.type	_dl_exit,@function	\n" \
-	"_dl_exit:				\n" \
-	"	mov	$" STR(SYS_exit) ", %eax\n" \
-	"	int	$0x80			\n" \
+	"	.globl	_csu_abort		\n" \
+	"	.type	_csu_abort,@function	\n" \
+	"_csu_abort:				\n" \
 	"	int3				\n" \
 	"	.previous")

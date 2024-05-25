@@ -1,4 +1,4 @@
-/*	$OpenBSD: traverse.c,v 1.39 2018/04/26 17:40:48 guenther Exp $	*/
+/*	$OpenBSD: traverse.c,v 1.42 2024/02/03 18:51:57 beck Exp $	*/
 /*	$NetBSD: traverse.c,v 1.17 1997/06/05 11:13:27 lukem Exp $	*/
 
 /*-
@@ -163,30 +163,6 @@ fs_mapinodes(ino_t maxino, int64_t *tapesize, int *anydirskipped)
 			inosused = cgp->cg_initediblk;
 		else
 			inosused = sblock->fs_ipg;
-		/*
-		 * If we are using soft updates, then we can trust the
-		 * cylinder group inode allocation maps to tell us which
-		 * inodes are allocated. We will scan the used inode map
-		 * to find the inodes that are really in use, and then
-		 * read only those inodes in from disk.
-		 */
-		if (sblock->fs_flags & FS_DOSOFTDEP) {
-			if (!cg_chkmagic(cgp))
-				quit("mapfiles: cg %d: bad magic number\n", cg);
-			cp = &cg_inosused(cgp)[(inosused - 1) / CHAR_BIT];
-			for ( ; inosused > 0; inosused -= CHAR_BIT, cp--) {
-				if (*cp == 0)
-					continue;
-				for (i = 1 << (CHAR_BIT - 1); i > 0; i >>= 1) {
-					if (*cp & i)
-						break;
-					inosused--;
-				}
-				break;
-			}
-			if (inosused <= 0)
-				continue;
-		}
 		for (i = 0; i < inosused; i++, ino++) {
 			if (ino < ROOTINO)
 				continue;
@@ -547,13 +523,7 @@ dumpino(union dinode *dp, ino_t ino)
 		 * Check for short symbolic link.
 		 */
 		if (DIP(dp, di_size) > 0 &&
-#ifdef FS_44INODEFMT
-		    (DIP(dp, di_size) < sblock->fs_maxsymlinklen ||
-		     (sblock->fs_maxsymlinklen == 0 &&
-			 DIP(dp, di_blocks) == 0))) {
-#else
-		    DIP(dp, di_blocks) == 0) {
-#endif
+		    DIP(dp, di_size) < sblock->fs_maxsymlinklen) {
 			void *shortlink;
 
 			spcl.c_addr[0] = 1;
@@ -717,10 +687,7 @@ ufs2_blksout(daddr_t *blkp, int frags, ino_t ino)
  * Dump a map to the tape.
  */
 void
-dumpmap(map, type, ino)
-	char *map;
-	int type;
-	ino_t ino;
+dumpmap(char *map, int type, ino_t ino)
 {
 	int i;
 	char *cp;
@@ -736,8 +703,7 @@ dumpmap(map, type, ino)
  * Write a header record to the dump tape.
  */
 void
-writeheader(ino)
-	ino_t ino;
+writeheader(ino_t ino)
 {
 	int32_t sum, cnt, *lp;
 

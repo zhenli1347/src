@@ -1,4 +1,4 @@
-/* $OpenBSD: trap.c,v 1.104 2022/11/02 07:20:07 guenther Exp $ */
+/* $OpenBSD: trap.c,v 1.111 2024/01/11 19:16:26 miod Exp $ */
 /* $NetBSD: trap.c,v 1.52 2000/05/24 16:48:33 thorpej Exp $ */
 
 /*-
@@ -201,7 +201,6 @@ printtrap(const unsigned long a0, const unsigned long a1,
  * to make the code a bit cleaner and more representative of the
  * Alpha architecture.
  */
-/*ARGSUSED*/
 void
 trap(a0, a1, a2, entry, framep)
 	const unsigned long a0, a1, a2, entry;
@@ -498,17 +497,15 @@ dopanic:
  * a3, and v0 from the frame before returning to the user process.
  */
 void
-syscall(code, framep)
-	u_int64_t code;
-	struct trapframe *framep;
+syscall(u_int64_t code, struct trapframe *framep)
 {
-	const struct sysent *callp;
+	const struct sysent *callp = sysent;
 	struct proc *p;
-	int error;
+	int error = ENOSYS;
 	u_int64_t opc;
 	u_long rval[2];
-	u_long args[10];					/* XXX */
-	u_int hidden, nargs;
+	u_long args[6];
+	u_int nargs;
 
 	atomic_add_int(&uvmexp.syscalls, 1);
 	p = curproc;
@@ -516,35 +513,13 @@ syscall(code, framep)
 	framep->tf_regs[FRAME_SP] = alpha_pal_rdusp();
 	opc = framep->tf_regs[FRAME_PC] - 4;
 
-	switch(code) {
-	case SYS_syscall:
-	case SYS___syscall:
-		/*
-		 * syscall() and __syscall() are handled the same on
-		 * the alpha, as everything is 64-bit aligned, anyway.
-		 */
-		code = framep->tf_regs[FRAME_A0];
-		hidden = 1;
-		break;
-	default:
-		hidden = 0;
-	}
+	if (code <= 0 || code >= SYS_MAXSYSCALL)
+		goto bad;
 
-	error = 0;
-	callp = sysent;
-	if (code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
-		callp += code;
+	callp += code;
 
-	nargs = callp->sy_narg + hidden;
+	nargs = callp->sy_narg;
 	switch (nargs) {
-	default:
-		if (nargs > 10)		/* XXX */
-			panic("syscall: too many args (%d)", nargs);
-		if ((error = copyin((caddr_t)(framep->tf_regs[FRAME_SP]), &args[6],
-		    (nargs - 6) * sizeof(u_long))))
-			goto bad;
 	case 6:
 		args[5] = framep->tf_regs[FRAME_A5];
 	case 5:
@@ -564,7 +539,7 @@ syscall(code, framep)
 	rval[0] = 0;
 	rval[1] = 0;
 
-	error = mi_syscall(p, code, callp, args + hidden, rval);
+	error = mi_syscall(p, code, callp, args, rval);
 
 	switch (error) {
 	case 0:
@@ -736,7 +711,7 @@ handle_opdec(p, ucodep)
 	p->p_md.md_tf->tf_regs[FRAME_SP] = alpha_pal_rdusp();
 
 	inst_pc = memaddr = p->p_md.md_tf->tf_regs[FRAME_PC] - 4;
-	if (copyin((caddr_t)inst_pc, &inst, sizeof (inst)) != 0) {
+	if (copyinsn(p, (u_int32_t *)inst_pc, (u_int32_t *)&inst) != 0) {
 		/*
 		 * really, this should never happen, but in case it
 		 * does we handle it.

@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.658 2022/11/08 14:49:20 cheloha Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.670 2024/04/29 00:29:48 jsg Exp $	*/
 /*	$NetBSD: machdep.c,v 1.214 1996/11/10 03:16:17 thorpej Exp $	*/
 
 /*-
@@ -70,19 +70,15 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/signalvar.h>
-#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/user.h>
 #include <sys/exec.h>
 #include <sys/buf.h>
 #include <sys/reboot.h>
 #include <sys/conf.h>
-#include <sys/timeout.h>
 #include <sys/malloc.h>
-#include <sys/mbuf.h>
 #include <sys/msgbuf.h>
 #include <sys/mount.h>
-#include <sys/vnode.h>
 #include <sys/device.h>
 #include <sys/extent.h>
 #include <sys/sysctl.h>
@@ -103,11 +99,9 @@
 #include <machine/cpu_full.h>
 #include <machine/cpufunc.h>
 #include <machine/cpuvar.h>
-#include <machine/gdt.h>
 #include <machine/kcore.h>
 #include <machine/pio.h>
 #include <machine/psl.h>
-#include <machine/reg.h>
 #include <machine/specialreg.h>
 #include <machine/biosvar.h>
 #include <machine/pte.h>
@@ -116,11 +110,8 @@
 #endif /* MULTIPROCESSOR */
 
 #include <dev/isa/isareg.h>
-#include <dev/isa/isavar.h>
 #include <dev/ic/i8042reg.h>
-#include <dev/ic/mc146818reg.h>
 #include <i386/isa/isa_machdep.h>
-#include <i386/isa/nvram.h>
 
 #include "acpi.h"
 #if NACPI > 0
@@ -134,8 +125,6 @@
 
 #ifdef DDB
 #include <machine/db_machdep.h>
-#include <ddb/db_access.h>
-#include <ddb/db_sym.h>
 #include <ddb/db_extern.h>
 #endif
 
@@ -147,13 +136,6 @@ extern struct proc *npxproc;
 #endif
 
 #include "bios.h"
-#include "com.h"
-
-#if NCOM > 0
-#include <sys/termios.h>
-#include <dev/ic/comreg.h>
-#include <dev/ic/comvar.h>
-#endif /* NCOM > 0 */
 
 #ifdef HIBERNATE
 #include <machine/hibernate_var.h>
@@ -209,9 +191,6 @@ int	dumpsize = 0;		/* pages */
 long	dumplo = 0;		/* blocks */
 
 int	cpu_class;
-int	i386_fpu_present;
-int	i386_fpu_exception;
-int	i386_fpu_fdivbug;
 
 int	i386_use_fxsave;
 int	i386_has_sse;
@@ -225,7 +204,6 @@ struct vm_map *exec_map = NULL;
 struct vm_map *phys_map = NULL;
 
 #if !defined(SMALL_KERNEL)
-int p4_model;
 int p3_early;
 void (*update_cpuspeed)(void) = NULL;
 void	via_update_sensor(void *args);
@@ -251,6 +229,7 @@ void (*cpusensors_setup)(struct cpu_info *);
 
 void (*delay_func)(int) = i8254_delay;
 void (*initclock_func)(void) = i8254_initclocks;
+void (*startclock_func)(void) = i8254_start_both_clocks;
 
 /*
  * Extent maps to manage I/O and ISA memory hole space.  Allocate
@@ -285,11 +264,6 @@ int allowaperture = 0;
 
 int has_rdrand;
 int has_rdseed;
-
-#include "pvbus.h"
-#if NPVBUS > 0
-#include <dev/pv/pvvar.h>
-#endif
 
 void	winchip_cpu_setup(struct cpu_info *);
 void	amd_family5_setperf_setup(struct cpu_info *);
@@ -1038,6 +1012,7 @@ const struct cpu_cpuid_feature cpu_seff0_ecxfeatures[] = {
 	{ SEFF0ECX_UMIP,	"UMIP" },
 	{ SEFF0ECX_AVX512VBMI,	"AVX512VBMI" },
 	{ SEFF0ECX_PKU,		"PKU" },
+	{ SEFF0ECX_WAITPKG,	"WAITPKG" },
 };
 
 const struct cpu_cpuid_feature cpu_seff0_edxfeatures[] = {
@@ -1568,7 +1543,6 @@ intel686_p4_cpu_setup(struct cpu_info *ci)
 	intel686_common_cpu_setup(ci);
 
 #if !defined(SMALL_KERNEL)
-	p4_model = (ci->ci_signature >> 4) & 15;
 	update_cpuspeed = p4_update_cpuspeed;
 #endif
 }
@@ -1661,6 +1635,7 @@ identifycpu(struct cpu_info *ci)
 	char *cpu_device = ci->ci_dev->dv_xname;
 	int skipspace;
 	extern uint32_t cpu_meltdown;
+	uint64_t msr, nmsr;
 
 	if (cpuid_level == -1) {
 		name = "486DX";
@@ -1880,6 +1855,23 @@ identifycpu(struct cpu_info *ci)
 		printf(", %02x-%02x-%02x", ci->ci_family, ci->ci_model,
 		    step);
 
+	if ((cpu_ecxfeature & CPUIDECX_HV) == 0) {
+		uint64_t level = 0;
+		uint32_t dummy;
+
+		if (strcmp(cpu_vendor, "AuthenticAMD") == 0 &&
+		    ci->ci_family >= 0x0f) {
+			level = rdmsr(MSR_PATCH_LEVEL);
+		} else if (strcmp(cpu_vendor, "GenuineIntel") == 0 &&
+		    ci->ci_family >= 6) {
+			wrmsr(MSR_BIOS_SIGN, 0);
+			CPUID(1, dummy, dummy, dummy, dummy);
+			level = rdmsr(MSR_BIOS_SIGN) >> 32;
+		}
+		if (level != 0)
+			printf(", patch %08llx", level);
+	}
+
 	printf("\n");
 
 	if (ci->ci_feature_flags) {
@@ -2009,13 +2001,17 @@ identifycpu(struct cpu_info *ci)
 	 */
 	if (!strcmp(cpu_vendor, "AuthenticAMD")) {
 		if (ci->ci_family >= 0x10 && ci->ci_family != 0x11) {
-			uint64_t msr;
-
-			msr = rdmsr(MSR_DE_CFG);
-			if ((msr & DE_CFG_SERIALIZE_LFENCE) == 0) {
-				msr |= DE_CFG_SERIALIZE_LFENCE;
-				wrmsr(MSR_DE_CFG, msr);
-			}
+			nmsr = msr = rdmsr(MSR_DE_CFG);
+			nmsr |= DE_CFG_SERIALIZE_LFENCE;
+			if (msr != nmsr)
+				wrmsr(MSR_DE_CFG, nmsr);
+		}
+		if (family == 0x17 && ci->ci_model >= 0x31 &&
+		    (cpu_ecxfeature & CPUIDECX_HV) == 0) {
+			nmsr = msr = rdmsr(MSR_DE_CFG);
+			nmsr |= DE_CFG_SERIALIZE_9;
+			if (msr != nmsr)
+				wrmsr(MSR_DE_CFG, nmsr);
 		}
 	}
 
@@ -3436,6 +3432,12 @@ void
 cpu_initclocks(void)
 {
 	(*initclock_func)();		/* lapic or i8254 */
+}
+
+void
+cpu_startclock(void)
+{
+	(*startclock_func)();
 }
 
 void

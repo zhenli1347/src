@@ -1,4 +1,4 @@
-/*	$OpenBSD: resolve.h,v 1.103 2022/12/04 15:42:07 deraadt Exp $ */
+/*	$OpenBSD: resolve.h,v 1.108 2024/05/21 05:00:47 jsg Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -73,14 +73,18 @@ typedef struct elf_object elf_object_t;
 struct object_vector {
 	int		len;
 	int		alloc;
-	elf_object_t 	**vec;
+	elf_object_t	**vec;
 };
 void	object_vec_grow(struct object_vector *_vec, int _more);
 
-struct mutate {
+struct addr_range {
 	vaddr_t start;
 	vaddr_t end;
-	int valid;
+};
+
+struct range_vector {
+	struct addr_range slice[40];
+	int count;
 };
 
 /*
@@ -239,9 +243,9 @@ struct elf_object {
 	/* nonzero if trace enabled for this object */
 	int traced;
 
-#define MAXMUT 40
-	struct mutate imut[MAXMUT];
-	struct mutate mut[MAXMUT];
+	struct range_vector imut;
+	struct range_vector mut;
+	int islibc;
 };
 
 struct dep_node {
@@ -318,7 +322,6 @@ void _dl_link_grpsym(elf_object_t *object);
 void _dl_cache_grpsym_list_setup(elf_object_t *_object);
 void _dl_link_grpref(elf_object_t *load_group, elf_object_t *load_object);
 void _dl_link_dlopen(elf_object_t *dep);
-void _dl_unlink_dlopen(elf_object_t *dep);
 void _dl_notify_unload_shlib(elf_object_t *object);
 void _dl_unload_shlib(elf_object_t *object);
 void _dl_unload_dlopen(void);
@@ -329,14 +332,15 @@ int	_dl_match_file(struct sod *sodp, const char *name, int namelen);
 char	*_dl_find_shlib(struct sod *sodp, char **searchpath, int nohints);
 void	_dl_load_list_free(struct load_list *load_list);
 
-void _dl_find_immutables(int type, elf_object_t *object, Elf_Ehdr *);
-void _dl_defer_mut(struct mutate *m, vaddr_t start, vsize_t len);
-void _dl_defer_immut(struct mutate *m, vaddr_t start, vsize_t len);
+void _dl_push_range_size(struct range_vector *v, vaddr_t start, vsize_t len);
 void _dl_apply_immutable(elf_object_t *object);
 
 typedef void lock_cb(int);
 void	_dl_thread_kern_go(lock_cb *);
 lock_cb	*_dl_thread_kern_stop(void);
+
+int	_dl_islibc(Elf_Dyn *_dynp, Elf_Addr loff);
+void	_dl_pin(int, Elf_Phdr *, void *, size_t, void *, size_t);
 
 char	*_dl_getenv(const char *, char **) __boot;
 void	_dl_unsetenv(const char *, char **) __boot;
@@ -344,6 +348,9 @@ void	_dl_unsetenv(const char *, char **) __boot;
 void	_dl_trace_setup(char **) __boot;
 void	_dl_trace_object_setup(elf_object_t *);
 int	_dl_trace_plt(const elf_object_t *, const char *);
+
+/* dlfcn.c */
+void	_dl_show_objects(elf_object_t *_object);
 
 /* tib.c */
 void	_dl_allocate_tls_offsets(void) __boot;

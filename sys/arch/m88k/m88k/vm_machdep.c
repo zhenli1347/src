@@ -1,4 +1,4 @@
-/*	$OpenBSD: vm_machdep.c,v 1.27 2022/02/21 19:22:21 kettenis Exp $	*/
+/*	$OpenBSD: vm_machdep.c,v 1.29 2024/05/21 23:16:06 jsg Exp $	*/
 
 /*
  * Copyright (c) 1998 Steve Murphree, Jr.
@@ -60,7 +60,6 @@
 #include <machine/trap.h>
 
 extern void savectx(struct pcb *);
-extern void switch_exit(struct proc *);
 
 /*
  * Finish a fork operation, with process p2 nearly set up.
@@ -157,7 +156,7 @@ vmapbuf(struct buf *bp, vsize_t len)
 	 * the pmap_extract().
 	 *
 	 * no need to flush TLB since we expect nothing to be mapped
-	 * where we we just allocated (TLB will be flushed when our
+	 * where we just allocated (TLB will be flushed when our
 	 * mapping is removed).
 	 */
 	while (len) {

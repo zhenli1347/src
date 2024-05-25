@@ -1,4 +1,4 @@
-.\" $OpenBSD: snmpd.conf.5,v 1.61 2022/08/23 08:56:21 martijn Exp $
+.\" $OpenBSD: snmpd.conf.5,v 1.64 2024/02/06 12:39:13 martijn Exp $
 .\"
 .\" Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
 .\"
@@ -14,12 +14,12 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 23 2022 $
+.Dd $Mdocdate: February 6 2024 $
 .Dt SNMPD.CONF 5
 .Os
 .Sh NAME
 .Nm snmpd.conf
-.Nd Simple Network Management Protocol daemon configuration file
+.Nd SNMP daemon configuration file
 .Sh DESCRIPTION
 .Nm
 is the configuration file for the
@@ -151,9 +151,9 @@ Having
 set requires at least one
 .Ic trap handle
 statement.
-.It Ic agentx Oo Ic path Ar path Oc Oo Ic owner Ar owner Oc Oo group Ar group Oc Oo Ic mode Ar mode Oc
+.It Ic agentx Oo Ic path Ar path Oc Oo Ic owner Ar owner Oc Oo Ic group Ar group Oc Oo Ic mode Ar mode Oc
 Set up an agentx master socket at
-.Ar path 
+.Ar path
 and defaults to
 .Pa /var/agentx/master .
 Socket owner, group, and permissions can be set with
@@ -231,6 +231,11 @@ RFC1910 legacy format.
 must be 8 bytes
 .Pq or 16 characters in hexadecimal format .
 .El
+.It Ic mib directory Ar path
+Specify which directories to recursively search for MIB files.
+Multiple directories can be specified.
+If no directory is specified it defaults to
+.Pa /usr/share/snmp/mibs .
 .It Ic read-only community Ar string
 Specify the name of the read-only community.
 There is no default value.

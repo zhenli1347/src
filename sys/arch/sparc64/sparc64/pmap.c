@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.106 2022/09/10 20:35:29 miod Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.120 2024/04/13 23:44:11 jsg Exp $	*/
 /*	$NetBSD: pmap.c,v 1.107 2001/08/31 16:47:41 eeh Exp $	*/
 /*
  * 
@@ -28,7 +28,6 @@
 
 #include <sys/atomic.h>
 #include <sys/param.h>
-#include <sys/malloc.h>
 #include <sys/queue.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
@@ -46,21 +45,16 @@
 #include <machine/hypervisor.h>
 #include <machine/openfirm.h>
 #include <machine/kcore.h>
+#include <machine/pte.h>
 
-#include "cache.h"
+#include <sparc64/sparc64/cache.h>
 
 #ifdef DDB
 #include <machine/db_machdep.h>
-#include <ddb/db_command.h>
-#include <ddb/db_sym.h>
-#include <ddb/db_variables.h>
-#include <ddb/db_extern.h>
-#include <ddb/db_access.h>
 #include <ddb/db_output.h>
-#define db_enter()	__asm volatile("ta 1; nop");
+#define db_enter()	__asm volatile("ta 1; nop")
 #else
 #define db_enter()
-#define db_printf	printf
 #endif
 
 #define	MEG		(1<<20) /* 1MB */
@@ -116,7 +110,6 @@ void	pmap_page_cache(struct pmap *pm, paddr_t pa, int mode);
 
 void	pmap_bootstrap_cpu(paddr_t);
 
-void	pmap_pinit(struct pmap *);
 void	pmap_release(struct pmap *);
 pv_entry_t pa_to_pvh(paddr_t);
 
@@ -517,9 +510,9 @@ pmap_bootstrap(u_long kernelstart, u_long kernelend, u_int maxctx, u_int numcpus
 
 			/* And the rest of the virtual page. */
 			if (prom_claim_virt(newkv, szdiff) != newkv)
-			prom_printf("pmap_bootstrap: could not claim "
-				"virtual dseg extension "
-				"at size %lx\r\n", newkv, szdiff);
+				prom_printf("pmap_bootstrap: could not claim "
+				    "virtual dseg extension "
+				    "at size %lx\r\n", newkv, szdiff);
 
 			/* Make sure all 4MB are mapped */
 			prom_map_phys(newkp, szdiff, newkv, -1);
@@ -779,7 +772,6 @@ remap_data:
 		prom_printf("Cannot allocate new cpu_info\r\n");
 		OF_exit();
 	}
-
 
 	/*
 	 * Now the kernel text segment is in its final location we can try to
@@ -1074,6 +1066,7 @@ remap_data:
 		if (prom_map[i].vstart && ((prom_map[i].vstart>>32) == 0)) {
 			for (j = 0; j < prom_map[i].vsize; j += NBPG) {
 				int k;
+				uint64_t tte;
 				
 				for (k = 0; page_size_map[k].mask; k++) {
 					if (((prom_map[i].vstart |
@@ -1084,9 +1077,14 @@ remap_data:
 						break;
 				}
 				/* Enter PROM map into pmap_kernel() */
+				tte = prom_map[i].tte;
+				if (CPU_ISSUN4V)
+					tte &= ~SUN4V_TLB_SOFT_MASK;
+				else
+					tte &= ~(SUN4U_TLB_SOFT2_MASK |
+					    SUN4U_TLB_SOFT_MASK);
 				pmap_enter_kpage(prom_map[i].vstart + j,
-					(prom_map[i].tte + j)|data|
-					page_size_map[k].code);
+				    (tte + j) | data | page_size_map[k].code);
 			}
 		}
 	}
@@ -1100,7 +1098,7 @@ remap_data:
 	vmmap += NBPG;
 	{ 
 		extern vaddr_t u0[2];
-		extern struct pcb* proc0paddr;
+		extern struct pcb *proc0paddr;
 		extern void main(void);
 		paddr_t pa;
 
@@ -1178,6 +1176,8 @@ remap_data:
 		cpus->ci_next = NULL; /* Redundant, I know. */
 		cpus->ci_curproc = &proc0;
 		cpus->ci_cpcb = (struct pcb *)u0[0]; /* Need better source */
+		cpus->ci_cpcbpaddr = pseg_get(pmap_kernel(), u0[0]) &
+		    TLB_PA_MASK;
 		cpus->ci_upaid = cpu_myid();
 		cpus->ci_cpuid = 0;
 		cpus->ci_flags = CPUF_RUNNING;
@@ -1468,7 +1468,7 @@ pmap_destroy(struct pmap *pm)
 
 /*
  * Release any resources held by the given physical map.
- * Called when a pmap initialized by pmap_pinit is being released.
+ * Called when a pmap initialized by pmap_create is being released.
  */
 void
 pmap_release(struct pmap *pm)
@@ -1520,19 +1520,6 @@ pmap_release(struct pmap *pm)
 	pmap_free_page(tmp, pm);
 	mtx_leave(&pm->pm_mtx);
 	ctx_free(pm);
-}
-
-/*
- * Copy the range specified by src_addr/len
- * from the source map to the range dst_addr/len
- * in the destination map.
- *
- * This routine is only advisory and need not do anything.
- */
-void
-pmap_copy(struct pmap *dst_pmap, struct pmap *src_pmap, vaddr_t dst_addr,
-    vsize_t len, vaddr_t src_addr)
-{
 }
 
 /*
@@ -1685,6 +1672,8 @@ pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot)
 			tte.data |= SUN4U_TLB_REAL_W|SUN4U_TLB_W;
 		if (prot & PROT_EXEC)
 			tte.data |= SUN4U_TLB_EXEC;
+		if (prot == PROT_EXEC)
+			tte.data |= SUN4U_TLB_EXEC_ONLY;
 		tte.data |= SUN4U_TLB_TSB_LOCK;	/* wired */
 	}
 	KDASSERT((tte.data & TLB_NFO) == 0);
@@ -1817,6 +1806,8 @@ pmap_enter(struct pmap *pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 			tte.data |= SUN4U_TLB_REAL_W;
 		if (prot & PROT_EXEC)
 			tte.data |= SUN4U_TLB_EXEC;
+		if (prot == PROT_EXEC)
+			tte.data |= SUN4U_TLB_EXEC_ONLY;
 		if (wired)
 			tte.data |= SUN4U_TLB_TSB_LOCK;
 	}
@@ -1941,8 +1932,7 @@ pmap_protect(struct pmap *pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 	KDASSERT(pm != pmap_kernel() || eva < INTSTACK || sva > EINTSTACK);
 	KDASSERT(pm != pmap_kernel() || eva < kdata || sva > ekdata);
 
-	if ((prot & (PROT_WRITE | PROT_EXEC)) ==
-	    (PROT_WRITE | PROT_EXEC))
+	if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC))
 		return;
 
 	if (prot == PROT_NONE) {
@@ -1985,7 +1975,7 @@ pmap_protect(struct pmap *pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 				if ((prot & PROT_WRITE) == 0)
 					data &= ~(SUN4U_TLB_W|SUN4U_TLB_REAL_W);
 				if ((prot & PROT_EXEC) == 0)
-					data &= ~(SUN4U_TLB_EXEC);
+					data &= ~(SUN4U_TLB_EXEC | SUN4U_TLB_EXEC_ONLY);
 			}
 			KDASSERT((data & TLB_NFO) == 0);
 			if (pseg_set(pm, sva, data, 0)) {
@@ -2013,27 +2003,30 @@ pmap_extract(struct pmap *pm, vaddr_t va, paddr_t *pap)
 {
 	paddr_t pa;
 
-	if (pm == pmap_kernel() && va >= kdata && 
-		va < roundup(ekdata, 4*MEG)) {
-		/* Need to deal w/locked TLB entry specially. */
-		pa = (paddr_t) (kdatap - kdata + va);
-	} else if( pm == pmap_kernel() && va >= ktext && va < ektext ) {
-		/* Need to deal w/locked TLB entry specially. */
-		pa = (paddr_t) (ktextp - ktext + va);
-	} else if (pm == pmap_kernel() && va >= INTSTACK && va < EINTSTACK) {
-		pa = curcpu()->ci_paddr + va - INTSTACK;
+	if (pm == pmap_kernel()) {
+		if (va >= kdata && va < roundup(ekdata, 4*MEG)) {
+			/* Need to deal w/locked TLB entry specially. */
+			pa = (paddr_t)(kdatap - kdata + va);
+		} else if (va >= ktext && va < ektext) {
+			/* Need to deal w/locked TLB entry specially. */
+			pa = (paddr_t)(ktextp - ktext + va);
+		} else if (va >= INTSTACK && va < EINTSTACK) {
+			pa = curcpu()->ci_paddr + va - INTSTACK;
+		} else {
+			goto check_pseg;
+		}
 	} else {
-		int s;
-
-		s = splvm();
-		pa = (pseg_get(pm, va) & TLB_PA_MASK) + (va & PGOFSET);
-		splx(s);
+check_pseg:
+		mtx_enter(&pm->pm_mtx);
+		pa = pseg_get(pm, va) & TLB_PA_MASK;
+		mtx_leave(&pm->pm_mtx);
+		if (pa == 0)
+			return FALSE;
+		pa |= va & PAGE_MASK;
 	}
-	if (pa == 0)
-		return (FALSE);
 	if (pap != NULL)
 		*pap = pa;
-	return (TRUE);
+	return TRUE;
 }
 
 /*
@@ -2464,6 +2457,8 @@ pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
 				clear |= SUN4U_TLB_EXEC;
 			if (PROT_EXEC == prot)
 				set |= SUN4U_TLB_EXEC_ONLY;
+			else
+				clear |= SUN4U_TLB_EXEC_ONLY;
 		}
 
 		pv = pa_to_pvh(pa);
@@ -2622,7 +2617,7 @@ ctx_free(struct pmap *pm)
 	if (ctxbusy[oldctx] == 0)
 		printf("ctx_free: freeing free context %d\n", oldctx);
 	if (ctxbusy[oldctx] != pm->pm_physaddr) {
-		printf("ctx_free: freeing someone esle's context\n "
+		printf("ctx_free: freeing someone else's context\n "
 		       "ctxbusy[%d] = %p, pm(%p)->pm_ctx = %p\n", 
 		       oldctx, (void *)(u_long)ctxbusy[oldctx], pm,
 		       (void *)(u_long)pm->pm_physaddr);
@@ -2705,7 +2700,7 @@ pmap_remove_pv(struct pmap *pmap, vaddr_t va, paddr_t pa)
 	 * If it is the first entry on the list, it is actually
 	 * in the header and we must copy the following entry up
 	 * to the header.  Otherwise we must search the list for
-	 * the entry.  In either case we free the now unused entry.
+	 * the entry.
 	 */
 	if (pmap == pv->pv_pmap && PV_MATCH(pv, va)) {
 		/* Save modified/ref bits */
@@ -2902,3 +2897,25 @@ db_dump_pv(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 }
 
 #endif
+
+/*
+ * Read an instruction from a given virtual memory address.
+ * EXEC_ONLY mappings are bypassed.
+ */
+int
+pmap_copyinsn(pmap_t pmap, vaddr_t va, uint32_t *insn)
+{
+	paddr_t pa;
+
+	if (pmap == pmap_kernel())
+		return EINVAL;
+
+	mtx_enter(&pmap->pm_mtx);
+	/* inline pmap_extract */
+	pa = pseg_get(pmap, va) & TLB_PA_MASK;
+	if (pa != 0)
+		*insn = lduwa(pa | (va & PAGE_MASK), ASI_PHYS_CACHED);
+	mtx_leave(&pmap->pm_mtx);
+
+	return pa == 0 ? EFAULT : 0;
+}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uts.c,v 1.43 2020/07/31 10:49:33 mglocker Exp $ */
+/*	$OpenBSD: uts.c,v 1.45 2024/05/23 03:21:09 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 Robert Nagy <robert@openbsd.org>
@@ -17,22 +17,14 @@
  */
 
 #include <sys/param.h>
-#include <sys/sockio.h>
-#include <sys/mbuf.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
-#include <sys/timeout.h>
-#include <sys/conf.h>
 #include <sys/device.h>
-#include <sys/endian.h>
 
 #include <machine/intr.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
-#include <dev/usb/usbdi_util.h>
 #include <dev/usb/usbdevs.h>
 
 #include <dev/wscons/wsconsio.h>
@@ -157,7 +149,7 @@ uts_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_intr_pipe = NULL;
 	sc->sc_enabled = sc->sc_isize = 0;
 
-	/* Copy the default scalue values to each softc */
+	/* Copy the default scale values to each softc */
 	bcopy(&def_scale, &sc->sc_tsscale, sizeof(sc->sc_tsscale));
 
 	/* get the config descriptor */

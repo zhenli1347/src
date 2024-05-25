@@ -1,4 +1,4 @@
-#	$OpenBSD: changelist,v 1.132 2022/07/02 03:32:05 danj Exp $
+#	$OpenBSD: changelist,v 1.138 2023/12/13 11:34:56 job Exp $
 #
 # List of files which the security script backs up and checks
 # for modifications.
@@ -24,7 +24,6 @@
 /etc/daily
 /etc/daily.local
 /etc/defaultdomain
-/etc/dhclient.conf
 /etc/dhcpd.conf
 /etc/dhcpleased.conf
 /etc/disktab
@@ -71,6 +70,7 @@
 /etc/mailer.conf
 /etc/man.conf
 /etc/master.passwd
+/etc/mixerctl.conf
 /etc/mk.conf
 +/etc/moduli
 /etc/monthly
@@ -110,13 +110,17 @@
 /etc/relayd.conf
 /etc/remote
 /etc/resolv.conf
-/etc/resolv.conf.tail
 /etc/ripd.conf
 /etc/rpc
+/etc/rpki/afrinic.constraints
 /etc/rpki/afrinic.tal
+/etc/rpki/apnic.constraints
 /etc/rpki/apnic.tal
+/etc/rpki/arin.constraints
 /etc/rpki/arin.tal
+/etc/rpki/lacnic.constraints
 /etc/rpki/lacnic.tal
+/etc/rpki/ripe.constraints
 /etc/rpki/ripe.tal
 /etc/rpki/skiplist
 /etc/sasyncd.conf
@@ -127,8 +131,6 @@
 +/etc/soii.key
 +/etc/spwd.db
 /etc/ssh/ssh_config
-+/etc/ssh/ssh_host_dsa_key
-/etc/ssh/ssh_host_dsa_key.pub
 +/etc/ssh/ssh_host_ecdsa_key
 /etc/ssh/ssh_host_ecdsa_key.pub
 +/etc/ssh/ssh_host_ed25519_key
@@ -143,6 +145,7 @@
 /etc/sysctl.conf
 /etc/syslog.conf
 /etc/sysmerge.ignore
+/etc/tmux.conf
 /etc/ttys
 /etc/unwind.conf
 /etc/usermgmt.conf
@@ -167,6 +170,10 @@
 /var/db/unwind.key
 +/var/nsd/etc/nsd.conf
 /var/unbound/etc/unbound.conf
++/var/unbound/etc/unbound_control.key
+/var/unbound/etc/unbound_control.pem
++/var/unbound/etc/unbound_server.key
+/var/unbound/etc/unbound_server.pem
 /var/yp/Makefile.main
 /var/yp/Makefile.yp
 /.cshrc

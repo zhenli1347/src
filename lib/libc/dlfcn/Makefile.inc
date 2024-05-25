@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.inc,v 1.5 2016/05/07 19:05:22 guenther Exp $
+#	$OpenBSD: Makefile.inc,v 1.7 2024/01/19 17:02:28 deraadt Exp $
 
 .PATH: ${LIBCSRCDIR}/dlfcn
 

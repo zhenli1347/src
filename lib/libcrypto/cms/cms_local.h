@@ -1,4 +1,4 @@
-/* $OpenBSD: cms_local.h,v 1.2 2022/11/26 17:23:17 tb Exp $ */
+/* $OpenBSD: cms_local.h,v 1.6 2024/05/19 07:12:50 jsg Exp $ */
 /*
  * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project.
@@ -170,7 +170,7 @@ struct CMS_EncryptedContentInfo_st {
 	size_t keylen;
 	/* Set to 1 if we are debugging decrypt and don't fake keys for MMA */
 	int debug;
-	/* Set to 1 if we have no cert and need exta safety measures for MMA */
+	/* Set to 1 if we have no cert and need extra safety measures for MMA */
 	int havenocert;
 };
 
@@ -388,19 +388,12 @@ struct CMS_Receipt_st {
 	ASN1_OCTET_STRING *originatorSignatureValue;
 };
 
-CMS_ContentInfo *CMS_ContentInfo_new(void);
-void CMS_ContentInfo_free(CMS_ContentInfo *a);
-CMS_ContentInfo *d2i_CMS_ContentInfo(CMS_ContentInfo **a, const unsigned char **in, long len);
-int i2d_CMS_ContentInfo(CMS_ContentInfo *a, unsigned char **out);
-extern const ASN1_ITEM CMS_ContentInfo_it;
 extern const ASN1_ITEM CMS_SignerInfo_it;
 extern const ASN1_ITEM CMS_IssuerAndSerialNumber_it;
 extern const ASN1_ITEM CMS_Attributes_Sign_it;
 extern const ASN1_ITEM CMS_Attributes_Verify_it;
 extern const ASN1_ITEM CMS_RecipientInfo_it;
 extern const ASN1_ITEM CMS_PasswordRecipientInfo_it;
-CMS_IssuerAndSerialNumber *CMS_IssuerAndSerialNumber_new(void);
-void CMS_IssuerAndSerialNumber_free(CMS_IssuerAndSerialNumber *a);
 
 #define CMS_SIGNERINFO_ISSUER_SERIAL    0
 #define CMS_SIGNERINFO_KEYIDENTIFIER    1
@@ -415,8 +408,6 @@ void CMS_IssuerAndSerialNumber_free(CMS_IssuerAndSerialNumber *a);
 #define CMS_OIK_KEYIDENTIFIER           1
 #define CMS_OIK_PUBKEY                  2
 
-BIO *cms_content_bio(CMS_ContentInfo *cms);
-
 CMS_ContentInfo *cms_Data_create(void);
 
 CMS_ContentInfo *cms_DigestedData_create(const EVP_MD *md);
@@ -429,9 +420,6 @@ int cms_set1_SignerIdentifier(CMS_SignerIdentifier *sid, X509 *cert, int type);
 int cms_SignerIdentifier_get0_signer_id(CMS_SignerIdentifier *sid,
     ASN1_OCTET_STRING **keyid, X509_NAME **issuer, ASN1_INTEGER **sno);
 int cms_SignerIdentifier_cert_cmp(CMS_SignerIdentifier *sid, X509 *cert);
-
-CMS_ContentInfo *cms_CompressedData_create(int comp_nid);
-BIO *cms_CompressedData_init_bio(CMS_ContentInfo *cms);
 
 BIO *cms_DigestAlgorithm_init_bio(X509_ALGOR *digestAlgorithm);
 int cms_DigestAlgorithm_find_ctx(EVP_MD_CTX *mctx, BIO *chain,

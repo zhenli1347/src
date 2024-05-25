@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.c,v 1.19 2021/04/20 21:11:56 dv Exp $	*/
+/*	$OpenBSD: proc.c,v 1.25 2024/04/09 15:48:01 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2010 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -37,29 +37,16 @@
 #include "proc.h"
 
 void	 proc_exec(struct privsep *, struct privsep_proc *, unsigned int, int,
-	    int, char **);
+	    char **);
 void	 proc_setup(struct privsep *, struct privsep_proc *, unsigned int);
 void	 proc_open(struct privsep *, int, int);
 void	 proc_accept(struct privsep *, int, enum privsep_procid,
 	    unsigned int);
 void	 proc_close(struct privsep *);
-int	 proc_ispeer(struct privsep_proc *, unsigned int, enum privsep_procid);
 void	 proc_shutdown(struct privsep_proc *);
 void	 proc_sig_handler(int, short, void *);
 void	 proc_range(struct privsep *, enum privsep_procid, int *, int *);
 int	 proc_dispatch_null(int, struct privsep_proc *, struct imsg *);
-
-int
-proc_ispeer(struct privsep_proc *procs, unsigned int nproc,
-    enum privsep_procid type)
-{
-	unsigned int	i;
-
-	for (i = 0; i < nproc; i++)
-		if (procs[i].p_id == type)
-			return (1);
-	return (0);
-}
 
 enum privsep_procid
 proc_getid(struct privsep_proc *procs, unsigned int nproc,
@@ -81,7 +68,7 @@ proc_getid(struct privsep_proc *procs, unsigned int nproc,
 
 void
 proc_exec(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc,
-    int debug, int argc, char **argv)
+    int argc, char **argv)
 {
 	unsigned int		 proc, nargc, i, proc_i;
 	char			**nargv;
@@ -130,10 +117,6 @@ proc_exec(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc,
 				fatal("%s: fork", __func__);
 				break;
 			case 0:
-				/* First create a new session */
-				if (setsid() == -1)
-					fatal("setsid");
-
 				/* Prepare parent socket. */
 				if (fd != PROC_PARENT_SOCK_FILENO) {
 					if (dup2(fd, PROC_PARENT_SOCK_FILENO)
@@ -141,16 +124,6 @@ proc_exec(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc,
 						fatal("dup2");
 				} else if (fcntl(fd, F_SETFD, 0) == -1)
 					fatal("fcntl");
-
-				/* Daemons detach from terminal. */
-				if (!debug && (fd =
-				    open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
-					(void)dup2(fd, STDIN_FILENO);
-					(void)dup2(fd, STDOUT_FILENO);
-					(void)dup2(fd, STDERR_FILENO);
-					if (fd > 2)
-						(void)close(fd);
-				}
 
 				execvp(argv[0], nargv);
 				fatal("%s: execvp", __func__);
@@ -218,6 +191,9 @@ proc_init(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc,
 		privsep_process = PROC_PARENT;
 		proc_setup(ps, procs, nproc);
 
+		if (!debug && daemon(0, 0) == -1)
+			fatal("failed to daemonize");
+
 		/*
 		 * Create the children sockets so we can use them
 		 * to distribute the rest of the socketpair()s using
@@ -242,7 +218,7 @@ proc_init(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc,
 		}
 
 		/* Engage! */
-		proc_exec(ps, procs, nproc, debug, argc, argv);
+		proc_exec(ps, procs, nproc, argc, argv);
 		return;
 	}
 
@@ -300,7 +276,7 @@ proc_setup(struct privsep *ps, struct privsep_proc *procs, unsigned int nproc)
 	struct privsep_pipes	*pp;
 
 	/* Initialize parent title, ps_instances and procs. */
-	ps->ps_title[PROC_PARENT] = "parent";
+	ps->ps_title[PROC_PARENT] = "vmd";
 
 	for (src = 0; src < PROC_MAX; src++)
 		/* Default to 1 process instance */
@@ -527,10 +503,7 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 	const char		*root;
 	struct control_sock	*rcs;
 
-	log_procinit(p->p_title);
-
-	/* Set the process group of the current process */
-	setpgid(0, 0);
+	log_procinit("%s", p->p_title);
 
 	if (p->p_id == PROC_CONTROL && ps->ps_instance == 0) {
 		if (control_init(ps, &ps->ps_csock) == -1)
@@ -674,7 +647,7 @@ proc_dispatch(int fd, short event, void *arg)
 		case IMSG_CTL_PROCFD:
 			IMSG_SIZE_CHECK(&imsg, &pf);
 			memcpy(&pf, imsg.data, sizeof(pf));
-			proc_accept(ps, imsg.fd, pf.pf_procid,
+			proc_accept(ps, imsg_get_fd(&imsg), pf.pf_procid,
 			    pf.pf_instance);
 			break;
 		default:
@@ -698,9 +671,14 @@ proc_dispatch_null(int fd, struct privsep_proc *p, struct imsg *imsg)
 /*
  * imsg helper functions
  */
-
 void
 imsg_event_add(struct imsgev *iev)
+{
+	imsg_event_add2(iev, NULL);
+}
+
+void
+imsg_event_add2(struct imsgev *iev, struct event_base *ev_base)
 {
 	if (iev->handler == NULL) {
 		imsg_flush(&iev->ibuf);
@@ -713,6 +691,8 @@ imsg_event_add(struct imsgev *iev)
 
 	event_del(&iev->ev);
 	event_set(&iev->ev, iev->ibuf.fd, iev->events, iev->handler, iev->data);
+	if (ev_base != NULL)
+		event_base_set(ev_base, &iev->ev);
 	event_add(&iev->ev, NULL);
 }
 
@@ -720,12 +700,20 @@ int
 imsg_compose_event(struct imsgev *iev, uint16_t type, uint32_t peerid,
     pid_t pid, int fd, void *data, uint16_t datalen)
 {
+	return imsg_compose_event2(iev, type, peerid, pid, fd, data, datalen,
+	    NULL);
+}
+
+int
+imsg_compose_event2(struct imsgev *iev, uint16_t type, uint32_t peerid,
+    pid_t pid, int fd, void *data, uint16_t datalen, struct event_base *ev_base)
+{
 	int	ret;
 
 	if ((ret = imsg_compose(&iev->ibuf, type, peerid,
 	    pid, fd, data, datalen)) == -1)
 		return (ret);
-	imsg_event_add(iev);
+	imsg_event_add2(iev, ev_base);
 	return (ret);
 }
 
@@ -805,7 +793,8 @@ proc_forward_imsg(struct privsep *ps, struct imsg *imsg,
     enum privsep_procid id, int n)
 {
 	return (proc_compose_imsg(ps, id, n, imsg->hdr.type,
-	    imsg->hdr.peerid, imsg->fd, imsg->data, IMSG_DATA_SIZE(imsg)));
+	    imsg->hdr.peerid, imsg_get_fd(imsg), imsg->data,
+	    IMSG_DATA_SIZE(imsg)));
 }
 
 struct imsgbuf *

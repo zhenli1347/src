@@ -1,4 +1,4 @@
-/* $OpenBSD: wskbd.c,v 1.114 2022/11/10 12:10:54 matthieu Exp $ */
+/* $OpenBSD: wskbd.c,v 1.119 2024/03/25 13:01:49 mvs Exp $ */
 /* $NetBSD: wskbd.c,v 1.80 2005/05/04 01:52:16 augustss Exp $ */
 
 /*
@@ -94,6 +94,7 @@
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <sys/vnode.h>
+#include <sys/task.h>
 
 #include <ddb/db_var.h>
 
@@ -113,7 +114,6 @@
 
 #if NWSDISPLAY > 0
 #include <sys/atomic.h>
-#include <sys/task.h>
 #endif
 
 #ifdef WSKBD_DEBUG
@@ -177,10 +177,19 @@ struct wskbd_softc {
 #if NAUDIO > 0
 	void	*sc_audiocookie;
 #endif
+	struct task sc_kbd_backlight_task;
+	u_int	sc_kbd_backlight_cmd;
 #if NWSDISPLAY > 0
 	struct task sc_brightness_task;
 	int	sc_brightness_steps;
 #endif
+};
+
+enum wskbd_kbd_backlight_cmds {
+	KBD_BACKLIGHT_NONE,
+	KBD_BACKLIGHT_UP,
+	KBD_BACKLIGHT_DOWN,
+	KBD_BACKLIGHT_TOGGLE,
 };
 
 #define MOD_SHIFT_L		(1 << 0)
@@ -249,6 +258,8 @@ void	wskbd_set_keymap(struct wskbd_softc *, struct wscons_keymap *, int);
 
 int	(*wskbd_get_backlight)(struct wskbd_backlight *);
 int	(*wskbd_set_backlight)(struct wskbd_backlight *);
+
+void	wskbd_kbd_backlight_task(void *);
 #if NWSDISPLAY > 0
 void	wskbd_brightness_task(void *);
 #endif
@@ -406,6 +417,7 @@ wskbd_attach(struct device *parent, struct device *self, void *aux)
 		bcopy(ap->keymap, &sc->id->t_keymap, sizeof(sc->id->t_keymap));
 	}
 
+	task_set(&sc->sc_kbd_backlight_task, wskbd_kbd_backlight_task, sc);
 #if NWSDISPLAY > 0
 	timeout_set(&sc->sc_repeat_ch, wskbd_repeat, sc);
 	task_set(&sc->sc_brightness_task, wskbd_brightness_task, sc);
@@ -638,8 +650,8 @@ wskbd_detach(struct device  *self, int flags)
 		s = spltty();
 		if (--sc->sc_refcnt >= 0) {
 			/* Wake everyone by generating a dummy event. */
-			if (++evar->put >= WSEVENT_QSIZE)
-				evar->put = 0;
+			if (++evar->ws_put >= WSEVENT_QSIZE)
+				evar->ws_put = 0;
 			WSEVENT_WAKEUP(evar);
 			/* Wait for processes to go away. */
 			if (tsleep_nsec(sc, PZERO, "wskdet", SEC_TO_NSEC(60)))
@@ -745,16 +757,16 @@ wskbd_deliver_event(struct wskbd_softc *sc, u_int type, int value)
 	}
 
 #ifdef DIAGNOSTIC
-	if (evar->q == NULL) {
+	if (evar->ws_q == NULL) {
 		printf("wskbd_input: evar->q=NULL\n");
 		return;
 	}
 #endif
 
-	put = evar->put;
-	ev = &evar->q[put];
+	put = evar->ws_put;
+	ev = &evar->ws_q[put];
 	put = (put + 1) % WSEVENT_QSIZE;
-	if (put == evar->get) {
+	if (put == evar->ws_get) {
 		log(LOG_WARNING, "%s: event queue overflow\n",
 		    sc->sc_base.me_dv.dv_xname);
 		return;
@@ -762,7 +774,7 @@ wskbd_deliver_event(struct wskbd_softc *sc, u_int type, int value)
 	ev->type = type;
 	ev->value = value;
 	nanotime(&ev->time);
-	evar->put = put;
+	evar->ws_put = put;
 	WSEVENT_WAKEUP(evar);
 }
 
@@ -996,7 +1008,7 @@ wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
 	case FIOASYNC:
 		if (sc->sc_base.me_evp == NULL)
 			return (EINVAL);
-		sc->sc_base.me_evp->async = *(int *)data != 0;
+		sc->sc_base.me_evp->ws_async = *(int *)data != 0;
 		return (0);
 
 	case FIOGETOWN:
@@ -1004,7 +1016,7 @@ wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
 		evar = sc->sc_base.me_evp;
 		if (evar == NULL)
 			return (EINVAL);
-		sigio_getown(&evar->sigio, cmd, data);
+		sigio_getown(&evar->ws_sigio, cmd, data);
 		return (0);
 
 	case FIOSETOWN:
@@ -1012,7 +1024,7 @@ wskbd_do_ioctl_sc(struct wskbd_softc *sc, u_long cmd, caddr_t data, int flag,
 		evar = sc->sc_base.me_evp;
 		if (evar == NULL)
 			return (EINVAL);
-		return (sigio_setown(&evar->sigio, cmd, data));
+		return (sigio_setown(&evar->ws_sigio, cmd, data));
 	}
 
 	/*
@@ -1217,8 +1229,11 @@ getkeyrepeat:
 
 	case WSKBDIO_GETENCODINGS:
 		uedp = (struct wskbd_encoding_data *)data;
-		for (count = 0; sc->id->t_keymap.keydesc[count].name; count++)
-			;
+		count = 0;
+		if (sc->id->t_keymap.keydesc != NULL) {
+			while (sc->id->t_keymap.keydesc[count].name)
+				count++;
+		}
 		if (uedp->nencodings > count)
 			uedp->nencodings = count;
 		for (i = 0; i < uedp->nencodings; i++) {
@@ -1513,6 +1528,13 @@ internal_command(struct wskbd_softc *sc, u_int *type, keysym_t ksym,
 	if (*type != WSCONS_EVENT_KEY_DOWN)
 		return (0);
 
+#ifdef SUSPEND
+	if (ksym == KS_Cmd_Sleep) {
+		request_sleep(SLEEP_SUSPEND);
+		return (1);
+	}
+#endif
+
 #ifdef HAVE_SCROLLBACK_SUPPORT
 #if NWSDISPLAY > 0
 	switch (ksym) {
@@ -1536,6 +1558,21 @@ internal_command(struct wskbd_softc *sc, u_int *type, keysym_t ksym,
 	}
 #endif
 #endif
+
+	switch (ksym) {
+	case KS_Cmd_KbdBacklightUp:
+		atomic_store_int(&sc->sc_kbd_backlight_cmd, KBD_BACKLIGHT_UP);
+		task_add(systq, &sc->sc_kbd_backlight_task);
+		return (1);
+	case KS_Cmd_KbdBacklightDown:
+		atomic_store_int(&sc->sc_kbd_backlight_cmd, KBD_BACKLIGHT_DOWN);
+		task_add(systq, &sc->sc_kbd_backlight_task);
+		return (1);
+	case KS_Cmd_KbdBacklightToggle:
+		atomic_store_int(&sc->sc_kbd_backlight_cmd, KBD_BACKLIGHT_TOGGLE);
+		task_add(systq, &sc->sc_kbd_backlight_task);
+		return (1);
+	}
 
 #if NWSDISPLAY > 0
 	switch(ksym) {
@@ -1890,6 +1927,32 @@ wskbd_set_keymap(struct wskbd_softc *sc, struct wscons_keymap *map, int maplen)
 	free(sc->sc_map, M_DEVBUF, sc->sc_maplen * sizeof(*sc->sc_map));
 	sc->sc_map = map;
 	sc->sc_maplen = maplen;
+}
+
+void
+wskbd_kbd_backlight_task(void *arg)
+{
+	struct wskbd_softc *sc = arg;
+	struct wskbd_backlight data;
+	int step, val;
+	u_int cmd;
+
+	if (wskbd_get_backlight == NULL || wskbd_set_backlight == NULL)
+		return;
+
+	cmd  = atomic_swap_uint(&sc->sc_kbd_backlight_cmd, 0);
+	if (cmd != KBD_BACKLIGHT_UP &&
+	    cmd != KBD_BACKLIGHT_DOWN &&
+	    cmd != KBD_BACKLIGHT_TOGGLE)
+		return;
+
+	(*wskbd_get_backlight)(&data);
+	step = (data.max - data.min + 1) / 8;
+	val = (cmd == KBD_BACKLIGHT_UP) ?  data.curval + step :
+	    (cmd == KBD_BACKLIGHT_DOWN) ?  data.curval - step :
+	    (data.curval) ?  0 : (data.max - data.min + 1) / 2;
+	data.curval = (val > 0xff) ?  0xff : (val < 0) ? 0 : val;
+	(*wskbd_set_backlight)(&data);
 }
 
 #if NWSDISPLAY > 0

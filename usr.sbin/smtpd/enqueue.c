@@ -1,4 +1,4 @@
-/*	$OpenBSD: enqueue.c,v 1.120 2021/07/28 19:39:50 benno Exp $	*/
+/*	$OpenBSD: enqueue.c,v 1.122 2024/01/20 09:01:03 claudio Exp $	*/
 
 /*
  * Copyright (c) 2005 Henning Brauer <henning@bulabula.org>
@@ -24,6 +24,7 @@
 #include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "smtpd.h"
@@ -807,7 +808,7 @@ open_connection(void)
 			errx(1, "unexpected imsg reply type");
 		}
 
-		fd = imsg.fd;
+		fd = imsg_get_fd(&imsg);
 		imsg_free(&imsg);
 
 		break;

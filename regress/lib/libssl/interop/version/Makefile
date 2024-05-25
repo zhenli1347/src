@@ -1,20 +1,23 @@
-# $OpenBSD: Makefile,v 1.3 2020/12/17 00:51:12 bluhm Exp $
+# $OpenBSD: Makefile,v 1.8 2023/10/30 17:15:21 tb Exp $
 
 # Connect a client to a server.  Both can be current libressl, or
-# openssl 1.0.2, or openssl 1.1.  Pin client or server to a fixed TLS
+# openssl 1.1 or openssl 3.0.  Pin client or server to a fixed TLS
 # version number.  Incompatible versions must fail.  Check that client 
 # and server have used correct version by grepping in their session
 # print out.
 
 LIBRARIES =		libressl
-.if exists(/usr/local/bin/eopenssl)
-LIBRARIES +=		openssl
-.endif
 .if exists(/usr/local/bin/eopenssl11)
 LIBRARIES +=		openssl11
 .endif
+.if exists(/usr/local/bin/eopenssl30)
+LIBRARIES +=		openssl30
+.endif
+.if exists(/usr/local/bin/eopenssl31)
+LIBRARIES +=		openssl31
+.endif
 
-VERSIONS =	any TLS1 TLS1_1 TLS1_2 TLS1_3
+VERSIONS =	any TLS1_2 TLS1_3
 
 .for cver in ${VERSIONS}
 .for sver in ${VERSIONS}
@@ -28,13 +31,18 @@ FAIL_${cver}_${sver} = !
 .for clib in ${LIBRARIES}
 .for slib in ${LIBRARIES}
 
-.if ("${clib}" != openssl && "${slib}" != openssl) || \
-    ("${cver}" != TLS1_3 && "${sver}" != TLS1_3)
+.if ("${cver}" != TLS1_3 && "${sver}" != TLS1_3) && \
+    ((("${clib}" != openssl30 && "${slib}" != openssl30) && \
+    ("${clib}" != openssl31 && "${slib}" != openssl31)) || \
+    (("${cver}" != any && "${sver}" != any) && \
+    ("${cver}" != TLS1 && "${sver}" != TLS1) && \
+    ("${cver}" != TLS1_1 && "${sver}" != TLS1_1)))
 
 .if ("${clib}" == "libressl" || "${slib}" == "libressl")
 REGRESS_TARGETS +=	run-version-client-${clib}-${cver}-server-${slib}-${sver}
 .else
-REGRESS_SLOW_TARGETS +=	run-version-client-${clib}-${cver}-server-${slib}-${sver}
+# Don't use REGRESS_SLOW_TARGETS since its handling in bsd.regress.mk is slow.
+SLOW_TARGETS +=	run-version-client-${clib}-${cver}-server-${slib}-${sver}
 .endif
 
 run-version-client-${clib}-${cver}-server-${slib}-${sver} \
@@ -62,7 +70,8 @@ server-version-client-${clib}-${cver}-server-${slib}-${sver}.out: \
 .if ("${clib}" == "libressl" || "${slib}" == "libressl")
 REGRESS_TARGETS +=	check-version-client-${clib}-${cver}-server-${slib}-${sver}
 .else
-REGRESS_SLOW_TARGETS +=	check-version-client-${clib}-${cver}-server-${slib}-${sver}
+# Don't use REGRESS_SLOW_TARGETS since its handling in bsd.regress.mk is slow.
+SLOW_TARGETS +=	check-version-client-${clib}-${cver}-server-${slib}-${sver}
 .endif
 
 check-version-client-${clib}-${cver}-server-${slib}-${sver}: \
@@ -72,13 +81,8 @@ check-version-client-${clib}-${cver}-server-${slib}-${sver}: \
 	@grep ' Protocol *: ' ${@:S/^check/server/}.out
 .if "${cver}" == any
 .if "${sver}" == any
-.if "${clib}" == openssl || "${slib}" == openssl
-	grep -q ' Protocol *: TLSv1.2$$' ${@:S/^check/client/}.out
-	grep -q ' Protocol *: TLSv1.2$$' ${@:S/^check/server/}.out
-.else
 	grep -q ' Protocol *: TLSv1.3$$' ${@:S/^check/client/}.out
 	grep -q ' Protocol *: TLSv1.3$$' ${@:S/^check/server/}.out
-.endif
 .else
 	grep -q ' Protocol *: ${sver:S/TLS/TLSv/:S/_/./}$$' \
 	    ${@:S/^check/client/}.out
@@ -99,5 +103,11 @@ check-version-client-${clib}-${cver}-server-${slib}-${sver}: \
 .endfor
 .endfor
 .endfor
+
+.include <bsd.own.mk>
+REGRESS_SKIP_SLOW ?= no
+.if ${REGRESS_SKIP_SLOW:L} != "yes"
+REGRESS_TARGETS += ${SLOW_TARGETS}
+.endif
 
 .include <bsd.regress.mk>

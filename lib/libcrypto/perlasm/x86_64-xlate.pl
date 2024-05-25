@@ -291,7 +291,7 @@ my %globals;
 }
 { package register;	# pick up registers, which start with %.
     sub re {
-	my	$class = shift;	# muliple instances...
+	my	$class = shift;	# multiple instances...
 	my	$self = {};
 	local	*line = shift;
 	undef	$ret;
@@ -504,6 +504,9 @@ my %globals;
 		    $self->{value} = ".p2align\t" . (log($line)/log(2));
 		} elsif ($dir eq ".section") {
 		    $current_segment=$line;
+		    if (!$elf && $current_segment eq ".rodata") {
+			if	($flavour eq "macosx")	{ $self->{value} = ".section\t__DATA,__const"; }
+		    }
 		    if (!$elf && $current_segment eq ".init") {
 			if	($flavour eq "macosx")	{ $self->{value} = ".mod_init_func"; }
 			elsif	($flavour eq "mingw64")	{ $self->{value} = ".section\t.ctors"; }
@@ -550,9 +553,10 @@ my %globals;
 		/\.section/ && do { my $v=undef;
 				    $line =~ s/([^,]*).*/$1/;
 				    $line = ".CRT\$XCU" if ($line eq ".init");
+				    $line = ".rdata" if ($line eq ".rodata");
 				    if ($nasm) {
 					$v="section	$line";
-					if ($line=~/\.([px])data/) {
+					if ($line=~/\.([prx])data/) {
 					    $v.=" rdata align=";
 					    $v.=$1 eq "p"? 4 : 8;
 					} elsif ($line=~/\.CRT\$/i) {
@@ -561,9 +565,17 @@ my %globals;
 				    } else {
 					$v="$current_segment\tENDS\n" if ($current_segment);
 					$v.="$line\tSEGMENT";
-					if ($line=~/\.([px])data/) {
+					if ($line=~/\.([prx])data/) {
 					    $v.=" READONLY";
-					    $v.=" ALIGN(".($1 eq "p" ? 4 : 8).")" if ($masm>=$masmref);
+					    if ($masm>=$masmref) {
+						    if ($1 eq "r") {
+							    $v.=" ALIGN(64)";
+						    } elsif ($1 eq "p") {
+							    $v.=" ALIGN(4)";
+						    } else {
+							    $v.=" ALIGN(8)";
+						    }
+					    }
 					} elsif ($line=~/\.CRT\$/i) {
 					    $v.=" READONLY ";
 					    $v.=$masm>=$masmref ? "ALIGN(8)" : "DWORD";
@@ -777,6 +789,22 @@ ___
 OPTION	DOTNAME
 ___
 }
+
+if ($nasm) {
+	print <<___;
+\%define _CET_ENDBR
+___
+} else {
+	print <<___;
+#if defined(__CET__)
+#include <cet.h>
+#else
+#define _CET_ENDBR
+#endif
+
+___
+}
+
 print "#include \"x86_arch.h\"\n";
 
 while($line=<>) {
@@ -879,7 +907,7 @@ close STDOUT;
 # (#)	Nth argument, volatile
 #
 # In Unix terms top of stack is argument transfer area for arguments
-# which could not be accomodated in registers. Or in other words 7th
+# which could not be accommodated in registers. Or in other words 7th
 # [integer] argument resides at 8(%rsp) upon function entry point.
 # 128 bytes above %rsp constitute a "red zone" which is not touched
 # by signal handlers and can be used as temporal storage without
@@ -896,7 +924,7 @@ close STDOUT;
 # the area above user stack pointer in true asynchronous manner...
 #
 # All the above means that if assembler programmer adheres to Unix
-# register and stack layout, but disregards the "red zone" existense,
+# register and stack layout, but disregards the "red zone" existence,
 # it's possible to use following prologue and epilogue to "gear" from
 # Unix to Win64 ABI in leaf functions with not more than 6 arguments.
 #

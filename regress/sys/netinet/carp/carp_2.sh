@@ -1,11 +1,14 @@
 #!/bin/ksh
-#	$OpenBSD: carp_2.sh,v 1.1 2016/10/24 02:52:02 yasuoka Exp $
+#	$OpenBSD: carp_2.sh,v 1.3 2024/01/05 10:37:54 anton Exp $
 
 
 cleanup()
 {
 	for if in $ALL_IFS; do
 		ifconfig $if destroy 2>/dev/null
+	done
+	for i in $RDOMAINS; do
+		ifconfig lo$i destroy 2>/dev/null
 	done
 }
 
@@ -78,13 +81,13 @@ ifconfig carp$IFNO2 rdomain $RD2 lladdr $lladdr2 192.168.0.1/24 \
 #
 
 # IFNO1 must become master
-sleep 3.1	# need 3 seconds to become master
+wait_until "ifconfig carp$IFNO1 | grep -q 'status: master'"
 test sh -c "ifconfig carp$IFNO1 | grep -q 'status: master'"
 test sh -c "ifconfig carp$IFNO2 | grep -q 'status: backup'"
 
 # carpdemote must work
 ifconfig -g ${IFGPREFIX}a carpdemote
-sleep 0.1
+wait_until "ifconfig carp$IFNO1 | grep -q 'status: backup'"
 test sh -c "ifconfig carp$IFNO1 | grep -q 'status: backup'"
 test sh -c "ifconfig carp$IFNO2 | grep -q 'status: master'"
 

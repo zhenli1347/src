@@ -1,4 +1,4 @@
-/*	$OpenBSD: ax.h,v 1.1 2022/08/23 08:56:20 martijn Exp $ */
+/*	$OpenBSD: ax.h,v 1.4 2024/02/20 12:25:43 martijn Exp $ */
 /*
  * Copyright (c) 2019 Martijn van Duren <martijn@openbsd.org>
  *
@@ -15,6 +15,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/types.h>
+
+#include <endian.h>
 #include <stdint.h>
 
 #define AX_PDU_FLAG_INSTANCE_REGISTRATION (1 << 0)
@@ -122,8 +125,6 @@ struct ax {
 	size_t ax_wblen;
 	size_t ax_wbtlen;
 	size_t ax_wbsize;
-	uint32_t *ax_packetids;
-	size_t ax_packetidsize;
 };
 
 #ifndef AX_PRIMITIVE
@@ -251,8 +252,7 @@ uint32_t ax_register(struct ax *, uint8_t, uint32_t,
 uint32_t ax_unregister(struct ax *, uint32_t, struct ax_ostring *,
     uint8_t, uint8_t, struct ax_oid *, uint32_t);
 int ax_response(struct ax *, uint32_t, uint32_t, uint32_t,
-    struct ax_ostring *, uint32_t, uint16_t, uint16_t,
-    struct ax_varbind *, size_t);
+    uint32_t, uint16_t, uint16_t, struct ax_varbind *, size_t);
 void ax_pdu_free(struct ax_pdu *);
 void ax_varbind_free(struct ax_varbind *);
 const char *ax_error2string(enum ax_pdu_error);

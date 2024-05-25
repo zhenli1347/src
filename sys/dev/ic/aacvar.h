@@ -1,4 +1,4 @@
-/*	$OpenBSD: aacvar.h,v 1.16 2022/01/09 05:42:37 jsg Exp $	*/
+/*	$OpenBSD: aacvar.h,v 1.18 2023/09/11 08:40:25 mvs Exp $	*/
 
 /*-
  * Copyright (c) 2000 Michael Smith
@@ -395,7 +395,6 @@ struct aac_softc
 	struct aac_aif_command	aac_aifq[AAC_AIFQ_LENGTH];
 	int			aac_aifq_head;
 	int			aac_aifq_tail;
-	struct selinfo		aac_select;
 	struct proc		*aifthread;
 	int			aifflags;
 #define AAC_AIFFLAGS_RUNNING	(1 << 0)
@@ -429,31 +428,25 @@ int	aac_intr(void *);
 
 /* These all require correctly aligned buffers */
 static __inline__ void
-aac_enc16(addr, value)
-	u_int8_t *addr;
-	u_int16_t value;
+aac_enc16(u_int8_t *addr, u_int16_t value)
 {
 	*(u_int16_t *)addr = htole16(value);
 }
 
 static __inline__ void
-aac_enc32(addr, value)
-	u_int8_t *addr;
-	u_int32_t value;
+aac_enc32(u_int8_t *addr, u_int32_t value)
 {
 	*(u_int32_t *)addr = htole32(value);
 }
 
 static __inline__ u_int16_t
-aac_dec16(addr)
-	u_int8_t *addr;
+aac_dec16(u_int8_t *addr)
 {
 	return letoh16(*(u_int16_t *)addr);
 }
 
 static __inline__ u_int32_t
-aac_dec32(addr)
-	u_int8_t *addr;
+aac_dec32(u_int8_t *addr)
 {
 	return letoh32(*(u_int32_t *)addr);
 }

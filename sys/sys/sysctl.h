@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.h,v 1.231 2022/11/07 14:25:44 robert Exp $	*/
+/*	$OpenBSD: sysctl.h,v 1.235 2023/10/01 15:58:12 krw Exp $	*/
 /*	$NetBSD: sysctl.h,v 1.16 1996/04/09 20:55:36 cgd Exp $	*/
 
 /*
@@ -490,6 +490,7 @@ struct kinfo_proc {
 	u_int32_t p_rtableid;		/* U_INT: Routing table identifier. */
 
 	u_int64_t p_pledge;		/* U_INT64_T: Pledge flags. */
+	char	p_name[KI_MAXCOMLEN];	/* thread name */
 };
 
 /*
@@ -617,7 +618,7 @@ do {									\
 	(kp)->p_svgid = (uc)->cr_svgid;					\
 									\
 	memcpy((kp)->p_groups, (uc)->cr_groups,				\
-	    _FILL_KPROC_MIN(sizeof((kp)->p_groups), sizeof((uc)->cr_groups)));	\
+	    _FILL_KPROC_MIN(sizeof((kp)->p_groups), sizeof((uc)->cr_groups))); \
 	(kp)->p_ngroups = (uc)->cr_ngroups;				\
 									\
 	(kp)->p_jobc = (pg)->pg_jobc;					\
@@ -630,6 +631,7 @@ do {									\
 		(kp)->p_uticks = (p)->p_tu.tu_uticks;			\
 		(kp)->p_sticks = (p)->p_tu.tu_sticks;			\
 		(kp)->p_iticks = (p)->p_tu.tu_iticks;			\
+		strlcpy((kp)->p_name, (p)->p_name, sizeof((kp)->p_name)); \
 	} else {							\
 		(kp)->p_rtime_sec = (pr)->ps_tu.tu_runtime.tv_sec;	\
 		(kp)->p_rtime_usec = (pr)->ps_tu.tu_runtime.tv_nsec/1000; \
@@ -666,7 +668,7 @@ do {									\
 	strlcpy((kp)->p_emul, "native", sizeof((kp)->p_emul));		\
 	strlcpy((kp)->p_comm, (pr)->ps_comm, sizeof((kp)->p_comm));	\
 	strlcpy((kp)->p_login, (sess)->s_login,				\
-	    _FILL_KPROC_MIN(sizeof((kp)->p_login), sizeof((sess)->s_login)));	\
+	    _FILL_KPROC_MIN(sizeof((kp)->p_login), sizeof((sess)->s_login))); \
 									\
 	if ((sess)->s_ttyvp)						\
 		(kp)->p_eflag |= EPROC_CTTY;				\
@@ -946,7 +948,9 @@ struct kinfo_file {
 #define	HW_SMT			24	/* int: enable SMT/HT/CMT */
 #define	HW_NCPUONLINE		25	/* int: number of cpus being used */
 #define	HW_POWER		26	/* int: machine has wall-power */
-#define	HW_MAXID		27	/* number of valid hw ids */
+#define	HW_BATTERY		27	/* node: battery */
+#define	HW_UCOMNAMES		28	/* strings: ucom names */
+#define	HW_MAXID		30	/* number of valid hw ids */
 
 #define	CTL_HW_NAMES { \
 	{ 0, 0 }, \
@@ -976,6 +980,23 @@ struct kinfo_file {
 	{ "smt", CTLTYPE_INT }, \
 	{ "ncpuonline", CTLTYPE_INT }, \
 	{ "power", CTLTYPE_INT }, \
+	{ "battery", CTLTYPE_NODE }, \
+	{ "ucomnames", CTLTYPE_STRING }, \
+}
+
+/*
+ * HW_BATTERY
+ */
+#define	HW_BATTERY_CHARGEMODE	1	/* int: battery charging mode */
+#define	HW_BATTERY_CHARGESTART	2	/* int: battery start charge percent */
+#define	HW_BATTERY_CHARGESTOP	3	/* int: battery stop charge percent */
+#define	HW_BATTERY_MAXID	4
+
+#define CTL_HW_BATTERY_NAMES { \
+	{ 0, 0 }, \
+	{ "chargemode", CTLTYPE_INT }, \
+	{ "chargestart", CTLTYPE_INT }, \
+	{ "chargestop", CTLTYPE_INT }, \
 }
 
 /*
@@ -1058,7 +1079,6 @@ struct walkarg;
 int sysctl_dumpentry(struct rtentry *, void *, unsigned int);
 int sysctl_rtable(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_clockrate(char *, size_t *, void *);
-int sysctl_vnode(char *, size_t *, struct proc *);
 #if defined(GPROF) || defined(DDBPROF)
 int sysctl_doprof(int *, u_int, void *, size_t *, void *, size_t);
 #endif
@@ -1072,8 +1092,6 @@ int hw_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 int debug_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 		      struct proc *);
 #endif
-int vm_sysctl(int *, u_int, void *, size_t *, void *, size_t,
-		   struct proc *);
 int fs_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 		   struct proc *);
 int fs_posix_sysctl(int *, u_int, void *, size_t *, void *, size_t,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: res_comp.c,v 1.21 2022/11/16 18:30:12 florian Exp $	*/
+/*	$OpenBSD: res_comp.c,v 1.23 2023/03/15 22:12:00 millert Exp $	*/
 
 /*
  * ++Copyright++ 1985, 1993
@@ -82,6 +82,9 @@ dn_expand(const u_char *msg, const u_char *eomorig, const u_char *comp_dn,
 	char *eom;
 	int len = -1, checked = 0;
 
+	if (comp_dn < msg || comp_dn >= eomorig)
+		return (-1);
+
 	dn = exp_dn;
 	cp = comp_dn;
 	if (length > HOST_NAME_MAX)
@@ -91,6 +94,9 @@ dn_expand(const u_char *msg, const u_char *eomorig, const u_char *comp_dn,
 	 * fetch next label in domain name
 	 */
 	while ((n = *cp++)) {
+		if (cp >= eomorig)	/* out of range */
+			return (-1);
+
 		/*
 		 * Check for indirection
 		 */
@@ -149,7 +155,7 @@ DEF_WEAK(dn_expand);
  * 'length' is the size of the array pointed to by 'comp_dn'.
  * 'dnptrs' is a list of pointers to previous compressed names. dnptrs[0]
  * is a pointer to the beginning of the message. The list ends with NULL.
- * 'lastdnptr' is a pointer to the end of the arrary pointed to
+ * 'lastdnptr' is a pointer to the end of the array pointed to
  * by 'dnptrs'. Side effect is to update the list of pointers for
  * labels inserted into the message as we compress the name.
  * If 'dnptr' is NULL, we don't try to compress names. If 'lastdnptr'

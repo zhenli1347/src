@@ -1,4 +1,4 @@
-/*	$OpenBSD: clock.c,v 1.51 2022/11/29 00:58:05 cheloha Exp $	*/
+/*	$OpenBSD: clock.c,v 1.58 2023/09/17 14:50:51 cheloha Exp $	*/
 /*	$NetBSD: clock.c,v 1.1 1996/09/30 16:34:40 ws Exp $	*/
 
 /*
@@ -69,7 +69,6 @@ const struct intrclock dec_intrclock = {
 
 static struct timecounter tb_timecounter = {
 	.tc_get_timecount = tb_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = 0xffffffff,
 	.tc_frequency = 0,
 	.tc_name = "tb",
@@ -148,8 +147,6 @@ decr_intr(struct clockframe *frame)
 	(void) ppc_intr_disable();
 }
 
-void cpu_startclock(void);
-
 void
 cpu_initclocks(void)
 {
@@ -196,17 +193,14 @@ cpu_initclocks(void)
 
 	intrstate = ppc_intr_disable();
 
-	stathz = 100;
-	profhz = 1000; /* must be a multiple of stathz */
-	clockintr_init(CL_RNDSTAT);
+	stathz = hz;
+	profhz = stathz * 10;
+	statclock_is_randomized = 1;
 
 	dec_nsec_cycle_ratio = ticks_per_sec * (1ULL << 32) / 1000000000;
 	dec_nsec_max = UINT64_MAX / dec_nsec_cycle_ratio;
 
 	evcount_attach(&clk_count, "clock", &clk_irq);
-
-	clock_initialized = 1;
-	cpu_startclock();
 
 	ppc_intr_enable(intrstate);
 }
@@ -214,6 +208,7 @@ cpu_initclocks(void)
 void
 cpu_startclock(void)
 {
+	clock_initialized = 1;
 	clockintr_cpu_init(&dec_intrclock);
 	clockintr_trigger();
 }
@@ -235,7 +230,6 @@ delay(unsigned n)
 void
 setstatclockrate(int newhz)
 {
-	clockintr_setstatclockrate(newhz);
 }
 
 u_int
@@ -248,16 +242,13 @@ void
 dec_rearm(void *unused, uint64_t nsecs)
 {
 	uint32_t cycles;
-	int s;
 
 	if (nsecs > dec_nsec_max)
 		nsecs = dec_nsec_max;
 	cycles = (nsecs * dec_nsec_cycle_ratio) >> 32;
 	if (cycles > UINT32_MAX >> 1)
 		cycles = UINT32_MAX >> 1;
-	s = ppc_intr_disable();
 	ppc_mtdec(cycles);
-	ppc_intr_enable(s);
 }
 
 void

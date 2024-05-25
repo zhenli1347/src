@@ -1,4 +1,4 @@
-/*	$OpenBSD: library_mquery.c,v 1.69 2022/12/04 15:42:07 deraadt Exp $ */
+/*	$OpenBSD: library_mquery.c,v 1.76 2024/04/05 13:51:47 deraadt Exp $ */
 
 /*
  * Copyright (c) 2002 Dale Rahn
@@ -60,7 +60,6 @@ _dl_load_list_free(struct load_list *load_list)
 	}
 }
 
-
 void
 _dl_unload_shlib(elf_object_t *object)
 {
@@ -99,25 +98,25 @@ unload:
 	}
 }
 
-
 elf_object_t *
 _dl_tryload_shlib(const char *libname, int type, int flags, int nodelete)
 {
-	struct mutate imut[MAXMUT], mut[MAXMUT];
-	int libfile, i;
+	struct range_vector imut, mut;
+	int libfile, libc = -1, i;
 	struct load_list *ld, *lowld = NULL;
 	elf_object_t *object;
 	Elf_Dyn *dynp = NULL;
 	Elf_Ehdr *ehdr;
-	Elf_Phdr *phdp;
+	Elf_Phdr *phdp, *ptls = NULL;
+	Elf_Phdr *syscall_phdp = NULL;
 	Elf_Addr load_end = 0;
 	Elf_Addr align = _dl_pagesz - 1, off, size;
-	Elf_Phdr *ptls = NULL;
 	Elf_Addr relro_addr = 0, relro_size = 0;
 	struct stat sb;
 	char hbuf[4096], *exec_start;
 	size_t exec_size;
 
+#define powerof2(x) ((((x) - 1) & (x)) == 0)
 #define ROUND_PG(x) (((x) + align) & ~(align))
 #define TRUNC_PG(x) ((x) & ~(align))
 
@@ -127,7 +126,7 @@ _dl_tryload_shlib(const char *libname, int type, int flags, int nodelete)
 		return(0);
 	}
 
-	if ( _dl_fstat(libfile, &sb) < 0) {
+	if (_dl_fstat(libfile, &sb) < 0) {
 		_dl_errno = DL_CANT_OPEN;
 		return(0);
 	}
@@ -171,6 +170,14 @@ _dl_tryload_shlib(const char *libname, int type, int flags, int nodelete)
 	 */
 	phdp = (Elf_Phdr *)(hbuf + ehdr->e_phoff);
 	for (i = 0; i < ehdr->e_phnum; i++, phdp++) {
+		if (phdp->p_align > 1 && !powerof2(phdp->p_align)) {
+			_dl_printf("%s: ld.so invalid ELF input %s.\n",
+			    __progname, libname);
+			_dl_close(libfile);
+			_dl_errno = DL_CANT_MMAP;
+			return(0);
+		}
+
 		switch (phdp->p_type) {
 		case PT_LOAD:
 			off = (phdp->p_vaddr & align);
@@ -289,7 +296,7 @@ retry:
 		}
 
 		/* Entire mapping can become immutable, minus exceptions chosen later */
-		_dl_defer_immut(imut, LOFF + ld->moff, ROUND_PG(ld->size));
+		_dl_push_range_size(&imut, LOFF + ld->moff, ROUND_PG(ld->size));
 
 		ld->start = res;
 	}
@@ -312,14 +319,23 @@ retry:
 		case PT_GNU_RELRO:
 			relro_addr = phdp->p_vaddr + LOFF;
 			relro_size = phdp->p_memsz;
-			_dl_defer_mut(mut, phdp->p_vaddr + LOFF, phdp->p_memsz);
+			_dl_push_range_size(&mut, relro_addr, relro_size);
 			break;
 		case PT_OPENBSD_MUTABLE:
-			_dl_defer_mut(mut, phdp->p_vaddr + LOFF, phdp->p_memsz);
+			_dl_push_range_size(&mut, phdp->p_vaddr + LOFF,
+			    phdp->p_memsz);
+			break;
+		case PT_OPENBSD_SYSCALLS:
+			syscall_phdp = phdp;
 			break;
 		}
 	}
 
+	libc = _dl_islibc(dynp, LOFF);
+	if (libc && syscall_phdp)
+		_dl_pin(libfile, syscall_phdp, lowld->start,
+		    (size_t)((exec_start + exec_size) - LOFF),
+		    exec_start, exec_size);
 	_dl_close(libfile);
 
 	dynp = (Elf_Dyn *)((unsigned long)dynp + LOFF);
@@ -327,8 +343,6 @@ retry:
 	    (Elf_Phdr *)((char *)lowld->start + ehdr->e_phoff), ehdr->e_phnum,
 	    type, (Elf_Addr)lowld->start, LOFF);
 	if (object) {
-		char *soname = (char *)object->Dyn.info[DT_SONAME];
-
 		object->load_size = (Elf_Addr)load_end - (Elf_Addr)lowld->start;
 		object->load_list = lowld;
 		/* set inode, dev from stat info */
@@ -338,20 +352,13 @@ retry:
 		object->nodelete = nodelete;
 		object->relro_addr = relro_addr;
 		object->relro_size = relro_size;
+		object->islibc = libc;
 		_dl_set_sod(object->load_name, &object->sod);
 		if (ptls != NULL && ptls->p_memsz)
 			_dl_set_tls(object, ptls, (Elf_Addr)lowld->start,
 			    libname);
-
-		/* Request permission for system calls in libc.so's text segment */
-		if (soname != NULL &&
-		    _dl_strncmp(soname, "libc.so.", 8) == 0) {
-			if (_dl_msyscall(exec_start, exec_size) == -1)
-				_dl_printf("msyscall %lx %lx error\n",
-				    exec_start, exec_size);
-		}
-		_dl_bcopy(mut, object->mut, sizeof mut);
-		_dl_bcopy(imut, object->imut, sizeof imut);
+		_dl_bcopy(&mut, &object->mut, sizeof mut);
+		_dl_bcopy(&imut, &object->imut, sizeof imut);
 	} else {
 		_dl_load_list_free(lowld);
 	}

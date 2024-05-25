@@ -1,4 +1,4 @@
-/*	$OpenBSD: elink3.c,v 1.98 2020/12/12 11:48:52 jan Exp $	*/
+/*	$OpenBSD: elink3.c,v 1.101 2023/11/10 15:51:20 bluhm Exp $	*/
 /*	$NetBSD: elink3.c,v 1.32 1997/05/14 00:22:00 thorpej Exp $	*/
 
 /*
@@ -41,7 +41,6 @@
 #include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <sys/syslog.h>
-#include <sys/selinfo.h>
 #include <sys/timeout.h>
 #include <sys/device.h>
 
@@ -334,7 +333,7 @@ epconfig(struct ep_softc *sc, u_short chipset, u_int8_t *enaddr)
 	ifp->if_flags =
 	    IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	/* 64 packets are around 100ms on 10Mbps */
-	ifq_set_maxlen(&ifp->if_snd, 64);
+	ifq_init_maxlen(&ifp->if_snd, 64);
 
 	if_attach(ifp);
 	ether_ifattach(ifp);
@@ -609,7 +608,7 @@ epinit(struct ep_softc *sc)
 	for (i = 0; i < 31; i++)
 		bus_space_read_1(iot, ioh, ep_w1_reg(sc, EP_W1_TX_STATUS));
 
-	/* Set threshold for for Tx-space available interrupt. */
+	/* Set threshold for Tx-space available interrupt. */
 	bus_space_write_2(iot, ioh, EP_COMMAND,
 	    SET_TX_AVAIL_THRESH | (1600 >> sc->txashift));
 

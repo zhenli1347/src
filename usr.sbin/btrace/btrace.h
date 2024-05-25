@@ -1,4 +1,4 @@
-/*	$OpenBSD: btrace.h,v 1.11 2021/12/07 22:17:03 guenther Exp $ */
+/*	$OpenBSD: btrace.h,v 1.15 2024/05/21 05:00:48 jsg Exp $ */
 
 /*
  * Copyright (c) 2019 - 2020 Martin Pieuchot <mpi@openbsd.org>
@@ -33,27 +33,31 @@ const char *		 ba_name(struct bt_arg *);
 long			 ba2long(struct bt_arg *, struct dt_evt *);
 const char		*ba2str(struct bt_arg *, struct dt_evt *);
 long			 bacmp(struct bt_arg *, struct bt_arg *);
+unsigned long		 dt_get_offset(pid_t);
 
 /* ksyms.c */
-int			 kelf_open(void);
-void			 kelf_close(void);
-int			 kelf_snprintsym(char *, size_t, unsigned long);
+struct syms;
+struct syms		*kelf_open(const char *);
+void			 kelf_close(struct syms *);
+int			 kelf_snprintsym(struct syms *, char *, size_t,
+			    unsigned long, unsigned long);
 
 /* map.c */
 struct map;
 struct hist;
+struct map		*map_new(void);
 void			 map_clear(struct map *);
 void			 map_delete(struct map *, const char *);
 struct bt_arg		*map_get(struct map *, const char *);
-struct map		*map_insert(struct map *, const char *, struct bt_arg *,
-			    struct dt_evt *);
+void			 map_insert(struct map *, const char *, void *);
 void			 map_print(struct map *, size_t, const char *);
 void			 map_zero(struct map *);
-struct hist		*hist_increment(struct hist *, const char *, long);
+struct hist		*hist_new(long);
+void			 hist_increment(struct hist *, const char *);
 void			 hist_print(struct hist *, const char *);
 
-#define KLEN	512	/* # of characters in map key, contain a stack trace */
-#define STRLEN	64	/* maximum # of bytes to output via str() function */
+#define KLEN	1024	/* # of characters in map key, contain a stack trace */
+#define STRLEN	128	/* maximum # of bytes to output via str() function */
 
 /* printf.c */
 int			 stmt_printf(struct bt_stmt *, struct dt_evt *);

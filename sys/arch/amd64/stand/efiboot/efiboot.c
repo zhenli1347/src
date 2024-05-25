@@ -1,4 +1,4 @@
-/*	$OpenBSD: efiboot.c,v 1.40 2022/07/11 19:45:02 kettenis Exp $	*/
+/*	$OpenBSD: efiboot.c,v 1.42 2024/04/25 18:31:49 kn Exp $	*/
 
 /*
  * Copyright (c) 2015 YASUOKA Masahiko <yasuoka@yasuoka.net>
@@ -831,6 +831,7 @@ efi_com_putc(dev_t dev, int c)
  */
 static EFI_GUID			 acpi_guid = ACPI_20_TABLE_GUID;
 static EFI_GUID			 smbios_guid = SMBIOS_TABLE_GUID;
+static EFI_GUID			 esrt_guid = EFI_SYSTEM_RESOURCE_TABLE_GUID;
 static int			 gopmode = -1;
 
 #define	efi_guidcmp(_a, _b)	memcmp((_a), (_b), sizeof(EFI_GUID))
@@ -870,6 +871,34 @@ efi_makebootargs(void)
 		    &ST->ConfigurationTable[i].VendorGuid) == 0)
 			ei->config_smbios = (uintptr_t)
 			    ST->ConfigurationTable[i].VendorTable;
+		else if (efi_guidcmp(&esrt_guid,
+		    &ST->ConfigurationTable[i].VendorGuid) == 0)
+			ei->config_esrt = (uintptr_t)
+			    ST->ConfigurationTable[i].VendorTable;
+	}
+
+	/*
+	 * Need to copy ESRT because call to ExitBootServices() frees memory of
+	 * type EfiBootServicesData in which ESRT resides.
+	 */
+	if (ei->config_esrt != 0) {
+		EFI_SYSTEM_RESOURCE_TABLE *esrt =
+		    (EFI_SYSTEM_RESOURCE_TABLE *)ei->config_esrt;
+		size_t esrt_size = sizeof(*esrt) +
+		    esrt->FwResourceCount * sizeof(EFI_SYSTEM_RESOURCE_ENTRY);
+		void *esrt_copy;
+
+		/*
+		 * Using EfiRuntimeServicesData as it maps to BIOS_MAP_RES,
+		 * while EfiLoaderData becomes BIOS_MAP_FREE.
+		 */
+		status = BS->AllocatePool(EfiRuntimeServicesData,
+		    esrt_size, &esrt_copy);
+		if (status == EFI_SUCCESS) {
+			memcpy(esrt_copy, esrt, esrt_size);
+			ei->config_esrt = (uintptr_t)esrt_copy;
+			ei->flags |= BEI_ESRT;
+		}
 	}
 
 	/*
@@ -1049,16 +1078,68 @@ u_int
 sleep(u_int i)
 {
 	time_t t;
+	u_int intr = 0;
 
 	/*
 	 * Loop for the requested number of seconds, polling,
 	 * so that it may handle interrupts.
 	 */
-	for (t = getsecs() + i; getsecs() < t; cnischar())
+	for (t = getsecs() + i; intr == 0 && getsecs() < t; intr = cnischar())
 		;
 
+	return intr;
+}
+
+#ifdef IDLE_POWEROFF
+CHAR16		*idle_name = L"IdlePoweroff";
+EFI_STATUS	 idle_status;
+/* randomly generated f948e8a9-0570-4338-ad10-29f4cf12849d */
+EFI_GUID	 openbsd_guid = { 0xf948e8a9, 0x0570, 0x4338,
+    { 0xad, 0x10, 0x29, 0xf4, 0xcf, 0x12, 0x84, 0x9d } };
+/* Non-Volatile, Boot Service Access, Runtime Service Access */
+UINT32		 idle_attrs = 0x1 | 0x2 | 0x4;
+UINT16		 idle_secs;
+UINTN		 idle_sz = sizeof(idle_secs);
+
+int
+get_idle_timeout(void)
+{
+	idle_status = RS->GetVariable(idle_name, &openbsd_guid, NULL,
+	    &idle_sz, &idle_secs);
+	if (idle_status != EFI_SUCCESS) {
+		if (idle_status != EFI_NOT_FOUND) {
+			printf("%s: %d\n", __func__, idle_status);
+			return 1;
+		}
+		return -1;
+	}
 	return 0;
 }
+
+int
+set_idle_timeout(int secs)
+{
+	idle_secs = secs;
+	idle_sz = idle_secs > 0 ? sizeof(idle_secs) : 0;
+	idle_status = RS->SetVariable(idle_name, &openbsd_guid, idle_attrs,
+	    idle_sz, &idle_secs);
+	if (idle_status != EFI_SUCCESS) {
+		printf("%s: %d\n", __func__, idle_status);
+		return -1;
+	}
+	return 0;
+}
+
+/* see lib/libsa/softraid.c sr_crypto_passphrase_decrypt() */
+void
+idle_poweroff(void)
+{
+	if (get_idle_timeout() == 0 && sleep(idle_secs) == 0) {
+		printf("\nno input after %us, powering off...\n", idle_secs);
+		Xpoweroff_efi();
+	}
+}
+#endif /* IDLE_POWEROFF */
 
 /***********************************************************************
  * Commands
@@ -1144,3 +1225,21 @@ Xgop_efi(void)
 
 	return (0);
 }
+
+#ifdef IDLE_POWEROFF
+int
+Xidle_efi(void)
+{
+	if (cmd.argc >= 2) {
+		int secs;
+
+		secs = strtol(cmd.argv[1], NULL, 10);
+		if (0 <= secs && secs < UINT16_MAX)
+			set_idle_timeout(secs);
+	} else {
+		if (get_idle_timeout() == 0)
+			printf("Timeout = %us\n", idle_secs);
+	}
+	return 0;
+}
+#endif /* IDLE_POWEROFF */

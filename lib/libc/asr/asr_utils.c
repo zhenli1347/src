@@ -1,4 +1,4 @@
-/*	$OpenBSD: asr_utils.c,v 1.19 2022/11/17 17:39:41 florian Exp $	*/
+/*	$OpenBSD: asr_utils.c,v 1.22 2023/11/20 12:15:16 florian Exp $	*/
 /*
  * Copyright (c) 2009-2012	Eric Faurot	<eric@faurot.net>
  *
@@ -123,7 +123,7 @@ dname_expand(const unsigned char *data, size_t len, size_t offset,
 
 	for (; (n = data[offset]); ) {
 		if ((n & 0xc0) == 0xc0) {
-			if (offset + 2 > len)
+			if (offset + 1 >= len)
 				return (-1);
 			ptr = 256 * (n & ~0xc0) + data[offset + 1];
 			if (ptr >= start)
@@ -133,7 +133,7 @@ dname_expand(const unsigned char *data, size_t len, size_t offset,
 			offset = start = ptr;
 			continue;
 		}
-		if (offset + n + 1 > len)
+		if (offset + n + 1 >= len)
 			return (-1);
 
 		if (dname_check_label(data + offset + 1, n) == -1)
@@ -384,7 +384,7 @@ static int
 pack_dname(struct asr_pack *p, const char *dname)
 {
 	/* dname compression would be nice to have here.
-	 * need additionnal context.
+	 * need additional context.
 	 */
 	return (pack_data(p, dname, strlen(dname) + 1));
 }
@@ -581,4 +581,36 @@ hnok_lenient(const char *dn)
 		pch = ch; ch = *dn++;
 	}
 	return 1;
+}
+
+/* Check if the hostname is localhost or if it's in the localhost domain */
+int
+_asr_is_localhost(const char *hn)
+{
+	size_t	 hnlen, localhostlen;
+
+	if (hn == NULL)
+		return 0;
+
+	if (strcasecmp(hn, "localhost") == 0 ||
+	    strcasecmp(hn, "localhost.") == 0)
+		return 1;
+
+	hnlen = strlen(hn);
+	localhostlen = strlen(".localhost");
+
+	if (hnlen < localhostlen)
+		return 0;
+
+	if (strcasecmp(hn + hnlen - localhostlen, ".localhost") == 0)
+		return 1;
+
+	localhostlen++;
+	if (hnlen < localhostlen)
+		return 0;
+
+	if (strcasecmp(hn + hnlen - localhostlen, ".localhost.") == 0)
+		return 1;
+
+	return 0;
 }

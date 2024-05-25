@@ -1,4 +1,4 @@
-/*      $OpenBSD: ip6_divert.c,v 1.88 2022/10/17 14:49:02 mvs Exp $ */
+/*      $OpenBSD: ip6_divert.c,v 1.95 2024/02/13 12:22:09 bluhm Exp $ */
 
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
@@ -30,11 +30,13 @@
 #include <net/netisr.h>
 
 #include <netinet/in.h>
+#include <netinet6/in6_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
-#include <netinet/in_pcb.h>
 #include <netinet/ip6.h>
-#include <netinet6/in6_var.h>
+#include <netinet6/ip6_var.h>
+#include <netinet/in_pcb.h>
+#include <netinet/ip_divert.h>
 #include <netinet6/ip6_divert.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
@@ -65,11 +67,12 @@ const struct sysctl_bounded_args divert6ctl_vars[] = {
 
 const struct pr_usrreqs divert6_usrreqs = {
 	.pru_attach	= divert6_attach,
-	.pru_detach	= divert6_detach,
-	.pru_lock	= divert6_lock,
-	.pru_unlock	= divert6_unlock,
-	.pru_bind	= divert6_bind,
-	.pru_shutdown	= divert6_shutdown,
+	.pru_detach	= divert_detach,
+	.pru_lock	= divert_lock,
+	.pru_unlock	= divert_unlock,
+	.pru_locked	= divert_locked,
+	.pru_bind	= divert_bind,
+	.pru_shutdown	= divert_shutdown,
 	.pru_send	= divert6_send,
 	.pru_control	= in6_control,
 	.pru_sockaddr	= in6_sockaddr,
@@ -177,7 +180,7 @@ divert6_output(struct inpcb *inp, struct mbuf *m, struct mbuf *nam,
 	} else {
 		m->m_pkthdr.ph_rtableid = inp->inp_rtableid;
 
-		error = ip6_output(m, NULL, &inp->inp_route6,
+		error = ip6_output(m, NULL, &inp->inp_route,
 		    IP_ALLOWBROADCAST | IP_RAWOUTPUT, NULL, NULL);
 	}
 
@@ -238,16 +241,22 @@ divert6_packet(struct mbuf *m, int dir, u_int16_t divert_port)
 			break;
 		}
 		if_put(ifp);
+	} else {
+		/*
+		 * Calculate protocol checksum for outbound packet diverted
+		 * to userland.  pf out rule diverts before cksum offload.
+		 */
+		in6_proto_cksum_out(m, NULL);
 	}
 
-	mtx_enter(&inp->inp_mtx);
 	so = inp->inp_socket;
+	mtx_enter(&so->so_rcv.sb_mtx);
 	if (sbappendaddr(so, &so->so_rcv, sin6tosa(&sin6), m, NULL) == 0) {
-		mtx_leave(&inp->inp_mtx);
+		mtx_leave(&so->so_rcv.sb_mtx);
 		div6stat_inc(div6s_fullsock);
 		goto bad;
 	}
-	mtx_leave(&inp->inp_mtx);
+	mtx_leave(&so->so_rcv.sb_mtx);
 	sorwakeup(so);
 
 	in_pcbunref(inp);
@@ -266,7 +275,6 @@ divert6_attach(struct socket *so, int proto, int wait)
 
 	if (so->so_pcb != NULL)
 		return EINVAL;
-
 	if ((so->so_state & SS_PRIV) == 0)
 		return EACCES;
 
@@ -277,57 +285,6 @@ divert6_attach(struct socket *so, int proto, int wait)
 	error = soreserve(so, divert6_sendspace, divert6_recvspace);
 	if (error)
 		return (error);
-	sotoinpcb(so)->inp_flags |= INP_HDRINCL;
-	return (0);
-}
-
-int
-divert6_detach(struct socket *so)
-{
-	struct inpcb *inp = sotoinpcb(so);
-
-	soassertlocked(so);
-
-	if (inp == NULL)
-		return (EINVAL);
-
-	in_pcbdetach(inp);
-
-	return (0);
-}
-
-void
-divert6_lock(struct socket *so)
-{
-	struct inpcb *inp = sotoinpcb(so);
-
-	NET_ASSERT_LOCKED();
-	mtx_enter(&inp->inp_mtx);
-}
-
-void
-divert6_unlock(struct socket *so)
-{
-	struct inpcb *inp = sotoinpcb(so);
-
-	NET_ASSERT_LOCKED();
-	mtx_leave(&inp->inp_mtx);
-}
-
-int
-divert6_bind(struct socket *so, struct mbuf *addr, struct proc *p)
-{
-	struct inpcb *inp = sotoinpcb(so);
-
-	soassertlocked(so);
-	return in_pcbbind(inp, addr, p);
-}
-
-int
-divert6_shutdown(struct socket *so)
-{
-	soassertlocked(so);
-	socantsendmore(so);
 
 	return (0);
 }
@@ -352,7 +309,7 @@ divert6_sysctl_div6stat(void *oldp, size_t *oldlenp, void *newp)
 
 	CTASSERT(sizeof(div6stat) == (nitems(counters) * sizeof(u_long)));
 
-	counters_read(div6counters, counters, nitems(counters));
+	counters_read(div6counters, counters, nitems(counters), NULL);
 
 	for (i = 0; i < nitems(counters); i++)
 		words[i] = (u_long)counters[i];

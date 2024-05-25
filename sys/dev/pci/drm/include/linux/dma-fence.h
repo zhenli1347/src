@@ -41,6 +41,7 @@ struct dma_fence_ops {
 	bool (*signaled)(struct dma_fence *);
 	long (*wait)(struct dma_fence *, bool, long);
 	void (*release)(struct dma_fence *);
+	void (*set_deadline)(struct dma_fence *, ktime_t);
 	bool use_64bit_seqno;
 };
 
@@ -64,6 +65,7 @@ int dma_fence_signal_timestamp(struct dma_fence *, ktime_t);
 int dma_fence_signal_timestamp_locked(struct dma_fence *, ktime_t);
 bool dma_fence_is_signaled(struct dma_fence *);
 bool dma_fence_is_signaled_locked(struct dma_fence *);
+ktime_t dma_fence_timestamp(struct dma_fence *);
 long dma_fence_default_wait(struct dma_fence *, bool, long);
 long dma_fence_wait_any_timeout(struct dma_fence **, uint32_t, bool, long,
     uint32_t *);
@@ -75,9 +77,11 @@ void dma_fence_init(struct dma_fence *, const struct dma_fence_ops *,
 int dma_fence_add_callback(struct dma_fence *, struct dma_fence_cb *,
     dma_fence_func_t);
 bool dma_fence_remove_callback(struct dma_fence *, struct dma_fence_cb *);
+bool dma_fence_is_container(struct dma_fence *);
+void dma_fence_set_deadline(struct dma_fence *, ktime_t);
 
 struct dma_fence *dma_fence_get_stub(void);
-struct dma_fence *dma_fence_allocate_private_stub(void);
+struct dma_fence *dma_fence_allocate_private_stub(ktime_t);
 
 static inline void
 dma_fence_free(struct dma_fence *fence)
@@ -111,10 +115,29 @@ dma_fence_is_later(struct dma_fence *a, struct dma_fence *b)
 	return __dma_fence_is_later(a->seqno, b->seqno, a->ops);
 }
 
+static inline bool
+dma_fence_is_later_or_same(struct dma_fence *a, struct dma_fence *b)
+{
+	if (a == b)
+		return true;
+	return dma_fence_is_later(a, b);
+}
+
 static inline void
 dma_fence_set_error(struct dma_fence *fence, int error)
 {
 	fence->error = error;
+}
+
+static inline bool
+dma_fence_begin_signalling(void)
+{
+	return true;
+}
+
+static inline void
+dma_fence_end_signalling(bool x)
+{
 }
 
 #endif

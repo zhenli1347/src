@@ -1,4 +1,4 @@
-/* $OpenBSD: cpu.h,v 1.67 2022/10/25 15:15:38 guenther Exp $ */
+/* $OpenBSD: cpu.h,v 1.74 2024/05/21 23:16:06 jsg Exp $ */
 /* $NetBSD: cpu.h,v 1.45 2000/08/21 02:03:12 thorpej Exp $ */
 
 /*-
@@ -99,6 +99,7 @@ typedef union alpha_t_float {
 #include <machine/bus.h>
 #include <machine/intr.h>
 #include <sys/cdefs.h>
+#include <sys/clockintr.h>
 #include <sys/device.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
@@ -144,7 +145,6 @@ void	proc_trampoline(void);					/* MAGIC */
 void	regdump(struct trapframe *);
 void	regtoframe(struct reg *, struct trapframe *);
 void	savectx(struct pcb *);
-void    switch_exit(struct proc *);				/* MAGIC */
 void	syscall(u_int64_t, struct trapframe *);
 void	trap(unsigned long, unsigned long, unsigned long, unsigned long,
 	    struct trapframe *);
@@ -211,7 +211,9 @@ struct cpu_info {
 #endif
 #ifdef GPROF
 	struct gmonparam *ci_gmon;
+	struct clockintr ci_gmonclock;
 #endif
+	struct clockqueue ci_queue;
 	char ci_panicbuf[512];
 };
 
@@ -297,7 +299,7 @@ cpu_rnd_messybits(void)
 }
 
 /*
- * Arguments to hardclock and gatherstats encapsulate the previous
+ * Arguments to clockintr_dispatch encapsulate the previous
  * machine state in an opaque clockframe.  On the Alpha, we use
  * what we push on an interrupt (a trapframe).
  */
@@ -440,6 +442,8 @@ intr_restore(u_long s)
 {
 	splx((int)s);
 }
+
+#define copyinsn(p, v, ip)	copyin32((v), (ip))
 
 #endif /* _KERNEL */
 #endif /* _MACHINE_CPU_H_ */

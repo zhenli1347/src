@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_rsu.c,v 1.51 2022/04/21 21:03:03 stsp Exp $	*/
+/*	$OpenBSD: if_rsu.c,v 1.53 2024/05/23 03:21:08 jsg Exp $	*/
 
 /*-
  * Copyright (c) 2010 Damien Bergamini <damien.bergamini@free.fr>
@@ -25,11 +25,8 @@
 #include <sys/param.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
-#include <sys/socket.h>
 #include <sys/systm.h>
 #include <sys/timeout.h>
-#include <sys/conf.h>
 #include <sys/device.h>
 #include <sys/endian.h>
 
@@ -770,7 +767,6 @@ rsu_calib_to(void *arg)
 	usbd_ref_decr(sc->sc_udev);
 }
 
-/* ARGSUSED */
 void
 rsu_calib_cb(struct rsu_softc *sc, void *arg)
 {
@@ -948,7 +944,6 @@ rsu_set_key_cb(struct rsu_softc *sc, void *arg)
 	}
 }
 
-/* ARGSUSED */
 void
 rsu_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     struct ieee80211_key *k)
@@ -1624,7 +1619,6 @@ rsu_tx(struct rsu_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 	return (0);
 }
 
-/* ARGSUSED */
 int
 rsu_send_mgmt(struct ieee80211com *ic, struct ieee80211_node *ni, int type,
     int arg1, int arg2)

@@ -1,4 +1,4 @@
-/* $OpenBSD: cryptlib.c,v 1.45 2019/01/26 11:30:32 deraadt Exp $ */
+/* $OpenBSD: cryptlib.c,v 1.51 2024/04/21 13:41:14 tb Exp $ */
 /* ====================================================================
  * Copyright (c) 1998-2006 The OpenSSL Project.  All rights reserved.
  *
@@ -124,6 +124,8 @@
 #include <openssl/opensslconf.h>
 #include <openssl/crypto.h>
 
+#include "crypto_local.h"
+
 static void (*locking_callback)(int mode, int type,
     const char *file, int line) = NULL;
 static int (*add_lock_callback)(int *pointer, int amount,
@@ -134,24 +136,28 @@ CRYPTO_num_locks(void)
 {
 	return 1;
 }
+LCRYPTO_ALIAS(CRYPTO_num_locks);
 
 unsigned long
 (*CRYPTO_get_id_callback(void))(void)
 {
 	return NULL;
 }
+LCRYPTO_ALIAS(CRYPTO_get_id_callback);
 
 void
 CRYPTO_set_id_callback(unsigned long (*func)(void))
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_set_id_callback);
 
 unsigned long
 CRYPTO_thread_id(void)
 {
 	return (unsigned long)pthread_self();
 }
+LCRYPTO_ALIAS(CRYPTO_thread_id);
 
 void
 CRYPTO_set_locking_callback(void (*func)(int mode, int lock_num,
@@ -159,6 +165,7 @@ CRYPTO_set_locking_callback(void (*func)(int mode, int lock_num,
 {
 	locking_callback = func;
 }
+LCRYPTO_ALIAS(CRYPTO_set_locking_callback);
 
 void
 (*CRYPTO_get_locking_callback(void))(int mode, int lock_num,
@@ -166,6 +173,7 @@ void
 {
 	return locking_callback;
 }
+LCRYPTO_ALIAS(CRYPTO_get_locking_callback);
 
 void
 CRYPTO_set_add_lock_callback(int (*func)(int *num, int mount, int lock_num,
@@ -173,6 +181,7 @@ CRYPTO_set_add_lock_callback(int (*func)(int *num, int mount, int lock_num,
 {
 	add_lock_callback = func;
 }
+LCRYPTO_ALIAS(CRYPTO_set_add_lock_callback);
 
 int
 (*CRYPTO_get_add_lock_callback(void))(int *num, int mount, int type,
@@ -180,58 +189,68 @@ int
 {
 	return add_lock_callback;
 }
+LCRYPTO_ALIAS(CRYPTO_get_add_lock_callback);
 
 const char *
 CRYPTO_get_lock_name(int lock_num)
 {
 	return "";
 }
+LCRYPTO_ALIAS(CRYPTO_get_lock_name);
 
 struct CRYPTO_dynlock_value *
 CRYPTO_get_dynlock_value(int i)
 {
 	return NULL;
 }
+LCRYPTO_ALIAS(CRYPTO_get_dynlock_value);
 
 int CRYPTO_get_new_dynlockid(void)
 {
 	return 0;
 }
+LCRYPTO_ALIAS(CRYPTO_get_new_dynlockid);
 
 void
 CRYPTO_destroy_dynlockid(int i)
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_destroy_dynlockid);
 
 int CRYPTO_get_new_lockid(char *name)
 {
 	return 0;
 }
+LCRYPTO_ALIAS(CRYPTO_get_new_lockid);
 
 int
 CRYPTO_THREADID_set_callback(void (*func)(CRYPTO_THREADID *))
 {
 	return 1;
 }
+LCRYPTO_ALIAS(CRYPTO_THREADID_set_callback);
 
 void
 (*CRYPTO_THREADID_get_callback(void))(CRYPTO_THREADID *)
 {
 	return NULL;
 }
+LCRYPTO_ALIAS(CRYPTO_THREADID_get_callback);
 
 void
 CRYPTO_THREADID_set_numeric(CRYPTO_THREADID *id, unsigned long val)
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_THREADID_set_numeric);
 
 void
 CRYPTO_THREADID_set_pointer(CRYPTO_THREADID *id, void *ptr)
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_THREADID_set_pointer);
 
 void
 CRYPTO_set_dynlock_create_callback(struct CRYPTO_dynlock_value *(
@@ -239,6 +258,7 @@ CRYPTO_set_dynlock_create_callback(struct CRYPTO_dynlock_value *(
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_set_dynlock_create_callback);
 
 void
 CRYPTO_set_dynlock_lock_callback(void (*dyn_lock_function)(
@@ -246,6 +266,7 @@ CRYPTO_set_dynlock_lock_callback(void (*dyn_lock_function)(
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_set_dynlock_lock_callback);
 
 void
 CRYPTO_set_dynlock_destroy_callback(void (*dyn_destroy_function)(
@@ -253,10 +274,10 @@ CRYPTO_set_dynlock_destroy_callback(void (*dyn_destroy_function)(
 {
 	return;
 }
+LCRYPTO_ALIAS(CRYPTO_set_dynlock_destroy_callback);
 
 struct CRYPTO_dynlock_value *
-(*CRYPTO_get_dynlock_create_callback(void))(
-    const char *file, int line)
+(*CRYPTO_get_dynlock_create_callback(void))(const char *file, int line)
 {
 	return NULL;
 }
@@ -267,6 +288,7 @@ void
 {
 	return NULL;
 }
+LCRYPTO_ALIAS(CRYPTO_get_dynlock_lock_callback);
 
 void
 (*CRYPTO_get_dynlock_destroy_callback(void))(
@@ -274,6 +296,7 @@ void
 {
 	return NULL;
 }
+LCRYPTO_ALIAS(CRYPTO_get_dynlock_destroy_callback);
 
 void
 CRYPTO_THREADID_current(CRYPTO_THREADID *id)
@@ -311,6 +334,7 @@ OPENSSL_cpu_caps(void)
 {
 	return OPENSSL_ia32cap_P;
 }
+LCRYPTO_ALIAS(OPENSSL_cpu_caps);
 
 #if defined(OPENSSL_CPUID_OBJ) && !defined(OPENSSL_NO_ASM)
 #define OPENSSL_CPUID_SETUP
@@ -333,6 +357,7 @@ OPENSSL_cpu_caps(void)
 {
 	return 0;
 }
+LCRYPTO_ALIAS(OPENSSL_cpu_caps);
 #endif
 
 #if !defined(OPENSSL_CPUID_SETUP) && !defined(OPENSSL_CPUID_OBJ)
@@ -349,7 +374,7 @@ OPENSSL_showfatal(const char *fmta, ...)
 	va_list ap;
 
 	va_start(ap, fmta);
-	vsyslog_r(LOG_INFO|LOG_LOCAL2, &sdata, fmta, ap);
+	vsyslog_r(LOG_CONS|LOG_LOCAL2, &sdata, fmta, ap);
 	va_end(ap);
 }
 
@@ -361,6 +386,7 @@ OpenSSLDie(const char *file, int line, const char *assertion)
 	    getuid(), getprogname(), file, line, assertion);
 	_exit(1);
 }
+LCRYPTO_ALIAS(OpenSSLDie);
 
 int
 CRYPTO_memcmp(const void *in_a, const void *in_b, size_t len)
@@ -375,3 +401,4 @@ CRYPTO_memcmp(const void *in_a, const void *in_b, size_t len)
 
 	return x;
 }
+LCRYPTO_ALIAS(CRYPTO_memcmp);

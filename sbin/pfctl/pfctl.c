@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfctl.c,v 1.389 2022/11/19 14:01:51 kn Exp $ */
+/*	$OpenBSD: pfctl.c,v 1.394 2024/02/02 08:23:29 sashan Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -118,6 +118,7 @@ int	pfctl_recurse(int, int, const char *,
 int	pfctl_call_clearrules(int, int, struct pfr_anchoritem *);
 int	pfctl_call_cleartables(int, int, struct pfr_anchoritem *);
 int	pfctl_call_clearanchors(int, int, struct pfr_anchoritem *);
+int	pfctl_call_showtables(int, int, struct pfr_anchoritem *);
 
 const char	*clearopt;
 char		*rulesopt;
@@ -367,7 +368,7 @@ pfctl_clear_interface_flags(int dev, int opts)
 int
 pfctl_clear_rules(int dev, int opts, char *anchorname)
 {
-	struct pfr_buffer 	t;
+	struct pfr_buffer	t;
 
 	memset(&t, 0, sizeof(t));
 	t.pfrb_type = PFRB_TRANS;
@@ -513,7 +514,7 @@ pfctl_kill_src_nodes(int dev, int opts)
 
 				dests++;
 
-				copy_satopfaddr(&psnk.psnk_src.addr.v.a.addr,
+				copy_satopfaddr(&psnk.psnk_dst.addr.v.a.addr,
 				    resp[1]->ai_addr);
 
 				if (ioctl(dev, DIOCKILLSRCNODES, &psnk) == -1)
@@ -594,7 +595,7 @@ pfctl_net_kill_states(int dev, const char *iface, int opts, int rdomain)
 
 				dests++;
 
-				copy_satopfaddr(&psk.psk_src.addr.v.a.addr,
+				copy_satopfaddr(&psk.psk_dst.addr.v.a.addr,
 				    resp[1]->ai_addr);
 
 				if (ioctl(dev, DIOCKILLSTATES, &psk) == -1)
@@ -837,9 +838,14 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
     char *anchorname, int depth, int wildcard, long shownr)
 {
 	struct pfioc_rule pr;
-	u_int32_t nr, mnr, header = 0;
+	u_int32_t header = 0;
 	int len = strlen(path), ret = 0;
 	char *npath, *p;
+
+	if (depth > PF_ANCHOR_STACK_MAX) {
+		warnx("%s: max stack depth exceeded for %s", __func__, path);
+		return (-1);
+	}
 
 	/*
 	 * Truncate a trailing / and * on an anchorname before searching for
@@ -888,24 +894,9 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 		goto error;
 	}
 
-	if (shownr < 0) {
-		mnr = pr.nr;
-		nr = 0;
-	} else if (shownr < pr.nr) {
-		nr = shownr;
-		mnr = shownr + 1;
-	} else {
-		warnx("rule %ld not found", shownr);
-		ret = -1;
-		goto error;
-	}
-	for (; nr < mnr; ++nr) {
-		pr.nr = nr;
-		if (ioctl(dev, DIOCGETRULE, &pr) == -1) {
-			warn("DIOCGETRULE");
-			ret = -1;
-			goto error;
-		}
+	while (ioctl(dev, DIOCGETRULE, &pr) != -1) {
+		if (shownr != -1 && shownr != pr.nr)
+			continue;
 
 		/* anchor is the same for all rules in it */
 		if (pr.rule.anchor_wildcard == 0)
@@ -941,7 +932,7 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 			 * the user has explicitly requested recursion,
 			 * print it recursively.
 			 */
-       		        if (pr.anchor_call[0] &&
+		        if (pr.anchor_call[0] &&
 			    (((p = strrchr(pr.anchor_call, '/')) ?
 			    p[1] == '_' : pr.anchor_call[0] == '_') ||
 			    opts & PF_OPT_RECURSE)) {
@@ -963,6 +954,13 @@ pfctl_show_rules(int dev, char *path, int opts, enum pfctl_show format,
 		case PFCTL_SHOW_NOTHING:
 			break;
 		}
+		errno = 0;
+	}
+
+	if (errno != 0 && errno != ENOENT) {
+		warn("DIOCGETRULE");
+		ret = -1;
+		goto error;
 	}
 
 	/*
@@ -2304,6 +2302,13 @@ pfctl_call_clearrules(int dev, int opts, struct pfr_anchoritem *pfra)
 }
 
 int
+pfctl_call_showtables(int dev, int opts, struct pfr_anchoritem *pfra)
+{
+	pfctl_show_tables(pfra->pfra_anchorname, opts);
+	return (0);
+}
+
+int
 pfctl_call_clearanchors(int dev, int opts, struct pfr_anchoritem *pfra)
 {
 	int	rv = 0;
@@ -2328,10 +2333,12 @@ pfctl_recurse(int dev, int opts, const char *anchorname,
 	 * so that failures on one anchor do not prevent clearing others.
 	 */
 	opts |= PF_OPT_IGNFAIL;
-	printf("Removing:\n");
+	if ((opts & PF_OPT_CALLSHOW) == 0)
+		printf("Removing:\n");
 	SLIST_FOREACH_SAFE(pfra, anchors, pfra_sle, pfra_save) {
-		printf("  %s\n", (*pfra->pfra_anchorname == '\0') ?
-		    "/" : pfra->pfra_anchorname);
+		if ((opts & PF_OPT_CALLSHOW) == 0)
+			printf("  %s\n", (*pfra->pfra_anchorname == '\0') ?
+			    "/" : pfra->pfra_anchorname);
 		rv |= walkf(dev, opts, pfra);
 		SLIST_REMOVE(anchors, pfra, pfr_anchoritem, pfra_sle);
 		free(pfra->pfra_anchorname);
@@ -2750,7 +2757,12 @@ main(int argc, char *argv[])
 			pfctl_show_fingerprints(opts);
 			break;
 		case 'T':
-			pfctl_show_tables(anchorname, opts);
+			if (opts & PF_OPT_RECURSE) {
+				opts |= PF_OPT_CALLSHOW;
+				pfctl_recurse(dev, opts, anchorname,
+				    pfctl_call_showtables);
+			} else
+				pfctl_show_tables(anchorname, opts);
 			break;
 		case 'o':
 			pfctl_load_fingerprints(dev, opts);

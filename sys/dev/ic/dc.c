@@ -1,4 +1,4 @@
-/*	$OpenBSD: dc.c,v 1.155 2022/02/22 01:15:01 guenther Exp $	*/
+/*	$OpenBSD: dc.c,v 1.157 2024/05/13 01:15:50 jsg Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998, 1999
@@ -134,7 +134,6 @@
 #endif
 
 int dc_intr(void *);
-struct dc_type *dc_devtype(void *);
 int dc_newbuf(struct dc_softc *, int, struct mbuf *);
 int dc_encap(struct dc_softc *, bus_dmamap_t, struct mbuf *, u_int32_t *);
 
@@ -1697,7 +1696,7 @@ hasmac:
 	ifp->if_ioctl = dc_ioctl;
 	ifp->if_start = dc_start;
 	ifp->if_watchdog = dc_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, DC_TX_LIST_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, DC_TX_LIST_CNT - 1);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 
 	ifp->if_capabilities = IFCAP_VLAN_MTU;

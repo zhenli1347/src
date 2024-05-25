@@ -1,4 +1,4 @@
-/*	$OpenBSD: mio_priv.h,v 1.12 2015/11/22 12:01:23 ratchov Exp $	*/
+/*	$OpenBSD: mio_priv.h,v 1.14 2024/05/21 06:07:06 jsg Exp $	*/
 /*
  * Copyright (c) 2008 Alexandre Ratchov <alex@caoua.org>
  *
@@ -28,7 +28,7 @@ struct mio_hdl {
 	struct mio_ops *ops;
 	unsigned mode;			/* MIO_IN | MIO_OUT */
 	int nbio;			/* true if non-blocking io */
-	int eof;			/* true if error occured */
+	int eof;			/* true if error occurred */
 };
 
 /*
@@ -46,6 +46,5 @@ struct mio_ops {
 struct mio_hdl *_mio_rmidi_open(const char *, unsigned, int);
 struct mio_hdl *_mio_aucat_open(const char *, unsigned, int);
 void _mio_create(struct mio_hdl *, struct mio_ops *, unsigned, int);
-void _mio_destroy(struct mio_hdl *);
 
 #endif /* !defined(MIO_PRIV_H) */

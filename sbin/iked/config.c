@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.91 2022/12/03 22:34:35 tobhe Exp $	*/
+/*	$OpenBSD: config.c,v 1.97 2024/02/15 19:11:00 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -82,12 +82,12 @@ config_free_kex(struct iked_kex *kex)
 	if (kex == NULL)
 		return;
 
-	ibuf_release(kex->kex_inonce);
-	ibuf_release(kex->kex_rnonce);
+	ibuf_free(kex->kex_inonce);
+	ibuf_free(kex->kex_rnonce);
 
 	group_free(kex->kex_dhgroup);
-	ibuf_release(kex->kex_dhiexchange);
-	ibuf_release(kex->kex_dhrexchange);
+	ibuf_free(kex->kex_dhiexchange);
+	ibuf_free(kex->kex_dhrexchange);
 
 	free(kex);
 }
@@ -140,42 +140,42 @@ config_free_sa(struct iked *env, struct iked_sa *sa)
 	ikev2_msg_flushqueue(env, &sa->sa_requests);
 	ikev2_msg_flushqueue(env, &sa->sa_responses);
 
-	ibuf_release(sa->sa_inonce);
-	ibuf_release(sa->sa_rnonce);
+	ibuf_free(sa->sa_inonce);
+	ibuf_free(sa->sa_rnonce);
 
 	group_free(sa->sa_dhgroup);
-	ibuf_release(sa->sa_dhiexchange);
-	ibuf_release(sa->sa_dhrexchange);
+	ibuf_free(sa->sa_dhiexchange);
+	ibuf_free(sa->sa_dhrexchange);
 
-	ibuf_release(sa->sa_simult);
+	ibuf_free(sa->sa_simult);
 
 	hash_free(sa->sa_prf);
 	hash_free(sa->sa_integr);
 	cipher_free(sa->sa_encr);
 
-	ibuf_release(sa->sa_key_d);
-	ibuf_release(sa->sa_key_iauth);
-	ibuf_release(sa->sa_key_rauth);
-	ibuf_release(sa->sa_key_iencr);
-	ibuf_release(sa->sa_key_rencr);
-	ibuf_release(sa->sa_key_iprf);
-	ibuf_release(sa->sa_key_rprf);
+	ibuf_free(sa->sa_key_d);
+	ibuf_free(sa->sa_key_iauth);
+	ibuf_free(sa->sa_key_rauth);
+	ibuf_free(sa->sa_key_iencr);
+	ibuf_free(sa->sa_key_rencr);
+	ibuf_free(sa->sa_key_iprf);
+	ibuf_free(sa->sa_key_rprf);
 
-	ibuf_release(sa->sa_1stmsg);
-	ibuf_release(sa->sa_2ndmsg);
+	ibuf_free(sa->sa_1stmsg);
+	ibuf_free(sa->sa_2ndmsg);
 
-	ibuf_release(sa->sa_iid.id_buf);
-	ibuf_release(sa->sa_rid.id_buf);
-	ibuf_release(sa->sa_icert.id_buf);
-	ibuf_release(sa->sa_rcert.id_buf);
+	ibuf_free(sa->sa_iid.id_buf);
+	ibuf_free(sa->sa_rid.id_buf);
+	ibuf_free(sa->sa_icert.id_buf);
+	ibuf_free(sa->sa_rcert.id_buf);
 	for (i = 0; i < IKED_SCERT_MAX; i++)
-		ibuf_release(sa->sa_scert[i].id_buf);
-	ibuf_release(sa->sa_localauth.id_buf);
-	ibuf_release(sa->sa_peerauth.id_buf);
+		ibuf_free(sa->sa_scert[i].id_buf);
+	ibuf_free(sa->sa_localauth.id_buf);
+	ibuf_free(sa->sa_peerauth.id_buf);
 
-	ibuf_release(sa->sa_eap.id_buf);
+	ibuf_free(sa->sa_eap.id_buf);
 	free(sa->sa_eapid);
-	ibuf_release(sa->sa_eapmsk);
+	ibuf_free(sa->sa_eapmsk);
 
 	free(sa->sa_cp_addr);
 	free(sa->sa_cp_addr6);
@@ -507,8 +507,14 @@ config_setmode(struct iked *env, unsigned int passive)
 {
 	unsigned int	 type;
 
+	/*
+	 * In order to control the startup of the processes,
+	 * the messages are sent in this order:
+	 *   PROC_PARENT -> PROC_CERT -> PROC_PARENT -> PROC_IKEV2
+	 * so PROC_CERT is ready before PROC_IKEV2 is activated.
+	 */
 	type = passive ? IMSG_CTL_PASSIVE : IMSG_CTL_ACTIVE;
-	proc_compose(&env->sc_ps, PROC_IKEV2, type, NULL, 0);
+	proc_compose(&env->sc_ps, PROC_CERT, type, NULL, 0);
 
 	return (0);
 }
@@ -611,16 +617,16 @@ config_getsocket(struct iked *env, struct imsg *imsg,
 {
 	struct iked_socket	*sock, **sock0 = NULL, **sock1 = NULL;
 
-	log_debug("%s: received socket fd %d", __func__, imsg->fd);
-
 	if ((sock = calloc(1, sizeof(*sock))) == NULL)
 		fatal("config_getsocket: calloc");
 
 	IMSG_SIZE_CHECK(imsg, &sock->sock_addr);
 
 	memcpy(&sock->sock_addr, imsg->data, sizeof(sock->sock_addr));
-	sock->sock_fd = imsg->fd;
+	sock->sock_fd = imsg_get_fd(imsg);
 	sock->sock_env = env;
+
+	log_debug("%s: received socket fd %d", __func__, sock->sock_fd);
 
 	switch (sock->sock_addr.ss_family) {
 	case AF_INET:
@@ -645,9 +651,22 @@ config_getsocket(struct iked *env, struct imsg *imsg,
 
 	event_set(&sock->sock_ev, sock->sock_fd,
 	    EV_READ|EV_PERSIST, cb, sock);
-	event_add(&sock->sock_ev, NULL);
 
 	return (0);
+}
+
+void
+config_enablesocket(struct iked *env)
+{
+	struct iked_socket	*sock;
+	size_t			 i;
+
+	for (i = 0; i < nitems(env->sc_sock4); i++)
+		if ((sock = env->sc_sock4[i]) != NULL)
+			event_add(&sock->sock_ev, NULL);
+	for (i = 0; i < nitems(env->sc_sock6); i++)
+		if ((sock = env->sc_sock6[i]) != NULL)
+			event_add(&sock->sock_ev, NULL);
 }
 
 int
@@ -665,8 +684,10 @@ config_setpfkey(struct iked *env)
 int
 config_getpfkey(struct iked *env, struct imsg *imsg)
 {
-	log_debug("%s: received pfkey fd %d", __func__, imsg->fd);
-	pfkey_init(env, imsg->fd);
+	int fd = imsg_get_fd(imsg);
+
+	log_debug("%s: received pfkey fd %d", __func__, fd);
+	pfkey_init(env, fd);
 	return (0);
 }
 
@@ -900,6 +921,8 @@ config_setstatic(struct iked *env)
 {
 	proc_compose(&env->sc_ps, PROC_IKEV2, IMSG_CTL_STATIC,
 	    &env->sc_static, sizeof(env->sc_static));
+	proc_compose(&env->sc_ps, PROC_CERT, IMSG_CTL_STATIC,
+	    &env->sc_static, sizeof(env->sc_static));
 	return (0);
 }
 
@@ -985,28 +1008,6 @@ config_getocsp(struct iked *env, struct imsg *imsg)
 }
 
 int
-config_setcertpartialchain(struct iked *env)
-{
-	unsigned int boolval;
-
-	boolval = env->sc_cert_partial_chain;
-	proc_compose(&env->sc_ps, PROC_CERT, IMSG_CERT_PARTIAL_CHAIN,
-	    &boolval, sizeof(boolval));
-	return (0);
-}
-
-int
-config_getcertpartialchain(struct iked *env, struct imsg *imsg)
-{
-	unsigned int boolval;
-
-	IMSG_SIZE_CHECK(imsg, &boolval);
-	memcpy(&boolval, imsg->data, sizeof(boolval));
-	env->sc_cert_partial_chain = boolval;
-	return (0);
-}
-
-int
 config_setkeys(struct iked *env)
 {
 	FILE			*fp = NULL;
@@ -1042,7 +1043,7 @@ config_setkeys(struct iked *env)
 	iov[0].iov_base = &privkey;
 	iov[0].iov_len = sizeof(privkey);
 	iov[1].iov_base = ibuf_data(privkey.id_buf);
-	iov[1].iov_len = ibuf_length(privkey.id_buf);
+	iov[1].iov_len = ibuf_size(privkey.id_buf);
 
 	if (proc_composev(&env->sc_ps, PROC_CERT, IMSG_PRIVKEY, iov, 2) == -1) {
 		log_warnx("%s: failed to send private key", __func__);
@@ -1052,7 +1053,7 @@ config_setkeys(struct iked *env)
 	iov[0].iov_base = &pubkey;
 	iov[0].iov_len = sizeof(pubkey);
 	iov[1].iov_base = ibuf_data(pubkey.id_buf);
-	iov[1].iov_len = ibuf_length(pubkey.id_buf);
+	iov[1].iov_len = ibuf_size(pubkey.id_buf);
 
 	if (proc_composev(&env->sc_ps, PROC_CERT, IMSG_PUBKEY, iov, 2) == -1) {
 		log_warnx("%s: failed to send public key", __func__);
@@ -1064,8 +1065,8 @@ config_setkeys(struct iked *env)
 	if (fp != NULL)
 		fclose(fp);
 
-	ibuf_release(pubkey.id_buf);
-	ibuf_release(privkey.id_buf);
+	ibuf_free(pubkey.id_buf);
+	ibuf_free(privkey.id_buf);
 	EVP_PKEY_free(key);
 
 	return (ret);

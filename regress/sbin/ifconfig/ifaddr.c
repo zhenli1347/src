@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifaddr.c,v 1.6 2021/07/12 15:09:18 beck Exp $	*/
+/*	$OpenBSD: ifaddr.c,v 1.8 2023/03/08 04:43:06 guenther Exp $	*/
 
 /*
  * This file has been copied from ifconfig and adapted to test
@@ -206,8 +206,6 @@ const struct	cmd {
 	{ "tunnel",	NEXTARG2,	0,		NULL, settunnel },
 	{ "tunneladdr",	NEXTARG,	0,		settunneladdr },
 	{ "-tunnel",	0,		0,		deletetunnel },
-	/* deletetunnel is for backward compat, remove during 6.4-current */
-	{ "deletetunnel",  0,		0,		deletetunnel },
 	{ "tunneldomain", NEXTARG,	0,		settunnelinst },
 	{ "-tunneldomain", 0,		0,		unsettunnelinst },
 	{ "tunnelttl",	NEXTARG,	0,		settunnelttl },
@@ -682,7 +680,6 @@ printif(char *name, int ifaliases)
 #define MASK	2
 #define DSTADDR	3
 
-/*ARGSUSED*/
 void
 setifaddr(const char *addr, int param)
 {
@@ -712,7 +709,6 @@ setifrtlabel(const char *label, int d)
 }
 #endif
 
-/* ARGSUSED */
 void
 setifnetmask(const char *addr, int ignored)
 {
@@ -721,7 +717,6 @@ setifnetmask(const char *addr, int ignored)
 	explicit_prefix = 1;
 }
 
-/* ARGSUSED */
 void
 setifbroadaddr(const char *addr, int ignored)
 {
@@ -729,7 +724,6 @@ setifbroadaddr(const char *addr, int ignored)
 	afp->af_getaddr(addr, DSTADDR);
 }
 
-/* ARGSUSED */
 void
 setifipdst(const char *addr, int ignored)
 {
@@ -740,7 +734,6 @@ setifipdst(const char *addr, int ignored)
 }
 
 #define rqtosa(x) (&(((struct ifreq *)(afp->x))->ifr_addr))
-/*ARGSUSED*/
 void
 notealias(const char *addr, int param)
 {
@@ -755,7 +748,6 @@ notealias(const char *addr, int param)
 		clearaddr = 0;
 }
 
-/*ARGSUSED*/
 void
 setifdstaddr(const char *addr, int param)
 {
@@ -1024,7 +1016,6 @@ print_tunnel(const struct if_laddrreq *req)
 	}
 }
 
-/* ARGSUSED */
 static void
 phys_status(int force)
 {
@@ -1215,7 +1206,6 @@ status(int link, struct sockaddr_dl *sdl, int ls)
 	phys_status(0);
 }
 
-/* ARGSUSED */
 void
 in_status(int force)
 {
@@ -1283,7 +1273,6 @@ in_status(int force)
 	putchar('\n');
 }
 
-/* ARGSUSED */
 void
 setifprefixlen(const char *addr, int d)
 {
@@ -1508,7 +1497,6 @@ settunneladdr(const char *addr, int ignored)
 	freeaddrinfo(res);
 }
 
-/* ARGSUSED */
 void
 deletetunnel(const char *ignored, int alsoignored)
 {
@@ -1642,7 +1630,6 @@ in_getaddr(const char *s, int which)
 	}
 }
 
-/* ARGSUSED */
 void
 in_getprefix(const char *plen, int which)
 {

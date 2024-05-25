@@ -1,4 +1,4 @@
-.\" $OpenBSD: bgpd.8,v 1.75 2022/07/12 17:30:57 claudio Exp $
+.\" $OpenBSD: bgpd.8,v 1.78 2023/04/03 10:48:00 claudio Exp $
 .\"
 .\" Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
 .\"
@@ -14,12 +14,12 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: July 12 2022 $
+.Dd $Mdocdate: April 3 2023 $
 .Dt BGPD 8
 .Os
 .Sh NAME
 .Nm bgpd
-.Nd Border Gateway Protocol daemon
+.Nd Border Gateway Protocol (BGP) routing daemon
 .Sh SYNOPSIS
 .Nm bgpd
 .Bk -words
@@ -478,6 +478,26 @@ has been started.
 .Re
 .Pp
 .Rs
+.%A C. Loibl
+.%A S. Hares
+.%A R. Raszuk
+.%A D. McPherson
+.%A M. Bacher
+.%D December 2020
+.%R RFC 8955
+.%T Dissemination of Flow Specification Rules
+.Re
+.Pp
+.Rs
+.%A C. Loibl
+.%A R. Raszuk
+.%A S. Hares
+.%D December 2020
+.%R RFC 8956
+.%T Dissemination of Flow Specification Rules for IPv6
+.Re
+.Pp
+.Rs
 .%A E. Chen
 .%A J. Scudder
 .%D July 2021
@@ -494,6 +514,18 @@ has been started.
 .%D May 2022
 .%R RFC 9234
 .%T Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages
+.Re
+.Pp
+.Rs
+.%A A. Azimov
+.%A E. Bogomazov
+.%A R. Bush
+.%A K. Patel
+.%A J. Snijders
+.%A K. Sriram
+.%D October 2022
+.%R draft-ietf-sidrops-aspa-verification
+.%T BGP AS_PATH Verification Based on Resource Public Key Infrastructure (RPKI) Autonomous System Provider Authorization (ASPA) Objects
 .Re
 .Sh HISTORY
 The

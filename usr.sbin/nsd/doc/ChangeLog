@@ -1,3 +1,239 @@
+4 April 2024: Jeroen
+	- Use rooted temporary path in makedist.sh.
+
+3 April 2024: Jeroen
+	- Replace multiple strcat and strcpy by snprintf.
+	- Tag for 4.9.0.
+
+26 March 2024: Jeroen
+	- Test if debug is available in do-tests.
+	- Enforce timeout from NSD in ixfr_gone test.
+	- Update expressions in ixfr_and_restart test.
+	- Make algorithm explicit in control-repattern test.
+	- Switch algorithm to hmac-256 for testplan_mess test.
+	- Tag for 4.9.0rc1.
+
+25 March 2024: Jeroen
+	- Fix timing sensitivity in ixfr_outsync test.
+
+22 March 2024: Jeroen
+	- Set up doc/RELNOTES for upcoming release.
+
+26 February 2024: Willem
+	- Merge #316: Fix to reap defunct children by the reload process that
+	  emerged when some serve child processes were still serving TCP
+	  request while the others had already quit, while the reload process
+	  was waiting for the signal from the backup/old main process that all
+	  children exited.
+	- Fix (also from Merge #316) to reap exited children more frequently
+	  from server main loop for processes that exited during reload, but
+	  missed the initial reaping at start of the main loop because they
+	  took somewhat longer to exit.
+
+16 February 2024: Wouter
+	- Fix compile with memclean for xfrd nsd.db close.
+	- In xfrd del secondary zone, the timer could perhaps have
+	  event_added, and if so, it would not be event_del if a tcp connection
+	  is active at the time. This could cause the libevent event lists
+	  to fail. Also fix to make sure to set event_added for the
+	  nsd-control ssl nonblocking handshake and check event_added there
+	  too, for extra certainty.
+
+15 February 2024: Willem
+	- Merge #304: Support for Catalog zones version "2" as specified in
+	  RFC 9432. Both the consumer as well as the producer role are
+	  implemented, but only a single catalog consumer zone is allowed.
+	  The "coo" property, only relevant with multiple catalog consumer,
+	  is therefore not supported. The "group" property is supported.
+	  Have a look at the nsd.conf man page for details on how to
+	  configure and use catalog zones.
+
+12 February 2024: Willem
+	- Allow SOA apex queries to otherwise with allow-query protected zones
+	  for clients matching a provide-xfr rule, because clients that are
+	  allowed to transfer the zone need to be able to query SOA at the
+	  apex preceding the actual transfer.
+
+6 February 2024: Wouter
+	- Fix #313: nsd 4.8 stats with implausible spikes.
+
+16 January 2024: Wouter
+	- Move acx_nlnetlabs.m4 to version 48, with ssp and getaddrinfo
+	  include check.
+
+14 January 2024: Wouter
+	- Move acx_nlnetlabs.m4 to version 47, with crypt32 check.
+
+8 December 2023: Wouter
+	- Merge #309: More RFC 8499 compliance.
+	- Fix #310: NSD stats contain the terms "master" and "slave".
+	- Fix control-reconfig-xfrd test for zonestatus primary that is
+	  printed by nsd-control zonestatus.
+
+7 December 2023: Wouter
+	- Merge #307 from anandb-ripencc: Many improvements to the nsd.conf
+	  man page.
+	- Fix #308: Deprecate "multi-master-check" in favour of
+	  "multi-primary-check".
+
+6 December 2023: Wouter
+	- Fix to sync the tests script file common.sh.
+	- Update test script file common.sh.
+	- Fix #306: Missing AC_SUBST(dbdir) breaks installation with 4.8.0.
+	- Fix for #306: Create directory for xfrd.state and zone.list files
+	  in make install.
+
+29 November 2023: Wouter
+	- Tag for 4.8.0rc1. This became 4.8.0 release on 6 December 2023.
+	  The repository continues with version 4.8.1 under development.
+
+28 November 2023: Wouter
+	- Set up doc/RELNOTES for upcoming release.
+	- Fix unit test kill_from_pidfile function for nonexistent files
+	  because the argument is evaluated before the test expression.
+	- Fix rr-test to also convert the contents of the just written output
+	  file.
+	- Fix test set to remove -f nsd.db and rm nsd.db commands.
+	- Fix test set to remove difffile option.
+
+27 November 2023: Jeroen
+	- Fix #14: Set timeout to 3s when servicing remaining TCP connections.
+	- Fix: Always instate write handler after reading queries from TCP.
+	- Answer first query on connections accepted just before reload.
+
+27 November 2023: Wouter
+	- Merge #305: faster stats. Statistics can be gathered while a reload
+	  is in progress.
+
+27 November 2023: Willem
+	- Merge #302: Test package fixes. Correct Auxfiles, kill_from_pidfile
+	  function and fix drop_updates, rr-test and xfr_update tests.
+
+1 November 2023: Jeroen
+	- Remove on-disk database.
+
+31 October 2023: Wouter
+	- Merge #301: improve the logging of ixfr fallbacks to axfr.
+
+30 October 2023: Jeroen
+	- Fix processing of consolidated IXFRs.
+
+30 October 2023: Wouter
+	- Fix for interprocess communication to set quit sync command from
+	  main process explicitly.
+
+3 October 2023: Wouter
+	- Merge #281: Proxy protocol. An implementation of PROXYv2 for NSD.
+	  It can be configured with proxy-protocol-port: portnum with the
+	  port number of the interface on which proxy traffic is handled.
+	  The interface can support proxy traffic for UDP, TCP and TLS.
+
+21 September 2023: Wouter
+	- Merge #295: Update e-mail addresses, add ref to support contracts
+
+31 August 2023: Wouter
+	- Fix autoconf 2.69 warnings in configure.
+
+14 July 2023: Wouter
+	- Merge #287: Update nsd.conf.5.in.
+
+11 July 2023: Wouter
+	- Fix unused variable warning in unit test of udb.
+
+22 June 2023: Wouter
+	- Fix #284: dnstap_collector.c: SOCK_NONBLOCK is not available on
+	  Mac/Darwin.
+
+7 June 2023: Wouter
+	- Merge #282: Improve nsd.conf man page.
+	- Fix unused but set variable warning.
+	- Fix #283: Compile failure in remote.c when --disable-bind8-stats
+	  and --without-ssl are specified.
+
+31 May 2023: Wouter
+	- Add missing items to doc/RELNOTES.
+	- Tag for 4.7.0rc1. It became release 4.7.0 on 7 june 2023. The code
+	  repository continues with 4.7.1.
+
+30 May 2023: Jeroen
+	- Fix #240: Prefix messages originating from verifier.
+	- Fix #275: Drop unnecessary root server checks.
+
+30 May 2023: Wouter
+	- Next version is 4.7.0, instead of 4.6.2, because of the added
+	  features, like TLS for DNSTAP.
+	- Fix unused variable warning in unit test, from clang compile.
+
+24 May 2023: Wouter
+	- For #279: Note that autoreconf -fi creates the configure script
+	  and also the needed auxiliary files, for autoconf 2.69 and 2.71.
+
+4 May 2023: Wouter
+	- Fix to remove unused whitespace from acx_nlnetlabs.m4 and config.h.
+
+1 May 2023: Wouter
+	- make depend.
+	- Fix for build to run flex and bison before compiling code that needs
+	  the headers.
+
+13 April 2023: Wouter
+	- Fix cirrus script for submit to coverity scan to libtoolize
+	  the configure script components config.guess and config.sub.
+	- Fix readme status badge links.
+
+28 March 2023: Wouter
+	- Fix #273: Large TXT record breaks AXFR.
+	- Fix ixfr create from adding too many record types.
+
+16 March 2023: Wouter
+	- Fix include brackets for ssl.h include statements, instead of quotes.
+	- Fix static analyzer warning about nsd_event_method initialization.
+
+15 March 2023: Wouter
+	- Dnstap tls code fixes.
+
+14 March 2023: Wouter
+	- Fix dnstap to not check socket path when using IP address.
+	- dnstap over TLS, default enabled. Configured with the
+	  options dnstap-tls, dnstap-tls-server-name, dnstap-tls-cert-bundle,
+	  dnstap-tls-client-key-file and dnstap-tls-client-cert-file.
+	- Fix to compile without ssl with dnstap-tls code.
+
+9 March 2023: Wouter
+	- Fix #271: DNSTAP over TCP, with dnstap-ip: "127.0.0.1@3333".
+	- Fix to clean more memory on exit of dnstap collector.
+
+23 February 2023: Wouter
+	- Fix #270: reserved identifier violation.
+
+20 February 2023: Wouter
+	- Merge #269 from Fale: Add systemd service unit.
+
+16 February 2023: Wouter
+	- Fix #266: Fix build with --without-ssl.
+	- Fix #267: Allow unencrypted local operation of nsd-control.
+	- Fix for #267: neater variable definitions.
+
+2 February 2023: Wouter
+	- Merge #265: Fix C99 compatibility issue.
+
+30 January 2023: Wouter
+	- Merge #263: Add bash autocompletion script for nsd-control.
+	- Fix for #262: More error logging for SSL read failures for zone
+	  transfers.
+
+27 January 2023: Wouter
+	- Fix #262: Zone(s) not synchronizing properly via TLS.
+	- Fix ixfr_and_restart test to wait for processes to come to a stop.
+
+26 January 2023: Wouter
+	- Fix configure for -Wstrict-prototypes.
+
+10 November 2022: Wouter
+	- Tag for NSD 4.6.1, the repository continues with version 4.6.2.
+	- Fix #239: -Wincompatible-pointer-types warning in remote.c.
+	- Fix unit tests to succeed with --disable-bind8-stats.
+
 1 November 2022: Wouter
 	- Fixup for non-trailing newline lexer change warnings.
 	- Update doc/RELNOTES for changes.

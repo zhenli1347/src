@@ -1,4 +1,4 @@
-/*	$OpenBSD: mda.c,v 1.143 2021/06/14 17:58:15 eric Exp $	*/
+/*	$OpenBSD: mda.c,v 1.147 2024/01/20 09:01:03 claudio Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
+#include <time.h>
 #include <unistd.h>
 #include <vis.h>
 
@@ -112,7 +113,7 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 	uint64_t		 reqid;
 	size_t			 sz;
 	char			 out[256], buf[LINE_MAX];
-	int			 n;
+	int			 n, fd;
 	enum lka_resp_status	status;
 	enum mda_resp_status	mda_status;
 	int			mda_sysexit;
@@ -195,7 +196,8 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 		s = tree_xget(&sessions, reqid);
 		e = s->evp;
 
-		if (imsg->fd == -1) {
+		fd = imsg_get_fd(imsg);
+		if (fd == -1) {
 			log_debug("debug: mda: cannot get message fd");
 			mda_queue_tempfail(e->id,
 			    "Cannot get message fd",
@@ -207,11 +209,11 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 
 		log_debug("debug: mda: got message fd %d "
 		    "for session %016"PRIx64 " evpid %016"PRIx64,
-		    imsg->fd, s->id, e->id);
+		    fd, s->id, e->id);
 
-		if ((s->datafp = fdopen(imsg->fd, "r")) == NULL) {
+		if ((s->datafp = fdopen(fd, "r")) == NULL) {
 			log_warn("warn: mda: fdopen");
-			close(imsg->fd);
+			close(fd);
 			mda_queue_tempfail(e->id, "fdopen failed",
 			    ESC_OTHER_MAIL_SYSTEM_STATUS);
 			mda_log(e, "TempFail", "fdopen failed");
@@ -282,7 +284,8 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 
 		s = tree_xget(&sessions, reqid);
 		e = s->evp;
-		if (imsg->fd == -1) {
+		fd = imsg_get_fd(imsg);
+		if (fd == -1) {
 			log_warn("warn: mda: fail to retrieve mda fd");
 			mda_queue_tempfail(e->id, "Cannot get mda fd",
 			    ESC_OTHER_MAIL_SYSTEM_STATUS);
@@ -293,10 +296,10 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 
 		log_debug("debug: mda: got mda fd %d "
 		    "for session %016"PRIx64 " evpid %016"PRIx64,
-		    imsg->fd, s->id, s->evp->id);
+		    fd, s->id, s->evp->id);
 
-		io_set_nonblocking(imsg->fd);
-		io_set_fd(s->io, imsg->fd);
+		io_set_nonblocking(fd);
+		io_set_fd(s->io, fd);
 		io_set_write(s->io);
 		return;
 
@@ -314,8 +317,9 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 		 * Grab last line of mda stdout/stderr if available.
 		 */
 		out[0] = '\0';
-		if (imsg->fd != -1)
-			mda_getlastline(imsg->fd, out, sizeof(out));
+		fd = imsg_get_fd(imsg);
+		if (fd != -1)
+			mda_getlastline(fd, out, sizeof(out));
 
 		/*
 		 * Choose between parent's description of error and
@@ -370,12 +374,12 @@ mda_imsg(struct mproc *p, struct imsg *imsg)
 }
 
 void
-mda_postfork()
+mda_postfork(void)
 {
 }
 
 void
-mda_postprivdrop()
+mda_postprivdrop(void)
 {
 	tree_init(&sessions);
 	tree_init(&users);
@@ -507,7 +511,7 @@ mda_getlastline(int fd, char *dst, size_t dstsz)
 	size_t	 sz = 0;
 	ssize_t	 len;
 	int	 out = 0;
-	
+
 	if (lseek(fd, 0, SEEK_SET) == -1) {
 		log_warn("warn: mda: lseek");
 		close(fd);

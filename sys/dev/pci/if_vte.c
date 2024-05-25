@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_vte.c,v 1.26 2022/04/19 03:25:46 kevlo Exp $	*/
+/*	$OpenBSD: if_vte.c,v 1.28 2024/05/24 06:02:57 jsg Exp $	*/
 /*-
  * Copyright (c) 2010, Pyun YongHyeon <yongari@FreeBSD.org>
  * All rights reserved.
@@ -36,10 +36,8 @@
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/queue.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/timeout.h>
-#include <sys/socket.h>
 
 #include <machine/bus.h>
 
@@ -54,10 +52,8 @@
 #include <net/bpf.h>
 #endif
 
-#include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
 
-#include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcidevs.h>
 
@@ -329,7 +325,7 @@ vte_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_ioctl = vte_ioctl;
 	ifp->if_start = vte_start;
 	ifp->if_watchdog = vte_watchdog;
-	ifq_set_maxlen(&ifp->if_snd, VTE_TX_RING_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, VTE_TX_RING_CNT - 1);
 	bcopy(sc->vte_eaddr, sc->sc_arpcom.ac_enaddr, ETHER_ADDR_LEN);
 	bcopy(sc->sc_dev.dv_xname, ifp->if_xname, IFNAMSIZ);
 

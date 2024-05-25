@@ -1,4 +1,4 @@
-/*	$OpenBSD: fw_cfg.c,v 1.5 2021/11/05 10:18:50 jan Exp $	*/
+/*	$OpenBSD: fw_cfg.c,v 1.8 2024/02/04 14:53:12 dv Exp $	*/
 /*
  * Copyright (c) 2018 Claudio Jeker <claudio@openbsd.org>
  *
@@ -16,13 +16,16 @@
  */
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <machine/biosvar.h>	/* bios_memmap_t */
 #include <machine/vmmvar.h>
+#include <dev/pv/virtioreg.h>
 
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "atomicio.h"
+#include "pci.h"
 #include "vmd.h"
 #include "vmm.h"
 #include "fw_cfg.h"
@@ -63,32 +66,58 @@ static struct fw_cfg_state {
 
 static uint64_t	fw_cfg_dma_addr;
 
+static bios_memmap_t e820[VMM_MAX_MEM_RANGES];
+
 static int	fw_cfg_select_file(uint16_t);
 static void	fw_cfg_file_dir(void);
 
 void
 fw_cfg_init(struct vmop_create_params *vmc)
 {
-	const char *bootorder = NULL;
 	unsigned int sd = 0;
+	size_t i, e820_len = 0;
+	char bootorder[64];
+	const char *bootfmt;
+	int bootidx = -1;
+
+	/* Define e820 memory ranges. */
+	memset(&e820, 0, sizeof(e820));
+	for (i = 0; i < vmc->vmc_params.vcp_nmemranges; i++) {
+		struct vm_mem_range *range = &vmc->vmc_params.vcp_memranges[i];
+		bios_memmap_t *entry = &e820[i];
+		entry->addr = range->vmr_gpa;
+		entry->size = range->vmr_size;
+		if (range->vmr_type == VM_MEM_RAM)
+			entry->type = BIOS_MAP_FREE;
+		else
+			entry->type = BIOS_MAP_RES;
+		e820_len += sizeof(bios_memmap_t);
+	}
+	fw_cfg_add_file("etc/e820", &e820, e820_len);
 
 	/* do not double print chars on serial port */
 	fw_cfg_add_file("etc/screen-and-debug", &sd, sizeof(sd));
 
 	switch (vmc->vmc_bootdevice) {
 	case VMBOOTDEV_DISK:
-		bootorder = "/pci@i0cf8/*@3\nHALT";
+		bootidx = pci_find_first_device(PCI_PRODUCT_VIRTIO_BLOCK);
+		bootfmt = "/pci@i0cf8/*@%d\nHALT";
 		break;
 	case VMBOOTDEV_CDROM:
-		bootorder = "/pci@i0cf8/*@4/*@0/*@0,40000100\nHALT";
+		bootidx = pci_find_first_device(PCI_PRODUCT_VIRTIO_SCSI);
+		bootfmt = "/pci@i0cf8/*@%d/*@0/*@0,40000100\nHALT";
 		break;
 	case VMBOOTDEV_NET:
 		/* XXX not yet */
-		bootorder = "HALT";
+		bootidx = pci_find_first_device(PCI_PRODUCT_VIRTIO_NETWORK);
+		bootfmt = "HALT";
 		break;
 	}
-	if (bootorder)
+	if (bootidx > -1) {
+		snprintf(bootorder, sizeof(bootorder), bootfmt, bootidx);
+		log_debug("%s: bootorder: %s", __func__, bootorder);
 		fw_cfg_add_file("bootorder", bootorder, strlen(bootorder) + 1);
+	}
 }
 
 int
@@ -367,7 +396,7 @@ fw_cfg_add_file(const char *name, const void *data, size_t len)
 	if (fw_cfg_lookup_file(name))
 		fatalx("%s: fw_cfg: file %s exists", __progname, name);
 
-	if ((f = calloc(sizeof(*f), 1)) == NULL)
+	if ((f = calloc(1, sizeof(*f))) == NULL)
 		fatal("%s", __func__);
 
 	if ((f->data = malloc(len)) == NULL)

@@ -1,4 +1,4 @@
-/*	$OpenBSD: spamd.c,v 1.158 2021/07/14 13:33:57 kn Exp $	*/
+/*	$OpenBSD: spamd.c,v 1.163 2024/05/09 08:35:03 florian Exp $	*/
 
 /*
  * Copyright (c) 2015 Henning Brauer <henning@openbsd.org>
@@ -39,7 +39,6 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
-#include <limits.h>
 #include <tls.h>
 
 #include <netdb.h>
@@ -439,7 +438,7 @@ read_configline(FILE *config)
 }
 
 void
-spamd_tls_init()
+spamd_tls_init(void)
 {
 	if (tlskeyfile == NULL && tlscertfile == NULL)
 		return;
@@ -729,10 +728,9 @@ initcon(struct con *cp, int fd, struct sockaddr *sa)
 	    0 : stutter;
 	error = getnameinfo(sa, sa->sa_len, cp->addr, sizeof(cp->addr), NULL, 0,
 	    NI_NUMERICHOST);
-#ifdef useless
 	if (error)
-		errx(1, "%s", gai_strerror(error));
-#endif
+		strlcpy(cp->addr, "<unknown>", sizeof(cp->addr));
+	memset(ctimebuf, 0, sizeof(ctimebuf));
 	ctime_r(&t, ctimebuf);
 	ctimebuf[sizeof(ctimebuf) - 2] = '\0'; /* nuke newline */
 	snprintf(cp->obuf, cp->osize, "220 %s ESMTP %s; %s\r\n",
@@ -848,6 +846,8 @@ nextstate(struct con *cp)
 				    match(cp->ibuf, "EHLO")) {
 					snprintf(cp->obuf, cp->osize,
 					    "250-%s\r\n"
+					    "250-8BITMIME\r\n"
+					    "250-SMTPUTF8\r\n"
 					    "250 STARTTLS\r\n",
 					    hostname);
 					nextstate = 7;

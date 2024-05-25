@@ -1,4 +1,4 @@
-/*      $OpenBSD: pmap.h,v 1.50 2022/09/10 20:35:28 miod Exp $ */
+/*      $OpenBSD: pmap.h,v 1.54 2023/12/11 22:12:53 kettenis Exp $ */
 
 /*
  * Copyright (c) 1987 Carnegie-Mellon University
@@ -147,10 +147,12 @@ extern	struct pmap *const kernel_pmap_ptr;
 #define	pmap_wired_count(pmap)		((pmap)->pm_stats.wired_count)
 #define	pmap_kernel()			(kernel_pmap_ptr)
 
+extern pt_entry_t pg_ri;
+#define PMAP_CHECK_COPYIN		(pg_ri == 0)
+
 #define	PMAP_STEAL_MEMORY		/* Enable 'stealing' during boot */
 
-#define	PMAP_PREFER(pa, va)		pmap_prefer(pa, va)
-
+#define	PMAP_PREFER
 extern vaddr_t pmap_prefer_mask;
 /* pmap prefer alignment */
 #define	PMAP_PREFER_ALIGN()						\
@@ -159,10 +161,11 @@ extern vaddr_t pmap_prefer_mask;
 #define	PMAP_PREFER_OFFSET(of)		((of) & pmap_prefer_mask)
 
 void	pmap_bootstrap(void);
-vaddr_t	pmap_prefer(vaddr_t, vaddr_t);
+int	pmap_copyinsn(pmap_t, vaddr_t, uint32_t *);
 int	pmap_emulate_modify(pmap_t, vaddr_t);
 void	pmap_page_cache(vm_page_t, u_int);
 
+#define pmap_init_percpu()		do { /* nothing */ } while (0)
 #define	pmap_unuse_final(p)		do { /* nothing yet */ } while (0)
 #define	pmap_remove_holes(vm)		do { /* nothing */ } while (0)
 

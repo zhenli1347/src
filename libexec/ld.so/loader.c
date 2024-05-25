@@ -1,4 +1,4 @@
-/*	$OpenBSD: loader.c,v 1.206 2022/12/04 15:55:26 visa Exp $ */
+/*	$OpenBSD: loader.c,v 1.223 2024/01/22 02:08:31 deraadt Exp $ */
 
 /*
  * Copyright (c) 1998 Per Fogelstrom, Opsycon AB
@@ -30,6 +30,7 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/exec.h>
 #ifdef __i386__
 # include <machine/vmparam.h>
@@ -69,6 +70,7 @@ int _dl_trust __relro = 0;
 char **_dl_libpath __relro = NULL;
 const char **_dl_argv __relro = NULL;
 int _dl_argc __relro = 0;
+const char *_dl_libcname;
 
 char *_dl_preload __boot_data = NULL;
 char *_dl_tracefmt1 __boot_data = NULL;
@@ -155,7 +157,7 @@ _dl_run_all_dtors(void)
 		}
 		for (node = _dl_objects;
 		    node != NULL;
-		    node = node->next ) {
+		    node = node->next) {
 			if ((node->dyn.fini || node->dyn.fini_array) &&
 			    (OBJECT_REF_CNT(node) == 0) &&
 			    (node->status & STAT_INIT_DONE) &&
@@ -170,10 +172,9 @@ _dl_run_all_dtors(void)
 			}
 		}
 
-
 		for (node = _dl_objects;
 		    node != NULL;
-		    node = node->next ) {
+		    node = node->next) {
 			if (node->status & STAT_FINI_READY) {
 				fini_complete = 0;
 				node->status |= STAT_FINI_DONE;
@@ -338,7 +339,7 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 			}
 		}
 
-		if ( libcount != 0) {
+		if (libcount != 0) {
 			struct listent {
 				Elf_Dyn *dynp;
 				elf_object_t *depobj;
@@ -357,6 +358,31 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 			    dynp++)
 				if (dynp->d_tag == DT_NEEDED)
 					liblist[loop++].dynp = dynp;
+
+			/*
+			 * We can't support multiple versions of libc
+			 * in a single process.  So remember the first
+			 * libc SONAME we encounter as a dependency
+			 * and use it in further loads of libc.  In
+			 * practice this means we will always use the
+			 * libc version that the binary was linked
+			 * against.  This isn't entirely correct, but
+			 * it will keep most binaries running when
+			 * transitioning over a libc major bump.
+			 */
+			if (_dl_libcname == NULL) {
+				for (loop = 0; loop < libcount; loop++) {
+					const char *libname;
+					libname = dynobj->dyn.strtab;
+					libname +=
+					    liblist[loop].dynp->d_un.d_val;
+					if (_dl_strncmp(libname,
+					    "libc.so.", 8) == 0) {
+						_dl_libcname = libname;
+						break;
+					}
+				}
+			}
 
 			/* Randomize these */
 			for (loop = 0; loop < libcount; loop++)
@@ -380,6 +406,10 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 				    liblist[randomlist[loop]].dynp->d_un.d_val;
 				DL_DEB(("loading: %s required by %s\n", libname,
 				    dynobj->load_name));
+				if (_dl_strncmp(libname, "libc.so.", 8) == 0) {
+					if (_dl_libcname)
+						libname = _dl_libcname;
+				}
 				depobj = _dl_load_shlib(libname, dynobj,
 				    OBJTYPE_LIB, depflags, nodelete);
 				if (depobj == 0) {
@@ -409,7 +439,6 @@ _dl_load_dep_libs(elf_object_t *object, int flags, int booting)
 	}
 
 	_dl_cache_grpsym_list_setup(object);
-
 	return(0);
 }
 
@@ -449,6 +478,29 @@ _dl_self_relro(long loff)
 #define PFLAGS(X) ((((X) & PF_R) ? PROT_READ : 0) | \
 		   (((X) & PF_W) ? PROT_WRITE : 0) | \
 		   (((X) & PF_X) ? PROT_EXEC : 0))
+
+/*
+ * To avoid kbind(2) becoming a powerful gadget, it is called inline to a
+ * function.  Therefore we cannot create a precise pinsyscall label.  Instead
+ * create a duplicate entry to force the kernel's pinsyscall code to skip
+ * validation, rather than labelling it illegal.  kbind(2) remains safe
+ * because it self-protects by checking its calling address.
+ */
+#define __STRINGIFY(x)  #x
+#define STRINGIFY(x)    __STRINGIFY(x)
+#ifdef __arm__
+__asm__(".pushsection .openbsd.syscalls,\"\",%progbits;"
+    ".p2align 2;"
+    ".long 0;"
+    ".long " STRINGIFY(SYS_kbind) ";"
+    ".popsection");
+#else
+__asm__(".pushsection .openbsd.syscalls,\"\",@progbits;"
+    ".p2align 2;"
+    ".long 0;"
+    ".long " STRINGIFY(SYS_kbind) ";"
+    ".popsection");
+#endif
 
 /*
  * This is the dynamic loader entrypoint. When entering here, depending
@@ -625,9 +677,17 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	 */
 	map_link = NULL;
 #ifdef __mips__
-	if (exe_obj->Dyn.info[DT_MIPS_RLD_MAP - DT_LOPROC + DT_NUM] != 0)
-		map_link = (struct r_debug **)(exe_obj->Dyn.info[
-		    DT_MIPS_RLD_MAP - DT_LOPROC + DT_NUM] + exe_loff);
+	for (dynp = exe_obj->load_dyn; dynp->d_tag; dynp++) {
+		if (dynp->d_tag == DT_MIPS_RLD_MAP_REL) {
+			map_link = (struct r_debug **)
+			    (dynp->d_un.d_ptr + (Elf_Addr)dynp);
+			break;
+		} else if (dynp->d_tag == DT_MIPS_RLD_MAP) {
+			map_link = (struct r_debug **)
+			    (dynp->d_un.d_ptr + exe_loff);
+			break;
+		}
+	}
 #endif
 	if (map_link == NULL) {
 		for (dynp = exe_obj->load_dyn; dynp->d_tag; dynp++) {
@@ -677,7 +737,7 @@ _dl_boot(const char **argv, char **envp, const long dyn_loff, long *dl_data)
 	if (_dl_debug || _dl_traceld) {
 		if (_dl_traceld)
 			_dl_pledge("stdio rpath", NULL);
-		_dl_show_objects();
+		_dl_show_objects(NULL);
 	}
 
 	DL_DEB(("dynamic loading done, %s.\n",
@@ -757,7 +817,7 @@ _dl_rtld(elf_object_t *object)
 		}
 	}
 
-	/* 
+	/*
 	 * TEXTREL binaries are loaded without immutable on un-writeable sections.
 	 * After text relocations are finished, these regions can become
 	 * immutable.  OPENBSD_MUTABLE section always overlaps writeable LOADs,
@@ -1010,113 +1070,86 @@ _dl_rreloc(elf_object_t *object)
 }
 
 void
-_dl_defer_immut(struct mutate *m, vaddr_t start, vsize_t len)
+_dl_push_range(struct range_vector *v, vaddr_t s, vaddr_t e)
 {
-	int i;
+	int i = v->count;
 
-	for (i = 0; i < MAXMUT; i++) {
-		if (m[i].valid == 0) {
-//			_dl_printf("%dimut\t%lx-%lx (len %x)\n",
-//			    i, start, start + len, len);
-			m[i].start = start;
-			m[i].end = start + len;
-			m[i].valid = 1;
-			return;
-		}
+	if (i == nitems(v->slice)) {
+		_dl_die("too many ranges");
 	}
-	if (i == MAXMUT)
-		_dl_die("too many _dl_defer_immut");
+	/* Skips the empty ranges (s == e). */
+	if (s < e) {
+		v->slice[i].start = s;
+		v->slice[i].end = e;
+		v->count++;
+	} else if (s > e) {
+		_dl_die("invalid range");
+	}
 }
 
 void
-_dl_defer_mut(struct mutate *m, vaddr_t start, size_t len)
+_dl_push_range_size(struct range_vector *v, vaddr_t s, vsize_t size)
 {
-	int i;
-
-	for (i = 0; i < MAXMUT; i++) {
-		if (m[i].valid == 0) {
-//			_dl_printf("%dmut\t%lx-%lx (len %x)\n",
-//			    i, start, start + len, len);
-			m[i].start = start;
-			m[i].end = start + len;
-			m[i].valid = 1;
-			return;
-		}
-	}
-	if (i == MAXMUT)
-		_dl_die("too many _dl_defer_mut");
+	_dl_push_range(v, s, s + size);
 }
 
+/*
+ * Finds the truly immutable ranges by taking mutable ones out.  Implements
+ * interval difference of imut and mut. Interval splitting necessitates
+ * intermediate storage and complex double buffering.
+ */
 void
 _dl_apply_immutable(elf_object_t *object)
 {
-	struct mutate *m, *im, *imtail;
-	int mut, imut;
-	
+	struct range_vector acc[2];  /* flips out to avoid copying */
+	struct addr_range *m, *im;
+	int i, j, imut, in, out;
+
 	if (object->obj_type != OBJTYPE_LIB)
 		return;
 
-	imtail = &object->imut[MAXMUT - 1];
+	for (imut = 0; imut < object->imut.count; imut++) {
+		im = &object->imut.slice[imut];
+		out = 0;
+		acc[out].count = 0;
+		_dl_push_range(&acc[out], im->start, im->end);
 
-//	_dl_printf("library %s %lx:\n", object->load_name);
-	for (imut = 0; imut < MAXMUT; imut++) {
-		im = &object->imut[imut];
-		if (im->valid == 0)
-			continue;
-
-		for (mut = 0; mut < MAXMUT; mut++) {
-			m = &object->mut[mut];
-			if (m->valid == 0)
-				continue;
-//			_dl_printf("- mut%d %lx-%lx (%x) from imut%d %lx-%lx (%x): ",
-//			    mut, m->start, m->end, m->end - m->start,
-//			    imut, im->start, im->end, im->end - im->start);
-			if (m->start <= im->start) {
-				if (m->end < im->start) {
-//					_dl_printf("before ignored");
+		for (i = 0; i < object->mut.count; i++) {
+			m = &object->mut.slice[i];
+			in = out;
+			out = 1 - in;
+			acc[out].count = 0;
+			for (j = 0; j < acc[in].count; j++) {
+				const vaddr_t ms = m->start, me = m->end;
+				const vaddr_t is = acc[in].slice[j].start,
+				    ie = acc[in].slice[j].end;
+				if (ie <= ms || me <= is) {
+					/* is .. ie .. ms .. me -> is .. ie */
+					/* ms .. me .. is .. ie -> is .. ie */
+					_dl_push_range(&acc[out], is, ie);
+				} else if (ms <= is && ie <= me) {
+					/* PROVIDED: ms < ie && is < me */
+					/* ms .. is .. ie .. me -> [] */
 					;
-				} else if (m->end >= im->end) {
-					im->start = im->end = im->valid = 0;
-//					_dl_printf("whole: %lx-%lx", im->start, im->end);
+				} else if (ie <= me) {
+					/* is .. ms .. ie .. me -> is .. ms */
+					_dl_push_range(&acc[out], is, ms);
+				} else if (is < ms) {
+					/* is .. ms .. me .. ie -> is .. ms */
+					_dl_push_range(&acc[out], is, ms);
+					_dl_push_range(&acc[out], me, ie);
 				} else {
-					im->start = m->end;
-//					_dl_printf("early: %lx-%lx", im->start, im->end);
-				}
-			} else if (m->start > im->start) {
-				if (m->end > im->end) {
-//					_dl_printf("after ignored");
-					;
-				} else if (m->end == im->end) {
-					im->end = m->start;
-//					_dl_printf("end: %lx-%lx", im->start, im->end);
-				} else if (m->end < im->end) {
-					imtail->start = im->start;
-					imtail->end = m->start;
-					imtail->valid = 1;
-					imtail--;
-					imtail->start = m->end;
-					imtail->end = im->end;
-					imtail->valid = 1;
-					imtail--;
-					im->start = im->end = im->valid = 0;
-//					_dl_printf("split %lx-%lx %lx-%lx",
-//					    imtail[1].start, imtail[1].end,
-//					    imtail[2].start, imtail[2].end);
+					/* ms .. is .. me .. ie -> me .. ie */
+					_dl_push_range(&acc[out], me, ie);
 				}
 			}
-//			_dl_printf("\n");
 		}
-	}
 
-	/* and now, install immutability for objects */
-	for (imut = 0; imut < MAXMUT; imut++) {
-		im = &object->imut[imut];
-		if (im->valid == 0)
-			continue;
-//		_dl_printf("IMUT %s %lx-%lx (len %x) (%lx,%lx) [%lx,%lx]\n",
-//		    object->load_name, im->start, im->end, im->end - im->start,
-//		    (void *)im->start, (void *)im->end,
-//		    (void *)im->start, im->end - im->start);
-		_dl_mimmutable((void *)im->start, im->end - im->start);
+		/* and now, install immutability for objects */
+		for (i = 0; i < acc[out].count; i++) {
+			const struct addr_range *ar = &acc[out].slice[i];
+			_dl_mimmutable((void *)ar->start, ar->end - ar->start);
+		}
+
 	}
 }

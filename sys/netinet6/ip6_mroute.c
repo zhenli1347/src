@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_mroute.c,v 1.135 2022/09/08 10:22:07 kn Exp $	*/
+/*	$OpenBSD: ip6_mroute.c,v 1.141 2024/04/06 14:23:27 bluhm Exp $	*/
 /*	$NetBSD: ip6_mroute.c,v 1.59 2003/12/10 09:28:38 itojun Exp $	*/
 /*	$KAME: ip6_mroute.c,v 1.45 2001/03/25 08:38:51 itojun Exp $	*/
 
@@ -245,6 +245,8 @@ mrt6_ioctl(struct socket *so, u_long cmd, caddr_t data)
 	if (inp == NULL)
 		return (ENOTCONN);
 
+	KERNEL_LOCK();
+
 	switch (cmd) {
 	case SIOCGETSGCNT_IN6:
 		NET_LOCK_SHARED();
@@ -262,6 +264,8 @@ mrt6_ioctl(struct socket *so, u_long cmd, caddr_t data)
 		error = ENOTTY;
 		break;
 	}
+
+	KERNEL_UNLOCK();
 	return error;
 }
 
@@ -402,8 +406,9 @@ mrt6_rtwalk_mf6csysctl(struct rtentry *rt, void *arg, unsigned int rtableid)
 	}
 
 	for (minfo = msa->ms6a_minfos;
-	     (uint8_t *)minfo < ((uint8_t *)msa->ms6a_minfos + msa->ms6a_len);
-	     minfo++) {
+	    (uint8_t *)(minfo + 1) <=
+	    (uint8_t *)msa->ms6a_minfos + msa->ms6a_len;
+	    minfo++) {
 		/* Find a new entry or update old entry. */
 		if (!IN6_ARE_ADDR_EQUAL(&minfo->mf6c_origin.sin6_addr,
 		    &satosin6(rt->rt_gateway)->sin6_addr) ||
@@ -445,13 +450,11 @@ mrt6_sysctl_mfc(void *oldp, size_t *oldlenp)
 	if (oldp != NULL && *oldlenp > MAXPHYS)
 		return EINVAL;
 
-	if (oldp != NULL)
+	memset(&msa, 0, sizeof(msa));
+	if (oldp != NULL && *oldlenp > 0) {
 		msa.ms6a_minfos = malloc(*oldlenp, M_TEMP, M_WAITOK | M_ZERO);
-	else
-		msa.ms6a_minfos = NULL;
-
-	msa.ms6a_len = *oldlenp;
-	msa.ms6a_needed = 0;
+		msa.ms6a_len = *oldlenp;
+	}
 
 	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++) {
 		rtable_walk(rtableid, AF_INET6, NULL, mrt6_rtwalk_mf6csysctl,
@@ -460,11 +463,11 @@ mrt6_sysctl_mfc(void *oldp, size_t *oldlenp)
 
 	if (msa.ms6a_minfos != NULL && msa.ms6a_needed > 0 &&
 	    (error = copyout(msa.ms6a_minfos, oldp, msa.ms6a_needed)) != 0) {
-		free(msa.ms6a_minfos, M_TEMP, *oldlenp);
+		free(msa.ms6a_minfos, M_TEMP, msa.ms6a_len);
 		return error;
 	}
 
-	free(msa.ms6a_minfos, M_TEMP, *oldlenp);
+	free(msa.ms6a_minfos, M_TEMP, msa.ms6a_len);
 	*oldlenp = msa.ms6a_needed;
 
 	return 0;
@@ -606,7 +609,9 @@ add_m6if(struct socket *so, struct mif6ctl *mifcp)
 		memset(&ifr, 0, sizeof(ifr));
 		ifr.ifr_addr.sin6_family = AF_INET6;
 		ifr.ifr_addr.sin6_addr = in6addr_any;
+		KERNEL_LOCK();
 		error = (*ifp->if_ioctl)(ifp, SIOCADDMULTI, (caddr_t)&ifr);
+		KERNEL_UNLOCK();
 
 		if (error) {
 			if_put(ifp);
@@ -847,11 +852,17 @@ del_m6fc(struct socket *so, struct mf6cctl *mfccp)
 }
 
 int
-socket6_send(struct socket *s, struct mbuf *mm, struct sockaddr_in6 *src)
+socket6_send(struct socket *so, struct mbuf *mm, struct sockaddr_in6 *src)
 {
-	if (s) {
-		if (sbappendaddr(s, &s->so_rcv, sin6tosa(src), mm, NULL) != 0) {
-			sorwakeup(s);
+	if (so != NULL) {
+		int ret;
+
+		mtx_enter(&so->so_rcv.sb_mtx);
+		ret = sbappendaddr(so, &so->so_rcv, sin6tosa(src), mm, NULL);
+		mtx_leave(&so->so_rcv.sb_mtx);
+
+		if (ret != 0) {
+			sorwakeup(so);
 			return 0;
 		}
 	}

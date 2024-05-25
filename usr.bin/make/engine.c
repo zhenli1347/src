@@ -1,4 +1,4 @@
-/*	$OpenBSD: engine.c,v 1.70 2021/10/25 19:54:29 kn Exp $ */
+/*	$OpenBSD: engine.c,v 1.74 2024/04/09 15:08:21 cheloha Exp $ */
 /*
  * Copyright (c) 2012 Marc Espie.
  *
@@ -73,8 +73,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "config.h"
 #include "defines.h"
+#include "cmd_exec.h"
 #include "dir.h"
 #include "engine.h"
 #include "arch.h"
@@ -84,10 +84,10 @@
 #include "extern.h"
 #include "lst.h"
 #include "timestamp.h"
+#include "main.h"
 #include "make.h"
 #include "pathnames.h"
 #include "error.h"
-#include "str.h"
 #include "memory.h"
 #include "buf.h"
 #include "job.h"
@@ -95,9 +95,6 @@
 
 static void MakeTimeStamp(void *, void *);
 static int rewrite_time(const char *);
-static void setup_meta(void);
-static void setup_engine(void);
-static char **recheck_command_for_shell(char **);
 static void list_parents(GNode *, FILE *);
 
 /* XXX due to a bug in make's logic, targets looking like *.a or -l*
@@ -210,6 +207,7 @@ node_failure(GNode *gn)
 		fflush(stdout);
 	else {
 		print_errors();
+		dump_unreadable();
 		Punt(NULL);
 	}
 }
@@ -264,7 +262,7 @@ Job_Touch(GNode *gn)
 	} else {
 		const char *file = gn->path != NULL ? gn->path : gn->name;
 
-		if (set_times(file) == -1){
+		if (utimes(file, NULL) == -1){
 			if (rewrite_time(file) == -1) {
 				(void)fprintf(stderr,
 				    "*** couldn't touch %s: %s", file,
@@ -506,88 +504,6 @@ Make_OODate(GNode *gn)
 	return oodate;
 }
 
-/* The following array is used to make a fast determination of which
- * characters are interpreted specially by the shell.  If a command
- * contains any of these characters, it is executed by the shell, not
- * directly by us.  */
-static char	    meta[256];
-
-void
-setup_meta(void)
-{
-	char *p;
-
-	for (p = "#=|^(){};&<>*?[]:$`\\\n~"; *p != '\0'; p++)
-		meta[(unsigned char) *p] = 1;
-	/* The null character serves as a sentinel in the string.  */
-	meta[0] = 1;
-}
-
-static char **
-recheck_command_for_shell(char **av)
-{
-	char *runsh[] = {
-		"!", "alias", "cd", "eval", "exit", "read", "set", "ulimit",
-		"unalias", "unset", "wait", "umask", NULL
-	};
-
-	char **p;
-
-	/* optimization: if exec cmd, we avoid the intermediate shell */
-	if (strcmp(av[0], "exec") == 0)
-		av++;
-
-	if (!av[0])
-		return NULL;
-
-	for (p = runsh; *p; p++)
-		if (strcmp(av[0], *p) == 0)
-			return NULL;
-
-	return av;
-}
-
-static void
-run_command(const char *cmd, bool errCheck)
-{
-	const char *p;
-	char *shargv[4];
-	char **todo;
-
-	shargv[0] = _PATH_BSHELL;
-
-	shargv[1] = errCheck ? "-ec" : "-c";
-	shargv[2] = (char *)cmd;
-	shargv[3] = NULL;
-
-	todo = shargv;
-
-
-	/* Search for meta characters in the command. If there are no meta
-	 * characters, there's no need to execute a shell to execute the
-	 * command.  */
-	for (p = cmd; !meta[(unsigned char)*p]; p++)
-		continue;
-	if (*p == '\0') {
-		char *bp;
-		char **av;
-		int argc;
-		/* No meta-characters, so probably no need to exec a shell.
-		 * Break the command into words to form an argument vector
-		 * we can execute.  */
-		av = brk_string(cmd, &argc, &bp);
-		av = recheck_command_for_shell(av);
-		if (av != NULL)
-			todo = av;
-	}
-	execvp(todo[0], todo);
-
-	if (errno == ENOENT)
-		fprintf(stderr, "%s: not found\n", todo[0]);
-	else
-		perror(todo[0]);
-	_exit(1);
-}
 
 void
 job_attach_node(Job *job, GNode *node)
@@ -694,17 +610,6 @@ run_gnode(GNode *gn)
 }
 
 
-static void
-setup_engine(void)
-{
-	static int already_setup = 0;
-
-	if (!already_setup) {
-		setup_meta();
-		already_setup = 1;
-	}
-}
-
 static bool
 do_run_command(Job *job, const char *pre)
 {
@@ -797,7 +702,6 @@ job_run_next(Job *job)
 	bool started;
 	GNode *gn = job->node;
 
-	setup_engine();
 	while (job->next_cmd != NULL) {
 		struct command *command = Lst_Datum(job->next_cmd);
 

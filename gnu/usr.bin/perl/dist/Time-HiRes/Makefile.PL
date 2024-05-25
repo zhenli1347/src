@@ -68,11 +68,20 @@ __EOD__
             }
         }
 
-        my $ccflags = $Config{'ccflags'} . ' ' . "-I$COREincdir"
-         . ' -DPERL_NO_INLINE_FUNCTIONS';
+        my $ccflags = $Config{'ccflags'} . ' ';
+        my @osvers = split /\./, $Config{osvers};
+        if ($^O eq "darwin"
+            && $^X eq "/usr/bin/perl"
+            && $osvers[0] >= 18) {
+            $ccflags .= qq(-iwithsysroot "$COREincdir");
+        }
+        else {
+            $ccflags .= "-I$COREincdir"
+        }
+        $ccflags .= ' -DPERL_NO_INLINE_FUNCTIONS';
 
         if ($^O eq 'VMS') {
-            $cccmd = "$Config{'cc'} /include=($COREincdir) $tmp.c";
+            $cccmd = "$Config{'cc'} $Config{'ccflags'} /include=($COREincdir) $tmp.c";
         }
 
         if ($args{silent} || !$VERBOSE) {
@@ -562,7 +571,10 @@ EOD
     my $has_clock_gettime;
     my $has_clock_gettime_emulation;
     if (exists $Config{d_clock_gettime}) {
-        $has_clock_gettime++ if $Config{d_clock_gettime}; # Unlikely...
+        if ($Config{d_clock_gettime}) { # possibly set for cross-compilation
+            $has_clock_gettime++;
+            $DEFINE .= ' -DTIME_HIRES_CLOCK_GETTIME';
+        }
     } elsif (has_clock_xxx('gettime')) {
         $has_clock_gettime++;
         $DEFINE .= ' -DTIME_HIRES_CLOCK_GETTIME';
@@ -591,7 +603,10 @@ EOD
     my $has_clock_getres;
     my $has_clock_getres_emulation;
     if (exists $Config{d_clock_getres}) {
-        $has_clock_getres++ if $Config{d_clock_getres}; # Unlikely...
+        if ($Config{d_clock_getres}) { # possibly set for cross-compilation
+            $has_clock_getres++;
+            $DEFINE .= ' -DTIME_HIRES_CLOCK_GETRES';
+        }
     } elsif (has_clock_xxx('getres')) {
         $has_clock_getres++;
         $DEFINE .= ' -DTIME_HIRES_CLOCK_GETRES';
@@ -620,7 +635,10 @@ EOD
     my $has_clock_nanosleep;
     my $has_clock_nanosleep_emulation;
     if (exists $Config{d_clock_nanosleep}) {
-        $has_clock_nanosleep++ if $Config{d_clock_nanosleep}; # Unlikely...
+        if ($Config{d_clock_nanosleep}) { # possibly set for cross-compilation
+            $has_clock_nanosleep++;
+            $DEFINE .= ' -DTIME_HIRES_CLOCK_NANOSLEEP';
+        }
     } elsif (has_clock_nanosleep()) {
         $has_clock_nanosleep++;
         $DEFINE .= ' -DTIME_HIRES_CLOCK_NANOSLEEP';
@@ -643,7 +661,10 @@ EOD
     print "Looking for clock()... ";
     my $has_clock;
     if (exists $Config{d_clock}) {
-        $has_clock++ if $Config{d_clock}; # Unlikely...
+        if ($Config{d_clock}) { # possibly set for cross-compilation
+            $has_clock++;
+            $DEFINE .= ' -DTIME_HIRES_CLOCK';
+        }
     } elsif (has_clock()) {
         $has_clock++;
         $DEFINE .= ' -DTIME_HIRES_CLOCK';
@@ -829,6 +850,11 @@ EOM
             print "NOT found.\n";
         }
     }
+    if ($^O eq "darwin") {
+        # the system perl on darwin doesn't seem to include -DPERL_DARWIN
+        # which breaks setting up emulation
+        DEFINE("PERL_DARWIN");
+    }
 
     if ($DEFINE) {
         $DEFINE =~ s/^\s+//;
@@ -841,8 +867,6 @@ EOM
 
 sub doMakefile {
     my @makefileopts = ();
-
-    DEFINE('USE_PPPORT_H') unless $ENV{PERL_CORE};
 
     push (@makefileopts,
         'NAME'  => 'Time::HiRes',
@@ -861,7 +885,7 @@ sub doMakefile {
             'Config' => 0,
             'Exporter' => 0,
             'ExtUtils::MakeMaker' => 0,
-            'Test::More' => 0,
+            'Test::More' => 0.84,
             'XSLoader' => 0,
             'strict' => 0,
             'File::Spec' => 0,
@@ -912,9 +936,9 @@ sub doMakefile {
         push @makefileopts, (
             META_MERGE => {
                 resources => {
-                    repository => 'git://perl5.git.perl.org/perl.git',
-                    bugtracker => 'https://rt.perl.org/rt3/',
-                    homepage   => "http://dev.perl.org/",
+                    repository => 'https://github.com/Perl/perl5.git',
+                    bugtracker => 'https://github.com/Perl/perl5/issues',
+                    homepage   => "https://github.com/Perl/perl5",
                 },
             },
         )

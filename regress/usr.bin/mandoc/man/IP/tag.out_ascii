@@ -1,19 +1,27 @@
 IP-TAG(1)                   General Commands Manual                  IP-TAG(1)
 
 NNAAMMEE
-       IP-tag - automatic tagging of indented blocks
+     IP-tag - automatic tagging of indented blocks
 
 DDEESSCCRRIIPPTTIIOONN
-       BEGINTEST initial text
+     BEGINTEST initial text
 
-        strong   text
+      strong   text
 
-       -strong   text
+     -strong   text
 
-        _-_w_e_a_k    text
+      _-_w_e_a_k    text
 
-        strong   text
+     hyphen-minus
+               text
 
-       ENDTEST
+     minus-sign
+               text
 
-OpenBSD                         March 10, 2020                       IP-TAG(1)
+     -strong   text
+
+      strong   text
+
+     ENDTEST
+
+OpenBSD                        November 24, 2023                     IP-TAG(1)

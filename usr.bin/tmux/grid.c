@@ -1,4 +1,4 @@
-/* $OpenBSD: grid.c,v 1.127 2022/09/28 07:55:29 nicm Exp $ */
+/* $OpenBSD: grid.c,v 1.130 2023/07/13 06:03:48 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -37,7 +37,7 @@
 
 /* Default grid cell data. */
 const struct grid_cell grid_default_cell = {
-	{ { ' ' }, 0, 1, 1 }, 0, 0, 8, 8, 0, 0
+	{ { ' ' }, 0, 1, 1 }, 0, 0, 8, 8, 8, 0
 };
 
 /*
@@ -45,15 +45,15 @@ const struct grid_cell grid_default_cell = {
  * appears in the grid - because of this, they are always extended cells.
  */
 static const struct grid_cell grid_padding_cell = {
-	{ { '!' }, 0, 0, 0 }, 0, GRID_FLAG_PADDING, 8, 8, 0, 0
+	{ { '!' }, 0, 0, 0 }, 0, GRID_FLAG_PADDING, 8, 8, 8, 0
 };
 
 /* Cleared grid cell data. */
 static const struct grid_cell grid_cleared_cell = {
-	{ { ' ' }, 0, 1, 1 }, 0, GRID_FLAG_CLEARED, 8, 8, 0, 0
+	{ { ' ' }, 0, 1, 1 }, 0, GRID_FLAG_CLEARED, 8, 8, 8, 0
 };
 static const struct grid_cell_entry grid_cleared_entry = {
-	GRID_FLAG_CLEARED, { .data = { 0, 8, 8, ' ' } }
+	{ .data = { 0, 8, 8, ' ' } }, GRID_FLAG_CLEARED
 };
 
 /* Store cell in entry. */
@@ -528,7 +528,7 @@ grid_get_cell1(struct grid_line *gl, u_int px, struct grid_cell *gc)
 	gc->bg = gce->data.bg;
 	if (gce->flags & GRID_FLAG_BG256)
 		gc->bg |= COLOUR_FLAG_256;
-	gc->us = 0;
+	gc->us = 8;
 	utf8_set(&gc->data, gce->data.data);
 	gc->link = 0;
 }
@@ -956,7 +956,7 @@ grid_string_cells_code(const struct grid_cell *lastgc,
 	for (i = 0; i < nitems(attrs); i++) {
 		if (((~attr & attrs[i].mask) &&
 		    (lastattr & attrs[i].mask)) ||
-		    (lastgc->us != 0 && gc->us == 0)) {
+		    (lastgc->us != 8 && gc->us == 8)) {
 			s[n++] = 0;
 			lastattr &= GRID_ATTR_CHARSET;
 			break;
@@ -1044,7 +1044,8 @@ grid_string_cells(struct grid *gd, u_int px, u_int py, u_int nx,
 	const char		*data;
 	char			*buf, code[8192];
 	size_t			 len, off, size, codelen;
-	u_int			 xx, has_link = 0, end;
+	u_int			 xx, end;
+	int			 has_link = 0;
 	const struct grid_line	*gl;
 
 	if (lastgc != NULL && *lastgc == NULL) {

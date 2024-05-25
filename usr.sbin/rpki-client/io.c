@@ -1,4 +1,4 @@
-/*	$OpenBSD: io.c,v 1.21 2022/11/29 20:26:22 job Exp $ */
+/*	$OpenBSD: io.c,v 1.24 2023/12/12 15:54:18 claudio Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -41,7 +41,7 @@ io_new_buffer(void)
 
 	if ((b = ibuf_dynamic(64, INT32_MAX)) == NULL)
 		err(1, NULL);
-	ibuf_reserve(b, sizeof(size_t));	/* can not fail */
+	ibuf_add_zero(b, sizeof(size_t));	/* can not fail */
 	return b;
 }
 
@@ -88,7 +88,7 @@ io_close_buffer(struct msgbuf *msgbuf, struct ibuf *b)
 	size_t len;
 
 	len = ibuf_size(b) - sizeof(len);
-	memcpy(ibuf_seek(b, 0, sizeof(len)), &len, sizeof(len));
+	ibuf_set(b, 0, &len, sizeof(len));
 	ibuf_close(msgbuf, b);
 }
 
@@ -100,15 +100,10 @@ io_close_buffer(struct msgbuf *msgbuf, struct ibuf *b)
 void
 io_read_buf(struct ibuf *b, void *res, size_t sz)
 {
-	char	*tmp;
-
 	if (sz == 0)
 		return;
-	tmp = ibuf_seek(b, b->rpos, sz);
-	if (tmp == NULL)
-		errx(1, "bad internal framing, buffer too short");
-	b->rpos += sz;
-	memcpy(res, tmp, sz);
+	if (ibuf_get(b, res, sz) == -1)
+		err(1, "bad internal framing");
 }
 
 /*
@@ -189,10 +184,13 @@ io_buf_read(int fd, struct ibuf **ib)
 		*ib = b;
 	}
 
+ again:
 	/* read some data */
 	while ((n = read(fd, b->buf + b->wpos, b->size - b->wpos)) == -1) {
 		if (errno == EINTR)
 			continue;
+		if (errno == EAGAIN)
+			return NULL;
 		err(1, "read");
 	}
 
@@ -209,7 +207,7 @@ io_buf_read(int fd, struct ibuf **ib)
 				errx(1, "bad internal framing, bad size");
 			if (ibuf_realloc(b, sz) == -1)
 				err(1, "ibuf_realloc");
-			return NULL;
+			goto again;
 		}
 
 		/* skip over initial size header */
@@ -277,7 +275,7 @@ io_buf_recvfd(int fd, struct ibuf **ib)
 			for (i = 0; i < j; i++) {
 				f = ((int *)CMSG_DATA(cmsg))[i];
 				if (i == 0)
-					b->fd = f;
+					ibuf_fd_set(b, f);
 				else
 					close(f);
 			}

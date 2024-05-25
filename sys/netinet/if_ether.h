@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ether.h,v 1.83 2021/07/07 20:19:01 sashan Exp $	*/
+/*	$OpenBSD: if_ether.h,v 1.92 2024/02/14 22:41:48 bluhm Exp $	*/
 /*	$NetBSD: if_ether.h,v 1.22 1996/05/11 13:00:00 mycroft Exp $	*/
 
 /*
@@ -181,6 +181,9 @@ struct sockaddr_inarp {
 #define	RTF_PERMANENT_ARP RTF_PROTO3    /* only manual overwrite of entry */
 
 #ifdef _KERNEL
+
+#include <sys/refcnt.h>
+
 /*
  * Macro to map an IP multicast address to an Ethernet multicast address.
  * The high-order 25 bits of the Ethernet address are statically assigned,
@@ -271,7 +274,7 @@ void	arp_rtrequest(struct ifnet *, int, struct rtentry *);
 void	ether_fakeaddr(struct ifnet *);
 int	ether_addmulti(struct ifreq *, struct arpcom *);
 int	ether_delmulti(struct ifreq *, struct arpcom *);
-int	ether_multiaddr(struct sockaddr *, u_int8_t[], u_int8_t[]);
+int	ether_multiaddr(struct sockaddr *, u_int8_t *, u_int8_t *);
 void	ether_ifattach(struct ifnet *);
 void	ether_ifdetach(struct ifnet *);
 int	ether_ioctl(struct ifnet *, struct arpcom *, u_long, caddr_t);
@@ -297,6 +300,21 @@ const struct ether_brport *
 uint64_t	ether_addr_to_e64(const struct ether_addr *);
 void		ether_e64_to_addr(struct ether_addr *, uint64_t);
 
+struct ether_extracted {
+	struct ether_header		*eh;
+	struct ether_vlan_header	*evh;
+	struct ip			*ip4;
+	struct ip6_hdr			*ip6;
+	struct tcphdr			*tcp;
+	struct udphdr			*udp;
+	u_int				 iplen;
+	u_int				 iphlen;
+	u_int				 tcphlen;
+	u_int				 paylen;
+};
+
+void ether_extract_headers(struct mbuf *, struct ether_extracted *);
+
 /*
  * Ethernet multicast address structure.  There is one of these for each
  * multicast address or range of multicast addresses that we are supposed
@@ -308,7 +326,7 @@ void		ether_e64_to_addr(struct ether_addr *, uint64_t);
 struct ether_multi {
 	u_int8_t enm_addrlo[ETHER_ADDR_LEN]; /* low  or only address of range */
 	u_int8_t enm_addrhi[ETHER_ADDR_LEN]; /* high or only address of range */
-	u_int	 enm_refcount;		/* no. claims to this addr/range */
+	struct refcnt enm_refcnt;		/* no. claims to this addr/range */
 	LIST_ENTRY(ether_multi) enm_list;
 };
 

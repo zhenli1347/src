@@ -1,4 +1,4 @@
-/*	$OpenBSD: vfs_subr.c,v 1.317 2022/08/14 01:58:28 jsg Exp $	*/
+/*	$OpenBSD: vfs_subr.c,v 1.319 2024/02/03 18:51:58 beck Exp $	*/
 /*	$NetBSD: vfs_subr.c,v 1.53 1996/04/22 01:39:13 christos Exp $	*/
 
 /*
@@ -270,8 +270,8 @@ vfs_rootmountalloc(char *fstypename, char *devname, struct mount **mpp)
 	mp = vfs_mount_alloc(NULLVP, vfsp);
 	mp->mnt_flag |= MNT_RDONLY;
 	mp->mnt_stat.f_mntonname[0] = '/';
-	copystr(devname, mp->mnt_stat.f_mntfromname, MNAMELEN, NULL);
-	copystr(devname, mp->mnt_stat.f_mntfromspec, MNAMELEN, NULL);
+	strlcpy(mp->mnt_stat.f_mntfromname, devname, MNAMELEN);
+	strlcpy(mp->mnt_stat.f_mntfromspec, devname, MNAMELEN);
 	*mpp = mp;
 	return (0);
  }
@@ -1819,6 +1819,10 @@ vfs_syncwait(struct proc *p, int verbose)
 			 * With soft updates, some buffers that are
 			 * written will be remarked as dirty until other
 			 * buffers are written.
+			 *
+			 * XXX here be dragons. this should really go away
+			 * but should be carefully made to go away on it's
+			 * own with testing.. XXX
 			 */
 			if (bp->b_flags & B_DELWRI) {
 				s = splbio();
@@ -2249,18 +2253,14 @@ vfs_buf_print(void *b, int full,
 	    bp->b_proc, bp->b_error, bp->b_flags, B_BITS);
 
 	(*pr)("  bufsize 0x%lx bcount 0x%lx resid 0x%lx\n"
-	      "  data %p saveaddr %p dep %p iodone %p\n",
+	      "  data %p saveaddr %p iodone %p\n",
 	    bp->b_bufsize, bp->b_bcount, (long)bp->b_resid,
 	    bp->b_data, bp->b_saveaddr,
-	    LIST_FIRST(&bp->b_dep), bp->b_iodone);
+	    bp->b_iodone);
 
 	(*pr)("  dirty {off 0x%x end 0x%x} valid {off 0x%x end 0x%x}\n",
 	    bp->b_dirtyoff, bp->b_dirtyend, bp->b_validoff, bp->b_validend);
 
-#ifdef FFS_SOFTUPDATES
-	if (full)
-		softdep_print(bp, full, pr);
-#endif
 }
 
 const char *vtypes[] = { VTYPE_NAMES };

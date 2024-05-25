@@ -35,7 +35,7 @@ extern "C" {
 #endif
 
 #define PERL_BITS_PER_BYTE	8
-#define	PERL_NFDBITS		(sizeof(Perl_fd_mask)*PERL_BITS_PER_BYTE)
+#define PERL_NFDBITS            (sizeof(Perl_fd_mask)*PERL_BITS_PER_BYTE)
 
 typedef int			Perl_fd_mask;
 
@@ -73,7 +73,7 @@ int win32_recv (SOCKET s, char * buf, int len, int flags);
 int win32_recvfrom (SOCKET s, char * buf, int len, int flags,
                          struct sockaddr *from, int * fromlen);
 int win32_select (int nfds, Perl_fd_set *rfds, Perl_fd_set *wfds, Perl_fd_set *xfds,
-		  const struct timeval *timeout);
+                  const struct timeval *timeout);
 int win32_send (SOCKET s, const char * buf, int len, int flags);
 int win32_sendto (SOCKET s, const char * buf, int len, int flags,
                        const struct sockaddr *to, int tolen);

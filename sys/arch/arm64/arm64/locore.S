@@ -1,4 +1,4 @@
-/* $OpenBSD: locore.S,v 1.41 2022/12/08 01:25:44 guenther Exp $ */
+/* $OpenBSD: locore.S,v 1.46 2024/03/16 20:46:28 kettenis Exp $ */
 /*-
  * Copyright (c) 2012-2014 Andrew Turner
  * All rights reserved.
@@ -35,7 +35,6 @@
 #include <machine/param.h>
 
 #define	VIRT_BITS	39
-#define	NUM_L1_TTBR0	2
 
 /*
  * If we are started in EL2, configure the required hypervisor
@@ -58,6 +57,7 @@ drop_to_el1:
 
 	/* Configure the Hypervisor */
 	mov	x2, #(HCR_RW)
+	orr	x2, x2, #(HCR_API | HCR_APK)
 	msr	hcr_el2, x2
 
 	/* Load the Virtualization Process ID Register */
@@ -280,33 +280,33 @@ data_align_pad:
 	.space 32
 	.align 12 /* 4KiB aligned */
 	/*
-	 * 3 initial tables (in the following order):
+	 * 5 initial tables (in the following order):
 	 *           L2 for kernel (High addresses)
 	 *           L1 for kernel
-	 *           L1 for user   (Low addresses)
+	 *           L2 for identity map (Low addresses)
+	 *           L1 for identity map
+	 *           L0 for identity map
+	 *
+	 * The kernel L2 and identity map L1 and L2 tables contain two
+	 * pages each such that we can map a 64MB region that straddles
+	 * 1GB or 512GB (in the case of the identity map) boundary.
 	 */
 	.globl	pagetable
 pagetable:
-	.space	PAGE_SIZE * 2	// allocate 2 pages for pmapvp2
+pagetable_l2_ttbr1:
+	.space	PAGE_SIZE * 2
 pagetable_l1_ttbr1:
-	.space	PAGE_SIZE * 2	// allocate 2 pages for pmapvp1
-	.globl pagetable_l1_ttbr0
+	.space	PAGE_SIZE
+pagetable_l2_ttbr0:
+	.space	PAGE_SIZE * 2
 pagetable_l1_ttbr0:
-	.space	PAGE_SIZE * NUM_L1_TTBR0
+	.space	PAGE_SIZE * 2
 	.globl pagetable_l0_ttbr0
 pagetable_l0_ttbr0:
 	.space	PAGE_SIZE
 	.globl	pagetable_end
 pagetable_end:
-	.globl pagetable_l1_ttbr0_pa
-pagetable_l1_ttbr0_pa:
-	.xword	0
-	.globl pagetable_l1_ttbr0_num
-pagetable_l1_ttbr0_num:
-	.xword	NUM_L1_TTBR0
-	.globl pagetable_l1_ttbr0_idx
-pagetable_l1_ttbr0_idx: /* uint64_t[NUM_L1_TTBR0] */
-	.fill	NUM_L1_TTBR0 * 8, 1, 0xff
+
 	.bss
 	.align	4
 	.globl initstack
@@ -366,21 +366,17 @@ sigcode:
 	add	x0, x0, #SF_SC
 
 	mov	x8, #SYS_sigreturn
+	.globl sigcodecall
+sigcodecall:
 	svc	0
 	dsb	nsh
 	isb
 	.globl  sigcoderet
 sigcoderet:
-
-	/* sigreturn failed, exit */
-	mov	x8, #SYS_exit
-	svc	0
-	dsb	nsh
-	isb
 END(sigcode)
 	.global esigcode
 esigcode:
-
+	/* FALLTHROUGH */
 	.globl	sigfill
 sigfill:
 	udf	#0
@@ -394,6 +390,12 @@ sigfillsiz:
 	.text
 
 #ifdef MULTIPROCESSOR
+	.globl cpu_hatch_secondary_spin
+cpu_hatch_secondary_spin:
+	/* Fetch physical address of CPU info */
+	adrp	x0, cpu_hatch_ci
+	ldr	x0, [x0, :lo12:cpu_hatch_ci]	
+
 	.globl cpu_hatch_secondary
 cpu_hatch_secondary:
 	/* Drop to EL1 */
@@ -403,10 +405,6 @@ cpu_hatch_secondary:
 	bl	get_virt_delta
 
 	/* Set up CPU info */
-	adr	x0, .Lcpu_hatch_ci
-	ldr	x0, [x0]
-	sub	x0, x0, x29
-	ldr	x0, [x0]
 	ldr	x1, [x0, #CI_SELF]
 	msr	tpidr_el1, x1
 
@@ -429,8 +427,6 @@ cpu_hatch_secondary:
 	.align 3
 .Lcpu_init_secondary:
 	.xword	cpu_init_secondary
-.Lcpu_hatch_ci:
-	.xword	cpu_hatch_ci
 
 	.data
 	.align 3

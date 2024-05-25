@@ -1,5 +1,5 @@
 /*
- * $OpenBSD: util.c,v 1.3 2021/09/02 20:57:58 deraadt Exp $
+ * $OpenBSD: util.c,v 1.5 2023/04/19 12:34:23 jsg Exp $
  * Copyright (c) 2002 Institute for Open Systems Technology Australia (IFOST)
  * Copyright (c) 2007 Michael Erdely <merdely@openbsd.org>
  * Copyright (c) 2019 Martijn van Duren <martijn@openbsd.org>
@@ -30,7 +30,6 @@
  */
 
 #include <sys/socket.h>
-#include <limits.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -64,7 +63,7 @@ dlog(int d, char *fmt, ...)
 	va_list ap;
 
 	/*
-	 * if debugging is on, print everthing to stderr
+	 * if debugging is on, print everything to stderr
 	 * otherwise, syslog it if d = 0. messing with
 	 * newlines means there wont be newlines in stuff
 	 * that goes to syslog.

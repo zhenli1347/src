@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_wg.c,v 1.26 2022/07/21 11:26:50 kn Exp $ */
+/*	$OpenBSD: if_wg.c,v 1.38 2024/04/09 12:53:08 claudio Exp $ */
 
 /*
  * Copyright (C) 2015-2020 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
@@ -42,6 +42,7 @@
 #include <net/pfvar.h>
 #include <net/route.h>
 #include <net/bpf.h>
+#include <net/art.h>
 
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
@@ -150,8 +151,8 @@ struct wg_index {
 };
 
 struct wg_timers {
-	/* t_lock is for blocking wg_timers_event_* when setting t_disabled. */
-	struct rwlock		 t_lock;
+	/* t_mtx is for blocking wg_timers_event_* when setting t_disabled. */
+	struct mutex		 t_mtx;
 
 	int			 t_disabled;
 	int			 t_need_another_keepalive;
@@ -221,6 +222,8 @@ struct wg_peer {
 
 	SLIST_ENTRY(wg_peer)	 p_start_list;
 	int			 p_start_onlist;
+
+	char			 p_description[IFDESCRSIZE];
 };
 
 struct wg_softc {
@@ -407,6 +410,8 @@ wg_peer_create(struct wg_softc *sc, uint8_t public[WG_KEY_SIZE])
 	peer->p_counters_tx = 0;
 	peer->p_counters_rx = 0;
 
+	strlcpy(peer->p_description, "", IFDESCRSIZE);
+
 	mtx_init(&peer->p_endpoint_mtx, IPL_NET);
 	bzero(&peer->p_endpoint, sizeof(peer->p_endpoint));
 
@@ -505,14 +510,25 @@ wg_peer_destroy(struct wg_peer *peer)
 
 	NET_LOCK();
 	while (!ifq_empty(&sc->sc_if.if_snd)) {
+		/*
+		 * XXX: `if_snd' of stopped interface could still
+		 * contain packets
+		 */
+		if (!ISSET(sc->sc_if.if_flags, IFF_RUNNING)) {
+			ifq_purge(&sc->sc_if.if_snd);
+			continue;
+		}
 		NET_UNLOCK();
-		tsleep_nsec(sc, PWAIT, "wg_ifq", 1000);
+		tsleep_nsec(&nowake, PWAIT, "wg_ifq", 1000);
 		NET_LOCK();
 	}
 	NET_UNLOCK();
 
 	taskq_barrier(wg_crypt_taskq);
 	taskq_barrier(net_tq(sc->sc_if.if_index));
+
+	if (!mq_empty(&peer->p_stage_queue))
+		mq_purge(&peer->p_stage_queue);
 
 	DPRINTF(sc, "Peer %llu destroyed\n", peer->p_id);
 	explicit_bzero(peer, sizeof(*peer));
@@ -716,14 +732,16 @@ wg_socket_open(struct socket **so, int af, in_port_t *port,
 	solock(*so);
 	sotoinpcb(*so)->inp_upcall = wg_input;
 	sotoinpcb(*so)->inp_upcall_arg = upcall_arg;
+	sounlock(*so);
 
 	if ((ret = sosetopt(*so, SOL_SOCKET, SO_RTABLE, &mrtable)) == 0) {
+		solock(*so);
 		if ((ret = sobind(*so, &mhostnam, curproc)) == 0) {
 			*port = sotoinpcb(*so)->inp_lport;
 			*rtable = sotoinpcb(*so)->inp_rtableid;
 		}
+		sounlock(*so);
 	}
-	sounlock(*so);
 
 	if (ret != 0)
 		wg_socket_close(so);
@@ -913,7 +931,7 @@ void
 wg_timers_init(struct wg_timers *t)
 {
 	bzero(t, sizeof(*t));
-	rw_init(&t->t_lock, "wg_timers");
+	mtx_init_flags(&t->t_mtx, IPL_NET, "wg_timers", 0);
 	mtx_init(&t->t_handshake_mtx, IPL_NET);
 
 	timeout_set(&t->t_new_handshake, wg_timers_run_new_handshake, t);
@@ -928,19 +946,19 @@ wg_timers_init(struct wg_timers *t)
 void
 wg_timers_enable(struct wg_timers *t)
 {
-	rw_enter_write(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	t->t_disabled = 0;
-	rw_exit_write(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 	wg_timers_run_persistent_keepalive(t);
 }
 
 void
 wg_timers_disable(struct wg_timers *t)
 {
-	rw_enter_write(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	t->t_disabled = 1;
 	t->t_need_another_keepalive = 0;
-	rw_exit_write(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 
 	timeout_del_barrier(&t->t_new_handshake);
 	timeout_del_barrier(&t->t_send_keepalive);
@@ -952,12 +970,12 @@ wg_timers_disable(struct wg_timers *t)
 void
 wg_timers_set_persistent_keepalive(struct wg_timers *t, uint16_t interval)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled) {
 		t->t_persistent_keepalive_interval = interval;
 		wg_timers_run_persistent_keepalive(t);
 	}
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 int
@@ -1003,16 +1021,16 @@ wg_timers_event_data_sent(struct wg_timers *t)
 	int	msecs = NEW_HANDSHAKE_TIMEOUT * 1000;
 	msecs += arc4random_uniform(REKEY_TIMEOUT_JITTER);
 
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled && !timeout_pending(&t->t_new_handshake))
 		timeout_add_msec(&t->t_new_handshake, msecs);
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
 wg_timers_event_data_received(struct wg_timers *t)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled) {
 		if (!timeout_pending(&t->t_send_keepalive))
 			timeout_add_sec(&t->t_send_keepalive,
@@ -1020,7 +1038,7 @@ wg_timers_event_data_received(struct wg_timers *t)
 		else
 			t->t_need_another_keepalive = 1;
 	}
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
@@ -1038,11 +1056,11 @@ wg_timers_event_any_authenticated_packet_received(struct wg_timers *t)
 void
 wg_timers_event_any_authenticated_packet_traversal(struct wg_timers *t)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled && t->t_persistent_keepalive_interval > 0)
 		timeout_add_sec(&t->t_persistent_keepalive,
 		    t->t_persistent_keepalive_interval);
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
@@ -1051,10 +1069,10 @@ wg_timers_event_handshake_initiated(struct wg_timers *t)
 	int	msecs = REKEY_TIMEOUT * 1000;
 	msecs += arc4random_uniform(REKEY_TIMEOUT_JITTER);
 
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled)
 		timeout_add_msec(&t->t_retry_handshake, msecs);
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
@@ -1068,7 +1086,7 @@ wg_timers_event_handshake_responded(struct wg_timers *t)
 void
 wg_timers_event_handshake_complete(struct wg_timers *t)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled) {
 		mtx_enter(&t->t_handshake_mtx);
 		timeout_del(&t->t_retry_handshake);
@@ -1077,25 +1095,25 @@ wg_timers_event_handshake_complete(struct wg_timers *t)
 		mtx_leave(&t->t_handshake_mtx);
 		wg_timers_run_send_keepalive(t);
 	}
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
 wg_timers_event_session_derived(struct wg_timers *t)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled)
 		timeout_add_sec(&t->t_zero_key_material, REJECT_AFTER_TIME * 3);
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
 wg_timers_event_want_initiation(struct wg_timers *t)
 {
-	rw_enter_read(&t->t_lock);
+	mtx_enter(&t->t_mtx);
 	if (!t->t_disabled)
 		wg_timers_run_send_initiation(t, 0);
-	rw_exit_read(&t->t_lock);
+	mtx_leave(&t->t_mtx);
 }
 
 void
@@ -1463,7 +1481,7 @@ wg_handshake_worker(void *_sc)
  *  - The parallel queue is used to distribute the encryption across multiple
  *    threads.
  *  - The serial queue ensures that packets are not reordered and are
- *    delievered in sequence.
+ *    delivered in sequence.
  * The wg_tag attached to the packet contains two flags to help the two queues
  * interact.
  *  - t_done: The parallel queue has finished with the packet, now the serial
@@ -1518,6 +1536,8 @@ wg_encap(struct wg_softc *sc, struct mbuf *m)
 	 * back to random buckets.
 	 */
 	mc->m_pkthdr.ph_flowid = m->m_pkthdr.ph_flowid;
+
+	mc->m_pkthdr.pf.prio = m->m_pkthdr.pf.prio;
 
 	res = noise_remote_encrypt(&peer->p_remote, &data->r_idx, &nonce,
 				   data->buf, plaintext_len);
@@ -2320,6 +2340,10 @@ wg_ioctl_set(struct wg_softc *sc, struct wg_data_io *data)
 			}
 		}
 
+		if (peer_o.p_flags & WG_PEER_SET_DESCRIPTION)
+			strlcpy(peer->p_description, peer_o.p_description,
+			    IFDESCRSIZE);
+
 		aip_p = &peer_p->p_aips[0];
 		for (j = 0; j < peer_o.p_aips_count; j++) {
 			if ((ret = copyin(aip_p, &aip_o, sizeof(aip_o))) != 0)
@@ -2429,6 +2453,8 @@ wg_ioctl_get(struct wg_softc *sc, struct wg_data_io *data)
 			aip_count++;
 		}
 		peer_o.p_aips_count = aip_count;
+
+		strlcpy(peer_o.p_description, peer->p_description, IFDESCRSIZE);
 
 		if ((ret = copyout(&peer_o, peer_p, sizeof(peer_o))) != 0)
 			goto unlock_and_ret_size;
@@ -2666,9 +2692,9 @@ wg_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_type = IFT_WIREGUARD;
 	ifp->if_rtrequest = p2p_rtrequest;
 
+	if_counters_alloc(ifp);
 	if_attach(ifp);
 	if_alloc_sadl(ifp);
-	if_counters_alloc(ifp);
 
 #if NBPFILTER > 0
 	bpfattach(&ifp->if_bpf, ifp, DLT_LOOP, sizeof(uint32_t));

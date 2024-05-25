@@ -1,4 +1,4 @@
-/* $OpenBSD: asn_moid.c,v 1.15 2022/11/26 16:08:50 tb Exp $ */
+/* $OpenBSD: asn_moid.c,v 1.17 2024/03/02 09:02:04 tb Exp $ */
 /* Written by Stephen Henson (steve@openssl.org) for the OpenSSL
  * project 2001.
  */

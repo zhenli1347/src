@@ -3,7 +3,9 @@
 #ifndef _LINUX_IOPORT_H
 #define _LINUX_IOPORT_H
 
-#include <sys/types.h>
+#include <linux/types.h>
+
+#define IORESOURCE_MEM	0x0001
 
 struct resource {
 	u_long	start;
@@ -17,7 +19,7 @@ resource_size(const struct resource *r)
 }
 
 #define DEFINE_RES_MEM(_start, _size)		\
-	{					\
+(struct resource) {				\
 		.start = (_start),		\
 		.end = (_start) + (_size) - 1,	\
 	}

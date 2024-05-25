@@ -1,4 +1,4 @@
-/*	$OpenBSD: qcrtc.c,v 1.1 2022/11/08 19:47:05 patrick Exp $	*/
+/*	$OpenBSD: qcrtc.c,v 1.4 2024/05/13 01:15:50 jsg Exp $	*/
 /*
  * Copyright (c) 2022 Patrick Wildt <patrick@blueri.se>
  *
@@ -25,6 +25,7 @@
 #include <dev/fdt/spmivar.h>
 
 #include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_misc.h>
 #include <dev/ofw/fdt.h>
 
 #include <dev/clock_subr.h>
@@ -59,7 +60,8 @@ struct cfdriver qcrtc_cd = {
 int	qcrtc_gettime(struct todr_chip_handle *, struct timeval *);
 int	qcrtc_settime(struct todr_chip_handle *, struct timeval *);
 
-void	qcrtc_tick(void *);
+extern int qcscm_uefi_rtc_get(uint32_t *);
+extern int qcscm_uefi_rtc_set(uint32_t);
 
 int
 qcrtc_match(struct device *parent, void *match, void *aux)
@@ -100,7 +102,34 @@ int
 qcrtc_gettime(struct todr_chip_handle *handle, struct timeval *tv)
 {
 	struct qcrtc_softc *sc = handle->cookie;
-	uint32_t reg;
+	uint32_t reg, off;
+	int error;
+
+	/* Read current counting RTC value. */
+	error = spmi_cmd_read(sc->sc_tag, sc->sc_sid, SPMI_CMD_EXT_READL,
+	    sc->sc_addr + RTC_READ, &reg, sizeof(reg));
+	if (error) {
+		printf("%s: error reading RTC\n", sc->sc_dev.dv_xname);
+		return error;
+	}
+
+	/* Retrieve RTC offset from either NVRAM or UEFI. */
+	error = nvmem_read_cell(sc->sc_node, "offset", &off, sizeof(off));
+	if (error == ENXIO || (!error && off == 0))
+		error = qcscm_uefi_rtc_get(&off);
+	if (error)
+		return error;
+
+	tv->tv_sec = off + reg;
+	tv->tv_usec = 0;
+	return 0;
+}
+
+int
+qcrtc_settime(struct todr_chip_handle *handle, struct timeval *tv)
+{
+	struct qcrtc_softc *sc = handle->cookie;
+	uint32_t reg, off;
 	int error;
 
 	error = spmi_cmd_read(sc->sc_tag, sc->sc_sid, SPMI_CMD_EXT_READL,
@@ -110,16 +139,11 @@ qcrtc_gettime(struct todr_chip_handle *handle, struct timeval *tv)
 		return error;
 	}
 
-	tv->tv_sec = reg;
-	tv->tv_usec = 0;
+	/* Store RTC offset in either NVRAM or UEFI. */
+	off = tv->tv_sec - reg;
+	error = nvmem_write_cell(sc->sc_node, "offset", &off, sizeof(off));
+	if (error == ENXIO)
+		error = qcscm_uefi_rtc_set(off);
 
-	/* We need to offset. */
-	return EIO;
-}
-
-int
-qcrtc_settime(struct todr_chip_handle *handle, struct timeval *tv)
-{
-	/* XXX: We can't set the time for now, hardware reasons. */
-	return EPERM;
+	return error;
 }

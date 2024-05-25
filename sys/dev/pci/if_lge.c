@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_lge.c,v 1.79 2022/10/09 02:32:02 kevlo Exp $	*/
+/*	$OpenBSD: if_lge.c,v 1.81 2024/05/24 06:02:53 jsg Exp $	*/
 /*
  * Copyright (c) 2001 Wind River Systems
  * Copyright (c) 1997, 1998, 1999, 2000, 2001
@@ -80,10 +80,7 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/malloc.h>
-#include <sys/kernel.h>
 #include <sys/device.h>
-#include <sys/socket.h>
 
 #include <net/if.h>
 #include <net/if_media.h>
@@ -102,7 +99,6 @@
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcidevs.h>
 
-#include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
 
 #define LGE_USEIOSPACE
@@ -499,7 +495,7 @@ lge_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_start = lge_start;
 	ifp->if_watchdog = lge_watchdog;
 	ifp->if_hardmtu = LGE_JUMBO_MTU;
-	ifq_set_maxlen(&ifp->if_snd, LGE_TX_LIST_CNT - 1);
+	ifq_init_maxlen(&ifp->if_snd, LGE_TX_LIST_CNT - 1);
 	DPRINTFN(5, ("bcopy\n"));
 	bcopy(sc->sc_dv.dv_xname, ifp->if_xname, IFNAMSIZ);
 

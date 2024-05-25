@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfkeyv2_convert.c,v 1.79 2022/01/20 17:13:12 bluhm Exp $	*/
+/*	$OpenBSD: pfkeyv2_convert.c,v 1.83 2023/11/28 13:23:20 bluhm Exp $	*/
 /*
  * The author of this code is Angelos D. Keromytis (angelos@keromytis.org)
  *
@@ -302,9 +302,6 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 		if ((tdb->tdb_exp_timeout =
 		    sadb_lifetime->sadb_lifetime_addtime) != 0) {
 			tdb->tdb_flags |= TDBF_TIMER;
-			if (timeout_add_sec(&tdb->tdb_timer_tmo,
-			    tdb->tdb_exp_timeout))
-				tdb_ref(tdb);
 		} else
 			tdb->tdb_flags &= ~TDBF_TIMER;
 
@@ -331,9 +328,6 @@ import_lifetime(struct tdb *tdb, struct sadb_lifetime *sadb_lifetime, int type)
 		if ((tdb->tdb_soft_timeout =
 		    sadb_lifetime->sadb_lifetime_addtime) != 0) {
 			tdb->tdb_flags |= TDBF_SOFT_TIMER;
-			if (timeout_add_sec(&tdb->tdb_stimer_tmo,
-			    tdb->tdb_soft_timeout))
-				tdb_ref(tdb);
 		} else
 			tdb->tdb_flags &= ~TDBF_SOFT_TIMER;
 
@@ -490,10 +484,8 @@ import_flow(struct sockaddr_encap *flow, struct sockaddr_encap *flowmask,
 
 #ifdef INET6
 	case AF_INET6:
-		in6_embedscope(&src->sin6.sin6_addr, &src->sin6,
-		    NULL);
-		in6_embedscope(&dst->sin6.sin6_addr, &dst->sin6,
-		    NULL);
+		in6_embedscope(&src->sin6.sin6_addr, &src->sin6, NULL, NULL);
+		in6_embedscope(&dst->sin6.sin6_addr, &dst->sin6, NULL, NULL);
 
 		/* netmask handling */
 		rt_maskedcopy(&src->sa, &src->sa, &srcmask->sa);
@@ -951,6 +943,30 @@ export_tap(void **p, struct tdb *tdb)
 }
 #endif
 
+/* Import interface information for SA */
+void
+import_iface(struct tdb *tdb, struct sadb_x_iface *siface)
+{
+	if (siface != NULL) {
+		SET(tdb->tdb_flags, TDBF_IFACE);
+		tdb->tdb_iface = siface->sadb_x_iface_unit;
+		tdb->tdb_iface_dir = siface->sadb_x_iface_direction;
+	}
+}
+
+/* Export interface information for SA */
+void
+export_iface(void **p, struct tdb *tdb)
+{
+	struct sadb_x_iface *siface = (struct sadb_x_iface *)*p;
+
+	siface->sadb_x_iface_len = sizeof(*siface) / sizeof(uint64_t);
+	siface->sadb_x_iface_unit = tdb->tdb_iface;
+	siface->sadb_x_iface_direction = tdb->tdb_iface_dir;
+
+	*p += sizeof(*siface);
+}
+
 void
 export_satype(void **p, struct tdb *tdb)
 {
@@ -968,7 +984,7 @@ export_counter(void **p, struct tdb *tdb)
 	uint64_t counters[tdb_ncounters];
 	struct sadb_x_counter *scnt = (struct sadb_x_counter *)*p;
 
-	counters_read(tdb->tdb_counters, counters, tdb_ncounters);
+	counters_read(tdb->tdb_counters, counters, tdb_ncounters, NULL);
 
 	scnt->sadb_x_counter_len = sizeof(struct sadb_x_counter) /
 	    sizeof(uint64_t);

@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.88 2022/09/12 19:35:20 miod Exp $ */
+/* $OpenBSD: pmap.c,v 1.91 2023/04/13 15:23:21 miod Exp $ */
 /* $NetBSD: pmap.c,v 1.154 2000/12/07 22:18:55 thorpej Exp $ */
 
 /*-
@@ -149,7 +149,7 @@
 
 #include <machine/atomic.h>
 #include <machine/cpu.h>
-#if defined(_PMAP_MAY_USE_PROM_CONSOLE) || defined(MULTIPROCESSOR)
+#if defined(MULTIPROCESSOR)
 #include <machine/rpb.h>
 #endif
 
@@ -286,7 +286,7 @@ struct pool pmap_pv_pool;
  *	* Process B runs.  It is now using the TLB entries tagged
  *	  by process A.  *poof*
  *
- * In the scenario above, in addition to the processor using using incorrect
+ * In the scenario above, in addition to the processor using incorrect
  * TLB entries, the PALcode might use incorrect information to service a
  * TLB miss.  (The PALcode uses the recursively mapped Virtual Page Table
  * to locate the PTE for a faulting address, and tagged TLB entries exist
@@ -301,7 +301,7 @@ struct pool pmap_pv_pool;
  * safe (since PG_ASM mappings match any ASN).
  *
  * On processors that do not support ASNs, the PALcode invalidates
- * the TLB and I-cache automatically on swpctx.  We still still go
+ * the TLB and I-cache automatically on swpctx.  We still go
  * through the motions of assigning an ASN (really, just refreshing
  * the ASN generation in this particular case) to keep the logic sane
  * in other parts of the code.
@@ -785,27 +785,6 @@ pmap_bootstrap(paddr_t ptaddr, u_int maxasn, u_long ncpuids)
 	kernel_lev1map[l1pte_index(VPTBASE)] = pte;
 	VPT = (pt_entry_t *)VPTBASE;
 
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-    {
-	extern pt_entry_t prom_pte;			/* XXX */
-	extern int prom_mapped;				/* XXX */
-
-	if (pmap_uses_prom_console()) {
-		/*
-		 * XXX Save old PTE so we can remap the PROM, if
-		 * XXX necessary.
-		 */
-		prom_pte = *(pt_entry_t *)ptaddr & ~PG_ASM;
-	}
-	prom_mapped = 0;
-
-	/*
-	 * Actually, this code lies.  The prom is still mapped, and will
-	 * remain so until the context switch after alpha_init() returns.
-	 */
-    }
-#endif
-
 	/*
 	 * Set up level 2 page table.
 	 */
@@ -914,21 +893,6 @@ pmap_bootstrap(paddr_t ptaddr, u_int maxasn, u_long ncpuids)
 	atomic_setbits_ulong(&pmap_kernel()->pm_cpus,
 	    (1UL << cpu_number()));
 }
-
-#ifdef _PMAP_MAY_USE_PROM_CONSOLE
-int
-pmap_uses_prom_console(void)
-{
-
-#if defined(NEW_SCC_DRIVER)
-	return (cputype == ST_DEC_21000);
-#else
-	return (cputype == ST_DEC_21000
-	    || cputype == ST_DEC_3000_300
-	    || cputype == ST_DEC_3000_500);
-#endif /* NEW_SCC_DRIVER */
-}
-#endif /* _PMAP_MAY_USE_PROM_CONSOLE */
 
 /*
  * pmap_steal_memory:		[ INTERFACE ]
@@ -2051,17 +2015,6 @@ pmap_extract(pmap_t pmap, vaddr_t va, paddr_t *pap)
 #endif
 	return (rv);
 }
-
-/*
- * pmap_copy:			[ INTERFACE ]
- *
- *	Copy the mapping range specified by src_addr/len
- *	from the source map to the range dst_addr/len
- *	in the destination map.
- *
- *	This routine is only advisory and need not do anything.
- */
-/* call deleted in <machine/pmap.h> */
 
 /*
  * pmap_collect:		[ INTERFACE ]

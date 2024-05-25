@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ix.h,v 1.45 2022/06/27 15:11:23 jan Exp $	*/
+/*	$OpenBSD: if_ix.h,v 1.47 2024/05/21 11:19:39 bluhm Exp $	*/
 
 /******************************************************************************
 
@@ -158,14 +158,14 @@ struct ix_queue {
 	char			name[8];
 	pci_intr_handle_t	ih;
 	void			*tag;
-	struct tx_ring		*txr;
-	struct rx_ring		*rxr;
+	struct ix_txring	*txr;
+	struct ix_rxring	*rxr;
 };
 
 /*
  * The transmit ring, one per tx queue
  */
-struct tx_ring {
+struct ix_txring {
 	struct ix_softc		*sc;
 	struct ifqueue		*ifq;
 	uint32_t		me;
@@ -190,7 +190,7 @@ struct tx_ring {
 /*
  * The Receive ring, one per rx queue
  */
-struct rx_ring {
+struct ix_rxring {
 	struct ix_softc		*sc;
 	struct ifiqueue		*ifiq;
 	uint32_t		me;
@@ -225,7 +225,6 @@ struct ix_softc {
 	struct ifmedia		media;
 	struct intrmap		*sc_intrmap;
 	int			if_flags;
-	int			vlan_stripping;
 
 	uint16_t		num_vlans;
 	uint16_t		num_queues;
@@ -263,14 +262,14 @@ struct ix_softc {
 	 * Transmit rings:
 	 *	Allocated at run time, an array of rings.
 	 */
-	struct tx_ring		*tx_rings;
+	struct ix_txring	*tx_rings;
 	int			num_tx_desc;
 
 	/*
 	 * Receive rings:
 	 *	Allocated at run time, an array of rings.
 	 */
-	struct rx_ring		*rx_rings;
+	struct ix_rxring	*rx_rings;
 	uint64_t		que_mask;
 	int			num_rx_desc;
 

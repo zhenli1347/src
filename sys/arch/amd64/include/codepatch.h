@@ -1,4 +1,4 @@
-/*      $OpenBSD: codepatch.h,v 1.14 2020/03/11 07:27:08 guenther Exp $    */
+/*      $OpenBSD: codepatch.h,v 1.19 2024/02/12 01:18:17 guenther Exp $    */
 /*
  * Copyright (c) 2014-2015 Stefan Fritsch <sf@sfritsch.de>
  *
@@ -29,7 +29,7 @@ __cptext void *codepatch_maprw(vaddr_t *nva, vaddr_t dest);
 __cptext void codepatch_unmaprw(vaddr_t nva);
 __cptext void codepatch_fill_nop(void *caddr, uint16_t len);
 __cptext void codepatch_nop(uint16_t tag);
-__cptext void codepatch_replace(uint16_t tag, void *code, size_t len);
+__cptext void codepatch_replace(uint16_t tag, const void *code, size_t len);
 __cptext void codepatch_call(uint16_t _tag, void *_func);
 __cptext void codepatch_jmp(uint16_t _tag, void *_func);
 void codepatch_disable(void);
@@ -65,6 +65,11 @@ void codepatch_disable(void);
 #define CPTAG_MDS_VMM		10
 #define CPTAG_FENCE_SWAPGS_MIS_TAKEN	11
 #define CPTAG_FENCE_NO_SAFE_SMAP	12
+#define CPTAG_XRSTORS			13
+#define CPTAG_RETPOLINE_RAX		14
+#define CPTAG_RETPOLINE_R11		15
+#define CPTAG_RETPOLINE_R13		16
+#define CPTAG_IBPB_NOP			17
 
 /*
  * stac/clac SMAP instructions have lfence like semantics.  Let's
@@ -95,5 +100,21 @@ void codepatch_disable(void);
 	.byte	0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00	;\
 	.byte	0x0f, 0x1f, 0x40, 0x00				;\
 	CODEPATCH_END2(997, CPTAG_PCID_SET_REUSE)
+
+/* Would be neat if these could be in something like .cptext */
+#define CODEPATCH_CODE(symbol, instructions...)		\
+	.section .rodata;				\
+	.globl	symbol;					\
+symbol:	instructions;					\
+	.size	symbol, . - symbol
+
+/* provide a (short) variable with the length of the patch */
+#define CODEPATCH_CODE_LEN(symbol, instructions...)	\
+	CODEPATCH_CODE(symbol, instructions);		\
+996:	.globl	symbol##_len;				\
+	.align	2;					\
+symbol##_len:						\
+	.short	996b - symbol;				\
+	.size	symbol##_len, 2
 
 #endif /* _MACHINE_CODEPATCH_H_ */

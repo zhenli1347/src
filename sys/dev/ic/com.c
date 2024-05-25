@@ -1,4 +1,4 @@
-/*	$OpenBSD: com.c,v 1.175 2022/01/11 11:51:14 uaa Exp $	*/
+/*	$OpenBSD: com.c,v 1.179 2024/05/13 01:15:50 jsg Exp $	*/
 /*	$NetBSD: com.c,v 1.82.4.1 1996/06/02 09:08:00 mrg Exp $	*/
 
 /*
@@ -65,7 +65,6 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/ioctl.h>
-#include <sys/selinfo.h>
 #include <sys/tty.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
@@ -95,7 +94,6 @@ static u_char tiocm_xxx2mcr(int);
 
 void	compwroff(struct com_softc *);
 void	cominit(bus_space_tag_t, bus_space_handle_t, int, int);
-int	com_is_console(bus_space_tag_t, bus_addr_t);
 
 struct cfdriver com_cd = {
 	NULL, "com", DV_TTY
@@ -146,14 +144,14 @@ comspeed(long freq, long speed)
 int
 comprobe1(bus_space_tag_t iot, bus_space_handle_t ioh)
 {
-	int i, k;
+	int i;
 
 	/* force access to id reg */
-	bus_space_write_1(iot, ioh, com_lcr, 0);
+	bus_space_write_1(iot, ioh, com_lcr, LCR_8BITS);
 	bus_space_write_1(iot, ioh, com_iir, 0);
 	for (i = 0; i < 32; i++) {
-		k = bus_space_read_1(iot, ioh, com_iir);
-		if (k & 0x38) {
+		if ((bus_space_read_1(iot, ioh, com_lcr) != LCR_8BITS) ||
+		    (bus_space_read_1(iot, ioh, com_iir) & 0x38)) {
 			bus_space_read_1(iot, ioh, com_data); /* cleanup */
 		} else
 			break;
@@ -1166,14 +1164,16 @@ void
 comcnprobe(struct consdev *cp)
 {
 	bus_space_handle_t ioh;
-	int found;
+	int found = 1;
 
 	if (comconsaddr == 0)
 		return;
 
 	if (bus_space_map(comconsiot, comconsaddr, COM_NPORTS, 0, &ioh))
 		return;
-	found = comprobe1(comconsiot, ioh);
+	/* XXX Some com@acpi devices will fail the comprobe1() check */
+	if (comcons_reg_width != 4)
+		found = comprobe1(comconsiot, ioh);
 	bus_space_unmap(comconsiot, ioh, COM_NPORTS);
 	if (!found)
 		return;

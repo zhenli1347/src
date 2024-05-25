@@ -1,4 +1,4 @@
-/*	$OpenBSD: pvclock.c,v 1.8 2021/11/05 11:38:29 mpi Exp $	*/
+/*	$OpenBSD: pvclock.c,v 1.11 2024/05/24 10:05:55 jsg Exp $	*/
 
 /*
  * Copyright (c) 2018 Reyk Floeter <reyk@openbsd.org>
@@ -22,11 +22,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/timetc.h>
-#include <sys/timeout.h>
-#include <sys/malloc.h>
-#include <sys/atomic.h>
 
 #include <machine/cpu.h>
 #include <machine/atomic.h>
@@ -51,8 +47,6 @@ void	 pvclock_attach(struct device *, struct device *, void *);
 int	 pvclock_activate(struct device *, int);
 
 uint	 pvclock_get_timecount(struct timecounter *);
-void	 pvclock_read_time_info(struct pvclock_softc *,
-	    struct pvclock_time_info *);
 
 static inline uint32_t
 	 pvclock_read_begin(const struct pvclock_time_info *);
@@ -75,7 +69,6 @@ struct cfdriver pvclock_cd = {
 
 struct timecounter pvclock_timecounter = {
 	.tc_get_timecount = pvclock_get_timecount,
-	.tc_poll_pps = NULL,
 	.tc_counter_mask = ~0u,
 	.tc_frequency = 0,
 	.tc_name = NULL,

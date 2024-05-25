@@ -1,23 +1,6 @@
-# $OpenBSD: Makefile.inc,v 1.3 2022/03/23 15:13:31 tb Exp $
+# $OpenBSD: Makefile.inc,v 1.13 2024/03/29 07:24:09 jsing Exp $
 
 # aarch64-specific libcrypto build rules
-
-# aes
-SRCS+= aes_core.c aes_cbc.c
-# bf
-SRCS+= bf_enc.c
-# bn
-SRCS+= bn_asm.c
-# camellia
-SRCS+= camellia.c cmll_cbc.c cmll_misc.c
-# des
-SRCS+= des_enc.c fcrypt_b.c
-# modes
-# rc4
-SRCS+= rc4_enc.c rc4_skey.c
-# sha
-# whrlpool
-SRCS+= wp_block.c
 
 .for dir f in ${SSLASM}
 SRCS+=	${f}.S
@@ -28,4 +11,5 @@ ${f}.S: ${LCRYPTO_SRC}/${dir}/asm/${f}.pl
 .endfor
 
 CFLAGS+= -DOPENSSL_CPUID_OBJ
+AFLAGS+= -mmark-bti-property
 SRCS+=	arm64cpuid.S arm64cap.c

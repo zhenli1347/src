@@ -1,4 +1,4 @@
-/*	$OpenBSD: packet.c,v 1.20 2021/01/19 16:02:06 claudio Exp $ */
+/*	$OpenBSD: packet.c,v 1.23 2024/05/18 11:17:30 jsg Exp $ */
 
 /*
  * Copyright (c) 2004, 2005 Esben Norby <norby@openbsd.org>
@@ -36,7 +36,6 @@
 #include "log.h"
 #include "ospfe.h"
 
-int		 ip_hdr_sanity_check(const struct ip6_hdr *, u_int16_t);
 int		 ospf_hdr_sanity_check(struct ospf_hdr *, u_int16_t,
 		    const struct iface *, struct in6_addr *);
 struct iface	*find_iface(struct ospfd_conf *, unsigned int,
@@ -64,16 +63,16 @@ gen_ospf_hdr(struct ibuf *buf, struct iface *iface, u_int8_t type)
 int
 upd_ospf_hdr(struct ibuf *buf, struct iface *iface)
 {
-	struct ospf_hdr	*ospf_hdr;
-
-	if ((ospf_hdr = ibuf_seek(buf, 0, sizeof(*ospf_hdr))) == NULL)
-		fatalx("upd_ospf_hdr: buf_seek failed");
-
 	/* update length */
-	if (buf->wpos > USHRT_MAX)
+	if (ibuf_size(buf) > USHRT_MAX)
 		fatalx("upd_ospf_hdr: resulting ospf packet too big");
-	ospf_hdr->len = htons((u_int16_t)buf->wpos);
-	ospf_hdr->chksum = 0; /* calculated via IPV6_CHECKSUM */
+	if (ibuf_set_n16(buf, offsetof(struct ospf_hdr, len),
+	    ibuf_size(buf)) == -1)
+		fatalx("upd_ospf_hdr: ibuf_set_n16 failed");
+
+	/* checksum calculated via IPV6_CHECKSUM */
+	if (ibuf_set_n16(buf, offsetof(struct ospf_hdr, chksum), 0) == -1)
+		fatalx("upd_ospf_hdr: ibuf_set_n16 failed");
 
 	return (0);
 }
@@ -103,7 +102,7 @@ send_packet(struct iface *iface, struct ibuf *buf,
 			return (-1);
 		}
 
-	if (sendto(iface->fd, buf->buf, ibuf_size(buf), 0,
+	if (sendto(iface->fd, ibuf_data(buf), ibuf_size(buf), 0,
 	    (struct sockaddr *)&sa6, sizeof(sa6)) == -1) {
 		log_warn("send_packet: error sending packet on interface %s",
 		    iface->name);

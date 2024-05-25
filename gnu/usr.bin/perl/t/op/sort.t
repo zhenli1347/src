@@ -237,6 +237,7 @@ eval { @b = sort twoface 4,1 };
 cmp_ok(substr($@,0,4), 'eq', 'good', 'twoface eval');
 
 eval <<'CODE';
+    no warnings qw(deprecated syntax);
     my @result = sort main'Backwards 'one', 'two';
 CODE
 cmp_ok($@,'eq','',q(old skool package));
@@ -900,12 +901,13 @@ cmp_ok($answer,'eq','good','sort subr called from other package');
 # Sorting shouldn't increase the refcount of a sub
 {
     sub sportello {(1+$a) <=> (1+$b)}
-    my $refcnt = &Internals::SvREFCNT(\&sportello);
+    # + 1 to account for prototype-defeating &... calling convention
+    my $refcnt = &Internals::SvREFCNT(\&sportello) + 1;
     @output = sort sportello 3,7,9;
 
     {
         package Doc;
-        ::is($refcnt, &Internals::SvREFCNT(\&::sportello), "sort sub refcnt");
+        ::refcount_is \&::sportello, $refcnt, "sort sub refcnt";
         $fail_msg = q(Modification of a read-only value attempted);
         # Sorting a read-only array in-place shouldn't be allowed
         my @readonly = (1..10);
@@ -1072,16 +1074,6 @@ my $stubref = \&givemeastub;
 is join("", sort $stubref split//, '04381091'), '98431100',
     'AUTOLOAD with stubref';
 
-# [perl #90030] sort without arguments
-eval '@x = (sort); 1';
-is $@, '', '(sort) does not die';
-is @x, 0, '(sort) returns empty list';
-eval '@x = sort; 1';
-is $@, '', 'sort; does not die';
-is @x, 0, 'sort; returns empty list';
-eval '{@x = sort} 1';
-is $@, '', '{sort} does not die';
-is @x, 0, '{sort} returns empty list';
 
 # this happened while the padrange op was being added. Sort blocks
 # are executed in void context, and the padrange op was skipping pushing
@@ -1201,4 +1193,41 @@ SKIP:
     $act .= "2";
     $fillb = undef;
     is $act, "01[sortb]2[fillb]";
+}
+
+# GH #18081
+# sub call via return in sort block was called in void rather than scalar
+# context
+
+{
+    sub sort18081 { $a + 1 <=> $b + 1 }
+    my @a = sort { return &sort18081 } 6,1,2;
+    is "@a", "1 2 6", "GH #18081";
+}
+
+# make a physically empty sort a compile-time error
+# Note that it was a wierd compile time error until
+# [perl #90030], v5.15.6-390-ga46b39a853
+# which made it a NOOP.
+# Then in Jan 2022 it was made an error again, to allow future
+# use of attribuute-like syntax, e.g.
+#    @a = $cond ? sort :num 1,2,3 : ....;
+# See http://nntp.perl.org/group/perl.perl5.porters/262425
+
+{
+    my @empty = ();
+    my @sorted = sort @empty;
+    is "@sorted", "", 'sort @empty';
+
+    eval 'my @s = sort';
+    like($@, qr/Not enough arguments for sort/, 'empty sort not allowed');
+
+    eval '{my @s = sort}';
+    like($@, qr/Not enough arguments for sort/, 'empty {sort} not allowed');
+
+    eval 'my @s = sort; 1';
+    like($@, qr/Not enough arguments for sort/, 'empty sort; not allowed');
+
+    eval 'my @s = (sort); 1';
+    like($@, qr/Not enough arguments for sort/, 'empty (sort); not allowed');
 }

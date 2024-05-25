@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpctl.c,v 1.287 2022/10/18 09:30:29 job Exp $ */
+/*	$OpenBSD: bgpctl.c,v 1.306 2024/05/22 08:42:34 claudio Exp $ */
 
 /*
  * Copyright (c) 2003 Henning Brauer <henning@openbsd.org>
@@ -19,6 +19,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -57,8 +58,9 @@ void		 show_mrt_msg(struct mrt_bgp_msg *, void *);
 const char	*msg_type(uint8_t);
 void		 network_bulk(struct parse_result *);
 int		 match_aspath(void *, uint16_t, struct filter_as *);
+struct flowspec	*res_to_flowspec(struct parse_result *);
 
-struct imsgbuf	*ibuf;
+struct imsgbuf	*imsgbuf;
 struct mrt_parser show_mrt = { show_mrt_dump, show_mrt_state, show_mrt_msg };
 struct mrt_parser net_mrt = { network_mrt_dump, NULL, NULL };
 const struct output	*output = &show_output;
@@ -85,6 +87,7 @@ main(int argc, char *argv[])
 	struct parse_result	*res;
 	struct ctl_neighbor	 neighbor;
 	struct ctl_show_rib_request	ribreq;
+	struct flowspec		*f;
 	char			*sockname;
 	enum imsg_type		 type;
 
@@ -171,9 +174,9 @@ main(int argc, char *argv[])
 	if (pledge("stdio", NULL) == -1)
 		err(1, "pledge");
 
-	if ((ibuf = malloc(sizeof(struct imsgbuf))) == NULL)
+	if ((imsgbuf = malloc(sizeof(struct imsgbuf))) == NULL)
 		err(1, NULL);
-	imsg_init(ibuf, fd);
+	imsg_init(imsgbuf, fd);
 	done = 0;
 
 	switch (res->action) {
@@ -183,55 +186,53 @@ main(int argc, char *argv[])
 		/* NOTREACHED */
 	case SHOW:
 	case SHOW_SUMMARY:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
+		    NULL, 0);
 		break;
 	case SHOW_SUMMARY_TERSE:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_TERSE, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_TERSE, 0, 0, -1, NULL, 0);
 		break;
 	case SHOW_FIB:
 		if (!res->addr.aid) {
-			struct ibuf	*msg;
-			sa_family_t	 af;
+			struct ctl_kroute_req	req = { 0 };
 
-			af = aid2af(res->aid);
-			if ((msg = imsg_create(ibuf, IMSG_CTL_KROUTE,
-			    res->rtableid, 0, sizeof(res->flags) +
-			    sizeof(af))) == NULL)
-				errx(1, "imsg_create failure");
-			if (imsg_add(msg, &res->flags, sizeof(res->flags)) ==
-			    -1 ||
-			    imsg_add(msg, &af, sizeof(af)) == -1)
-				errx(1, "imsg_add failure");
-			imsg_close(ibuf, msg);
+			req.af = aid2af(res->aid);
+			req.flags = res->flags;
+
+			imsg_compose(imsgbuf, IMSG_CTL_KROUTE, res->rtableid,
+			    0, -1, &req, sizeof(req));
 		} else
-			imsg_compose(ibuf, IMSG_CTL_KROUTE_ADDR, res->rtableid,
-			    0, -1, &res->addr, sizeof(res->addr));
+			imsg_compose(imsgbuf, IMSG_CTL_KROUTE_ADDR,
+			    res->rtableid, 0, -1,
+			    &res->addr, sizeof(res->addr));
 		break;
 	case SHOW_FIB_TABLES:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_FIB_TABLES, 0, 0, -1, NULL, 0);
-		break;
-	case SHOW_NEXTHOP:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_NEXTHOP, res->rtableid, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_FIB_TABLES, 0, 0, -1,
 		    NULL, 0);
 		break;
+	case SHOW_NEXTHOP:
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_NEXTHOP, res->rtableid,
+		    0, -1, NULL, 0);
+		break;
 	case SHOW_INTERFACE:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_INTERFACE, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_INTERFACE, 0, 0, -1,
+		    NULL, 0);
 		break;
 	case SHOW_SET:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_SET, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_SET, 0, 0, -1, NULL, 0);
 		break;
 	case SHOW_RTR:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_RTR, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_RTR, 0, 0, -1, NULL, 0);
 		break;
 	case SHOW_NEIGHBOR:
 	case SHOW_NEIGHBOR_TIMERS:
 	case SHOW_NEIGHBOR_TERSE:
 		neighbor.show_timers = (res->action == SHOW_NEIGHBOR_TIMERS);
 		if (res->peeraddr.aid || res->peerdesc[0])
-			imsg_compose(ibuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
+			imsg_compose(imsgbuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
 			    &neighbor, sizeof(neighbor));
 		else
-			imsg_compose(ibuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
+			imsg_compose(imsgbuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
 			    NULL, 0);
 		break;
 	case SHOW_RIB:
@@ -251,19 +252,20 @@ main(int argc, char *argv[])
 		ribreq.aid = res->aid;
 		ribreq.path_id = res->pathid;
 		ribreq.flags = res->flags;
-		imsg_compose(ibuf, type, 0, 0, -1, &ribreq, sizeof(ribreq));
+		imsg_compose(imsgbuf, type, 0, 0, -1, &ribreq, sizeof(ribreq));
 		break;
 	case SHOW_RIB_MEM:
-		imsg_compose(ibuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
 		break;
 	case SHOW_METRICS:
 		output = &ometric_output;
 		numdone = 2;
-		imsg_compose(ibuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1, NULL, 0);
-		imsg_compose(ibuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_NEIGHBOR, 0, 0, -1,
+		    NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_RIB_MEM, 0, 0, -1, NULL, 0);
 		break;
 	case RELOAD:
-		imsg_compose(ibuf, IMSG_CTL_RELOAD, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_RELOAD, 0, 0, -1,
 		    res->reason, sizeof(res->reason));
 		if (res->reason[0])
 			printf("reload request sent: %s\n", res->reason);
@@ -274,14 +276,14 @@ main(int argc, char *argv[])
 		errx(1, "action==FIB");
 		break;
 	case FIB_COUPLE:
-		imsg_compose(ibuf, IMSG_CTL_FIB_COUPLE, res->rtableid, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_FIB_COUPLE, res->rtableid, 0, -1,
 		    NULL, 0);
 		printf("couple request sent.\n");
 		done = 1;
 		break;
 	case FIB_DECOUPLE:
-		imsg_compose(ibuf, IMSG_CTL_FIB_DECOUPLE, res->rtableid, 0, -1,
-		    NULL, 0);
+		imsg_compose(imsgbuf, IMSG_CTL_FIB_DECOUPLE, res->rtableid,
+		    0, -1, NULL, 0);
 		printf("decouple request sent.\n");
 		done = 1;
 		break;
@@ -289,23 +291,23 @@ main(int argc, char *argv[])
 		errx(1, "action==NEIGHBOR");
 		break;
 	case NEIGHBOR_UP:
-		imsg_compose(ibuf, IMSG_CTL_NEIGHBOR_UP, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_NEIGHBOR_UP, 0, 0, -1,
 		    &neighbor, sizeof(neighbor));
 		break;
 	case NEIGHBOR_DOWN:
-		imsg_compose(ibuf, IMSG_CTL_NEIGHBOR_DOWN, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_NEIGHBOR_DOWN, 0, 0, -1,
 		    &neighbor, sizeof(neighbor));
 		break;
 	case NEIGHBOR_CLEAR:
-		imsg_compose(ibuf, IMSG_CTL_NEIGHBOR_CLEAR, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_NEIGHBOR_CLEAR, 0, 0, -1,
 		    &neighbor, sizeof(neighbor));
 		break;
 	case NEIGHBOR_RREFRESH:
-		imsg_compose(ibuf, IMSG_CTL_NEIGHBOR_RREFRESH, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_NEIGHBOR_RREFRESH, 0, 0, -1,
 		    &neighbor, sizeof(neighbor));
 		break;
 	case NEIGHBOR_DESTROY:
-		imsg_compose(ibuf, IMSG_CTL_NEIGHBOR_DESTROY, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_NEIGHBOR_DESTROY, 0, 0, -1,
 		    &neighbor, sizeof(neighbor));
 		break;
 	case NETWORK_BULK_ADD:
@@ -322,19 +324,19 @@ main(int argc, char *argv[])
 		net.rd = res->rd;
 		/* attribute sets are not supported */
 		if (res->action == NETWORK_ADD) {
-			imsg_compose(ibuf, IMSG_NETWORK_ADD, 0, 0, -1,
+			imsg_compose(imsgbuf, IMSG_NETWORK_ADD, 0, 0, -1,
 			    &net, sizeof(net));
-			send_filterset(ibuf, &res->set);
-			imsg_compose(ibuf, IMSG_NETWORK_DONE, 0, 0, -1,
+			send_filterset(imsgbuf, &res->set);
+			imsg_compose(imsgbuf, IMSG_NETWORK_DONE, 0, 0, -1,
 			    NULL, 0);
 		} else
-			imsg_compose(ibuf, IMSG_NETWORK_REMOVE, 0, 0, -1,
+			imsg_compose(imsgbuf, IMSG_NETWORK_REMOVE, 0, 0, -1,
 			    &net, sizeof(net));
 		printf("request sent.\n");
 		done = 1;
 		break;
 	case NETWORK_FLUSH:
-		imsg_compose(ibuf, IMSG_NETWORK_FLUSH, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_NETWORK_FLUSH, 0, 0, -1, NULL, 0);
 		printf("request sent.\n");
 		done = 1;
 		break;
@@ -342,7 +344,7 @@ main(int argc, char *argv[])
 		memset(&ribreq, 0, sizeof(ribreq));
 		ribreq.aid = res->aid;
 		strlcpy(ribreq.rib, res->rib, sizeof(ribreq.rib));
-		imsg_compose(ibuf, IMSG_CTL_SHOW_NETWORK, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_NETWORK, 0, 0, -1,
 		    &ribreq, sizeof(ribreq));
 		break;
 	case NETWORK_MRT:
@@ -361,11 +363,52 @@ main(int argc, char *argv[])
 		mrt_parse(res->mrtfd, &net_mrt, 1);
 		done = 1;
 		break;
+	case FLOWSPEC_ADD:
+	case FLOWSPEC_REMOVE:
+		f = res_to_flowspec(res);
+		/* attribute sets are not supported */
+		if (res->action == FLOWSPEC_ADD) {
+			imsg_compose(imsgbuf, IMSG_FLOWSPEC_ADD, 0, 0, -1,
+			    f, FLOWSPEC_SIZE + f->len);
+			send_filterset(imsgbuf, &res->set);
+			imsg_compose(imsgbuf, IMSG_FLOWSPEC_DONE, 0, 0, -1,
+			    NULL, 0);
+		} else
+			imsg_compose(imsgbuf, IMSG_FLOWSPEC_REMOVE, 0, 0, -1,
+			    f, FLOWSPEC_SIZE + f->len);
+		printf("request sent.\n");
+		done = 1;
+		break;
+	case FLOWSPEC_FLUSH:
+		imsg_compose(imsgbuf, IMSG_FLOWSPEC_FLUSH, 0, 0, -1, NULL, 0);
+		printf("request sent.\n");
+		done = 1;
+		break;
+	case FLOWSPEC_SHOW:
+		memset(&ribreq, 0, sizeof(ribreq));
+		switch (res->aid) {
+		case AID_INET:
+			ribreq.aid = AID_FLOWSPECv4;
+			break;
+		case AID_INET6:
+			ribreq.aid = AID_FLOWSPECv6;
+			break;
+		case AID_UNSPEC:
+			ribreq.aid = res->aid;
+			break;
+		default:
+			errx(1, "flowspec family %s currently not supported",
+			    aid2str(res->aid));
+		}
+		strlcpy(ribreq.rib, res->rib, sizeof(ribreq.rib));
+		imsg_compose(imsgbuf, IMSG_CTL_SHOW_FLOWSPEC, 0, 0, -1,
+		    &ribreq, sizeof(ribreq));
+		break;
 	case LOG_VERBOSE:
 		verbose = 1;
 		/* FALLTHROUGH */
 	case LOG_BRIEF:
-		imsg_compose(ibuf, IMSG_CTL_LOG_VERBOSE, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_CTL_LOG_VERBOSE, 0, 0, -1,
 		    &verbose, sizeof(verbose));
 		printf("logging request sent.\n");
 		done = 1;
@@ -375,13 +418,13 @@ main(int argc, char *argv[])
 	output->head(res);
 
  again:
-	while (ibuf->w.queued)
-		if (msgbuf_write(&ibuf->w) <= 0)
+	while (imsgbuf->w.queued)
+		if (msgbuf_write(&imsgbuf->w) <= 0)
 			err(1, "write error");
 
 	while (!done) {
 		while (!done) {
-			if ((n = imsg_get(ibuf, &imsg)) == -1)
+			if ((n = imsg_get(imsgbuf, &imsg)) == -1)
 				err(1, "imsg_get error");
 			if (n == 0)
 				break;
@@ -393,7 +436,7 @@ main(int argc, char *argv[])
 		if (done)
 			break;
 
-		if ((n = imsg_read(ibuf)) == -1)
+		if ((n = imsg_read(imsgbuf)) == -1)
 			err(1, "imsg_read error");
 		if (n == 0)
 			errx(1, "pipe closed");
@@ -408,7 +451,7 @@ main(int argc, char *argv[])
 	output->tail();
 
 	close(fd);
-	free(ibuf);
+	free(imsgbuf);
 
 	exit(0);
 }
@@ -416,128 +459,121 @@ main(int argc, char *argv[])
 int
 show(struct imsg *imsg, struct parse_result *res)
 {
-	struct peer		*p;
+	struct peer		 p;
 	struct ctl_timer	 t;
-	struct ctl_show_interface	*iface;
-	struct ctl_show_nexthop	*nh;
+	struct ctl_show_interface iface;
+	struct ctl_show_nexthop	 nh;
 	struct ctl_show_set	 set;
 	struct ctl_show_rtr	 rtr;
-	struct kroute_full	*kf;
-	struct ktable		*kt;
+	struct kroute_full	 kf;
+	struct ktable		 kt;
+	struct flowspec		 f;
 	struct ctl_show_rib	 rib;
 	struct rde_memstats	 stats;
-	u_char			*asdata;
-	u_int			 rescode, ilen;
-	size_t			 aslen;
+	struct ibuf		 ibuf;
+	u_int			 rescode;
 
 	switch (imsg->hdr.type) {
 	case IMSG_CTL_SHOW_NEIGHBOR:
 		if (output->neighbor == NULL)
 			break;
-		p = imsg->data;
-		output->neighbor(p, res);
+		if (imsg_get_data(imsg, &p, sizeof(p)) == -1)
+			err(1, "imsg_get_data");
+		output->neighbor(&p, res);
 		break;
 	case IMSG_CTL_SHOW_TIMER:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(t))
-			errx(1, "wrong imsg len");
 		if (output->timer == NULL)
 			break;
-		memcpy(&t, imsg->data, sizeof(t));
+		if (imsg_get_data(imsg, &t, sizeof(t)) == -1)
+			err(1, "imsg_get_data");
 		if (t.type > 0 && t.type < Timer_Max)
 			output->timer(&t);
 		break;
 	case IMSG_CTL_SHOW_INTERFACE:
 		if (output->interface == NULL)
 			break;
-		iface = imsg->data;
-		output->interface(iface);
+		if (imsg_get_data(imsg, &iface, sizeof(iface)) == -1)
+			err(1, "imsg_get_data");
+		output->interface(&iface);
 		break;
 	case IMSG_CTL_SHOW_NEXTHOP:
 		if (output->nexthop == NULL)
 			break;
-		nh = imsg->data;
-		output->nexthop(nh);
+		if (imsg_get_data(imsg, &nh, sizeof(nh)) == -1)
+			err(1, "imsg_get_data");
+		output->nexthop(&nh);
 		break;
 	case IMSG_CTL_KROUTE:
 	case IMSG_CTL_SHOW_NETWORK:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(*kf))
-			errx(1, "wrong imsg len");
 		if (output->fib == NULL)
 			break;
-		kf = imsg->data;
-		output->fib(kf);
+		if (imsg_get_data(imsg, &kf, sizeof(kf)) == -1)
+			err(1, "imsg_get_data");
+		output->fib(&kf);
+		break;
+	case IMSG_CTL_SHOW_FLOWSPEC:
+		if (output->flowspec == NULL)
+			break;
+		if (imsg_get_data(imsg, &f, sizeof(f)) == -1)
+			err(1, "imsg_get_data");
+		output->flowspec(&f);
 		break;
 	case IMSG_CTL_SHOW_FIB_TABLES:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(*kt))
-			errx(1, "wrong imsg len");
 		if (output->fib_table == NULL)
 			break;
-		kt = imsg->data;
-		output->fib_table(kt);
+		if (imsg_get_data(imsg, &kt, sizeof(kt)) == -1)
+			err(1, "imsg_get_data");
+		output->fib_table(&kt);
 		break;
 	case IMSG_CTL_SHOW_RIB:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(rib))
-			errx(1, "wrong imsg len");
 		if (output->rib == NULL)
 			break;
-		memcpy(&rib, imsg->data, sizeof(rib));
-		aslen = imsg->hdr.len - IMSG_HEADER_SIZE - sizeof(rib);
-		asdata = imsg->data;
-		asdata += sizeof(rib);
-		output->rib(&rib, asdata, aslen, res);
+		if (imsg_get_ibuf(imsg, &ibuf) == -1)
+			err(1, "imsg_get_ibuf");
+		if (ibuf_get(&ibuf, &rib, sizeof(rib)) == -1)
+			err(1, "imsg_get_ibuf");
+		output->rib(&rib, &ibuf, res);
 		break;
 	case IMSG_CTL_SHOW_RIB_COMMUNITIES:
-		ilen = imsg->hdr.len - IMSG_HEADER_SIZE;
-		if (ilen % sizeof(struct community)) {
-			warnx("bad IMSG_CTL_SHOW_RIB_COMMUNITIES received");
-			break;
-		}
 		if (output->communities == NULL)
 			break;
-		output->communities(imsg->data, ilen, res);
+		if (imsg_get_ibuf(imsg, &ibuf) == -1)
+			err(1, "imsg_get_ibuf");
+		output->communities(&ibuf, res);
 		break;
 	case IMSG_CTL_SHOW_RIB_ATTR:
-		ilen = imsg->hdr.len - IMSG_HEADER_SIZE;
-		if (ilen < 3) {
-			warnx("bad IMSG_CTL_SHOW_RIB_ATTR received");
-			break;
-		}
 		if (output->attr == NULL)
 			break;
-		output->attr(imsg->data, ilen, res->flags, 0);
+		if (imsg_get_ibuf(imsg, &ibuf) == -1)
+			err(1, "imsg_get_ibuf");
+		output->attr(&ibuf, res->flags, 0);
 		break;
 	case IMSG_CTL_SHOW_RIB_MEM:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(stats))
-			errx(1, "wrong imsg len");
 		if (output->rib_mem == NULL)
 			break;
-		memcpy(&stats, imsg->data, sizeof(stats));
+		if (imsg_get_data(imsg, &stats, sizeof(stats)) == -1)
+			err(1, "imsg_get_data");
 		output->rib_mem(&stats);
 		return (1);
 	case IMSG_CTL_SHOW_SET:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(set))
-			errx(1, "wrong imsg len");
 		if (output->set == NULL)
 			break;
-		memcpy(&set, imsg->data, sizeof(set));
+		if (imsg_get_data(imsg, &set, sizeof(set)) == -1)
+			err(1, "imsg_get_data");
 		output->set(&set);
 		break;
 	case IMSG_CTL_SHOW_RTR:
-		if (imsg->hdr.len < IMSG_HEADER_SIZE + sizeof(rtr))
-			errx(1, "wrong imsg len");
 		if (output->rtr == NULL)
 			break;
-		memcpy(&rtr, imsg->data, sizeof(rtr));
+		if (imsg_get_data(imsg, &rtr, sizeof(rtr)) == -1)
+			err(1, "imsg_get_data");
 		output->rtr(&rtr);
 		break;
 	case IMSG_CTL_RESULT:
-		if (imsg->hdr.len != IMSG_HEADER_SIZE + sizeof(rescode)) {
-			warnx("got IMSG_CTL_RESULT with wrong len");
-			break;
-		}
 		if (output->result == NULL)
 			break;
-		memcpy(&rescode, imsg->data, sizeof(rescode));
+		if (imsg_get_data(imsg, &rescode, sizeof(rescode)) == -1)
+			err(1, "imsg_get_data");
 		output->result(rescode);
 		return (1);
 	case IMSG_CTL_END:
@@ -711,7 +747,7 @@ fmt_flags(uint32_t flags, int sum)
 	if (sum) {
 		if (flags & F_PREF_INVALID)
 			*p++ = 'E';
-		if (flags & F_PREF_OTC_LOOP)
+		if (flags & F_PREF_OTC_LEAK)
 			*p++ = 'L';
 		if (flags & F_PREF_ANNOUNCE)
 			*p++ = 'A';
@@ -737,8 +773,8 @@ fmt_flags(uint32_t flags, int sum)
 
 		if (flags & F_PREF_INVALID)
 			strlcat(buf, ", invalid", sizeof(buf));
-		if (flags & F_PREF_OTC_LOOP)
-			strlcat(buf, ", otc loop", sizeof(buf));
+		if (flags & F_PREF_OTC_LEAK)
+			strlcat(buf, ", otc leak", sizeof(buf));
 		if (flags & F_PREF_STALE)
 			strlcat(buf, ", stale", sizeof(buf));
 		if (flags & F_PREF_ELIGIBLE)
@@ -768,6 +804,19 @@ fmt_ovs(uint8_t validation_state, int sum)
 		return (sum ? "V" : "valid");
 	default:
 		return (sum ? "N" : "not-found");
+	}
+}
+
+const char *
+fmt_avs(uint8_t validation_state, int sum)
+{
+	switch (validation_state) {
+	case ASPA_INVALID:
+		return (sum ? "!" : "invalid");
+	case ASPA_VALID:
+		return (sum ? "V" : "valid");
+	default:
+		return (sum ? "?" : "unknown");
 	}
 }
 
@@ -985,64 +1034,68 @@ fmt_large_community(uint32_t d1, uint32_t d2, uint32_t d3)
 }
 
 const char *
-fmt_ext_community(uint8_t *data)
+fmt_ext_community(uint64_t ext)
 {
 	static char	buf[32];
-	uint64_t	ext;
 	struct in_addr	ip;
 	uint32_t	as4, u32;
 	uint16_t	as2, u16;
 	uint8_t		type, subtype;
 
-	type = data[0];
-	subtype = data[1];
+	type = ext >> 56;
+	subtype = ext >> 48;
 
 	switch (type) {
 	case EXT_COMMUNITY_TRANS_TWO_AS:
-		memcpy(&as2, data + 2, sizeof(as2));
-		memcpy(&u32, data + 4, sizeof(u32));
+	case EXT_COMMUNITY_GEN_TWO_AS:
+		as2 = ext >> 32;
+		u32 = ext;
 		snprintf(buf, sizeof(buf), "%s %s:%u",
-		    log_ext_subtype(type, subtype),
-		    log_as(ntohs(as2)), ntohl(u32));
+		    log_ext_subtype(type, subtype), log_as(as2), u32);
 		return buf;
 	case EXT_COMMUNITY_TRANS_IPV4:
-		memcpy(&ip, data + 2, sizeof(ip));
-		memcpy(&u16, data + 6, sizeof(u16));
+	case EXT_COMMUNITY_GEN_IPV4:
+		ip.s_addr = htonl(ext >> 16);
+		u16 = ext;
 		snprintf(buf, sizeof(buf), "%s %s:%hu",
-		    log_ext_subtype(type, subtype),
-		    inet_ntoa(ip), ntohs(u16));
+		    log_ext_subtype(type, subtype), inet_ntoa(ip), u16);
 		return buf;
 	case EXT_COMMUNITY_TRANS_FOUR_AS:
-		memcpy(&as4, data + 2, sizeof(as4));
-		memcpy(&u16, data + 6, sizeof(u16));
+	case EXT_COMMUNITY_GEN_FOUR_AS:
+		as4 = ext >> 16;
+		u16 = ext;
 		snprintf(buf, sizeof(buf), "%s %s:%hu",
-		    log_ext_subtype(type, subtype),
-		    log_as(ntohl(as4)), ntohs(u16));
+		    log_ext_subtype(type, subtype), log_as(as4), u16);
 		return buf;
 	case EXT_COMMUNITY_TRANS_OPAQUE:
 	case EXT_COMMUNITY_TRANS_EVPN:
-		memcpy(&ext, data, sizeof(ext));
-		ext = be64toh(ext) & 0xffffffffffffLL;
+		ext &= 0xffffffffffffULL;
 		snprintf(buf, sizeof(buf), "%s 0x%llx",
 		    log_ext_subtype(type, subtype), (unsigned long long)ext);
 		return buf;
 	case EXT_COMMUNITY_NON_TRANS_OPAQUE:
-		memcpy(&ext, data, sizeof(ext));
-		ext = be64toh(ext) & 0xffffffffffffLL;
-		switch (ext) {
-		case EXT_COMMUNITY_OVS_VALID:
-			snprintf(buf, sizeof(buf), "%s valid",
-			    log_ext_subtype(type, subtype));
-			return buf;
-		case EXT_COMMUNITY_OVS_NOTFOUND:
-			snprintf(buf, sizeof(buf), "%s not-found",
-			    log_ext_subtype(type, subtype));
-			return buf;
-		case EXT_COMMUNITY_OVS_INVALID:
-			snprintf(buf, sizeof(buf), "%s invalid",
-			    log_ext_subtype(type, subtype));
-			return buf;
-		default:
+		ext &= 0xffffffffffffULL;
+		if (subtype == EXT_COMMUNITY_SUBTYPE_OVS) {
+			switch (ext) {
+			case EXT_COMMUNITY_OVS_VALID:
+				snprintf(buf, sizeof(buf), "%s valid",
+				    log_ext_subtype(type, subtype));
+				return buf;
+			case EXT_COMMUNITY_OVS_NOTFOUND:
+				snprintf(buf, sizeof(buf), "%s not-found",
+				    log_ext_subtype(type, subtype));
+				return buf;
+			case EXT_COMMUNITY_OVS_INVALID:
+				snprintf(buf, sizeof(buf), "%s invalid",
+				    log_ext_subtype(type, subtype));
+				return buf;
+			default:
+				snprintf(buf, sizeof(buf), "%s 0x%llx",
+				    log_ext_subtype(type, subtype),
+				    (unsigned long long)ext);
+				return buf;
+			}
+		} else {
 			snprintf(buf, sizeof(buf), "%s 0x%llx",
 			    log_ext_subtype(type, subtype),
 			    (unsigned long long)ext);
@@ -1050,10 +1103,7 @@ fmt_ext_community(uint8_t *data)
 		}
 		break;
 	default:
-		memcpy(&ext, data, sizeof(ext));
-		snprintf(buf, sizeof(buf), "%s 0x%llx",
-		    log_ext_subtype(type, subtype),
-		    (unsigned long long)be64toh(ext));
+		snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)ext);
 		return buf;
 	}
 }
@@ -1062,6 +1112,8 @@ const char *
 fmt_set_type(struct ctl_show_set *set)
 {
 	switch (set->type) {
+	case ASPA_SET:
+		return "ASPA";
 	case ROA_SET:
 		return "ROA";
 	case PREFIX_SET:
@@ -1119,21 +1171,21 @@ network_bulk(struct parse_result *res)
 			net.rd = res->rd;
 
 			if (res->action == NETWORK_BULK_ADD) {
-				imsg_compose(ibuf, IMSG_NETWORK_ADD,
+				imsg_compose(imsgbuf, IMSG_NETWORK_ADD,
 				    0, 0, -1, &net, sizeof(net));
 				/*
 				 * can't use send_filterset since that
 				 * would free the set.
 				 */
 				TAILQ_FOREACH(s, &res->set, entry) {
-					imsg_compose(ibuf,
+					imsg_compose(imsgbuf,
 					    IMSG_FILTER_SET,
 					    0, 0, -1, s, sizeof(*s));
 				}
-				imsg_compose(ibuf, IMSG_NETWORK_DONE,
+				imsg_compose(imsgbuf, IMSG_NETWORK_DONE,
 				    0, 0, -1, NULL, 0);
 			} else
-				imsg_compose(ibuf, IMSG_NETWORK_REMOVE,
+				imsg_compose(imsgbuf, IMSG_NETWORK_REMOVE,
 				     0, 0, -1, &net, sizeof(net));
 		}
 	}
@@ -1171,6 +1223,7 @@ show_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 	struct parse_result		 res;
 	struct ctl_show_rib_request	*req = arg;
 	struct mrt_rib_entry		*mre;
+	struct ibuf			 ibuf;
 	time_t				 now;
 	uint16_t			 i, j;
 
@@ -1236,11 +1289,14 @@ show_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 		    !match_aspath(mre->aspath, mre->aspath_len, &req->as))
 			continue;
 
-		output->rib(&ctl, mre->aspath, mre->aspath_len, &res);
+		ibuf_from_buffer(&ibuf, mre->aspath, mre->aspath_len);
+		output->rib(&ctl, &ibuf, &res);
 		if (req->flags & F_CTL_DETAIL) {
-			for (j = 0; j < mre->nattrs; j++)
-				output->attr(mre->attrs[j].attr,
-				    mre->attrs[j].attr_len, req->flags, 0);
+			for (j = 0; j < mre->nattrs; j++) {
+				ibuf_from_buffer(&ibuf, mre->attrs[j].attr,
+				    mre->attrs[j].attr_len);
+				output->attr(&ibuf, req->flags, 0);
+			}
 		}
 	}
 }
@@ -1310,22 +1366,22 @@ network_mrt_dump(struct mrt_rib *mr, struct mrt_peer *mp, void *arg)
 		net.type = NETWORK_MRTCLONE;
 		/* XXX rd can't be set and will be 0 */
 
-		imsg_compose(ibuf, IMSG_NETWORK_ADD, 0, 0, -1,
+		imsg_compose(imsgbuf, IMSG_NETWORK_ADD, 0, 0, -1,
 		    &net, sizeof(net));
-		if ((msg = imsg_create(ibuf, IMSG_NETWORK_ASPATH,
+		if ((msg = imsg_create(imsgbuf, IMSG_NETWORK_ASPATH,
 		    0, 0, sizeof(ctl) + mre->aspath_len)) == NULL)
 			errx(1, "imsg_create failure");
 		if (imsg_add(msg, &ctl, sizeof(ctl)) == -1 ||
 		    imsg_add(msg, mre->aspath, mre->aspath_len) == -1)
 			errx(1, "imsg_add failure");
-		imsg_close(ibuf, msg);
+		imsg_close(imsgbuf, msg);
 		for (j = 0; j < mre->nattrs; j++)
-			imsg_compose(ibuf, IMSG_NETWORK_ATTR, 0, 0, -1,
+			imsg_compose(imsgbuf, IMSG_NETWORK_ATTR, 0, 0, -1,
 			    mre->attrs[j].attr, mre->attrs[j].attr_len);
-		imsg_compose(ibuf, IMSG_NETWORK_DONE, 0, 0, -1, NULL, 0);
+		imsg_compose(imsgbuf, IMSG_NETWORK_DONE, 0, 0, -1, NULL, 0);
 
-		while (ibuf->w.queued) {
-			if (msgbuf_write(&ibuf->w) <= 0 && errno != EAGAIN)
+		while (imsgbuf->w.queued) {
+			if (msgbuf_write(&imsgbuf->w) <= 0 && errno != EAGAIN)
 				err(1, "write error");
 		}
 	}
@@ -1355,24 +1411,19 @@ show_mrt_state(struct mrt_bgp_state *ms, void *arg)
 }
 
 static void
-print_afi(u_char *p, uint8_t len)
+print_afi(struct ibuf *b)
 {
 	uint16_t afi;
 	uint8_t safi, aid;
 
-	if (len != 4) {
+	if (ibuf_get_n16(b, &afi) == -1 ||	/* afi, 2 byte */
+	    ibuf_skip(b, 1) == -1 ||		/* reserved, 1 byte */
+	    ibuf_get_n8(b, &safi) == -1 ||	/* safi, 1 byte */
+	    ibuf_size(b) != 0) {
 		printf("bad length");
 		return;
 	}
 
-	/* afi, 2 byte */
-	memcpy(&afi, p, sizeof(afi));
-	afi = ntohs(afi);
-	p += 2;
-	/* reserved, 1 byte */
-	p += 1;
-	/* safi, 1 byte */
-	memcpy(&safi, p, sizeof(safi));
 	if (afi2aid(afi, safi, &aid) == -1)
 		printf("unknown afi %u safi %u", afi, safi);
 	else
@@ -1380,12 +1431,14 @@ print_afi(u_char *p, uint8_t len)
 }
 
 static void
-print_capability(uint8_t capa_code, u_char *p, uint8_t len)
+print_capability(uint8_t capa_code, struct ibuf *b)
 {
+	uint32_t as;
+
 	switch (capa_code) {
 	case CAPA_MP:
 		printf("multiprotocol capability: ");
-		print_afi(p, len);
+		print_afi(b);
 		break;
 	case CAPA_REFRESH:
 		printf("route refresh capability");
@@ -1396,13 +1449,11 @@ print_capability(uint8_t capa_code, u_char *p, uint8_t len)
 		break;
 	case CAPA_AS4BYTE:
 		printf("4-byte AS num capability: ");
-		if (len == 4) {
-			uint32_t as;
-			memcpy(&as, p, sizeof(as));
-			as = ntohl(as);
-			printf("AS %u", as);
-		} else
+		if (ibuf_get_n32(b, &as) == -1 ||
+		    ibuf_size(b) != 0)
 			printf("bad length");
+		else
+			printf("AS %u", as);
 		break;
 	case CAPA_ADD_PATH:
 		printf("add-path capability");
@@ -1412,7 +1463,8 @@ print_capability(uint8_t capa_code, u_char *p, uint8_t len)
 		printf("enhanced route refresh capability");
 		break;
 	default:
-		printf("unknown capability %u length %u", capa_code, len);
+		printf("unknown capability %u length %zu",
+		    capa_code, ibuf_size(b));
 		break;
 	}
 }
@@ -1475,88 +1527,65 @@ print_notification(uint8_t errcode, uint8_t subcode)
 }
 
 static int
-show_mrt_capabilities(u_char *p, uint16_t len)
+show_mrt_capabilities(struct ibuf *b)
 {
-	uint16_t totlen = len;
 	uint8_t capa_code, capa_len;
+	struct ibuf cbuf;
 
-	while (len > 2) {
-		memcpy(&capa_code, p, sizeof(capa_code));
-		p += sizeof(capa_code);
-		len -= sizeof(capa_code);
-		memcpy(&capa_len, p, sizeof(capa_len));
-		p += sizeof(capa_len);
-		len -= sizeof(capa_len);
-		if (len < capa_len) {
-			printf("capa_len %u exceeds remaining length",
-			    capa_len);
+	while (ibuf_size(b) > 0) {
+		if (ibuf_get_n8(b, &capa_code) == -1 ||
+		    ibuf_get_n8(b, &capa_len) == -1 ||
+		    ibuf_get_ibuf(b, capa_len, &cbuf) == -1) {
+			printf("truncated capabilities");
 			return (-1);
 		}
 		printf("\n        ");
-		print_capability(capa_code, p, capa_len);
-		p += capa_len;
-		len -= capa_len;
+		print_capability(capa_code, &cbuf);
 	}
-	if (len != 0) {
-		printf("length mismatch while capability parsing");
-		return (-1);
-	}
-	return (totlen);
+	return (0);
 }
 
 static void
-show_mrt_open(u_char *p, uint16_t len)
+show_mrt_open(struct ibuf *b)
 {
+	struct in_addr ina;
+	uint32_t bgpid;
 	uint16_t short_as, holdtime;
 	uint8_t version, optparamlen;
-	struct in_addr bgpid;
 
 	/* length check up to optparamlen already happened */
-	memcpy(&version, p, sizeof(version));
-	p += sizeof(version);
-	len -= sizeof(version);
-	memcpy(&short_as, p, sizeof(short_as));
-	p += sizeof(short_as);
-	len -= sizeof(short_as);
-	short_as = ntohs(short_as);
-	memcpy(&holdtime, p, sizeof(holdtime));
-	holdtime = ntohs(holdtime);
-	p += sizeof(holdtime);
-	len -= sizeof(holdtime);
-	memcpy(&bgpid, p, sizeof(bgpid));
-	p += sizeof(bgpid);
-	len -= sizeof(bgpid);
-	memcpy(&optparamlen, p, sizeof(optparamlen));
-	p += sizeof(optparamlen);
-	len -= sizeof(optparamlen);
+	if (ibuf_get_n8(b, &version) == -1 ||
+	    ibuf_get_n16(b, &short_as) == -1 ||
+	    ibuf_get_n16(b, &holdtime) == -1 ||
+	    ibuf_get_n32(b, &bgpid) == -1 ||
+	    ibuf_get_n8(b, &optparamlen) == -1) {
+ trunc:
+		printf("truncated message");
+		return;
+	}
 
 	printf("\n    ");
+	ina.s_addr = htonl(bgpid);
 	printf("Version: %d AS: %u Holdtime: %u BGP Id: %s Paramlen: %u",
-	    version, short_as, holdtime, inet_ntoa(bgpid), optparamlen);
-	if (optparamlen != len) {
+	    version, short_as, holdtime, inet_ntoa(ina), optparamlen);
+	if (optparamlen != ibuf_size(b)) {
+		/* XXX missing support for RFC9072 */
 		printf("optional parameter length mismatch");
 		return;
 	}
-	while (len > 2) {
+	while (ibuf_size(b) > 0) {
 		uint8_t op_type, op_len;
-		int r;
 
-		memcpy(&op_type, p, sizeof(op_type));
-		p += sizeof(op_type);
-		len -= sizeof(op_type);
-		memcpy(&op_len, p, sizeof(op_len));
-		p += sizeof(op_len);
-		len -= sizeof(op_len);
+		if (ibuf_get_n8(b, &op_type) == -1 ||
+		    ibuf_get_n8(b, &op_len) == -1)
+			goto trunc;
 
 		printf("\n    ");
 		switch (op_type) {
 		case OPT_PARAM_CAPABILITIES:
-			printf("Capabilities: size %u", op_len);
-			r = show_mrt_capabilities(p, op_len);
-			if (r == -1)
+			printf("Capabilities: %u bytes", op_len);
+			if (show_mrt_capabilities(b) == -1)
 				return;
-			p += r;
-			len -= r;
 			break;
 		case OPT_PARAM_AUTH:
 		default:
@@ -1565,190 +1594,139 @@ show_mrt_open(u_char *p, uint16_t len)
 			return;
 		}
 	}
-	if (len != 0) {
-		printf("optional parameter encoding error");
-		return;
-	}
 }
 
 static void
-show_mrt_notification(u_char *p, uint16_t len)
+show_mrt_notification(struct ibuf *b)
 {
-	uint16_t i;
-	uint8_t errcode, subcode;
-	size_t reason_len;
 	char reason[REASON_LEN];
+	uint8_t errcode, subcode, reason_len, c;
+	size_t i, len;
 
-	memcpy(&errcode, p, sizeof(errcode));
-	p += sizeof(errcode);
-	len -= sizeof(errcode);
-
-	memcpy(&subcode, p, sizeof(subcode));
-	p += sizeof(subcode);
-	len -= sizeof(subcode);
+	if (ibuf_get_n8(b, &errcode) == -1 ||
+	    ibuf_get_n8(b, &subcode) == -1) {
+ trunc:
+		printf("truncated message");
+		return;
+	}
 
 	printf("\n    ");
 	print_notification(errcode, subcode);
 
 	if (errcode == ERR_CEASE && (subcode == ERR_CEASE_ADMIN_DOWN ||
 	    subcode == ERR_CEASE_ADMIN_RESET)) {
-		if (len > 1) {
-			reason_len = *p++;
-			len--;
-			if (len < reason_len) {
-				printf("truncated shutdown reason");
-				return;
-			}
-			if (reason_len > REASON_LEN - 1) {
-				printf("overly long shutdown reason");
-				return;
-			}
-			memcpy(reason, p, reason_len);
+		if (ibuf_size(b) > 1) {
+			if (ibuf_get_n8(b, &reason_len) == -1)
+				goto trunc;
+			if (ibuf_get(b, reason, reason_len) == -1)
+				goto trunc;
 			reason[reason_len] = '\0';
 			printf("shutdown reason: \"%s\"",
 			    log_reason(reason));
-			p += reason_len;
-			len -= reason_len;
 		}
 	}
 	if (errcode == ERR_OPEN && subcode == ERR_OPEN_CAPA) {
-		int r;
-
-		r = show_mrt_capabilities(p, len);
-		if (r == -1)
+		if (show_mrt_capabilities(b) == -1)
 			return;
-		p += r;
-		len -= r;
 	}
 
-	if (len > 0) {
-		printf("\n    additional data %u bytes", len);
+	if (ibuf_size(b) > 0) {
+		len = ibuf_size(b);
+		printf("\n    additional data, %zu bytes", len);
 		for (i = 0; i < len; i++) {
 			if (i % 16 == 0)
 				printf("\n    ");
 			if (i % 8 == 0)
 				printf("   ");
-			printf(" %02X", *p++);
+			if (ibuf_get_n8(b, &c) == -1)
+				goto trunc;
+			printf(" %02X", c);
 		}
 	}
 }
 
 /* XXX this function does not handle JSON output */
 static void
-show_mrt_update(u_char *p, uint16_t len, int reqflags, int addpath)
+show_mrt_update(struct ibuf *b, int reqflags, int addpath)
 {
 	struct bgpd_addr prefix;
-	int pos;
+	struct ibuf wbuf, abuf;
 	uint32_t pathid;
 	uint16_t wlen, alen;
 	uint8_t prefixlen;
 
-	if (len < sizeof(wlen)) {
-		printf("bad length");
-		return;
-	}
-	memcpy(&wlen, p, sizeof(wlen));
-	wlen = ntohs(wlen);
-	p += sizeof(wlen);
-	len -= sizeof(wlen);
+	if (ibuf_get_n16(b, &wlen) == -1 ||
+	    ibuf_get_ibuf(b, wlen, &wbuf) == -1)
+		goto trunc;
 
-	if (len < wlen) {
-		printf("bad withdraw length");
-		return;
-	}
 	if (wlen > 0) {
 		printf("\n     Withdrawn prefixes:");
-		while (wlen > 0) {
-			if (addpath) {
-				if (wlen <= sizeof(pathid)) {
-					printf("bad withdraw prefix");
-					return;
-				}
-				memcpy(&pathid, p, sizeof(pathid));
-				pathid = ntohl(pathid);
-				p += sizeof(pathid);
-				len -= sizeof(pathid);
-				wlen -= sizeof(pathid);
-			}
-			if ((pos = nlri_get_prefix(p, wlen, &prefix,
-			    &prefixlen)) == -1) {
-				printf("bad withdraw prefix");
-				return;
-			}
+		while (ibuf_size(&wbuf) > 0) {
+			if (addpath)
+				if (ibuf_get_n32(&wbuf, &pathid) == -1)
+					goto trunc;
+			if (nlri_get_prefix(&wbuf, &prefix, &prefixlen) == -1)
+				goto trunc;
+
 			printf(" %s/%u", log_addr(&prefix), prefixlen);
 			if (addpath)
 				printf(" path-id %u", pathid);
-			p += pos;
-			len -= pos;
-			wlen -= pos;
 		}
 	}
 
-	if (len < sizeof(alen)) {
-		printf("bad length");
-		return;
-	}
-	memcpy(&alen, p, sizeof(alen));
-	alen = ntohs(alen);
-	p += sizeof(alen);
-	len -= sizeof(alen);
+	if (ibuf_get_n16(b, &alen) == -1 ||
+	    ibuf_get_ibuf(b, alen, &abuf) == -1)
+		goto trunc;
 
-	if (len < alen) {
-		printf("bad attribute length");
-		return;
-	}
 	printf("\n");
 	/* alen attributes here */
-	while (alen > 3) {
-		uint8_t flags;
+	while (ibuf_size(&abuf) > 0) {
+		struct ibuf attrbuf;
 		uint16_t attrlen;
+		uint8_t flags;
 
-		flags = p[0];
-		/* type = p[1]; */
+		ibuf_from_ibuf(&abuf, &attrbuf);
+		if (ibuf_get_n8(&attrbuf, &flags) == -1 ||
+		    ibuf_skip(&attrbuf, 1) == -1)
+			goto trunc;
 
 		/* get the attribute length */
 		if (flags & ATTR_EXTLEN) {
-			if (len < sizeof(attrlen) + 2)
-				printf("bad attribute length");
-			memcpy(&attrlen, &p[2], sizeof(attrlen));
-			attrlen = ntohs(attrlen);
-			attrlen += sizeof(attrlen) + 2;
+			if (ibuf_get_n16(&attrbuf, &attrlen) == -1)
+				goto trunc;
 		} else {
-			attrlen = p[2];
-			attrlen += 1 + 2;
+			uint8_t tmp;
+			if (ibuf_get_n8(&attrbuf, &tmp) == -1)
+				goto trunc;
+			attrlen = tmp;
 		}
+		if (ibuf_truncate(&attrbuf, attrlen) == -1)
+			goto trunc;
+		ibuf_rewind(&attrbuf);
+		if (ibuf_skip(&abuf, ibuf_size(&attrbuf)) == -1)
+			goto trunc;
 
-		output->attr(p, attrlen, reqflags, addpath);
-		p += attrlen;
-		alen -= attrlen;
-		len -= attrlen;
+		output->attr(&attrbuf, reqflags, addpath);
 	}
 
-	if (len > 0) {
+	if (ibuf_size(b) > 0) {
 		printf("    NLRI prefixes:");
-		while (len > 0) {
-			if (addpath) {
-				if (len <= sizeof(pathid)) {
-					printf(" bad nlri prefix: pathid, len %d", len);
-					return;
-				}
-				memcpy(&pathid, p, sizeof(pathid));
-				pathid = ntohl(pathid);
-				p += sizeof(pathid);
-				len -= sizeof(pathid);
-			}
-			if ((pos = nlri_get_prefix(p, len, &prefix,
-			    &prefixlen)) == -1) {
-				printf(" bad nlri prefix");
-				return;
-			}
+		while (ibuf_size(b) > 0) {
+			if (addpath)
+				if (ibuf_get_n32(b, &pathid) == -1)
+					goto trunc;
+			if (nlri_get_prefix(b, &prefix, &prefixlen) == -1)
+				goto trunc;
+
 			printf(" %s/%u", log_addr(&prefix), prefixlen);
 			if (addpath)
 				printf(" path-id %u", pathid);
-			p += pos;
-			len -= pos;
 		}
 	}
+	return;
+
+ trunc:
+	printf("truncated message");
 }
 
 void
@@ -1757,35 +1735,34 @@ show_mrt_msg(struct mrt_bgp_msg *mm, void *arg)
 	static const uint8_t marker[MSGSIZE_HEADER_MARKER] = {
 	    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 	    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-	u_char *p;
+	uint8_t m[MSGSIZE_HEADER_MARKER];
+	struct ibuf *b;
 	uint16_t len;
 	uint8_t type;
 	struct ctl_show_rib_request *req = arg;
 
 	printf("%s %s[%u] -> ", fmt_time(&mm->time),
 	    log_addr(&mm->src), mm->src_as);
-	printf("%s[%u]: size %u%s ", log_addr(&mm->dst), mm->dst_as,
-	    mm->msg_len, mm->add_path ? " addpath" : "");
-	p = mm->msg;
-	len = mm->msg_len;
+	printf("%s[%u]: size %zu%s ", log_addr(&mm->dst), mm->dst_as,
+	    ibuf_size(&mm->msg), mm->add_path ? " addpath" : "");
+	b = &mm->msg;
 
-	if (len < MSGSIZE_HEADER) {
-		printf("illegal header length: %u byte\n", len);
+	if (ibuf_get(b, m, sizeof(m)) == -1) {
+		printf("bad message: short header\n");
 		return;
 	}
 
 	/* parse BGP message header */
-	if (memcmp(p, marker, sizeof(marker))) {
+	if (memcmp(m, marker, sizeof(marker))) {
 		printf("incorrect marker in BGP message\n");
 		return;
 	}
-	p += MSGSIZE_HEADER_MARKER;
 
-	memcpy(&len, p, 2);
-	len = ntohs(len);
-	p += 2;
-	memcpy(&type, p, 1);
-	p += 1;
+	if (ibuf_get_n16(b, &len) == -1 ||
+	    ibuf_get_n8(b, &type) == -1) {
+		printf("bad message: short header\n");
+		return;
+	}
 
 	if (len < MSGSIZE_HEADER || len > MAX_PKTSIZE) {
 		printf("illegal header length: %u byte\n", len);
@@ -1796,32 +1773,31 @@ show_mrt_msg(struct mrt_bgp_msg *mm, void *arg)
 	case OPEN:
 		printf("%s ", msgtypenames[type]);
 		if (len < MSGSIZE_OPEN_MIN) {
-			printf("illegal length: %u byte\n", len);
+			printf("bad length: %u bytes\n", len);
 			return;
 		}
-		show_mrt_open(p, len - MSGSIZE_HEADER);
+		show_mrt_open(b);
 		break;
 	case NOTIFICATION:
 		printf("%s ", msgtypenames[type]);
 		if (len < MSGSIZE_NOTIFICATION_MIN) {
-			printf("illegal length: %u byte\n", len);
+			printf("bad length: %u bytes\n", len);
 			return;
 		}
-		show_mrt_notification(p, len - MSGSIZE_HEADER);
+		show_mrt_notification(b);
 		break;
 	case UPDATE:
 		printf("%s ", msgtypenames[type]);
 		if (len < MSGSIZE_UPDATE_MIN) {
-			printf("illegal length: %u byte\n", len);
+			printf("bad length: %u bytes\n", len);
 			return;
 		}
-		show_mrt_update(p, len - MSGSIZE_HEADER, req->flags,
-		    mm->add_path);
+		show_mrt_update(b, req->flags, mm->add_path);
 		break;
 	case KEEPALIVE:
 		printf("%s ", msgtypenames[type]);
 		if (len != MSGSIZE_KEEPALIVE) {
-			printf("illegal length: %u byte\n", len);
+			printf("bad length: %u bytes\n", len);
 			return;
 		}
 		/* nothing */
@@ -1829,10 +1805,10 @@ show_mrt_msg(struct mrt_bgp_msg *mm, void *arg)
 	case RREFRESH:
 		printf("%s ", msgtypenames[type]);
 		if (len != MSGSIZE_RREFRESH) {
-			printf("illegal length: %u byte\n", len);
+			printf("bad length: %u bytes\n", len);
 			return;
 		}
-		print_afi(p, len);
+		print_afi(b);
 		break;
 	default:
 		printf("unknown type %u\n", type);
@@ -1913,4 +1889,116 @@ match_aspath(void *data, uint16_t len, struct filter_as *f)
 		}
 	}
 	return (0);
+}
+
+static void
+component_finish(int type, uint8_t *data, int len)
+{
+	uint8_t *last;
+	int i;
+
+	switch (type) {
+	case FLOWSPEC_TYPE_DEST:
+	case FLOWSPEC_TYPE_SOURCE:
+		/* nothing todo */
+		return;
+	default:
+		break;
+	}
+
+	i = 0;
+	do {
+		last = data + i;
+		i += FLOWSPEC_OP_LEN(*last) + 1;
+	} while (i < len);
+	*last |= FLOWSPEC_OP_EOL;
+}
+
+static void
+push_prefix(struct parse_result *r, int type, struct bgpd_addr *addr,
+    uint8_t len)
+{
+	void *data;
+	uint8_t *comp;
+	int complen, l;
+
+	switch (addr->aid) {
+	case AID_UNSPEC:
+		return;
+	case AID_INET:
+		complen = PREFIX_SIZE(len);
+		data = &addr->v4;
+		break;
+	case AID_INET6:
+		/* IPv6 includes an offset byte */
+		complen = PREFIX_SIZE(len) + 1;
+		data = &addr->v6;
+		break;
+	default:
+		errx(1, "unsupported address family for flowspec address");
+	}
+	comp = malloc(complen);
+	if (comp == NULL)
+		err(1, NULL);
+
+	l = 0;
+	comp[l++] = len;
+	if (addr->aid == AID_INET6)
+		comp[l++] = 0;
+	memcpy(comp + l, data, complen - l);
+
+	r->flow.complen[type] = complen;
+	r->flow.components[type] = comp;
+}
+
+
+struct flowspec *
+res_to_flowspec(struct parse_result *r)
+{
+	struct flowspec *f;
+	int i, len = 0;
+	uint8_t aid;
+
+	switch (r->aid) {
+	case AID_INET:
+		aid = AID_FLOWSPECv4;
+		break;
+	case AID_INET6:
+		aid = AID_FLOWSPECv6;
+		break;
+	default:
+		errx(1, "unsupported AFI %s for flowspec rule",
+		    aid2str(r->aid));
+	}
+
+	push_prefix(r, FLOWSPEC_TYPE_DEST, &r->flow.dst, r->flow.dstlen);
+	push_prefix(r, FLOWSPEC_TYPE_SOURCE, &r->flow.src, r->flow.srclen);
+
+	for (i = FLOWSPEC_TYPE_MIN; i < FLOWSPEC_TYPE_MAX; i++)
+		if (r->flow.components[i] != NULL)
+			len += r->flow.complen[i] + 1;
+
+	if (len == 0)
+		errx(1, "no flowspec rule defined");
+
+	f = malloc(FLOWSPEC_SIZE + len);
+	if (f == NULL)
+		err(1, NULL);
+	memset(f, 0, FLOWSPEC_SIZE);
+
+	f->aid = aid;
+	f->len = len;
+
+	len = 0;
+	for (i = FLOWSPEC_TYPE_MIN; i < FLOWSPEC_TYPE_MAX; i++)
+		if (r->flow.components[i] != NULL) {
+			f->data[len++] = i;
+			component_finish(i, r->flow.components[i],
+			    r->flow.complen[i]);
+			memcpy(f->data + len, r->flow.components[i],
+			    r->flow.complen[i]);
+			len += r->flow.complen[i];
+		}
+
+	return f;
 }

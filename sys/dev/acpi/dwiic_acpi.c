@@ -1,4 +1,4 @@
-/* $OpenBSD: dwiic_acpi.c,v 1.20 2022/08/31 15:14:01 kettenis Exp $ */
+/* $OpenBSD: dwiic_acpi.c,v 1.22 2023/07/08 02:43:02 jcs Exp $ */
 /*
  * Synopsys DesignWare I2C controller
  *
@@ -17,6 +17,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "iosf.h"
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -28,6 +30,7 @@
 #include <dev/acpi/dsdt.h>
 
 #include <dev/ic/dwiicvar.h>
+#include <dev/ic/iosfvar.h>
 
 struct dwiic_crs {
 	int irq_int;
@@ -47,11 +50,18 @@ int		dwiic_acpi_found_ihidev(struct dwiic_softc *,
 		    struct aml_node *, char *, struct dwiic_crs);
 int		dwiic_acpi_found_iatp(struct dwiic_softc *, struct aml_node *,
 		    char *, struct dwiic_crs);
+int		dwiic_acpi_found_ietp(struct dwiic_softc *, struct aml_node *,
+		    char *, struct dwiic_crs);
 void		dwiic_acpi_get_params(struct dwiic_softc *, char *, uint16_t *,
 		    uint16_t *, uint32_t *);
 void		dwiic_acpi_power(struct dwiic_softc *, int);
 void		dwiic_acpi_bus_scan(struct device *,
 		    struct i2cbus_attach_args *, void *);
+
+#if NIOSF > 0
+int		dwiic_acpi_acquire_bus(void *, int);
+void		dwiic_acpi_release_bus(void *, int);
+#endif
 
 const struct cfattach dwiic_acpi_ca = {
 	sizeof(struct dwiic_softc),
@@ -79,6 +89,63 @@ const char *ihidev_hids[] = {
 	NULL
 };
 
+const char *ietp_hids[] = {
+	"ELAN0000",
+	"ELAN0100",
+	"ELAN0600",
+	"ELAN0601",
+	"ELAN0602",
+	"ELAN0603",
+	"ELAN0604",
+	"ELAN0605",
+	"ELAN0606",
+	"ELAN0607",
+	"ELAN0608",
+	"ELAN0609",
+	"ELAN060B",
+	"ELAN060C",
+	"ELAN060F",
+	"ELAN0610",
+	"ELAN0611",
+	"ELAN0612",
+	"ELAN0615",
+	"ELAN0616",
+	"ELAN0617",
+	"ELAN0618",
+	"ELAN0619",
+	"ELAN061A",
+	"ELAN061B",
+	"ELAN061C",
+	"ELAN061D",
+	"ELAN061E",
+	"ELAN061F",
+	"ELAN0620",
+	"ELAN0621",
+	"ELAN0622",
+	"ELAN0623",
+	"ELAN0624",
+	"ELAN0625",
+	"ELAN0626",
+	"ELAN0627",
+	"ELAN0628",
+	"ELAN0629",
+	"ELAN062A",
+	"ELAN062B",
+	"ELAN062C",
+	"ELAN062D",
+	"ELAN062E",	/* Lenovo V340 Whiskey Lake U */
+	"ELAN062F",	/* Lenovo V340 Comet Lake U */
+	"ELAN0631",
+	"ELAN0632",
+	"ELAN0633",	/* Lenovo S145 */
+	"ELAN0634",	/* Lenovo V340 Ice lake */
+	"ELAN0635",	/* Lenovo V1415-IIL */
+	"ELAN0636",	/* Lenovo V1415-Dali */
+	"ELAN0637",	/* Lenovo V1415-IGLR */
+	"ELAN1000",
+	NULL
+};
+
 const char *iatp_hids[] = {
 	"ATML0000",
 	"ATML0001",
@@ -103,6 +170,7 @@ dwiic_acpi_attach(struct device *parent, struct device *self, void *aux)
 	struct acpi_attach_args *aaa = aux;
 	struct aml_value res;
 	struct dwiic_crs crs;
+	uint64_t sem;
 
 	sc->sc_acpi = (struct acpi_softc *)parent;
 	sc->sc_devnode = aaa->aaa_node;
@@ -163,6 +231,13 @@ dwiic_acpi_attach(struct device *parent, struct device *self, void *aux)
 			printf(": can't establish interrupt");
 	}
 
+	if (aml_evalinteger(sc->sc_acpi, sc->sc_devnode,
+	    "_SEM", 0, NULL, &sem))
+		sem = 0;
+
+	if (sem)
+		printf(", sem");
+
 	printf("\n");
 
 	rw_init(&sc->sc_i2c_lock, "iiclk");
@@ -175,6 +250,13 @@ dwiic_acpi_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_i2c_tag.ic_intr_establish = dwiic_i2c_intr_establish;
 	sc->sc_i2c_tag.ic_intr_disestablish = dwiic_i2c_intr_disestablish;
 	sc->sc_i2c_tag.ic_intr_string = dwiic_i2c_intr_string;
+
+#if NIOSF > 0
+	if (sem) {
+		sc->sc_i2c_tag.ic_acquire_bus = dwiic_acpi_acquire_bus;
+		sc->sc_i2c_tag.ic_release_bus = dwiic_acpi_release_bus;
+	}
+#endif
 
 	bzero(&sc->sc_iba, sizeof(sc->sc_iba));
 	sc->sc_iba.iba_name = "iic";
@@ -394,6 +476,8 @@ dwiic_acpi_found_hid(struct aml_node *node, void *arg)
 		return dwiic_acpi_found_ihidev(sc, node, dev, crs);
 	else if (dwiic_matchhids(dev, iatp_hids))
 		return dwiic_acpi_found_iatp(sc, node, dev, crs);
+	else if (dwiic_matchhids(dev, ietp_hids) || dwiic_matchhids(cdev, ietp_hids))
+		return dwiic_acpi_found_ietp(sc, node, dev, crs);
 
 	memset(&ia, 0, sizeof(ia));
 	ia.ia_tag = sc->sc_iba.iba_tag;
@@ -482,6 +566,32 @@ dwiic_acpi_found_ihidev(struct dwiic_softc *sc, struct aml_node *node,
 }
 
 int
+dwiic_acpi_found_ietp(struct dwiic_softc *sc, struct aml_node *node,
+    char *dev, struct dwiic_crs crs)
+{
+	struct i2c_attach_args ia;
+
+	memset(&ia, 0, sizeof(ia));
+	ia.ia_tag = sc->sc_iba.iba_tag;
+	ia.ia_size = 1;
+	ia.ia_name = "ietp";
+	ia.ia_addr = crs.i2c_addr;
+	ia.ia_cookie = dev;
+
+	if (sc->sc_poll_ihidev)
+		ia.ia_poll = 1;
+	if (!(crs.irq_int == 0 && crs.gpio_int_node == NULL))
+		ia.ia_intr = &crs;
+
+	if (config_found(sc->sc_iic, &ia, dwiic_i2c_print)) {
+		node->parent->attached = 1;
+		return 0;
+	}
+
+	return 1;
+}
+
+int
 dwiic_acpi_found_iatp(struct dwiic_softc *sc, struct aml_node *node, char *dev,
     struct dwiic_crs crs)
 {
@@ -547,3 +657,27 @@ dwiic_acpi_power(struct dwiic_softc *sc, int power)
 		dwiic_write(sc, 0x800, 1);
 	}
 }
+
+#if NIOSF > 0
+extern int	iosf_i2c_acquire(int);
+extern void	iosf_i2c_release(int);
+
+int
+dwiic_acpi_acquire_bus(void *cookie, int flags)
+{
+	int rv;
+
+	rv = dwiic_i2c_acquire_bus(cookie, flags);
+	if (rv != 0)
+		return (rv);
+
+	return (iosf_i2c_acquire(flags));
+}
+
+void
+dwiic_acpi_release_bus(void *cookie, int flags)
+{
+	iosf_i2c_release(flags);
+	dwiic_i2c_release_bus(cookie, flags);
+}
+#endif /* NIOSF > 0 */

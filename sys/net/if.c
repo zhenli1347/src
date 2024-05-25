@@ -1,4 +1,4 @@
-/*	$OpenBSD: if.c,v 1.683 2022/11/23 16:57:37 kn Exp $	*/
+/*	$OpenBSD: if.c,v 1.718 2024/02/06 00:18:53 bluhm Exp $	*/
 /*	$NetBSD: if.c,v 1.35 1996/05/07 05:26:04 thorpej Exp $	*/
 
 /*
@@ -95,12 +95,20 @@
 #include <net/route.h>
 #include <net/netisr.h>
 
+#include "vlan.h"
+#if NVLAN > 0
+#include <net/if_vlan_var.h>
+#endif
+
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netinet/igmp.h>
 #ifdef MROUTING
 #include <netinet/ip_mroute.h>
 #endif
+#include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
 
 #ifdef INET6
 #include <netinet6/in6_var.h>
@@ -238,8 +246,13 @@ int	ifq_congestion;
 
 int		 netisr;
 
+struct softnet {
+	char		 sn_name[16];
+	struct taskq	*sn_taskq;
+};
+
 #define	NET_TASKQ	4
-struct taskq	*nettqmp[NET_TASKQ];
+struct softnet	softnets[NET_TASKQ];
 
 struct task if_input_task_locked = TASK_INITIALIZER(if_netisr, NULL);
 
@@ -264,14 +277,21 @@ ifinit(void)
 	if_idxmap_init(8); /* 8 is a nice power of 2 for malloc */
 
 	for (i = 0; i < NET_TASKQ; i++) {
-		nettqmp[i] = taskq_create("softnet", 1, IPL_NET, TASKQ_MPSAFE);
-		if (nettqmp[i] == NULL)
+		struct softnet *sn = &softnets[i];
+		snprintf(sn->sn_name, sizeof(sn->sn_name), "softnet%u", i);
+		sn->sn_taskq = taskq_create(sn->sn_name, 1, IPL_NET,
+		    TASKQ_MPSAFE);
+		if (sn->sn_taskq == NULL)
 			panic("unable to create network taskq %d", i);
 	}
 }
 
 static struct if_idxmap if_idxmap;
 
+/*
+ * XXXSMP: For `ifnetlist' modification both kernel and net locks
+ * should be taken. For read-only access only one lock of them required.
+ */
 struct ifnet_head ifnetlist = TAILQ_HEAD_INITIALIZER(ifnetlist);
 
 static inline unsigned int
@@ -572,7 +592,7 @@ if_attach_queues(struct ifnet *ifp, unsigned int nqs)
 
 	for (i = 1; i < nqs; i++) {
 		ifq = malloc(sizeof(*ifq), M_DEVBUF, M_WAITOK|M_ZERO);
-		ifq_set_maxlen(ifq, ifp->if_snd.ifq_maxlen);
+		ifq_init_maxlen(ifq, ifp->if_snd.ifq_maxlen);
 		ifq_init(ifq, ifp, i);
 		map[i] = ifq;
 	}
@@ -761,7 +781,8 @@ if_input(struct ifnet *ifp, struct mbuf_list *ml)
 int
 if_input_local(struct ifnet *ifp, struct mbuf *m, sa_family_t af)
 {
-	int keepflags;
+	int keepflags, keepcksum;
+	uint16_t keepmss;
 
 #if NBPFILTER > 0
 	/*
@@ -779,19 +800,55 @@ if_input_local(struct ifnet *ifp, struct mbuf *m, sa_family_t af)
 	}
 #endif
 	keepflags = m->m_flags & (M_BCAST|M_MCAST);
+	/*
+	 * Preserve outgoing checksum flags, in case the packet is
+	 * forwarded to another interface.  Then the checksum, which
+	 * is now incorrect, will be calculated before sending.
+	 */
+	keepcksum = m->m_pkthdr.csum_flags & (M_IPV4_CSUM_OUT |
+	    M_TCP_CSUM_OUT | M_UDP_CSUM_OUT | M_ICMP_CSUM_OUT |
+	    M_TCP_TSO);
+	keepmss = m->m_pkthdr.ph_mss;
 	m_resethdr(m);
 	m->m_flags |= M_LOOP | keepflags;
+	m->m_pkthdr.csum_flags = keepcksum;
+	m->m_pkthdr.ph_mss = keepmss;
 	m->m_pkthdr.ph_ifidx = ifp->if_index;
 	m->m_pkthdr.ph_rtableid = ifp->if_rdomain;
 
-	ifp->if_opackets++;
-	ifp->if_obytes += m->m_pkthdr.len;
+	if (ISSET(keepcksum, M_TCP_TSO) && m->m_pkthdr.len > ifp->if_mtu) {
+		if (ifp->if_mtu > 0 &&
+		    ((af == AF_INET &&
+		    ISSET(ifp->if_capabilities, IFCAP_TSOv4)) ||
+		    (af == AF_INET6 &&
+		    ISSET(ifp->if_capabilities, IFCAP_TSOv6)))) {
+			tcpstat_inc(tcps_inswlro);
+			tcpstat_add(tcps_inpktlro,
+			    (m->m_pkthdr.len + ifp->if_mtu - 1) / ifp->if_mtu);
+		} else {
+			tcpstat_inc(tcps_inbadlro);
+			m_freem(m);
+			return (EPROTONOSUPPORT);
+		}
+	}
 
-	ifp->if_ipackets++;
-	ifp->if_ibytes += m->m_pkthdr.len;
+	if (ISSET(keepcksum, M_TCP_CSUM_OUT))
+		m->m_pkthdr.csum_flags |= M_TCP_CSUM_IN_OK;
+	if (ISSET(keepcksum, M_UDP_CSUM_OUT))
+		m->m_pkthdr.csum_flags |= M_UDP_CSUM_IN_OK;
+	if (ISSET(keepcksum, M_ICMP_CSUM_OUT))
+		m->m_pkthdr.csum_flags |= M_ICMP_CSUM_IN_OK;
+
+	/* do not count multicast loopback and simplex interfaces */
+	if (ISSET(ifp->if_flags, IFF_LOOPBACK)) {
+		counters_pkt(ifp->if_counters, ifc_opackets, ifc_obytes,
+		    m->m_pkthdr.len);
+	}
 
 	switch (af) {
 	case AF_INET:
+		if (ISSET(keepcksum, M_IPV4_CSUM_OUT))
+			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_OK;
 		ipv4_input(ifp, m);
 		break;
 #ifdef INET6
@@ -811,6 +868,97 @@ if_input_local(struct ifnet *ifp, struct mbuf *m, sa_family_t af)
 	}
 
 	return (0);
+}
+
+int
+if_output_ml(struct ifnet *ifp, struct mbuf_list *ml,
+    struct sockaddr *dst, struct rtentry *rt)
+{
+	struct mbuf *m;
+	int error = 0;
+
+	while ((m = ml_dequeue(ml)) != NULL) {
+		error = ifp->if_output(ifp, m, dst, rt);
+		if (error)
+			break;
+	}
+	if (error)
+		ml_purge(ml);
+
+	return error;
+}
+
+int
+if_output_tso(struct ifnet *ifp, struct mbuf **mp, struct sockaddr *dst,
+    struct rtentry *rt, u_int mtu)
+{
+	uint32_t ifcap;
+	int error;
+
+	switch (dst->sa_family) {
+	case AF_INET:
+		ifcap = IFCAP_TSOv4;
+		break;
+#ifdef INET6
+	case AF_INET6:
+		ifcap = IFCAP_TSOv6;
+		break;
+#endif
+	default:
+		unhandled_af(dst->sa_family);
+	}
+
+	/*
+	 * Try to send with TSO first.  When forwarding LRO may set
+	 * maximum segment size in mbuf header.  Chop TCP segment
+	 * even if it would fit interface MTU to preserve maximum
+	 * path MTU.
+	 */
+	error = tcp_if_output_tso(ifp, mp, dst, rt, ifcap, mtu);
+	if (error || *mp == NULL)
+		return error;
+
+	if ((*mp)->m_pkthdr.len <= mtu) {
+		switch (dst->sa_family) {
+		case AF_INET:
+			in_hdr_cksum_out(*mp, ifp);
+			in_proto_cksum_out(*mp, ifp);
+			break;
+#ifdef INET6
+		case AF_INET6:
+			in6_proto_cksum_out(*mp, ifp);
+			break;
+#endif
+		}
+		error = ifp->if_output(ifp, *mp, dst, rt);
+		*mp = NULL;
+		return error;
+	}
+
+	/* mp still contains mbuf that has to be fragmented or dropped. */
+	return 0;
+}
+
+int
+if_output_mq(struct ifnet *ifp, struct mbuf_queue *mq, unsigned int *total,
+    struct sockaddr *dst, struct rtentry *rt)
+{
+	struct mbuf_list ml;
+	unsigned int len;
+	int error;
+
+	mq_delist(mq, &ml);
+	len = ml_len(&ml);
+	error = if_output_ml(ifp, &ml, dst, rt);
+
+	/* XXXSMP we also discard if other CPU enqueues */
+	if (mq_len(mq) > 0) {
+		/* mbuf is back in queue. Discard. */
+		atomic_sub_int(total, len + mq_purge(mq));
+	} else
+		atomic_sub_int(total, len);
+
+	return error;
 }
 
 int
@@ -906,11 +1054,8 @@ if_netisr(void *unused)
 		atomic_clearbits_int(&netisr, n);
 
 #if NETHER > 0
-		if (n & (1 << NETISR_ARP)) {
-			KERNEL_LOCK();
+		if (n & (1 << NETISR_ARP))
 			arpintr();
-			KERNEL_UNLOCK();
-		}
 #endif
 		if (n & (1 << NETISR_IP))
 			ipintr();
@@ -942,14 +1087,6 @@ if_netisr(void *unused)
 #endif
 		t |= n;
 	}
-
-#if NPFSYNC > 0
-	if (t & (1 << NETISR_PFSYNC)) {
-		KERNEL_LOCK();
-		pfsyncintr();
-		KERNEL_UNLOCK();
-	}
-#endif
 
 	NET_UNLOCK();
 }
@@ -1099,6 +1236,8 @@ if_detach(struct ifnet *ifp)
 			ifafree(ifa);
 		}
 	}
+	splx(s);
+	NET_UNLOCK();
 
 	KASSERT(TAILQ_EMPTY(&ifp->if_addrhooks));
 	KASSERT(TAILQ_EMPTY(&ifp->if_linkstatehooks));
@@ -1110,8 +1249,6 @@ if_detach(struct ifnet *ifp)
 
 	/* Announce that the interface is gone. */
 	rtm_ifannounce(ifp, IFAN_DEPARTURE);
-	splx(s);
-	NET_UNLOCK();
 
 	if (ifp->if_counters != NULL)
 		if_counters_free(ifp);
@@ -1385,14 +1522,15 @@ if_congested(void)
  * Locate an interface based on a complete address.
  */
 struct ifaddr *
-ifa_ifwithaddr(struct sockaddr *addr, u_int rtableid)
+ifa_ifwithaddr(const struct sockaddr *addr, u_int rtableid)
 {
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 	u_int rdomain;
 
+	NET_ASSERT_LOCKED();
+
 	rdomain = rtable_l2(rtableid);
-	KERNEL_LOCK();
 	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp->if_rdomain != rdomain)
 			continue;
@@ -1402,12 +1540,10 @@ ifa_ifwithaddr(struct sockaddr *addr, u_int rtableid)
 				continue;
 
 			if (equal(addr, ifa->ifa_addr)) {
-				KERNEL_UNLOCK();
 				return (ifa);
 			}
 		}
 	}
-	KERNEL_UNLOCK();
 	return (NULL);
 }
 
@@ -1415,13 +1551,14 @@ ifa_ifwithaddr(struct sockaddr *addr, u_int rtableid)
  * Locate the point to point interface with a given destination address.
  */
 struct ifaddr *
-ifa_ifwithdstaddr(struct sockaddr *addr, u_int rdomain)
+ifa_ifwithdstaddr(const struct sockaddr *addr, u_int rdomain)
 {
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 
+	NET_ASSERT_LOCKED();
+
 	rdomain = rtable_l2(rdomain);
-	KERNEL_LOCK();
 	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
 		if (ifp->if_rdomain != rdomain)
 			continue;
@@ -1431,13 +1568,11 @@ ifa_ifwithdstaddr(struct sockaddr *addr, u_int rdomain)
 				    addr->sa_family || ifa->ifa_dstaddr == NULL)
 					continue;
 				if (equal(addr, ifa->ifa_dstaddr)) {
-					KERNEL_UNLOCK();
 					return (ifa);
 				}
 			}
 		}
 	}
-	KERNEL_UNLOCK();
 	return (NULL);
 }
 
@@ -1446,10 +1581,10 @@ ifa_ifwithdstaddr(struct sockaddr *addr, u_int rdomain)
  * a given address.
  */
 struct ifaddr *
-ifaof_ifpforaddr(struct sockaddr *addr, struct ifnet *ifp)
+ifaof_ifpforaddr(const struct sockaddr *addr, struct ifnet *ifp)
 {
 	struct ifaddr *ifa;
-	char *cp, *cp2, *cp3;
+	const char *cp, *cp2, *cp3;
 	char *cplim;
 	struct ifaddr *ifa_maybe = NULL;
 	u_int af = addr->sa_family;
@@ -1636,16 +1771,16 @@ if_linkstate_task(void *xifidx)
 	unsigned int ifidx = (unsigned long)xifidx;
 	struct ifnet *ifp;
 
-	KERNEL_LOCK();
 	NET_LOCK();
+	KERNEL_LOCK();
 
 	ifp = if_get(ifidx);
 	if (ifp != NULL)
 		if_linkstate(ifp);
 	if_put(ifp);
 
-	NET_UNLOCK();
 	KERNEL_UNLOCK();
+	NET_UNLOCK();
 }
 
 void
@@ -1653,8 +1788,10 @@ if_linkstate(struct ifnet *ifp)
 {
 	NET_ASSERT_LOCKED();
 
-	rtm_ifchg(ifp);
-	rt_if_track(ifp);
+	if (panicstr == NULL) {
+		rtm_ifchg(ifp);
+		rt_if_track(ifp);
+	}
 
 	if_hooks_run(&ifp->if_linkstatehooks);
 }
@@ -2056,43 +2193,10 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 			ifr->ifr_flags &= ~IFXF_WOL;
 			error = ENOTSUP;
 		}
-
-		if (ISSET(ifp->if_capabilities, IFCAP_TSO) &&
-		    ISSET(ifr->ifr_flags, IFXF_TSO) !=
-		    ISSET(ifp->if_xflags, IFXF_TSO)) {
-			struct ifreq ifrq;
-
-			s = splnet();
-
-			if (ISSET(ifr->ifr_flags, IFXF_TSO))
-				ifp->if_xflags |= IFXF_TSO;
-			else
-				ifp->if_xflags &= ~IFXF_TSO;
-
-			NET_ASSERT_LOCKED();	/* for ioctl */
-			KERNEL_ASSERT_LOCKED();	/* for if_flags */
-
-			if (ISSET(ifp->if_flags, IFF_UP)) {
-				/* go down for a moment... */
-				ifp->if_flags &= ~IFF_UP;
-				ifrq.ifr_flags = ifp->if_flags;
-				(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS,
-				    (caddr_t)&ifrq);
-
-				/* ... and up again */
-				ifp->if_flags |= IFF_UP;
-				ifrq.ifr_flags = ifp->if_flags;
-				(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS,
-				    (caddr_t)&ifrq);
-			}
-
-			splx(s);
-		} else if (!ISSET(ifp->if_capabilities, IFCAP_TSO) &&
-		    ISSET(ifr->ifr_flags, IFXF_TSO)) {
-			ifr->ifr_flags &= ~IFXF_TSO;
-			error = ENOTSUP;
-		}
 #endif
+		if (ISSET(ifr->ifr_flags, IFXF_LRO) !=
+		    ISSET(ifp->if_xflags, IFXF_LRO))
+			error = ifsetlro(ifp, ISSET(ifr->ifr_flags, IFXF_LRO));
 
 		if (error == 0)
 			ifp->if_xflags = (ifp->if_xflags & IFXF_CANTCHANGE) |
@@ -2395,7 +2499,6 @@ ifioctl_get(u_long cmd, caddr_t data)
 	char ifrtlabelbuf[RTLABEL_LEN];
 	int error = 0;
 	size_t bytesdone;
-	const char *label;
 
 	switch(cmd) {
 	case SIOCGIFCONF:
@@ -2470,9 +2573,8 @@ ifioctl_get(u_long cmd, caddr_t data)
 		break;
 
 	case SIOCGIFRTLABEL:
-		if (ifp->if_rtlabelid &&
-		    (label = rtlabel_id2name(ifp->if_rtlabelid)) != NULL) {
-			strlcpy(ifrtlabelbuf, label, RTLABEL_LEN);
+		if (ifp->if_rtlabelid && rtlabel_id2name(ifp->if_rtlabelid,
+		    ifrtlabelbuf, RTLABEL_LEN) != NULL) {
 			error = copyoutstr(ifrtlabelbuf, ifr->ifr_data,
 			    RTLABEL_LEN, &bytesdone);
 		} else
@@ -2697,7 +2799,8 @@ if_getdata(struct ifnet *ifp, struct if_data *data)
 	if (ifp->if_counters != NULL) {
 		uint64_t counters[ifc_ncounters];
 
-		counters_read(ifp->if_counters, counters, nitems(counters));
+		counters_read(ifp->if_counters, counters, nitems(counters),
+		    NULL);
 
 		data->ifi_ipackets += counters[ifc_ipackets];
 		data->ifi_ierrors += counters[ifc_ierrors];
@@ -2750,7 +2853,7 @@ if_creategroup(const char *groupname)
 {
 	struct ifg_group	*ifg;
 
-	if ((ifg = malloc(sizeof(*ifg), M_TEMP, M_NOWAIT)) == NULL)
+	if ((ifg = malloc(sizeof(*ifg), M_IFGROUP, M_NOWAIT)) == NULL)
 		return (NULL);
 
 	strlcpy(ifg->ifg_group, groupname, sizeof(ifg->ifg_group));
@@ -2785,11 +2888,11 @@ if_addgroup(struct ifnet *ifp, const char *groupname)
 		if (!strcmp(ifgl->ifgl_group->ifg_group, groupname))
 			return (EEXIST);
 
-	if ((ifgl = malloc(sizeof(*ifgl), M_TEMP, M_NOWAIT)) == NULL)
+	if ((ifgl = malloc(sizeof(*ifgl), M_IFGROUP, M_NOWAIT)) == NULL)
 		return (ENOMEM);
 
-	if ((ifgm = malloc(sizeof(*ifgm), M_TEMP, M_NOWAIT)) == NULL) {
-		free(ifgl, M_TEMP, sizeof(*ifgl));
+	if ((ifgm = malloc(sizeof(*ifgm), M_IFGROUP, M_NOWAIT)) == NULL) {
+		free(ifgl, M_IFGROUP, sizeof(*ifgl));
 		return (ENOMEM);
 	}
 
@@ -2800,8 +2903,8 @@ if_addgroup(struct ifnet *ifp, const char *groupname)
 	if (ifg == NULL) {
 		ifg = if_creategroup(groupname);
 		if (ifg == NULL) {
-			free(ifgl, M_TEMP, sizeof(*ifgl));
-			free(ifgm, M_TEMP, sizeof(*ifgm));
+			free(ifgl, M_IFGROUP, sizeof(*ifgl));
+			free(ifgm, M_IFGROUP, sizeof(*ifgm));
 			return (ENOMEM);
 		}
 	} else
@@ -2844,7 +2947,7 @@ if_delgroup(struct ifnet *ifp, const char *groupname)
 
 	if (ifgm != NULL) {
 		TAILQ_REMOVE(&ifgl->ifgl_group->ifg_members, ifgm, ifgm_next);
-		free(ifgm, M_TEMP, sizeof(*ifgm));
+		free(ifgm, M_IFGROUP, sizeof(*ifgm));
 	}
 
 #if NPF > 0
@@ -2857,10 +2960,10 @@ if_delgroup(struct ifnet *ifp, const char *groupname)
 #if NPF > 0
 		pfi_detach_ifgroup(ifgl->ifgl_group);
 #endif
-		free(ifgl->ifgl_group, M_TEMP, sizeof(*ifgl->ifgl_group));
+		free(ifgl->ifgl_group, M_IFGROUP, sizeof(*ifgl->ifgl_group));
 	}
 
-	free(ifgl, M_TEMP, sizeof(*ifgl));
+	free(ifgl, M_IFGROUP, sizeof(*ifgl));
 
 	return (0);
 }
@@ -3023,20 +3126,20 @@ if_getgrouplist(caddr_t data)
 }
 
 void
-if_group_routechange(struct sockaddr *dst, struct sockaddr *mask)
+if_group_routechange(const struct sockaddr *dst, const struct sockaddr *mask)
 {
 	switch (dst->sa_family) {
 	case AF_INET:
-		if (satosin(dst)->sin_addr.s_addr == INADDR_ANY &&
+		if (satosin_const(dst)->sin_addr.s_addr == INADDR_ANY &&
 		    mask && (mask->sa_len == 0 ||
-		    satosin(mask)->sin_addr.s_addr == INADDR_ANY))
+		    satosin_const(mask)->sin_addr.s_addr == INADDR_ANY))
 			if_group_egress_build();
 		break;
 #ifdef INET6
 	case AF_INET6:
-		if (IN6_ARE_ADDR_EQUAL(&(satosin6(dst))->sin6_addr,
+		if (IN6_ARE_ADDR_EQUAL(&(satosin6_const(dst))->sin6_addr,
 		    &in6addr_any) && mask && (mask->sa_len == 0 ||
-		    IN6_ARE_ADDR_EQUAL(&(satosin6(mask))->sin6_addr,
+		    IN6_ARE_ADDR_EQUAL(&(satosin6_const(mask))->sin6_addr,
 		    &in6addr_any)))
 			if_group_egress_build();
 		break;
@@ -3135,15 +3238,73 @@ ifpromisc(struct ifnet *ifp, int pswitch)
 	return (error);
 }
 
+/* Set/clear LRO flag and restart interface if needed. */
+int
+ifsetlro(struct ifnet *ifp, int on)
+{
+	struct ifreq ifrq;
+	int error = 0;
+	int s = splnet();
+	struct if_parent parent;
+
+	memset(&parent, 0, sizeof(parent));
+	if ((*ifp->if_ioctl)(ifp, SIOCGIFPARENT, (caddr_t)&parent) != -1) {
+		struct ifnet *ifp0 = if_unit(parent.ifp_parent);
+
+		if (ifp0 != NULL) {
+			ifsetlro(ifp0, on);
+			if_put(ifp0);
+		}
+	}
+
+	if (!ISSET(ifp->if_capabilities, IFCAP_LRO)) {
+		error = ENOTSUP;
+		goto out;
+	}
+
+	NET_ASSERT_LOCKED();	/* for ioctl */
+	KERNEL_ASSERT_LOCKED();	/* for if_flags */
+
+	if (on && !ISSET(ifp->if_xflags, IFXF_LRO)) {
+		if (ifp->if_type == IFT_ETHER && ether_brport_isset(ifp)) {
+			error = EBUSY;
+			goto out;
+		}
+		SET(ifp->if_xflags, IFXF_LRO);
+	} else if (!on && ISSET(ifp->if_xflags, IFXF_LRO))
+		CLR(ifp->if_xflags, IFXF_LRO);
+	else
+		goto out;
+
+	/* restart interface */
+	if (ISSET(ifp->if_flags, IFF_UP)) {
+		/* go down for a moment... */
+		CLR(ifp->if_flags, IFF_UP);
+		ifrq.ifr_flags = ifp->if_flags;
+		(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS, (caddr_t)&ifrq);
+
+		/* ... and up again */
+		SET(ifp->if_flags, IFF_UP);
+		ifrq.ifr_flags = ifp->if_flags;
+		(*ifp->if_ioctl)(ifp, SIOCSIFFLAGS, (caddr_t)&ifrq);
+	}
+ out:
+	splx(s);
+
+	return error;
+}
+
 void
 ifa_add(struct ifnet *ifp, struct ifaddr *ifa)
 {
+	NET_ASSERT_LOCKED_EXCLUSIVE();
 	TAILQ_INSERT_TAIL(&ifp->if_addrlist, ifa, ifa_list);
 }
 
 void
 ifa_del(struct ifnet *ifp, struct ifaddr *ifa)
 {
+	NET_ASSERT_LOCKED_EXCLUSIVE();
 	TAILQ_REMOVE(&ifp->if_addrlist, ifa, ifa_list);
 }
 
@@ -3402,13 +3563,29 @@ unhandled_af(int af)
 struct taskq *
 net_tq(unsigned int ifindex)
 {
-	struct taskq *t = NULL;
+	struct softnet *sn;
 	static int nettaskqs;
 
 	if (nettaskqs == 0)
 		nettaskqs = min(NET_TASKQ, ncpus);
 
-	t = nettqmp[ifindex % nettaskqs];
+	sn = &softnets[ifindex % nettaskqs];
 
-	return (t);
+	return (sn->sn_taskq);
+}
+
+void
+net_tq_barriers(const char *wmesg)
+{
+	struct task barriers[NET_TASKQ];
+	struct refcnt r = REFCNT_INITIALIZER();
+	int i;
+
+	for (i = 0; i < nitems(barriers); i++) {
+		task_set(&barriers[i], (void (*)(void *))refcnt_rele_wake, &r);
+		refcnt_take(&r);
+		task_add(softnets[i].sn_taskq, &barriers[i]);
+	}
+ 
+	refcnt_finalize(&r, wmesg);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: asn1_gen.c,v 1.20 2022/11/26 16:08:50 tb Exp $ */
+/* $OpenBSD: asn1_gen.c,v 1.22 2024/05/17 02:57:26 tb Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 2002.
  */
@@ -133,6 +133,7 @@ ASN1_generate_nconf(const char *str, CONF *nconf)
 	X509V3_set_nconf(&cnf, nconf);
 	return ASN1_generate_v3(str, &cnf);
 }
+LCRYPTO_ALIAS(ASN1_generate_nconf);
 
 ASN1_TYPE *
 ASN1_generate_v3(const char *str, X509V3_CTX *cnf)
@@ -266,6 +267,7 @@ ASN1_generate_v3(const char *str, X509V3_CTX *cnf)
 
 	return ret;
 }
+LCRYPTO_ALIAS(ASN1_generate_v3);
 
 static int
 asn1_cb(const char *elem, int len, void *bitstr)
@@ -531,7 +533,8 @@ static int
 asn1_str2tag(const char *tagstr, int len)
 {
 	unsigned int i;
-	static const struct tag_name_st *tntmp, tnst [] = {
+	const struct tag_name_st *tntmp;
+	static const struct tag_name_st tnst[] = {
 		ASN1_GEN_STR("BOOL", V_ASN1_BOOLEAN),
 		ASN1_GEN_STR("BOOLEAN", V_ASN1_BOOLEAN),
 		ASN1_GEN_STR("NULL", V_ASN1_NULL),

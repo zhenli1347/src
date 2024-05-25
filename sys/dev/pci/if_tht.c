@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_tht.c,v 1.146 2022/08/29 06:08:04 jsg Exp $ */
+/*	$OpenBSD: if_tht.c,v 1.148 2024/05/24 06:02:57 jsg Exp $ */
 
 /*
  * Copyright (c) 2007 David Gwynne <dlg@openbsd.org>
@@ -30,11 +30,9 @@
 #include <sys/systm.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
-#include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
-#include <sys/timeout.h>
 #include <sys/queue.h>
 #include <sys/rwlock.h>
 #include <sys/time.h>
@@ -781,7 +779,7 @@ tht_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_watchdog = tht_watchdog;
 	ifp->if_hardmtu = MCLBYTES - ETHER_HDR_LEN - ETHER_CRC_LEN; /* XXX */
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
-	ifq_set_maxlen(&ifp->if_snd, 400);
+	ifq_init_maxlen(&ifp->if_snd, 400);
 
 	ifmedia_init(&sc->sc_media, 0, tht_media_change, tht_media_status);
 	ifmedia_add(&sc->sc_media, IFM_ETHER|IFM_AUTO, 0, NULL);

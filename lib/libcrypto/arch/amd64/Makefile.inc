@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile.inc,v 1.8 2017/08/20 17:53:13 espie Exp $
+# $OpenBSD: Makefile.inc,v 1.27 2024/03/29 11:00:57 jsing Exp $
 
 # amd64-specific libcrypto build rules
 
@@ -13,9 +13,11 @@ SSLASM+= aes bsaes-x86_64
 CFLAGS+= -DVPAES_ASM
 SSLASM+= aes vpaes-x86_64
 SSLASM+= aes aesni-x86_64
-SSLASM+= aes aesni-sha1-x86_64
-# bf
-SRCS+= bf_enc.c
+CFLAGS+= -DHAVE_AES_CBC_ENCRYPT_INTERNAL
+CFLAGS+= -DHAVE_AES_SET_ENCRYPT_KEY_INTERNAL
+CFLAGS+= -DHAVE_AES_SET_DECRYPT_KEY_INTERNAL
+CFLAGS+= -DHAVE_AES_ENCRYPT_INTERNAL
+CFLAGS+= -DHAVE_AES_DECRYPT_INTERNAL
 # bn
 CFLAGS+= -DOPENSSL_IA32_SSE2
 CFLAGS+= -DRSA_ASM
@@ -24,17 +26,21 @@ CFLAGS+= -DOPENSSL_BN_ASM_MONT
 SSLASM+= bn x86_64-mont
 CFLAGS+= -DOPENSSL_BN_ASM_MONT5
 SSLASM+= bn x86_64-mont5
-CFLAGS+= -DOPENSSL_BN_ASM_GF2m
-SSLASM+= bn x86_64-gf2m
-# camellia
-SRCS+=	cmll_misc.c
-SSLASM+= camellia cmll-x86_64
-# des
-SRCS+= des_enc.c fcrypt_b.c
-# ec
-#CFLAGS+= -DECP_NISTZ256_ASM
-#SRCS+=	ecp_nistz256.c
-#SSLASM+= ec ecp_nistz256-x86_64
+
+# bn s2n-bignum
+SRCS += bn_arch.c
+SRCS += bignum_add.S
+SRCS += bignum_cmadd.S
+SRCS += bignum_cmul.S
+SRCS += bignum_mul.S
+SRCS += bignum_mul_4_8_alt.S
+SRCS += bignum_mul_8_16_alt.S
+SRCS += bignum_sqr.S
+SRCS += bignum_sqr_4_8_alt.S
+SRCS += bignum_sqr_8_16_alt.S
+SRCS += bignum_sub.S
+SRCS += word_clz.S
+
 # md5
 CFLAGS+= -DMD5_ASM
 SSLASM+= md5 md5-x86_64
@@ -42,9 +48,9 @@ SSLASM+= md5 md5-x86_64
 CFLAGS+= -DGHASH_ASM
 SSLASM+= modes ghash-x86_64
 # rc4
-CFLAGS+= -DRC4_MD5_ASM
+CFLAGS+= -DHAVE_RC4_INTERNAL
+CFLAGS+= -DHAVE_RC4_SET_KEY_INTERNAL
 SSLASM+= rc4 rc4-x86_64
-SSLASM+= rc4 rc4-md5-x86_64
 # ripemd
 # sha
 CFLAGS+= -DSHA1_ASM
@@ -61,9 +67,6 @@ GENERATED+= sha512-x86_64.S
 sha512-x86_64.S: ${LCRYPTO_SRC}/sha/asm/sha512-x86_64.pl ${EXTRA_PL}
 	cd ${LCRYPTO_SRC}/sha/asm ; \
 		/usr/bin/perl ./sha512-x86_64.pl ${.OBJDIR}/${.TARGET}
-# whrlpool
-CFLAGS+= -DWHIRLPOOL_ASM
-SSLASM+= whrlpool wp-x86_64
 
 .for dir f in ${SSLASM}
 SRCS+=	${f}.S
@@ -74,7 +77,7 @@ ${f}.S: ${LCRYPTO_SRC}/${dir}/asm/${f}.pl ${EXTRA_PL}
 .endfor
 
 CFLAGS+= -DOPENSSL_CPUID_OBJ
-SRCS+=	x86_64cpuid.S x86_64-gcc.c
+SRCS+=	x86_64cpuid.S
 GENERATED+=x86_64cpuid.S
 
 x86_64cpuid.S: ${LCRYPTO_SRC}/x86_64cpuid.pl ${EXTRA_PL}

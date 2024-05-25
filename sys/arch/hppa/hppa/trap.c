@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.159 2022/11/02 07:20:07 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.166 2024/04/14 03:26:25 jsg Exp $	*/
 
 /*
  * Copyright (c) 1998-2004 Michael Shalayeff
@@ -298,7 +298,8 @@ trap(int type, struct trapframe *frame)
 		fpp = (u_int64_t *)&hfp->hfp_regs;
 
 		pex = (u_int32_t *)&fpp[0];
-		for (i = 0, pex++; i < 7 && !*pex; i++, pex++);
+		for (i = 0, pex++; i < 7 && !*pex; i++, pex++)
+			;
 		flt = 0;
 		if (i < 7) {
 			u_int32_t stat = HPPA_FPU_OP(*pex);
@@ -764,8 +765,8 @@ void
 syscall(struct trapframe *frame)
 {
 	struct proc *p = curproc;
-	const struct sysent *callp;
-	int retq, code, argsize, argoff, error;
+	const struct sysent *callp = sysent;
+	int code, argsize, argoff, error;
 	register_t args[8], rval[2];
 #ifdef DIAGNOSTIC
 	int oldcpl = curcpu()->ci_cpl;
@@ -778,39 +779,15 @@ syscall(struct trapframe *frame)
 
 	p->p_md.md_regs = frame;
 
-	argoff = 4; retq = 0;
-	switch (code = frame->tf_t1) {
-	case SYS_syscall:
-		code = frame->tf_arg0;
-		args[0] = frame->tf_arg1;
-		args[1] = frame->tf_arg2;
-		args[2] = frame->tf_arg3;
-		argoff = 3;
-		break;
-	case SYS___syscall:
-		/*
-		 * this works, because quads get magically swapped
-		 * due to the args being laid backwards on the stack
-		 * and then copied in words
-		 */
-		code = frame->tf_arg0;
-		args[0] = frame->tf_arg2;
-		args[1] = frame->tf_arg3;
-		argoff = 2;
-		retq = 1;
-		break;
-	default:
-		args[0] = frame->tf_arg0;
-		args[1] = frame->tf_arg1;
-		args[2] = frame->tf_arg2;
-		args[3] = frame->tf_arg3;
-		break;
-	}
+	argoff = 4;
+	code = frame->tf_t1;
+	args[0] = frame->tf_arg0;
+	args[1] = frame->tf_arg1;
+	args[2] = frame->tf_arg2;
+	args[3] = frame->tf_arg3;
 
-	callp = sysent;
-	if (code < 0 || code >= SYS_MAXSYSCALL)
-		callp += SYS_syscall;
-	else
+	// XXX out of range stays on syscall0, which we assume is enosys
+	if (code > 0 && code < SYS_MAXSYSCALL)
 		callp += code;
 
 	if ((argsize = callp->sy_argsize)) {
@@ -841,7 +818,7 @@ syscall(struct trapframe *frame)
 		 */
 		i = 0;
 		switch (code) {
-		case SYS_lseek:		retq = 0;
+		case SYS_lseek:
 		case SYS_truncate:
 		case SYS_ftruncate:	i = 2;	break;
 		case SYS_preadv:
@@ -867,7 +844,7 @@ syscall(struct trapframe *frame)
 	switch (error) {
 	case 0:
 		frame->tf_ret0 = rval[0];
-		frame->tf_ret1 = rval[!retq];
+		frame->tf_ret1 = rval[1];
 		frame->tf_t1 = 0;
 		break;
 	case ERESTART:
@@ -883,7 +860,7 @@ syscall(struct trapframe *frame)
 		break;
 	}
 
-	ast(p);
+	ast(p);		// XXX why?
 
 	mi_syscall_return(p, code, error, rval);
 

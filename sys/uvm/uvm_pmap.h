@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pmap.h,v 1.31 2022/09/10 20:35:29 miod Exp $	*/
+/*	$OpenBSD: uvm_pmap.h,v 1.34 2024/04/03 18:43:32 miod Exp $	*/
 /*	$NetBSD: uvm_pmap.h,v 1.1 2000/06/27 09:00:14 mrg Exp $	*/
 
 /* 
@@ -104,7 +104,6 @@ typedef struct pmap_statistics	*pmap_statistics_t;
 #ifndef PMAP_PREFER
 #define PMAP_PREFER_ALIGN()	0
 #define PMAP_PREFER_OFFSET(off)	0
-#define PMAP_PREFER(addr, off)	(addr)
 #endif
 
 #ifdef _KERNEL
@@ -128,9 +127,6 @@ boolean_t	 pmap_clear_reference(struct vm_page *);
 
 #if !defined(pmap_collect) && defined(__HAVE_PMAP_COLLECT)
 void		 pmap_collect(pmap_t);
-#endif
-#if !defined(pmap_copy)
-void		 pmap_copy(pmap_t, pmap_t, vaddr_t, vsize_t, vaddr_t);
 #endif
 #if !defined(pmap_copy_page)
 void		 pmap_copy_page(struct vm_page *, struct vm_page *);
@@ -177,9 +173,10 @@ void		 pmap_update(pmap_t);
 void		 pmap_zero_page(struct vm_page *);
 #endif
 
-void		 pmap_virtual_space(vaddr_t *, vaddr_t *);
 #if defined(PMAP_STEAL_MEMORY)
 vaddr_t		 pmap_steal_memory(vsize_t, vaddr_t *, vaddr_t *);
+#else
+void		 pmap_virtual_space(vaddr_t *, vaddr_t *);
 #endif
 
 /* nested pmaps are used in i386/amd64 vmm */

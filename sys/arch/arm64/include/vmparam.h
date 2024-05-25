@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmparam.h,v 1.7 2019/06/01 18:38:27 patrick Exp $	*/
+/*	$OpenBSD: vmparam.h,v 1.9 2023/04/28 18:33:22 robert Exp $	*/
 /*	$NetBSD: vmparam.h,v 1.1 2003/04/26 18:39:49 fvdl Exp $	*/
 
 /*-
@@ -52,7 +52,7 @@
 #define	DFLDSIZ		((paddr_t)512*1024*1024)	/* initial data size limit */
 #endif
 #ifndef MAXDSIZ
-#define	MAXDSIZ		((paddr_t)16*1024*1024*1024)	/* max data size */
+#define	MAXDSIZ		((paddr_t)64*1024*1024*1024)	/* max data size */
 #endif
 #ifndef BRKSIZ
 #define	BRKSIZ		((paddr_t)16*1024*1024*1024)	/* heap gap size */
@@ -92,6 +92,9 @@
 #define	USER_SPACE_BITS		39
 #define	VM_MAXUSER_ADDRESS	((1ULL << USER_SPACE_BITS) - 0x8000)
 #define	VM_MAX_ADDRESS		VM_MAXUSER_ADDRESS
+#ifdef _KERNEL
+#define	VM_MIN_STACK_ADDRESS	(3ULL << (USER_SPACE_BITS - 2))
+#endif
 #define	VM_MIN_KERNEL_ADDRESS	((vaddr_t)0xffffff8000000000ULL)
 #define	VM_MAX_KERNEL_ADDRESS	((vaddr_t)0xffffff83ffffffffULL)
 

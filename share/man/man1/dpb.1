@@ -1,4 +1,4 @@
-.\"	$OpenBSD: dpb.1,v 1.28 2022/03/26 12:43:11 tb Exp $
+.\"	$OpenBSD: dpb.1,v 1.34 2023/06/17 19:35:54 espie Exp $
 .\"
 .\" Copyright (c) 2010-2013 Marc Espie <espie@openbsd.org>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: March 26 2022 $
+.Dd $Mdocdate: June 17 2023 $
 .Dt DPB 1
 .Os
 .Sh NAME
@@ -58,11 +58,15 @@ installations.
 If run as non-root,
 .Nm
 will warn.
-The preferred way is to run it as root (and preferably under a chroot).
+The preferred way is to run it as root (and preferably under a chroot, see
+.Xr bulk 8
+and
+.Xr proot 1
+for example setups).
 .Nm
 will then change its identity to different users as needed.
 See
-.Sq THE SECURITY MODEL OF DPB
+.Sx THE SECURITY MODEL OF DPB
 for details.
 .Pp
 .Nm
@@ -120,6 +124,18 @@ be shared on the cluster.
 Some log files ("rolling logs") are kept from one run to the run and
 stored under
 .Pa ${DISTDIR}/build-stats .
+On each run, the most recent entries for each pkgpath
+.Po
+see
+.Ar STATS_USED
+.Pc
+are used to figure out in which order things should be built.
+Meanwhile, some more entries are kept around
+.Po
+see
+.Ar STATS_BACKLOG
+.Pc
+for potential data analysis over longer periods.
 .Pp
 Option
 .Fl h Ar file
@@ -180,7 +196,7 @@ for preparing such an environment.
 .It Fl b Ar logfile
 Explicitly prime the heuristics module with a previous build log,
 so that packages that take a long time to build will happen earlier.
-The rolling log under
+The rolling log file under
 .Pa %f/build-stats/%a
 is automatically used.
 .It Fl C Ar pathlist
@@ -343,6 +359,17 @@ Defaults to
 can be set to nothing to disable.
 .It Ar STARTUP
 Define a start-up script on the command-line, override any host file contents.
+.It Ar STATS_BACKLOG
+Max number of stats (per individual pkgpath) to save in the rolling log file
+.Po
+defaults to 25
+.Pc .
+.It Ar STATS_USED
+Clamp number of stats (per individual pkgpath) used for computing build
+order
+.Po
+defaults to 10
+.Pc .
 .It Ar STUCK_TIMEOUT
 Timeout (in seconds * speed factor) after which tasks that don't show
 any progress will be killed.
@@ -514,7 +541,7 @@ It will go straight to build and package instead.
 Defaults to 120 seconds.
 .It squiggles=n
 Number of squiggles on this host (see
-.Sq the squiggle heuristics
+.Sx THE SQUIGGLE HEURISTICS
 below).
 Defaults to 1 squiggle for hosts with 4 jobs or more, 0.7 for hosts with more than 1 job,
 0 for single job hosts.
@@ -682,7 +709,7 @@ as an initial workdir size log.
 .It Fl s
 Compute workdir sizes before cleaning up, and stash them in log file
 .Pa %L/size.log .
-Also maintain a rolling log of build sizes under
+This will also maintain a rolling log of build sizes under
 .Pa %f/build-stats/%a-size .
 In order to save time,
 .Nm
@@ -1059,16 +1086,32 @@ interrupt
 .Nm
 while it is building a large port, or if you remove a lock after fixing a
 problem.
-.Sh TAGS FOR BUILDING KDE
-Currently, kde3 and kde4 can't be built simultaneously.
-Conflicting ports have been annotated with
-DPB_PROPERTIES=tag:kde3 ,
-DPB_PROPERTIES=tag:kde4
+.Sh TAGS FOR EXCLUSIVE BUILDS
+Back when we had kde3 and kde4, they couldn't be built simultaneously,
+and a single host had to be exclusively building kde3 or kde4 ports at
+a given moment.
+.Pp
+Conflicting ports had been annotated with
+.Ev DPB_PROPERTIES Ns = Ns Ar tag:kde3 ,
+.Ev DPB_PROPERTIES Ns = Ns Ar tag:kde4
 respectively.
 .Pp
+More generally, with
+.Ev DPB_PROPERTIES Ns = Ns Ar tag:A ,
+.Ev DPB_PROPERTIES Ns = Ns Ar tag:B ,
 .Nm
-now keeps track of those tags, and will postpone ports with the wrong
-tag while a given host is used by the other tag.
+will keep track of tags.
+For instance, if host
+.Ar X
+is building ports tagged with
+.Ar A ,
+then any port with tag
+.Ar B
+will be prevented from building on
+.Ar X
+until the next
+.Ar junk
+phase.
 .Pp
 This heavily relies on the
 .Ar junk
@@ -1081,19 +1124,19 @@ This
 .Sq force-junk
 stage is actually implemented as a pseudo path called
 .Ar junk-proxy ,
-which only does junk.
+which does only junk.
 .Pp
 In order for builds to proceed gracefully, machines should start
-in a clean slate, without kde3 or kde4 installed.
+in a clean slate, without any of the problematic ports installed.
 .Pp
-As a special-case, failing ports with a kde3 or kde4 tag will not
+As a special-case, failing ports with a tag will not
 interfere with clean-up, so that hosts do not get locked down to
 a specific tag.
 This also means that their dependencies
 may vanish before human intervention addresses the problem.
 .Pp
-This is supposed to be a temporary hack, as kde4 is large and
-having official packages helps a great deal in debugging it.
+This is supposed to be an exceptional hack, helpful while porters
+figure out how to remove the deadlock.
 .Sh EXTERNAL CONTROL
 By default
 .Po
@@ -1245,7 +1288,14 @@ They should be readable for the
 .Nm
 also records rolling build statistics under
 .Pa ${DISTDIR}/build-stats/${ARCH} ,
-and uses them automatically in the absence of
+and uses them automatically
+.Po
+see
+.Ar STATS_BACKLOG
+and
+.Ar STATS_USED
+.Pc
+in the absence of
 .Fl b Ar logfile .
 That file belongs to the
 .Ar LOG_USER
@@ -1320,7 +1370,7 @@ and finishes at
 .Sq package .
 .It Pa built-packages.log
 The actual list of fullpkgname.tgz as they get built.
-.It Pa concurrent.log
+.It Pa cpu-concurrency.log
 Shows the actual concurrency achieved as a result of job starvation /
 parallel handling.
 Only gets a new line when the value changes: pid timestamp jobs
@@ -1755,7 +1805,8 @@ and restart it.
 .Xr clean-old-distfiles 1 ,
 .Xr dpb-replay 1 ,
 .Xr proot 1 ,
-.Xr pkgpath 7
+.Xr pkgpath 7 ,
+.Xr bulk 8
 .Sh HISTORY
 The original
 .Nm dpb

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_ktrace.c,v 1.109 2022/12/05 23:18:37 deraadt Exp $	*/
+/*	$OpenBSD: kern_ktrace.c,v 1.114 2023/12/15 15:12:08 deraadt Exp $	*/
 /*	$NetBSD: kern_ktrace.c,v 1.23 1996/02/09 18:59:36 christos Exp $	*/
 
 /*
@@ -128,7 +128,6 @@ ktrinitheaderraw(struct ktr_header *kth, uint type, pid_t pid, pid_t tid)
 {
 	memset(kth, 0, sizeof(struct ktr_header));
 	kth->ktr_type = type;
-	nanotime(&kth->ktr_time);
 	kth->ktr_pid = pid;
 	kth->ktr_tid = tid;
 }
@@ -336,8 +335,11 @@ ktruser(struct proc *p, const char *id, const void *addr, size_t len)
 		else
 			memp = stkbuf;
 		error = copyin(addr, memp, len);
-		if (error == 0)
+		if (error == 0) {
+			KERNEL_LOCK();
 			ktrwrite2(p, &kth, &ktp, sizeof(ktp), memp, len);
+			KERNEL_UNLOCK();
+		}
 		if (memp != stkbuf)
 			free(memp, M_TEMP, len);
 	}
@@ -392,6 +394,24 @@ ktrpledge(struct proc *p, int error, uint64_t code, int syscall)
 	kp.error = error;
 	kp.code = code;
 	kp.syscall = syscall;
+
+	KERNEL_LOCK();
+	ktrwrite(p, &kth, &kp, sizeof(kp));
+	KERNEL_UNLOCK();
+	atomic_clearbits_int(&p->p_flag, P_INKTR);
+}
+
+void
+ktrpinsyscall(struct proc *p, int error, int syscall, vaddr_t addr)
+{
+	struct ktr_header kth;
+	struct ktr_pinsyscall kp;
+
+	atomic_setbits_int(&p->p_flag, P_INKTR);
+	ktrinitheader(&kth, p, KTR_PINSYSCALL);
+	kp.error = error;
+	kp.syscall = syscall;
+	kp.addr = addr;
 
 	KERNEL_LOCK();
 	ktrwrite(p, &kth, &kp, sizeof(kp));
@@ -634,6 +654,8 @@ ktrwriteraw(struct proc *curp, struct vnode *vp, struct ucred *cred,
 	struct iovec aiov[3];
 	struct process *pr;
 	int error;
+
+	nanotime(&kth->ktr_time);
 
 	KERNEL_ASSERT_LOCKED();
 

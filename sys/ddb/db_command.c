@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_command.c,v 1.97 2022/11/05 19:29:45 cheloha Exp $	*/
+/*	$OpenBSD: db_command.c,v 1.101 2024/05/13 01:15:50 jsg Exp $	*/
 /*	$NetBSD: db_command.c,v 1.20 1996/03/30 22:30:05 christos Exp $	*/
 
 /*
@@ -115,7 +115,6 @@ void	db_stack_trace_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_dmesg_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_show_panic_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_bcstats_print_cmd(db_expr_t, int, db_expr_t, char *);
-void	db_struct_offset_cmd(db_expr_t, int, db_expr_t, char *);
 void	db_ctf_show_struct(db_expr_t, int, db_expr_t, char *);
 void	db_show_regs(db_expr_t, int, db_expr_t, char *);
 void	db_write_cmd(db_expr_t, int, db_expr_t, char *);
@@ -310,7 +309,6 @@ db_command(const struct db_command **last_cmdp,
 	}
 }
 
-/*ARGSUSED*/
 void
 db_buf_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -322,7 +320,6 @@ db_buf_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	vfs_buf_print((void *) addr, full, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_map_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -334,28 +331,24 @@ db_map_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	uvm_map_printit((struct vm_map *) addr, full, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_malloc_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	malloc_printit(db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_mbuf_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	m_print((void *)addr, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_socket_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	so_print((void *)addr, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_mount_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -444,7 +437,6 @@ db_show_route(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	db_show_rtentry((void *)addr, NULL, -1);
 }
 
-/*ARGSUSED*/
 void
 db_object_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -456,7 +448,6 @@ db_object_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	uvm_object_printit((struct uvm_object *) addr, full, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_page_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -468,7 +459,6 @@ db_page_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 	uvm_page_printit((struct vm_page *) addr, full, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_vnode_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -481,7 +471,6 @@ db_vnode_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 }
 
 #ifdef NFSCLIENT
-/*ARGSUSED*/
 void
 db_nfsreq_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif)
@@ -494,7 +483,6 @@ db_nfsreq_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
 	nfs_request_print((void *)addr, full, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_nfsnode_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif)
@@ -508,7 +496,6 @@ db_nfsnode_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
 }
 #endif
 
-/*ARGSUSED*/
 void
 db_swap_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif)
@@ -516,7 +503,6 @@ db_swap_print_cmd(db_expr_t addr, int have_addr, db_expr_t count,
 	swap_print_all(db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_show_panic_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -537,26 +523,30 @@ db_show_panic_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 		db_printf("the kernel did not panic\n");	/* yet */
 }
 
-/*ARGSUSED*/
 void
 db_extent_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	extent_print_all();
 }
 
-/*ARGSUSED*/
 void
 db_pool_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	pool_printit((struct pool *)addr, modif, db_printf);
 }
 
-/*ARGSUSED*/
 void
 db_proc_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
 	if (!have_addr)
 		addr = (db_expr_t)curproc;
+	if (modif[0] == 't') {
+		addr = (db_expr_t)tfind((pid_t)addr);
+		if (addr == 0) {
+			db_printf("not found\n");
+			return;
+		}
+	}
 
 	proc_printit((struct proc *)addr, modif, db_printf);
 }
@@ -574,7 +564,6 @@ db_tdb_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 }
 #endif
 
-/*ARGSUSED*/
 void
 db_uvmexp_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -583,7 +572,6 @@ db_uvmexp_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 
 void	bcstats_print(int (*)(const char *, ...));
 
-/*ARGSUSED*/
 void
 db_bcstats_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -597,9 +585,7 @@ db_bcstats_print_cmd(db_expr_t addr, int have_addr, db_expr_t count, char *modif
 const struct db_command db_show_all_cmds[] = {
 	{ "procs",	db_show_all_procs,	0, NULL },
 	{ "callout",	db_show_callout,	0, NULL },
-#ifdef __HAVE_CLOCKINTR
 	{ "clockintr",	db_show_all_clockintr,	0, NULL },
-#endif
 	{ "pools",	db_show_all_pools,	0, NULL },
 	{ "mounts",	db_show_all_mounts,	0, NULL },
 	{ "vnodes",	db_show_all_vnodes,	0, NULL },
@@ -769,7 +755,6 @@ db_error(char *s)
  * Call random function:
  * !expr(arg,arg,arg)
  */
-/*ARGSUSED*/
 void
 db_fncall(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 {
@@ -926,7 +911,6 @@ db_show_regs(db_expr_t addr, int have_addr, db_expr_t count, char *modif)
 /*
  * Write to file.
  */
-/*ARGSUSED*/
 void
 db_write_cmd(db_expr_t address, int have_addr, db_expr_t count, char *modif)
 {

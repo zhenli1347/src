@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.c,v 1.48 2022/10/06 14:41:08 martijn Exp $	*/
+/*	$OpenBSD: snmpd.c,v 1.52 2024/04/12 14:17:42 bluhm Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -17,29 +17,20 @@
  */
 
 #include <sys/types.h>
-#include <sys/queue.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
-#include <sys/tree.h>
-
-#include <net/if.h>
 
 #include <dirent.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <getopt.h>
 #include <err.h>
 #include <errno.h>
-#include <event.h>
+#include <pwd.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <syslog.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <pwd.h>
 
+#include "log.h"
 #include "snmpd.h"
-#include "mib.h"
 
 __dead void	 usage(void);
 
@@ -201,6 +192,8 @@ main(int argc, char *argv[])
 	if (argc > 0)
 		usage();
 
+	log_setverbose(verbose);
+
 	if ((env = parse_config(conffile, flags)) == NULL)
 		exit(1);
 
@@ -229,8 +222,6 @@ main(int argc, char *argv[])
 	env->sc_engine_boots = 0;
 
 	proc_init(ps, procs, nitems(procs), debug, argc0, argv0, proc_id);
-	if (!debug && daemon(0, 0) == -1)
-		err(1, "failed to daemonize");
 
 	log_procinit("parent");
 	log_info("startup");
@@ -367,14 +358,10 @@ snmpd_backend(struct snmpd *env)
 	}
 	if (env->sc_flags & SNMPD_F_VERBOSE)
 		argv[i++] = "-vv";
-	if (env->sc_flags & SNMPD_F_DEBUG) {
+	if (env->sc_flags & SNMPD_F_DEBUG)
 		argv[i++] = "-d";
-		argv[i++] = "-x";
-		argv[i++] = "3";
-	} else {
-		argv[i++] = "-x";
-		argv[i++] = "0";
-	}
+	argv[i++] = "-x";
+	argv[i++] = "3";
 	argv[i] = NULL;
 	while ((file = readdir(dir)) != NULL) {
 		if (file->d_name[0] == '.')
@@ -386,10 +373,9 @@ snmpd_backend(struct snmpd *env)
 			fatal("fork");
 		case 0:
 			close(pair[1]);
-			if (dup2(pair[0],
-			    env->sc_flags & SNMPD_F_DEBUG ? 3 : 0) == -1)
+			if (dup2(pair[0], 3) == -1)
 				fatal("dup2");
-			if (closefrom(env->sc_flags & SNMPD_F_DEBUG ? 4 : 1) == -1)
+			if (closefrom(4) == -1)
 				fatal("closefrom");
 			(void)snprintf(execpath, sizeof(execpath), "%s/%s",
 			    SNMPD_BACKEND, file->d_name);

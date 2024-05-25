@@ -1,4 +1,4 @@
-/* $OpenBSD: bn_lib.c,v 1.66 2022/11/30 03:08:39 jsing Exp $ */
+/* $OpenBSD: bn_lib.c,v 1.93 2024/04/16 13:07:14 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -66,23 +66,22 @@
 #include <openssl/err.h>
 
 #include "bn_local.h"
+#include "bn_internal.h"
 
 BIGNUM *
 BN_new(void)
 {
-	BIGNUM *ret;
+	BIGNUM *bn;
 
-	if ((ret = malloc(sizeof(BIGNUM))) == NULL) {
+	if ((bn = calloc(1, sizeof(BIGNUM))) == NULL) {
 		BNerror(ERR_R_MALLOC_FAILURE);
-		return (NULL);
+		return NULL;
 	}
-	ret->flags = BN_FLG_MALLOCED;
-	ret->top = 0;
-	ret->neg = 0;
-	ret->dmax = 0;
-	ret->d = NULL;
-	return (ret);
+	bn->flags = BN_FLG_MALLOCED;
+
+	return bn;
 }
+LCRYPTO_ALIAS(BN_new);
 
 void
 BN_init(BIGNUM *a)
@@ -98,104 +97,46 @@ BN_clear(BIGNUM *a)
 	a->top = 0;
 	a->neg = 0;
 }
+LCRYPTO_ALIAS(BN_clear);
 
 void
-BN_clear_free(BIGNUM *a)
+BN_free(BIGNUM *bn)
 {
-	int i;
-
-	if (a == NULL)
+	if (bn == NULL)
 		return;
-	if (a->d != NULL && !(BN_get_flags(a, BN_FLG_STATIC_DATA)))
-		freezero(a->d, a->dmax * sizeof(a->d[0]));
-	i = BN_get_flags(a, BN_FLG_MALLOCED);
-	explicit_bzero(a, sizeof(BIGNUM));
-	if (i)
-		free(a);
+
+	if (!BN_get_flags(bn, BN_FLG_STATIC_DATA))
+		freezero(bn->d, bn->dmax * sizeof(bn->d[0]));
+
+	if (!BN_get_flags(bn, BN_FLG_MALLOCED)) {
+		explicit_bzero(bn, sizeof(*bn));
+		return;
+	}
+
+	freezero(bn, sizeof(*bn));
 }
+LCRYPTO_ALIAS(BN_free);
 
 void
-BN_free(BIGNUM *a)
+BN_clear_free(BIGNUM *bn)
 {
-	BN_clear_free(a);
+	BN_free(bn);
 }
-
-/* This stuff appears to be completely unused, so is deprecated */
-#ifndef OPENSSL_NO_DEPRECATED
-/* For a 32 bit machine
- * 2 -   4 ==  128
- * 3 -   8 ==  256
- * 4 -  16 ==  512
- * 5 -  32 == 1024
- * 6 -  64 == 2048
- * 7 - 128 == 4096
- * 8 - 256 == 8192
- */
-static int bn_limit_bits = 0;
-static int bn_limit_num = 8;        /* (1<<bn_limit_bits) */
-static int bn_limit_bits_low = 0;
-static int bn_limit_num_low = 8;    /* (1<<bn_limit_bits_low) */
-static int bn_limit_bits_high = 0;
-static int bn_limit_num_high = 8;   /* (1<<bn_limit_bits_high) */
-static int bn_limit_bits_mont = 0;
-static int bn_limit_num_mont = 8;   /* (1<<bn_limit_bits_mont) */
-
-void
-BN_set_params(int mult, int high, int low, int mont)
-{
-	if (mult >= 0) {
-		if (mult > (int)(sizeof(int) * 8) - 1)
-			mult = sizeof(int) * 8 - 1;
-		bn_limit_bits = mult;
-		bn_limit_num = 1 << mult;
-	}
-	if (high >= 0) {
-		if (high > (int)(sizeof(int) * 8) - 1)
-			high = sizeof(int) * 8 - 1;
-		bn_limit_bits_high = high;
-		bn_limit_num_high = 1 << high;
-	}
-	if (low >= 0) {
-		if (low > (int)(sizeof(int) * 8) - 1)
-			low = sizeof(int) * 8 - 1;
-		bn_limit_bits_low = low;
-		bn_limit_num_low = 1 << low;
-	}
-	if (mont >= 0) {
-		if (mont > (int)(sizeof(int) * 8) - 1)
-			mont = sizeof(int) * 8 - 1;
-		bn_limit_bits_mont = mont;
-		bn_limit_num_mont = 1 << mont;
-	}
-}
-
-int
-BN_get_params(int which)
-{
-	if (which == 0)
-		return (bn_limit_bits);
-	else if (which == 1)
-		return (bn_limit_bits_high);
-	else if (which == 2)
-		return (bn_limit_bits_low);
-	else if (which == 3)
-		return (bn_limit_bits_mont);
-	else
-		return (0);
-}
-#endif
+LCRYPTO_ALIAS(BN_clear_free);
 
 void
 BN_set_flags(BIGNUM *b, int n)
 {
 	b->flags |= n;
 }
+LCRYPTO_ALIAS(BN_set_flags);
 
 int
 BN_get_flags(const BIGNUM *b, int n)
 {
 	return b->flags & n;
 }
+LCRYPTO_ALIAS(BN_get_flags);
 
 void
 BN_with_flags(BIGNUM *dest, const BIGNUM *b, int flags)
@@ -208,50 +149,37 @@ BN_with_flags(BIGNUM *dest, const BIGNUM *b, int flags)
 	*dest = *b;
 	dest->flags = dest_flags;
 }
+LCRYPTO_ALIAS(BN_with_flags);
+
+static const BN_ULONG bn_value_one_data = 1;
+static const BIGNUM bn_value_one = {
+	.d = (BN_ULONG *)&bn_value_one_data,
+	.top = 1,
+	.dmax = 1,
+	.neg = 0,
+	.flags = BN_FLG_STATIC_DATA,
+};
 
 const BIGNUM *
 BN_value_one(void)
 {
-	static const BN_ULONG data_one = 1L;
-	static const BIGNUM const_one = {
-		(BN_ULONG *)&data_one, 1, 1, 0, BN_FLG_STATIC_DATA
-	};
-
-	return (&const_one);
+	return &bn_value_one;
 }
+LCRYPTO_ALIAS(BN_value_one);
 
 int
-BN_num_bits_word(BN_ULONG l)
+BN_num_bits_word(BN_ULONG w)
 {
-	BN_ULONG x, mask;
-	int bits;
-	unsigned int shift;
-
-	/* Constant time calculation of floor(log2(l)) + 1. */
-	bits = (l != 0);
-	shift = BN_BITS4;	/* On _LP64 this is 32, otherwise 16. */
-	do {
-		x = l >> shift;
-		/* If x is 0, set mask to 0, otherwise set it to all 1s. */
-		mask = ((~x & (x - 1)) >> (BN_BITS2 - 1)) - 1;
-		bits += shift & mask;
-		/* If x is 0, leave l alone, otherwise set l = x. */
-		l ^= (x ^ l) & mask;
-	} while ((shift /= 2) != 0);
-
-	return bits;
+	return BN_BITS2 - bn_clzw(w);
 }
+LCRYPTO_ALIAS(BN_num_bits_word);
 
 int
-BN_num_bits(const BIGNUM *a)
+BN_num_bits(const BIGNUM *bn)
 {
-	int i = a->top - 1;
-
-
-	if (BN_is_zero(a))
-		return 0;
-	return ((i * BN_BITS2) + BN_num_bits_word(a->d[i]));
+	return bn_bitsize(bn);
 }
+LCRYPTO_ALIAS(BN_num_bits);
 
 void
 bn_correct_top(BIGNUM *a)
@@ -260,139 +188,72 @@ bn_correct_top(BIGNUM *a)
 		a->top--;
 }
 
-/* The caller MUST check that words > b->dmax before calling this */
-static BN_ULONG *
-bn_expand_internal(const BIGNUM *b, int words)
-{
-	BN_ULONG *A, *a = NULL;
-	const BN_ULONG *B;
-	int i;
-
-
-	if (words > (INT_MAX/(4*BN_BITS2))) {
-		BNerror(BN_R_BIGNUM_TOO_LONG);
-		return NULL;
-	}
-	if (BN_get_flags(b, BN_FLG_STATIC_DATA)) {
-		BNerror(BN_R_EXPAND_ON_STATIC_BIGNUM_DATA);
-		return (NULL);
-	}
-	a = A = reallocarray(NULL, words, sizeof(BN_ULONG));
-	if (A == NULL) {
-		BNerror(ERR_R_MALLOC_FAILURE);
-		return (NULL);
-	}
-#if 1
-	B = b->d;
-	/* Check if the previous number needs to be copied */
-	if (B != NULL) {
-		for (i = b->top >> 2; i > 0; i--, A += 4, B += 4) {
-			/*
-			 * The fact that the loop is unrolled
-			 * 4-wise is a tribute to Intel. It's
-			 * the one that doesn't have enough
-			 * registers to accommodate more data.
-			 * I'd unroll it 8-wise otherwise:-)
-			 *
-			 *		<appro@fy.chalmers.se>
-			 */
-			BN_ULONG a0, a1, a2, a3;
-			a0 = B[0];
-			a1 = B[1];
-			a2 = B[2];
-			a3 = B[3];
-			A[0] = a0;
-			A[1] = a1;
-			A[2] = a2;
-			A[3] = a3;
-		}
-		switch (b->top & 3) {
-		case 3:
-			A[2] = B[2];
-		case 2:
-			A[1] = B[1];
-		case 1:
-			A[0] = B[0];
-		}
-	}
-
-#else
-	memset(A, 0, sizeof(BN_ULONG) * words);
-	memcpy(A, b->d, sizeof(b->d[0]) * b->top);
-#endif
-
-	return (a);
-}
-
-/* This is an internal function that should not be used in applications.
- * It ensures that 'b' has enough room for a 'words' word number
- * and initialises any unused part of b->d with leading zeros.
- * It is mostly used by the various BIGNUM routines. If there is an error,
- * NULL is returned. If not, 'b' is returned. */
-
 static int
-bn_expand2(BIGNUM *b, int words)
+bn_expand_internal(BIGNUM *bn, int words)
 {
+	BN_ULONG *d;
 
-	if (words > b->dmax) {
-		BN_ULONG *a = bn_expand_internal(b, words);
-		if (a == NULL)
-			return 0;
-		if (b->d)
-			freezero(b->d, b->dmax * sizeof(b->d[0]));
-		b->d = a;
-		b->dmax = words;
+	if (words < 0) {
+		BNerror(BN_R_BIGNUM_TOO_LONG); // XXX
+		return 0;
 	}
 
-/* None of this should be necessary because of what b->top means! */
-#if 0
-	/* NB: bn_wexpand() calls this only if the BIGNUM really has to grow */
-	if (b->top < b->dmax) {
-		int i;
-		BN_ULONG *A = &(b->d[b->top]);
-		for (i = (b->dmax - b->top) >> 3; i > 0; i--, A += 8) {
-			A[0] = 0;
-			A[1] = 0;
-			A[2] = 0;
-			A[3] = 0;
-			A[4] = 0;
-			A[5] = 0;
-			A[6] = 0;
-			A[7] = 0;
-		}
-		for (i = (b->dmax - b->top)&7; i > 0; i--, A++)
-			A[0] = 0;
-		assert(A == &(b->d[b->dmax]));
+	if (words > INT_MAX / (4 * BN_BITS2)) {
+		BNerror(BN_R_BIGNUM_TOO_LONG);
+		return 0;
 	}
-#endif
+	if (BN_get_flags(bn, BN_FLG_STATIC_DATA)) {
+		BNerror(BN_R_EXPAND_ON_STATIC_BIGNUM_DATA);
+		return 0;
+	}
+
+	d = recallocarray(bn->d, bn->dmax, words, sizeof(BN_ULONG));
+	if (d == NULL) {
+		BNerror(ERR_R_MALLOC_FAILURE);
+		return 0;
+	}
+	bn->d = d;
+	bn->dmax = words;
+
 	return 1;
 }
 
 int
-bn_expand(BIGNUM *a, int bits)
+bn_expand_bits(BIGNUM *bn, size_t bits)
 {
-	if (bits < 0)
-		return 0;
+	int words;
 
 	if (bits > (INT_MAX - BN_BITS2 + 1))
 		return 0;
 
-	if (((bits + BN_BITS2 - 1) / BN_BITS2) <= a->dmax)
-		return 1;
+	words = (bits + BN_BITS2 - 1) / BN_BITS2;
 
-	return bn_expand2(a, (bits + BN_BITS2 - 1) / BN_BITS2);
+	return bn_wexpand(bn, words);
 }
 
 int
-bn_wexpand(BIGNUM *a, int words)
+bn_expand_bytes(BIGNUM *bn, size_t bytes)
+{
+	int words;
+
+	if (bytes > (INT_MAX - BN_BYTES + 1))
+		return 0;
+
+	words = (bytes + BN_BYTES - 1) / BN_BYTES;
+
+	return bn_wexpand(bn, words);
+}
+
+int
+bn_wexpand(BIGNUM *bn, int words)
 {
 	if (words < 0)
 		return 0;
 
-	if (words <= a->dmax)
+	if (words <= bn->dmax)
 		return 1;
 
-	return bn_expand2(a, words);
+	return bn_expand_internal(bn, words);
 }
 
 BIGNUM *
@@ -406,55 +267,50 @@ BN_dup(const BIGNUM *a)
 	t = BN_new();
 	if (t == NULL)
 		return NULL;
-	if (!BN_copy(t, a)) {
+	if (!bn_copy(t, a)) {
 		BN_free(t);
 		return NULL;
 	}
 	return t;
 }
+LCRYPTO_ALIAS(BN_dup);
+
+static inline void
+bn_copy_words(BN_ULONG *ap, const BN_ULONG *bp, int n)
+{
+	while (n > 0) {
+		ap[0] = bp[0];
+		ap++;
+		bp++;
+		n--;
+	}
+}
 
 BIGNUM *
 BN_copy(BIGNUM *a, const BIGNUM *b)
 {
-	int i;
-	BN_ULONG *A;
-	const BN_ULONG *B;
-
-
 	if (a == b)
 		return (a);
+
 	if (!bn_wexpand(a, b->top))
 		return (NULL);
 
-#if 1
-	A = a->d;
-	B = b->d;
-	for (i = b->top >> 2; i > 0; i--, A += 4, B += 4) {
-		BN_ULONG a0, a1, a2, a3;
-		a0 = B[0];
-		a1 = B[1];
-		a2 = B[2];
-		a3 = B[3];
-		A[0] = a0;
-		A[1] = a1;
-		A[2] = a2;
-		A[3] = a3;
-	}
-	switch (b->top & 3) {
-	case 3:
-		A[2] = B[2];
-	case 2:
-		A[1] = B[1];
-	case 1:
-		A[0] = B[0];
-	}
-#else
-	memcpy(a->d, b->d, sizeof(b->d[0]) * b->top);
-#endif
+	bn_copy_words(a->d, b->d, b->top);
+
+	/* Copy constant time flag from b, but make it sticky on a. */
+	a->flags |= b->flags & BN_FLG_CONSTTIME;
 
 	a->top = b->top;
 	a->neg = b->neg;
+
 	return (a);
+}
+LCRYPTO_ALIAS(BN_copy);
+
+int
+bn_copy(BIGNUM *dst, const BIGNUM *src)
+{
+	return BN_copy(dst, src) != NULL;
 }
 
 void
@@ -488,6 +344,7 @@ BN_swap(BIGNUM *a, BIGNUM *b)
 	b->flags = (flags_old_b & BN_FLG_MALLOCED) |
 	    (flags_old_a & BN_FLG_STATIC_DATA);
 }
+LCRYPTO_ALIAS(BN_swap);
 
 BN_ULONG
 BN_get_word(const BIGNUM *a)
@@ -499,6 +356,7 @@ BN_get_word(const BIGNUM *a)
 	/* a->top == 0 */
 	return 0;
 }
+LCRYPTO_ALIAS(BN_get_word);
 
 int
 BN_set_word(BIGNUM *a, BN_ULONG w)
@@ -510,255 +368,47 @@ BN_set_word(BIGNUM *a, BN_ULONG w)
 	a->top = (w ? 1 : 0);
 	return (1);
 }
-
-BIGNUM *
-BN_bin2bn(const unsigned char *s, int len, BIGNUM *ret)
-{
-	unsigned int i, m;
-	unsigned int n;
-	BN_ULONG l;
-	BIGNUM *bn = NULL;
-
-	if (len < 0)
-		return (NULL);
-	if (ret == NULL)
-		ret = bn = BN_new();
-	if (ret == NULL)
-		return (NULL);
-	l = 0;
-	n = len;
-	if (n == 0) {
-		ret->top = 0;
-		return (ret);
-	}
-	i = ((n - 1) / BN_BYTES) + 1;
-	m = ((n - 1) % (BN_BYTES));
-	if (!bn_wexpand(ret, (int)i)) {
-		BN_free(bn);
-		return NULL;
-	}
-	ret->top = i;
-	ret->neg = 0;
-	while (n--) {
-		l = (l << 8L) | *(s++);
-		if (m-- == 0) {
-			ret->d[--i] = l;
-			l = 0;
-			m = BN_BYTES - 1;
-		}
-	}
-	/* need to call this due to clear byte at top if avoiding
-	 * having the top bit set (-ve number) */
-	bn_correct_top(ret);
-	return (ret);
-}
-
-typedef enum {
-	big,
-	little,
-} endianness_t;
-
-/* ignore negative */
-static int
-bn2binpad(const BIGNUM *a, unsigned char *to, int tolen, endianness_t endianness)
-{
-	int n;
-	size_t i, lasti, j, atop, mask;
-	BN_ULONG l;
-
-	/*
-	 * In case |a| is fixed-top, BN_num_bytes can return bogus length,
-	 * but it's assumed that fixed-top inputs ought to be "nominated"
-	 * even for padded output, so it works out...
-	 */
-	n = BN_num_bytes(a);
-	if (tolen == -1)
-		tolen = n;
-	else if (tolen < n) {	/* uncommon/unlike case */
-		BIGNUM temp = *a;
-
-		bn_correct_top(&temp);
-
-		n = BN_num_bytes(&temp);
-		if (tolen < n)
-			return -1;
-	}
-
-	/* Swipe through whole available data and don't give away padded zero. */
-	atop = a->dmax * BN_BYTES;
-	if (atop == 0) {
-		explicit_bzero(to, tolen);
-		return tolen;
-	}
-
-	lasti = atop - 1;
-	atop = a->top * BN_BYTES;
-
-	if (endianness == big)
-		to += tolen; /* start from the end of the buffer */
-
-	for (i = 0, j = 0; j < (size_t)tolen; j++) {
-		unsigned char val;
-
-		l = a->d[i / BN_BYTES];
-		mask = 0 - ((j - atop) >> (8 * sizeof(i) - 1));
-		val = (unsigned char)(l >> (8 * (i % BN_BYTES)) & mask);
-
-		if (endianness == big)
-			*--to = val;
-		else
-			*to++ = val;
-
-		i += (i - lasti) >> (8 * sizeof(i) - 1); /* stay on last limb */
-	}
-
-	return tolen;
-}
-
-int
-BN_bn2binpad(const BIGNUM *a, unsigned char *to, int tolen)
-{
-	if (tolen < 0)
-		return -1;
-	return bn2binpad(a, to, tolen, big);
-}
-
-int
-BN_bn2bin(const BIGNUM *a, unsigned char *to)
-{
-	return bn2binpad(a, to, -1, big);
-}
-
-BIGNUM *
-BN_lebin2bn(const unsigned char *s, int len, BIGNUM *ret)
-{
-	unsigned int i, m, n;
-	BN_ULONG l;
-	BIGNUM *bn = NULL;
-
-	if (ret == NULL)
-		ret = bn = BN_new();
-	if (ret == NULL)
-		return NULL;
-
-
-	s += len;
-	/* Skip trailing zeroes. */
-	for (; len > 0 && s[-1] == 0; s--, len--)
-		continue;
-
-	n = len;
-	if (n == 0) {
-		ret->top = 0;
-		return ret;
-	}
-
-	i = ((n - 1) / BN_BYTES) + 1;
-	m = (n - 1) % BN_BYTES;
-	if (!bn_wexpand(ret, (int)i)) {
-		BN_free(bn);
-		return NULL;
-	}
-
-	ret->top = i;
-	ret->neg = 0;
-	l = 0;
-	while (n-- > 0) {
-		s--;
-		l = (l << 8L) | *s;
-		if (m-- == 0) {
-			ret->d[--i] = l;
-			l = 0;
-			m = BN_BYTES - 1;
-		}
-	}
-
-	/*
-	 * need to call this due to clear byte at top if avoiding having the
-	 * top bit set (-ve number)
-	 */
-	bn_correct_top(ret);
-
-	return ret;
-}
-
-int
-BN_bn2lebinpad(const BIGNUM *a, unsigned char *to, int tolen)
-{
-	if (tolen < 0)
-		return -1;
-
-	return bn2binpad(a, to, tolen, little);
-}
+LCRYPTO_ALIAS(BN_set_word);
 
 int
 BN_ucmp(const BIGNUM *a, const BIGNUM *b)
 {
 	int i;
-	BN_ULONG t1, t2, *ap, *bp;
-
 
 	if (a->top < b->top)
 		return -1;
 	if (a->top > b->top)
 		return 1;
 
-	ap = a->d;
-	bp = b->d;
 	for (i = a->top - 1; i >= 0; i--) {
-		t1 = ap[i];
-		t2 = bp[i];
-		if (t1 != t2)
-			return ((t1 > t2) ? 1 : -1);
+		if (a->d[i] != b->d[i])
+			return (a->d[i] > b->d[i] ? 1 : -1);
 	}
-	return (0);
+
+	return 0;
 }
+LCRYPTO_ALIAS(BN_ucmp);
 
 int
 BN_cmp(const BIGNUM *a, const BIGNUM *b)
 {
-	int i;
-	int gt, lt;
-	BN_ULONG t1, t2;
-
-	if ((a == NULL) || (b == NULL)) {
+	if (a == NULL || b == NULL) {
 		if (a != NULL)
-			return (-1);
-		else if (b != NULL)
-			return (1);
-		else
-			return (0);
+			return -1;
+		if (b != NULL)
+			return 1;
+		return 0;
 	}
 
+	if (a->neg != b->neg)
+		return b->neg - a->neg;
 
-	if (a->neg != b->neg) {
-		if (a->neg)
-			return (-1);
-		else
-			return (1);
-	}
-	if (a->neg == 0) {
-		gt = 1;
-		lt = -1;
-	} else {
-		gt = -1;
-		lt = 1;
-	}
+	if (a->neg)
+		return BN_ucmp(b, a);
 
-	if (a->top > b->top)
-		return (gt);
-	if (a->top < b->top)
-		return (lt);
-	for (i = a->top - 1; i >= 0; i--) {
-		t1 = a->d[i];
-		t2 = b->d[i];
-		if (t1 > t2)
-			return (gt);
-		if (t1 < t2)
-			return (lt);
-	}
-	return (0);
+	return BN_ucmp(a, b);
 }
+LCRYPTO_ALIAS(BN_cmp);
 
 int
 BN_set_bit(BIGNUM *a, int n)
@@ -781,6 +431,7 @@ BN_set_bit(BIGNUM *a, int n)
 	a->d[i] |= (((BN_ULONG)1) << j);
 	return (1);
 }
+LCRYPTO_ALIAS(BN_set_bit);
 
 int
 BN_clear_bit(BIGNUM *a, int n)
@@ -797,8 +448,12 @@ BN_clear_bit(BIGNUM *a, int n)
 
 	a->d[i] &= (~(((BN_ULONG)1) << j));
 	bn_correct_top(a);
+
+	BN_set_negative(a, a->neg);
+
 	return (1);
 }
+LCRYPTO_ALIAS(BN_clear_bit);
 
 int
 BN_is_bit_set(const BIGNUM *a, int n)
@@ -813,6 +468,7 @@ BN_is_bit_set(const BIGNUM *a, int n)
 		return 0;
 	return (int)(((a->d[i]) >> j) & ((BN_ULONG)1));
 }
+LCRYPTO_ALIAS(BN_is_bit_set);
 
 int
 BN_mask_bits(BIGNUM *a, int n)
@@ -833,65 +489,19 @@ BN_mask_bits(BIGNUM *a, int n)
 		a->d[w] &= ~(BN_MASK2 << b);
 	}
 	bn_correct_top(a);
+
+	BN_set_negative(a, a->neg);
+
 	return (1);
 }
+LCRYPTO_ALIAS(BN_mask_bits);
 
 void
-BN_set_negative(BIGNUM *a, int b)
+BN_set_negative(BIGNUM *bn, int neg)
 {
-	if (b && !BN_is_zero(a))
-		a->neg = 1;
-	else
-		a->neg = 0;
+	bn->neg = ~BN_is_zero(bn) & bn_ct_ne_zero(neg);
 }
-
-int
-bn_cmp_words(const BN_ULONG *a, const BN_ULONG *b, int n)
-{
-	int i;
-	BN_ULONG aa, bb;
-
-	aa = a[n - 1];
-	bb = b[n - 1];
-	if (aa != bb)
-		return ((aa > bb) ? 1 : -1);
-	for (i = n - 2; i >= 0; i--) {
-		aa = a[i];
-		bb = b[i];
-		if (aa != bb)
-			return ((aa > bb) ? 1 : -1);
-	}
-	return (0);
-}
-
-/* Here follows a specialised variants of bn_cmp_words().  It has the
-   property of performing the operation on arrays of different sizes.
-   The sizes of those arrays is expressed through cl, which is the
-   common length ( basicall, min(len(a),len(b)) ), and dl, which is the
-   delta between the two lengths, calculated as len(a)-len(b).
-   All lengths are the number of BN_ULONGs...  */
-
-int
-bn_cmp_part_words(const BN_ULONG *a, const BN_ULONG *b, int cl, int dl)
-{
-	int n, i;
-
-	n = cl - 1;
-
-	if (dl < 0) {
-		for (i = dl; i < 0; i++) {
-			if (b[n - i] != 0)
-				return -1; /* a < b */
-		}
-	}
-	if (dl > 0) {
-		for (i = dl; i > 0; i--) {
-			if (a[n + i] != 0)
-				return 1; /* a > b */
-		}
-	}
-	return bn_cmp_words(a, b, cl);
-}
+LCRYPTO_ALIAS(BN_set_negative);
 
 /*
  * Constant-time conditional swap of a and b.
@@ -945,6 +555,7 @@ BN_consttime_swap(BN_ULONG condition, BIGNUM *a, BIGNUM *b, int nwords)
 	}
 #undef BN_CONSTTIME_SWAP
 }
+LCRYPTO_ALIAS(BN_consttime_swap);
 
 /*
  * Constant-time conditional swap of a and b.
@@ -998,48 +609,67 @@ BN_swap_ct(BN_ULONG condition, BIGNUM *a, BIGNUM *b, size_t nwords)
 }
 
 void
-BN_zero_ex(BIGNUM *a)
+BN_zero(BIGNUM *a)
 {
 	a->neg = 0;
 	a->top = 0;
-	/* XXX: a->flags &= ~BN_FIXED_TOP */
 }
+LCRYPTO_ALIAS(BN_zero);
+
+int
+BN_one(BIGNUM *a)
+{
+	return BN_set_word(a, 1);
+}
+LCRYPTO_ALIAS(BN_one);
 
 int
 BN_abs_is_word(const BIGNUM *a, const BN_ULONG w)
 {
 	return (a->top == 1 && a->d[0] == w) || (w == 0 && a->top == 0);
 }
+LCRYPTO_ALIAS(BN_abs_is_word);
 
 int
-BN_is_zero(const BIGNUM *a)
+BN_is_zero(const BIGNUM *bn)
 {
-	return a->top == 0;
+	BN_ULONG bits = 0;
+	int i;
+
+	for (i = 0; i < bn->top; i++)
+		bits |= bn->d[i];
+
+	return bits == 0;
 }
+LCRYPTO_ALIAS(BN_is_zero);
 
 int
 BN_is_one(const BIGNUM *a)
 {
 	return BN_abs_is_word(a, 1) && !a->neg;
 }
+LCRYPTO_ALIAS(BN_is_one);
 
 int
 BN_is_word(const BIGNUM *a, const BN_ULONG w)
 {
 	return BN_abs_is_word(a, w) && (w == 0 || !a->neg);
 }
+LCRYPTO_ALIAS(BN_is_word);
 
 int
 BN_is_odd(const BIGNUM *a)
 {
 	return a->top > 0 && (a->d[0] & 1);
 }
+LCRYPTO_ALIAS(BN_is_odd);
 
 int
 BN_is_negative(const BIGNUM *a)
 {
 	return a->neg != 0;
 }
+LCRYPTO_ALIAS(BN_is_negative);
 
 /*
  * Bits of security, see SP800-57, section 5.6.11, table 2.
@@ -1071,6 +701,7 @@ BN_security_bits(int L, int N)
 
 	return bits >= secbits ? secbits : bits;
 }
+LCRYPTO_ALIAS(BN_security_bits);
 
 BN_GENCB *
 BN_GENCB_new(void)
@@ -1082,6 +713,7 @@ BN_GENCB_new(void)
 
 	return cb;
 }
+LCRYPTO_ALIAS(BN_GENCB_new);
 
 void
 BN_GENCB_free(BN_GENCB *cb)
@@ -1090,6 +722,7 @@ BN_GENCB_free(BN_GENCB *cb)
 		return;
 	free(cb);
 }
+LCRYPTO_ALIAS(BN_GENCB_free);
 
 /* Populate a BN_GENCB structure with an "old"-style callback */
 void
@@ -1099,6 +732,7 @@ BN_GENCB_set_old(BN_GENCB *gencb, void (*cb)(int, int, void *), void *cb_arg)
 	gencb->cb.cb_1 = cb;
 	gencb->arg = cb_arg;
 }
+LCRYPTO_ALIAS(BN_GENCB_set_old);
 
 /* Populate a BN_GENCB structure with a "new"-style callback */
 void
@@ -1108,9 +742,11 @@ BN_GENCB_set(BN_GENCB *gencb, int (*cb)(int, int, BN_GENCB *), void *cb_arg)
 	gencb->cb.cb_2 = cb;
 	gencb->arg = cb_arg;
 }
+LCRYPTO_ALIAS(BN_GENCB_set);
 
 void *
 BN_GENCB_get_arg(BN_GENCB *cb)
 {
 	return cb->arg;
 }
+LCRYPTO_ALIAS(BN_GENCB_get_arg);
