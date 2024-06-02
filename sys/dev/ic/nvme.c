@@ -1,4 +1,4 @@
-/*	$OpenBSD: nvme.c,v 1.112 2024/05/24 12:04:07 krw Exp $ */
+/*	$OpenBSD: nvme.c,v 1.115 2024/05/28 00:24:44 jsg Exp $ */
 
 /*
  * Copyright (c) 2014 David Gwynne <dlg@openbsd.org>
@@ -156,6 +156,7 @@ static const struct nvme_ops nvme_ops = {
 };
 
 #define NVME_TIMO_QOP			5000	/* ms to create/delete queue */
+#define NVME_TIMO_PT			5000	/* ms to complete passthrough */
 #define NVME_TIMO_IDENT			10000	/* ms to probe/identify */
 #define NVME_TIMO_DELAYNS		10	/* ns to delay() in poll loop */
 
@@ -978,7 +979,7 @@ nvme_passthrough_cmd(struct nvme_softc *sc, struct nvme_pt_cmd *pt, int dv_unit,
 		nvme_dmamem_sync(sc, mem, BUS_DMASYNC_PREREAD);
 	}
 
-	flags = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_QOP);
+	flags = nvme_poll(sc, sc->sc_admin_q, ccb, nvme_sqe_fill, NVME_TIMO_PT);
 
 	if (pt->pt_databuflen > 0) {
 		nvme_dmamem_sync(sc, mem, BUS_DMASYNC_POSTREAD);
@@ -1896,12 +1897,12 @@ nvme_bioctl_sdname(const struct nvme_softc *sc, int target)
 	const struct sd_softc		*sd;
 
 	link = scsi_get_link(sc->sc_scsibus, target, 0);
-	if (link) {
-		sd = (struct sd_softc *)(link->device_softc);
-		if (ISSET(link->state, SDEV_S_DYING) || sd == NULL ||
-		    ISSET(sd->flags, SDF_DYING))
-			return NULL;
-	}
+	if (link == NULL)
+		return NULL;
+	sd = (struct sd_softc *)(link->device_softc);
+	if (ISSET(link->state, SDEV_S_DYING) || sd == NULL ||
+	    ISSET(sd->flags, SDF_DYING))
+		return NULL;
 
 	if (nvme_read4(sc, NVME_VS) == 0xffffffff)
 		return NULL;

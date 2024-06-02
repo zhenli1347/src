@@ -1,4 +1,4 @@
-/*	$OpenBSD: x509.c,v 1.87 2024/04/21 09:03:22 job Exp $ */
+/*	$OpenBSD: x509.c,v 1.90 2024/05/31 11:27:34 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -787,92 +787,6 @@ x509_get_crl(X509 *x, const char *fn, char **crl)
 }
 
 /*
- * Parse X509v3 authority key identifier (AKI) from the CRL.
- * This is matched against the string from x509_get_ski() above.
- * Returns the AKI or NULL if it could not be parsed.
- * The AKI is formatted as a hex string.
- */
-char *
-x509_crl_get_aki(X509_CRL *crl, const char *fn)
-{
-	const unsigned char	*d;
-	AUTHORITY_KEYID		*akid;
-	ASN1_OCTET_STRING	*os;
-	int			 dsz, crit;
-	char			*res = NULL;
-
-	akid = X509_CRL_get_ext_d2i(crl, NID_authority_key_identifier, &crit,
-	    NULL);
-	if (akid == NULL) {
-		warnx("%s: RFC 6487 section 4.8.3: AKI: extension missing", fn);
-		return NULL;
-	}
-	if (crit != 0) {
-		warnx("%s: RFC 6487 section 4.8.3: "
-		    "AKI: extension not non-critical", fn);
-		goto out;
-	}
-	if (akid->issuer != NULL || akid->serial != NULL) {
-		warnx("%s: RFC 6487 section 4.8.3: AKI: "
-		    "authorityCertIssuer or authorityCertSerialNumber present",
-		    fn);
-		goto out;
-	}
-
-	os = akid->keyid;
-	if (os == NULL) {
-		warnx("%s: RFC 6487 section 4.8.3: AKI: "
-		    "Key Identifier missing", fn);
-		goto out;
-	}
-
-	d = os->data;
-	dsz = os->length;
-
-	if (dsz != SHA_DIGEST_LENGTH) {
-		warnx("%s: RFC 6487 section 4.8.2: AKI: "
-		    "want %d bytes SHA1 hash, have %d bytes",
-		    fn, SHA_DIGEST_LENGTH, dsz);
-		goto out;
-	}
-
-	res = hex_encode(d, dsz);
-out:
-	AUTHORITY_KEYID_free(akid);
-	return res;
-}
-
-/*
- * Retrieve CRL Number extension. Returns a printable hexadecimal representation
- * of the number which has to be freed after use.
- */
-char *
-x509_crl_get_number(X509_CRL *crl, const char *fn)
-{
-	ASN1_INTEGER		*aint;
-	int			 crit;
-	char			*res = NULL;
-
-	aint = X509_CRL_get_ext_d2i(crl, NID_crl_number, &crit, NULL);
-	if (aint == NULL) {
-		warnx("%s: RFC 6487 section 5: CRL Number missing", fn);
-		return NULL;
-	}
-	if (crit != 0) {
-		warnx("%s: RFC 5280, section 5.2.3: "
-		    "CRL Number not non-critical", fn);
-		goto out;
-	}
-
-	/* This checks that the number is non-negative and <= 20 bytes. */
-	res = x509_convert_seqnum(fn, aint);
-
- out:
-	ASN1_INTEGER_free(aint);
-	return res;
-}
-
-/*
  * Convert passed ASN1_TIME to time_t *t.
  * Returns 1 on success and 0 on failure.
  */
@@ -928,23 +842,17 @@ x509_location(const char *fn, const char *descr, const char *proto,
 }
 
 /*
- * Check that the subject only contains commonName and serialNumber.
+ * Check that subject or issuer only contain commonName and serialNumber.
  * Return 0 on failure.
  */
 int
-x509_valid_subject(const char *fn, const X509 *x)
+x509_valid_name(const char *fn, const char *descr, const X509_NAME *xn)
 {
-	const X509_NAME *xn;
 	const X509_NAME_ENTRY *ne;
 	const ASN1_OBJECT *ao;
 	const ASN1_STRING *as;
 	int cn = 0, sn = 0;
 	int i, nid;
-
-	if ((xn = X509_get_subject_name(x)) == NULL) {
-		warnx("%s: X509_get_subject_name", fn);
-		return 0;
-	}
 
 	for (i = 0; i < X509_NAME_entry_count(xn); i++) {
 		if ((ne = X509_NAME_get_entry(xn, i)) == NULL) {
@@ -960,8 +868,8 @@ x509_valid_subject(const char *fn, const X509 *x)
 		switch (nid) {
 		case NID_commonName:
 			if (cn++ > 0) {
-				warnx("%s: duplicate commonName in subject",
-				    fn);
+				warnx("%s: duplicate commonName in %s",
+				    fn, descr);
 				return 0;
 			}
 			if ((as = X509_NAME_ENTRY_get_data(ne)) == NULL) {
@@ -974,6 +882,10 @@ x509_valid_subject(const char *fn, const X509 *x)
  * https://lists.afrinic.net/pipermail/dbwg/2023-March/000436.html
  */
 #if 0
+			/*
+			 * XXX - For some reason RFC 8209, section 3.1.1 decided
+			 * to allow UTF8String for BGPsec Router Certificates.
+			 */
 			if (ASN1_STRING_type(as) != V_ASN1_PRINTABLESTRING) {
 				warnx("%s: RFC 6487 section 4.5: commonName is"
 				    " not PrintableString", fn);
@@ -983,8 +895,8 @@ x509_valid_subject(const char *fn, const X509 *x)
 			break;
 		case NID_serialNumber:
 			if (sn++ > 0) {
-				warnx("%s: duplicate serialNumber in subject",
-				    fn);
+				warnx("%s: duplicate serialNumber in %s",
+				    fn, descr);
 				return 0;
 			}
 			break;
@@ -993,14 +905,14 @@ x509_valid_subject(const char *fn, const X509 *x)
 			return 0;
 		default:
 			warnx("%s: RFC 6487 section 4.5: unexpected attribute"
-			    " %s", fn, nid2str(nid));
+			    " %s in %s", fn, nid2str(nid), descr);
 			return 0;
 		}
 	}
 
 	if (cn == 0) {
-		warnx("%s: RFC 6487 section 4.5: subject missing commonName",
-		    fn);
+		warnx("%s: RFC 6487 section 4.5: %s missing commonName",
+		    fn, descr);
 		return 0;
 	}
 
@@ -1008,7 +920,8 @@ x509_valid_subject(const char *fn, const X509 *x)
 }
 
 /*
- * Convert an ASN1_INTEGER into a hexstring.
+ * Convert an ASN1_INTEGER into a hexstring, enforcing that it is non-negative
+ * and representable by at most 20 octets (RFC 5280, section 4.1.2.2).
  * Returned string needs to be freed by the caller.
  */
 char *

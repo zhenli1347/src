@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.114 2024/04/13 14:19:39 kettenis Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.118 2024/05/30 04:16:25 tb Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -87,6 +87,8 @@
 #define CPU_PART_CORTEX_A720	0xd81
 #define CPU_PART_CORTEX_X4	0xd82
 #define CPU_PART_NEOVERSE_V3	0xd84
+#define CPU_PART_CORTEX_X925	0xd85
+#define CPU_PART_CORTEX_A725	0xd87
 #define CPU_PART_CORTEX_A520AE	0xd88
 #define CPU_PART_CORTEX_A720AE	0xd89
 #define CPU_PART_NEOVERSE_N3	0xd8e
@@ -159,11 +161,13 @@ struct cpu_cores cpu_cores_arm[] = {
 	{ CPU_PART_CORTEX_A715, "Cortex-A715" },
 	{ CPU_PART_CORTEX_A720, "Cortex-A720" },
 	{ CPU_PART_CORTEX_A720AE, "Cortex-A720AE" },
+	{ CPU_PART_CORTEX_A725, "Cortex-A725" },
 	{ CPU_PART_CORTEX_X1, "Cortex-X1" },
 	{ CPU_PART_CORTEX_X1C, "Cortex-X1C" },
 	{ CPU_PART_CORTEX_X2, "Cortex-X2" },
 	{ CPU_PART_CORTEX_X3, "Cortex-X3" },
 	{ CPU_PART_CORTEX_X4, "Cortex-X4" },
+	{ CPU_PART_CORTEX_X925, "Cortex-X925" },
 	{ CPU_PART_NEOVERSE_E1, "Neoverse E1" },
 	{ CPU_PART_NEOVERSE_N1, "Neoverse N1" },
 	{ CPU_PART_NEOVERSE_N2, "Neoverse N2" },
@@ -741,6 +745,37 @@ cpu_identify(struct cpu_info *ci)
 	 * ID_AA64ISAR1
 	 */
 	id = READ_SPECIALREG(id_aa64isar1_el1);
+
+	if (ID_AA64ISAR1_LS64(id) >= ID_AA64ISAR1_LS64_BASE) {
+		printf("%sLS64", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR1_LS64(id) >= ID_AA64ISAR1_LS64_V)
+		printf("+V");
+	if (ID_AA64ISAR1_LS64(id) >= ID_AA64ISAR1_LS64_ACCDATA)
+		printf("+ACCDATA");
+
+	if (ID_AA64ISAR1_XS(id) >= ID_AA64ISAR1_XS_IMPL) {
+		printf("%sXS", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_I8MM(id) >= ID_AA64ISAR1_I8MM_IMPL) {
+		printf("%sI8MM", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_DGH(id) >= ID_AA64ISAR1_DGH_IMPL) {
+		printf("%sDGH", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64ISAR1_BF16(id) >= ID_AA64ISAR1_BF16_BASE) {
+		printf("%sBF16", sep);
+		sep = ",";
+	}
+	if (ID_AA64ISAR1_BF16(id) >= ID_AA64ISAR1_BF16_EBF)
+		printf("+EBF");
 
 	if (ID_AA64ISAR1_SPECRES(id) >= ID_AA64ISAR1_SPECRES_IMPL) {
 		printf("%sSPECRES", sep);
@@ -1450,13 +1485,14 @@ cpu_unidle(struct cpu_info *ci)
 
 #endif
 
+int cpu_suspended;
+
 #ifdef SUSPEND
 
 void cpu_hatch_primary(void);
 
 void (*cpu_suspend_cycle_fcn)(void) = cpu_wfi;
 label_t cpu_suspend_jmpbuf;
-int cpu_suspended;
 
 void
 cpu_suspend_cycle(void)
@@ -1526,7 +1562,8 @@ cpu_suspend_primary(void)
 	 * wake us up by clearing the flag.
 	 */
 	cpu_suspended = 1;
-	intr_enable_wakeup();
+	arm_intr_func.setipl(IPL_NONE);
+	intr_enable();
 
 	while (cpu_suspended) {
 #if NPSCI > 0
@@ -1542,7 +1579,8 @@ cpu_suspend_primary(void)
 	}
 
 resume:
-	intr_disable_wakeup();
+	intr_disable();
+	arm_intr_func.setipl(IPL_HIGH);
 
 	/* Unmask clock interrupts. */
 	WRITE_SPECIALREG(cntv_ctl_el0,
