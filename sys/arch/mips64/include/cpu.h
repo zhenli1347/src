@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.146 2024/02/25 19:15:50 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.150 2024/10/23 07:40:20 mpi Exp $	*/
 
 /*-
  * Copyright (c) 1992, 1993
@@ -111,6 +111,7 @@
 #include <machine/intr.h>
 #include <sys/sched.h>
 #include <sys/srp.h>
+#include <uvm/uvm_percpu.h>
 
 struct cpu_hwinfo {
 	uint32_t	c0prid;
@@ -144,6 +145,8 @@ struct cpu_info {
 
 #if defined(MULTIPROCESSOR)
 	struct srp_hazard ci_srp_hazards[SRP_HAZARD_NUM];
+#define __HAVE_UVM_PERCPU
+	struct uvm_pmr_cache	ci_uvm;
 #endif
 
 	/* cache information and pending flush state */
@@ -184,9 +187,9 @@ struct cpu_info {
 			ci_queue;
 
 	struct pmap	*ci_curpmap;
-	uint		ci_intrdepth;		/* interrupt depth */
+	uint		ci_idepth;		/* interrupt depth */
 #ifdef MULTIPROCESSOR
-	u_long		ci_flags;		/* flags; see below */
+	volatile u_long	ci_flags;		/* flags; see below */
 #endif
 	volatile int    ci_ddb;
 #define	CI_DDB_RUNNING		0
@@ -258,7 +261,7 @@ void	smp_rendezvous_cpus(unsigned long, void (*)(void *), void *arg);
 #define get_cpu_info(i)			(&cpu_info_primary)
 #endif
 
-#define CPU_BUSY_CYCLE()	do {} while (0)
+#define CPU_BUSY_CYCLE()	__asm volatile ("" ::: "memory")
 
 extern void (*md_initclock)(void);
 extern void (*md_startclock)(struct cpu_info *);
@@ -278,7 +281,7 @@ unsigned int cpu_rnd_messybits(void);
 #define	SR_KSU_USER		0x00000010
 #define	CLKF_USERMODE(framep)	((framep)->sr & SR_KSU_USER)
 #define	CLKF_PC(framep)		((framep)->pc)
-#define	CLKF_INTR(framep)	(curcpu()->ci_intrdepth > 1)	/* XXX */
+#define	CLKF_INTR(framep)	(curcpu()->ci_idepth > 1)	/* XXX */
 
 /*
  * This is used during profiling to integrate system time.

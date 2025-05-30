@@ -1,6 +1,6 @@
 #!/usr/bin/perl -T
 
-# $OpenBSD: security,v 1.42 2024/03/05 18:54:29 kn Exp $
+# $OpenBSD: security,v 1.48 2025/03/31 17:35:28 schwarze Exp $
 #
 # Copyright (c) 2011, 2012, 2014, 2015 Ingo Schwarze <schwarze@openbsd.org>
 # Copyright (c) 2011 Andrew Fresh <andrew@afresh1.com>
@@ -30,6 +30,7 @@ require File::Find;
 
 use constant {
 	BACKUP_DIR => '/var/backups/',
+	RELINK_DIR => '/usr/share/relink/',
 };
 
 $ENV{PATH} = '/bin:/usr/bin:/sbin:/usr/sbin';
@@ -74,7 +75,9 @@ sub check_passwd {
 	my $filename = '/etc/master.passwd';
 	$check_title = "Checking the $filename file:";
 	nag !(open my $fh, '<', $filename), "open: $filename: $!" and return;
-	my (%logins, %uids);
+	my (%logins, %uids, %skip);
+	%skip = map { $_ => 1 } split ' ', $ENV{PASSWDSKIP}
+	    if $ENV{PASSWDSKIP};
 	while (my $line = <$fh>) {
 		chomp $line;
 		nag $line !~ /\S/,
@@ -95,8 +98,7 @@ sub check_passwd {
 		}
 		nag length $name > 31,
 		    "Login $name has more than 31 characters.";
-		nag $pwd eq '' && !($name eq 'anoncvs' &&
-				    $shell =~ /\/anoncvssh$/),
+		nag $pwd eq '' && !$skip{"$name:$shell"},
 		    "Login $name has no password.";
 		if ($pwd ne '' &&
 		    $pwd ne 'skey' &&
@@ -255,7 +257,8 @@ sub check_sh {
 		$umaskset ||= check_umask($filename);
 
 		nag !(open my $fh, '-|', qw(/bin/sh -c),
-			". $filename; echo ENV=\$ENV; echo PATH=\$PATH"),
+			". $filename > /dev/null; " .
+			"echo ENV=\$ENV; echo PATH=\$PATH"),
 		    "cannot spawn /bin/sh: $!"
 		    and next;
 		my @output = <$fh>;
@@ -289,7 +292,7 @@ sub check_ksh {
 		check_umask($filename);
 
 		nag !(open my $fh, '-|', qw(/bin/ksh -c),
-			". $filename; echo PATH=\$PATH"),
+			". $filename > /dev/null; echo PATH=\$PATH"),
 		    "cannot spawn /bin/ksh: $!"
 		    and next;
 		my @output = <$fh>;
@@ -455,11 +458,14 @@ sub check_mailboxes {
 	foreach my $name (readdir $dh) {
 		next if $name =~ /^\.\.?$/;
 		next if $name =~ /.\.lock$/;
+		next if $name eq 'quota.user';
+		next if $name eq 'quota.group';
 		my ($mode, $fuid, $fgid) = (stat "$dir/$name")[2,4,5];
 		unless (defined $mode) {
 			nag !$!{ENOENT}, "stat: $dir/$name: $!";
 			next;
 		}
+		next if S_ISDIR($mode);
 		my $fname = (getpwuid $fuid)[0] // $fuid;
 		my $gname = (getgrgid $fgid)[0] // $fgid;
 		nag $fname ne $name,
@@ -574,6 +580,7 @@ sub find_special_files {
 		# SUID/SGID files
 		my $file = {};
 		if (-f _ && $mode & (S_ISUID | S_ISGID)) {
+			return if -e RELINK_DIR . $_;
 			$setuid_files->{$File::Find::name} = $file;
 			$uudecode_is_setuid = 1
 			    if basename($_) eq 'uudecode';
@@ -596,7 +603,7 @@ sub find_special_files {
 		$file->{group}   = (getgrgid $gid)[0] // $gid;
 		$file->{size}    = $size;
 		@$file{qw(wday mon day time year)} =
-		    split ' ', localtime $mtime;
+		    split ' ', gmtime $mtime;
 	}}, @fs);
 
 	nag $uudecode_is_setuid, 'Uudecode is setuid.';
@@ -660,6 +667,7 @@ sub check_filelist {
 		push @{$changed{additions}}, [ @{$files->{$f}}{@fields}, $f ];
 	}
 	foreach my $f (sort keys %current) {
+		next if $mode eq 'setuid' && -e RELINK_DIR . $f;
 		push @{$changed{deletions}}, [ @{$current{$f}}{@fields}, $f ];
 	};
 
@@ -897,6 +905,10 @@ sub check_disklabels {
 		$check_title = "======\n$disk diffs (-OLD  +NEW)\n======";
 		my $filename = BACKUP_DIR . "disklabel.$disk";
 		system "disklabel $disk > $filename";
+		backup_if_changed $filename;
+		unlink $filename;
+		$filename = BACKUP_DIR . "fdisk.$disk";
+		system "fdisk -v $disk > $filename";
 		backup_if_changed $filename;
 		unlink $filename;
 	}

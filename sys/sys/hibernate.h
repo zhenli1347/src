@@ -1,4 +1,4 @@
-/*	$OpenBSD: hibernate.h,v 1.45 2022/01/17 02:54:28 mlarkin Exp $	*/
+/*	$OpenBSD: hibernate.h,v 1.50 2025/05/21 04:05:23 mlarkin Exp $	*/
 
 /*
  * Copyright (c) 2011 Ariane van der Steldt <ariane@stack.nl>
@@ -22,7 +22,6 @@
 #include <sys/types.h>
 #include <sys/tree.h>
 #include <lib/libz/zlib.h>
-#include <machine/vmparam.h>
 #include <crypto/sha2.h>
 
 #define HIB_PHYSSEG_MAX		22
@@ -106,16 +105,16 @@ union hibernate_info {
 		long				guard;
 #endif /* ! NO_PROPOLICE */
 		u_int32_t			retguard_ofs;
+		u_int32_t			sec_size;
 	};
 
-	/* XXX - remove restriction to have this union fit in a single block */
-	char pad[512]; /* Pad to 512 bytes */
+	/* XXX - remove restriction to have the struct fit in a single block */
+	char pad[4096]; /* Pad to largest allowable disk sector size in bytes */
 };
 
 void	*hib_alloc(struct hiballoc_arena*, size_t);
 void	 hib_free(struct hiballoc_arena*, void*);
 int	 hiballoc_init(struct hiballoc_arena*, void*, size_t len);
-void	 uvm_pmr_zero_everything(void);
 void	 uvm_pmr_dirty_everything(void);
 int	 uvm_pmr_alloc_pig(paddr_t*, psize_t, paddr_t);
 int	 uvm_pmr_alloc_piglet(vaddr_t*, paddr_t*, vsize_t, paddr_t);
@@ -154,8 +153,11 @@ int	hibernate_alloc(void);
 void	hibernate_free(void);
 void	hib_getentropy(char **, size_t *);
 
+int	hibernate_write(union hibernate_info *, daddr_t, vaddr_t, size_t, int);
 void	hibernate_sort_ranges(union hibernate_info *);
 void	hibernate_suspend_bufcache(void);
 void	hibernate_resume_bufcache(void);
+
+void	preallocate_hibernate_memory(void);
 
 #endif /* _SYS_HIBERNATE_H_ */

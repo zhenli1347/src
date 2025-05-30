@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.h,v 1.161 2023/01/14 12:11:11 kettenis Exp $	*/
+/*	$OpenBSD: conf.h,v 1.166 2024/10/30 06:16:27 jsg Exp $	*/
 /*	$NetBSD: conf.h,v 1.33 1996/05/03 20:03:32 christos Exp $	*/
 
 /*-
@@ -49,7 +49,6 @@ struct buf;
 struct proc;
 struct tty;
 struct uio;
-struct vnode;
 struct knote;
 
 /*
@@ -291,13 +290,6 @@ extern struct cdevsw cdevsw[];
 	(dev_type_stop((*))) enodev, 0, \
 	(dev_type_mmap((*))) enodev }
 
-/* open, close, ioctl, mmap */
-#define	cdev_fb_init(c,n) { \
-	dev_init(c,n,open), dev_init(c,n,close), (dev_type_read((*))) enodev, \
-	(dev_type_write((*))) enodev, dev_init(c,n,ioctl), \
-	(dev_type_stop((*))) enodev, 0, \
-	dev_init(c,n,mmap) }
-
 /* open, close, read, write, ioctl, kqfilter */
 #define cdev_audio_init(c,n) { \
 	dev_init(c,n,open), dev_init(c,n,close), dev_init(c,n,read), \
@@ -523,21 +515,7 @@ struct linesw {
 
 #ifdef _KERNEL
 extern struct linesw linesw[];
-#endif
-
-/*
- * Swap device table
- */
-struct swdevt {
-	dev_t	sw_dev;
-	int	sw_flags;
-};
-#define	SW_FREED	0x01
-#define	SW_SEQUENTIAL	0x02
-#define	sw_freed	sw_flags	/* XXX compat */
-
-#ifdef _KERNEL
-extern struct swdevt swdevt[];
+extern dev_t swdevt[];		/* Swap device table */
 extern const int chrtoblktbl[];
 extern const int nchrtoblktbl;
 
@@ -582,8 +560,6 @@ cdev_decl(ch);
 bdev_decl(sd);
 cdev_decl(sd);
 
-cdev_decl(ses);
-
 cdev_decl(st);
 
 bdev_decl(cd);
@@ -621,7 +597,6 @@ cdev_decl(kstat);
 cdev_decl(bio);
 cdev_decl(vscsi);
 
-cdev_decl(gpr);
 cdev_decl(bktr);
 
 cdev_decl(usb);
@@ -631,7 +606,6 @@ cdev_decl(fido);
 cdev_decl(ujoy);
 cdev_decl(ucom);
 cdev_decl(ulpt);
-cdev_decl(urio);
 
 cdev_decl(hotplug);
 cdev_decl(gpio);

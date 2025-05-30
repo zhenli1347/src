@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_trace.c,v 1.44 2023/04/26 16:53:58 claudio Exp $	*/
+/*	$OpenBSD: db_trace.c,v 1.48 2025/05/23 03:13:33 sashan Exp $	*/
 /*	$NetBSD: db_trace.c,v 1.18 1996/05/03 19:42:01 christos Exp $	*/
 
 /*
@@ -67,12 +67,6 @@ struct db_variable *db_eregs = db_regs + nitems(db_regs);
  * Stack trace.
  */
 #define	INKERNEL(va)	(((vaddr_t)(va)) >= VM_MIN_KERNEL_ADDRESS)
-
-#define	NONE		0
-#define	TRAP		1
-#define	SYSCALL		2
-#define	INTERRUPT	3
-#define	AST		4
 
 int db_i386_numargs(struct callframe *);
 
@@ -161,7 +155,7 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 	lastframe = 0;
 	while (count && frame != 0) {
 		int		narg;
-		char *		name;
+		const char *	name;
 		db_expr_t	offset;
 		Elf_Sym		*sym;
 
@@ -303,30 +297,32 @@ stacktrace_save_utrace(struct stacktrace *st)
 	if (pcb == NULL)
 		return;
 
+	lastframe = NULL;
 	frame = __builtin_frame_address(0);
 	KASSERT(INKERNEL(frame));
-	f = *frame;
 
-	while (st->st_count < STACKTRACE_MAX) {
-		if (f.f_retaddr != 0 && !INKERNEL(f.f_retaddr))
-			st->st_pc[st->st_count++] = f.f_retaddr;
-
+	curcpu()->ci_inatomic++;
+	/*
+	 * skip kernel frames
+	 */
+	while (frame != NULL && lastframe < frame && INKERNEL(frame)) {
 		lastframe = frame;
-		frame = f.f_frame;
+		frame = frame->f_frame;
+	}
 
-		if (frame == NULL)
-			break;
-		if (INKERNEL(f.f_retaddr)) {
-			if (frame <= lastframe)
-				break;
-			f = *frame;
-			continue;
-		}
-		if (!INKERNEL(lastframe) && frame <= lastframe)
-			break;
+	/*
+	 * start saving userland frames
+	 */
+	if (lastframe != NULL)
+		st->st_pc[st->st_count++] = lastframe->f_retaddr;
+
+	while (frame != NULL && st->st_count < STACKTRACE_MAX) {
 		if (copyin(frame, &f, sizeof(f)) != 0)
 			break;
+		st->st_pc[st->st_count++] = f.f_retaddr;
+		frame = f.f_frame;
 	}
+	curcpu()->ci_inatomic--;
 }
 
 vaddr_t

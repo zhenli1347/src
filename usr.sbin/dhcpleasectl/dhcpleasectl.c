@@ -1,4 +1,4 @@
-/*	$OpenBSD: dhcpleasectl.c,v 1.7 2021/09/16 06:23:01 jmc Exp $	*/
+/*	$OpenBSD: dhcpleasectl.c,v 1.13 2024/11/21 13:38:14 claudio Exp $	*/
 
 /*
  * Copyright (c) 2021 Florian Obser <florian@openbsd.org>
@@ -156,14 +156,14 @@ main(int argc, char *argv[])
 
 	if ((ibuf = malloc(sizeof(struct imsgbuf))) == NULL)
 		err(1, NULL);
-	imsg_init(ibuf, ctl_sock);
+	if (imsgbuf_init(ibuf, ctl_sock) == -1)
+		err(1, NULL);
 
 	if (!lFlag) {
 		imsg_compose(ibuf, IMSG_CTL_SEND_REQUEST, 0, 0, -1,
 		    &if_index, sizeof(if_index));
-		while (ibuf->w.queued)
-			if (msgbuf_write(&ibuf->w) <= 0 && errno != EAGAIN)
-				err(1, "write error");
+		if (imsgbuf_flush(ibuf) == -1)
+			err(1, "write error");
 
 	}
 
@@ -171,13 +171,11 @@ main(int argc, char *argv[])
 		imsg_compose(ibuf, IMSG_CTL_SHOW_INTERFACE_INFO, 0, 0, -1,
 		    &if_index, sizeof(if_index));
 
-		while (ibuf->w.queued)
-			if (msgbuf_write(&ibuf->w) <= 0 && errno != EAGAIN)
-				err(1, "write error");
+		if (imsgbuf_flush(ibuf) == -1)
+			err(1, "write error");
 
-
-		if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
-			errx(1, "imsg_read error");
+		if ((n = imsgbuf_read(ibuf)) == -1)
+			err(1, "read error");
 		if (n == 0)
 			errx(1, "pipe closed");
 
@@ -287,23 +285,23 @@ show_interface_msg(struct ctl_engine_info *cei)
 			/* round up */
 			if (s - d * 86400 > 43200)
 				d++;
-			printf("\tlease %lld days\n", d);
+			printf("\tlease %lld day%s\n", d, d  > 1 ? "s" : "");
 		} else if (s > 3600) {
 			h = s / 3600;
 
 			/* round up */
 			if (s - h * 3600 > 1800)
 				h++;
-			printf("\tlease %lld hours\n", h);
+			printf("\tlease %lld hour%s\n", h, h > 1 ? "s" : "");
 		} else if (s > 60) {
 			m = s / 60;
 
 			/* round up */
 			if (s - m * 60 > 30)
 				m++;
-			printf("\tlease %lld minutes\n", m);
+			printf("\tlease %lld minute%s\n", m, m > 1 ? "s" : "");
 		} else
-			printf("\tlease %lld seconds\n", s);
+			printf("\tlease %lld second%s\n", s, s > 1 ? "s" : "");
 	}
 	if (cei->server_identifier.s_addr != INADDR_ANY) {
 		if (inet_ntop(AF_INET, &cei->server_identifier, ipbuf,

@@ -1,10 +1,13 @@
-#	$OpenBSD: Makefile.inc,v 1.92 2024/05/22 15:24:55 naddy Exp $
+#	$OpenBSD: Makefile.inc,v 1.99 2025/04/01 23:23:20 djm Exp $
 
 .include <bsd.own.mk>
 
 CFLAGS+=	-I${.CURDIR}/..
 .if ${MACHINE} != "hppa"
 CFLAGS+=	-fstack-protector-all
+.endif
+.if ${MACHINE} == "amd64"
+CFLAGS+=	-fret-clean
 .endif
 
 CDIAGFLAGS=	-Wall
@@ -26,7 +29,6 @@ CDIAGFLAGS+=	-Wold-style-definition
 CDIAGFLAGS+=	-Werror
 .endif
 
-#CDIAGFLAGS+=	-fno-common
 #DEBUG=-g
 #INSTALL_STRIP=
 
@@ -34,7 +36,6 @@ WARNINGS=yes
 
 OPENSSL?=	yes
 ZLIB?=		yes
-DSAKEY?=	yes
 
 .if (${OPENSSL:L} == "yes")
 CFLAGS+=	-DWITH_OPENSSL
@@ -42,10 +43,6 @@ CFLAGS+=	-DWITH_OPENSSL
 
 .if (${ZLIB:L} == "yes")
 CFLAGS+=	-DWITH_ZLIB
-.endif
-
-.if (${DSAKEY:L} == "yes")
-CFLAGS+=	-DWITH_DSA
 .endif
 
 CFLAGS+=	-DENABLE_PKCS11
@@ -77,6 +74,7 @@ SRCS_KEX+=	smult_curve25519_ref.c
 SRCS_KEX+=	kexgen.c
 SRCS_KEX+=	kexsntrup761x25519.c
 SRCS_KEX+=	sntrup761.c
+SRCS_KEX+=	kexmlkem768x25519.c
 
 SRCS_KEY+=	sshkey.c
 SRCS_KEY+=	cipher.c
@@ -86,9 +84,6 @@ SRCS_KEY+=	poly1305.c
 SRCS_KEY+=	ssh-ecdsa.c
 SRCS_KEY+=	ssh-ecdsa-sk.c
 SRCS_KEY+=	ssh-rsa.c
-.if (${DSAKEY:L} == "yes")
-SRCS_KEY+=	ssh-dss.c
-.endif
 SRCS_KEY+=	sshbuf-getput-crypto.c
 SRCS_KEY+=	digest-openssl.c
 SRCS_KEY+=	cipher-chachapoly-libcrypto.c

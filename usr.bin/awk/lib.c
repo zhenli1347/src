@@ -1,4 +1,4 @@
-/*	$OpenBSD: lib.c,v 1.57 2024/05/05 02:55:34 jsg Exp $	*/
+/*	$OpenBSD: lib.c,v 1.60 2025/02/05 20:32:56 millert Exp $	*/
 /****************************************************************
 Copyright (C) Lucent Technologies 1997
 All Rights Reserved
@@ -34,8 +34,6 @@ THIS SOFTWARE.
 #include <limits.h>
 #include <math.h>
 #include "awk.h"
-
-extern int u8_nextlen(const char *s);
 
 char	EMPTY[] = { '\0' };
 FILE	*infile	= NULL;
@@ -230,7 +228,7 @@ int readrec(char **pbuf, int *pbufsize, FILE *inf, bool newflag)	/* read one rec
 	char *rs = getsval(rsloc);
 
 	if (CSV) {
-		c = readcsvrec(pbuf, pbufsize, inf, newflag);
+		c = readcsvrec(&buf, &bufsize, inf, newflag);
 		isrec = (c == EOF && rr == buf) ? false : true;
 	} else if (*rs && rs[1]) {
 		bool found;
@@ -757,7 +755,7 @@ void WARNING(const char *fmt, ...)
 	error();
 }
 
-void error()
+void error(void)
 {
 	extern Node *curnode;
 
@@ -889,7 +887,7 @@ bool is_valid_number(const char *s, bool trailing_stuff_ok,
 		s++;
 
 	/* no hex floating point, sorry */
-	if (s[0] == '0' && tolower((uschar)s[1]) == 'x')
+	if (s[0] == '0' && tolower((uschar)s[1]) == 'x' && isxdigit((uschar)s[2]))
 		return false;
 
 	/* allow +nan, -nan, +inf, -inf, any other letter, no */

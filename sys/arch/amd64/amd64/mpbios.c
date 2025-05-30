@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpbios.c,v 1.31 2022/02/21 11:03:39 mpi Exp $	*/
+/*	$OpenBSD: mpbios.c,v 1.33 2024/10/22 21:50:02 jsg Exp $	*/
 /*	$NetBSD: mpbios.c,v 1.7 2003/05/15 16:32:50 fvdl Exp $	*/
 
 /*-
@@ -134,8 +134,7 @@ static const char *loc_where[] = {
 	"bios"
 };
 
-struct mp_map
-{
+struct mp_map {
 	vaddr_t		baseva;
 	int		vsize;
 	paddr_t		pa;
@@ -855,14 +854,6 @@ mp_print_eisa_intr(int intr)
 	printf(" EISA irq %d", intr);
 }
 #endif
-
-
-
-#define TAB_UNIT	4
-#define TAB_ROUND(a)	_TAB_ROUND(a, TAB_UNIT)
-
-#define _TAB_ROUND(a,u)	(((a) + (u - 1)) & ~(u - 1))
-#define EXTEND_TAB(a,u)	(!(_TAB_ROUND(a, u) == _TAB_ROUND((a + 1), u)))
 
 void
 mpbios_bus(const u_int8_t *ent, struct device *self)

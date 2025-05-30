@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sched.c,v 1.95 2024/02/28 13:43:44 mpi Exp $	*/
+/*	$OpenBSD: kern_sched.c,v 1.107 2025/05/28 03:27:44 jsg Exp $	*/
 /*
  * Copyright (c) 2007, 2008 Artur Grabowski <art@openbsd.org>
  *
@@ -95,7 +95,7 @@ sched_init_cpu(struct cpu_info *ci)
 
 	kthread_create_deferred(sched_kthreads_create, ci);
 
-	LIST_INIT(&spc->spc_deadproc);
+	TAILQ_INIT(&spc->spc_deadproc);
 	SIMPLEQ_INIT(&spc->spc_deferred);
 
 	/*
@@ -137,7 +137,6 @@ sched_idle(void *v)
 	struct schedstate_percpu *spc;
 	struct proc *p = curproc;
 	struct cpu_info *ci = v;
-	int s;
 
 	KERNEL_UNLOCK();
 
@@ -147,14 +146,12 @@ sched_idle(void *v)
 	 * First time we enter here, we're not supposed to idle,
 	 * just go away for a while.
 	 */
-	SCHED_LOCK(s);
-	cpuset_add(&sched_idle_cpus, ci);
+	SCHED_LOCK();
 	p->p_stat = SSLEEP;
 	p->p_cpu = ci;
 	atomic_setbits_int(&p->p_flag, P_CPUPEG);
 	mi_switch();
-	cpuset_del(&sched_idle_cpus, ci);
-	SCHED_UNLOCK(s);
+	SCHED_UNLOCK();
 
 	KASSERT(ci == curcpu());
 	KASSERT(curproc == spc->spc_idleproc);
@@ -163,13 +160,13 @@ sched_idle(void *v)
 		while (!cpu_is_idle(curcpu())) {
 			struct proc *dead;
 
-			SCHED_LOCK(s);
+			SCHED_LOCK();
 			p->p_stat = SSLEEP;
 			mi_switch();
-			SCHED_UNLOCK(s);
+			SCHED_UNLOCK();
 
-			while ((dead = LIST_FIRST(&spc->spc_deadproc))) {
-				LIST_REMOVE(dead, p_hash);
+			while ((dead = TAILQ_FIRST(&spc->spc_deadproc))) {
+				TAILQ_REMOVE(&spc->spc_deadproc, dead, p_runq);
 				exit2(dead);
 			}
 		}
@@ -185,10 +182,10 @@ sched_idle(void *v)
 			if (spc->spc_schedflags & SPCF_SHOULDHALT &&
 			    (spc->spc_schedflags & SPCF_HALTED) == 0) {
 				cpuset_del(&sched_idle_cpus, ci);
-				SCHED_LOCK(s);
+				SCHED_LOCK();
 				atomic_setbits_int(&spc->spc_schedflags,
 				    spc->spc_whichqs ? 0 : SPCF_HALTED);
-				SCHED_UNLOCK(s);
+				SCHED_UNLOCK();
 				wakeup(spc);
 			}
 #endif
@@ -207,15 +204,15 @@ sched_idle(void *v)
  * stack torn from under us before we manage to switch to another proc.
  * Therefore we have a per-cpu list of dead processes where we put this
  * proc and have idle clean up that list and move it to the reaper list.
- * All this will be unnecessary once we can bind the reaper this cpu
- * and not risk having it switch to another in case it sleeps.
  */
 void
 sched_exit(struct proc *p)
 {
 	struct schedstate_percpu *spc = &curcpu()->ci_schedstate;
 
-	LIST_INSERT_HEAD(&spc->spc_deadproc, p, p_hash);
+	TAILQ_INSERT_TAIL(&spc->spc_deadproc, p, p_runq);
+
+	tuagg_add_runtime();
 
 	KERNEL_ASSERT_LOCKED();
 	sched_toidle();
@@ -226,7 +223,6 @@ sched_toidle(void)
 {
 	struct schedstate_percpu *spc = &curcpu()->ci_schedstate;
 	struct proc *idle;
-	int s;
 
 #ifdef MULTIPROCESSOR
 	/* This process no longer needs to hold the kernel lock. */
@@ -245,14 +241,14 @@ sched_toidle(void)
 
 	atomic_clearbits_int(&spc->spc_schedflags, SPCF_SWITCHCLEAR);
 
-	SCHED_LOCK(s);
-
+	SCHED_LOCK();
 	idle = spc->spc_idleproc;
 	idle->p_stat = SRUN;
 
 	uvmexp.swtch++;
-	TRACEPOINT(sched, off__cpu, idle->p_tid + THREAD_PID_OFFSET,
-	    idle->p_p->ps_pid);
+	if (curproc != NULL)
+		TRACEPOINT(sched, off__cpu, idle->p_tid + THREAD_PID_OFFSET,
+		    idle->p_p->ps_pid);
 	cpu_switchto(NULL, idle);
 	panic("cpu_switchto returned");
 }
@@ -277,6 +273,7 @@ setrunqueue(struct cpu_info *ci, struct proc *p, uint8_t prio)
 	KASSERT(ci != NULL);
 	SCHED_ASSERT_LOCKED();
 	KASSERT(p->p_wchan == NULL);
+	KASSERT(!ISSET(p->p_flag, P_INSCHED));
 
 	p->p_cpu = ci;
 	p->p_stat = SRUN;
@@ -367,6 +364,7 @@ again:
 	} 
 
 	KASSERT(p->p_wchan == NULL);
+	KASSERT(!ISSET(p->p_flag, P_INSCHED));
 	return (p);
 }
 
@@ -569,7 +567,6 @@ log2(unsigned int i)
  * Just total guesstimates for now.
  */
 
-int sched_cost_load = 1;
 int sched_cost_priority = 1;
 int sched_cost_runnable = 3;
 int sched_cost_resident = 1;
@@ -627,14 +624,21 @@ void
 sched_peg_curproc(struct cpu_info *ci)
 {
 	struct proc *p = curproc;
-	int s;
 
-	SCHED_LOCK(s);
+	SCHED_LOCK();
 	atomic_setbits_int(&p->p_flag, P_CPUPEG);
 	setrunqueue(ci, p, p->p_usrpri);
 	p->p_ru.ru_nvcsw++;
 	mi_switch();
-	SCHED_UNLOCK(s);
+	SCHED_UNLOCK();
+}
+
+void
+sched_unpeg_curproc(void)
+{
+	struct proc *p = curproc;
+
+	atomic_clearbits_int(&p->p_flag, P_CPUPEG);
 }
 
 #ifdef MULTIPROCESSOR
@@ -703,7 +707,7 @@ sched_barrier_task(void *arg)
 
 	sched_peg_curproc(ci);
 	cond_signal(&sb->cond);
-	atomic_clearbits_int(&curproc->p_flag, P_CPUPEG);
+	sched_unpeg_curproc();
 }
 
 void
@@ -745,19 +749,11 @@ sched_barrier(struct cpu_info *ci)
  * Functions to manipulate cpu sets.
  */
 struct cpu_info *cpuset_infos[MAXCPUS];
-static struct cpuset cpuset_all;
 
 void
 cpuset_init_cpu(struct cpu_info *ci)
 {
-	cpuset_add(&cpuset_all, ci);
 	cpuset_infos[CPU_INFO_UNIT(ci)] = ci;
-}
-
-void
-cpuset_clear(struct cpuset *cs)
-{
-	memset(cs, 0, sizeof(*cs));
 }
 
 void
@@ -782,12 +778,6 @@ cpuset_isset(struct cpuset *cs, struct cpu_info *ci)
 }
 
 void
-cpuset_add_all(struct cpuset *cs)
-{
-	cpuset_copy(cs, &cpuset_all);
-}
-
-void
 cpuset_copy(struct cpuset *to, struct cpuset *from)
 {
 	memcpy(to, from, sizeof(*to));
@@ -803,15 +793,6 @@ cpuset_first(struct cpuset *cs)
 			return (cpuset_infos[i * 32 + ffs(cs->cs_set[i]) - 1]);
 
 	return (NULL);
-}
-
-void
-cpuset_union(struct cpuset *to, struct cpuset *a, struct cpuset *b)
-{
-	int i;
-
-	for (i = 0; i < CPUSET_ASIZE(ncpus); i++)
-		to->cs_set[i] = a->cs_set[i] | b->cs_set[i];
 }
 
 void

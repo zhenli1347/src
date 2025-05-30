@@ -1,4 +1,4 @@
-/*	$OpenBSD: lex.c,v 1.32 2023/11/25 16:31:33 millert Exp $	*/
+/*	$OpenBSD: lex.c,v 1.35 2025/02/05 20:32:56 millert Exp $	*/
 /****************************************************************
 Copyright (C) Lucent Technologies 1997
 All Rights Reserved
@@ -226,11 +226,6 @@ int yylex(void)
 			while ((c = input()) != '\n' && c != 0)
 				;
 			unput(c);
-			/*
-			 * Next line is a hack, itcompensates for
-			 * unput's treatment of \n.
-			 */
-			lineno++;
 			break;
 		case ';':
 			RET(';');
@@ -378,8 +373,6 @@ int yylex(void)
 		}
 	}
 }
-
-extern int runetochar(char *str, int c);
 
 int string(void)
 {
@@ -653,8 +646,6 @@ int input(void)	/* get next lexical input character */
 
 void unput(int c)	/* put lexical character back on input */
 {
-	if (c == '\n')  
-		lineno--;
 	if (yysptr >= yysbuf + sizeof(yysbuf))
 		FATAL("pushed back too much: %.20s...", yysbuf);
 	*yysptr++ = c;

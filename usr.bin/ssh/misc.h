@@ -1,4 +1,4 @@
-/* $OpenBSD: misc.h,v 1.108 2024/05/17 00:30:24 djm Exp $ */
+/* $OpenBSD: misc.h,v 1.111 2025/05/05 02:48:06 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -56,6 +56,7 @@ struct ForwardOptions {
 char	*chop(char *);
 void	 rtrim(char *);
 void	skip_space(char **);
+const char *strprefix(const char *, const char *, int);
 char	*strdelim(char **);
 char	*strdelimw(char **);
 int	 set_nonblock(int);
@@ -107,6 +108,7 @@ int	 parse_pattern_interval(const char *, char **, int *);
 int	 path_absolute(const char *);
 int	 stdfd_devnull(int, int, int);
 int	 lib_contains_symbol(const char *, const char *);
+char	*get_homedir(void);
 
 struct passwd *pwcopy(struct passwd *);
 const char *ssh_gai_strerror(int);
@@ -228,6 +230,11 @@ int ptimeout_get_ms(struct timespec *pt);
 struct timespec *ptimeout_get_tsp(struct timespec *pt);
 int ptimeout_isset(struct timespec *pt);
 
+/* misc-agent.c */
+char	*agent_hostname_hash(void);
+int	 agent_listener(const char *, const char *, int *, char **);
+void	 agent_cleanup_stale(const char *, int);
+
 /* readpass.c */
 
 #define RP_ECHO			0x0001
@@ -250,6 +257,7 @@ void	notify_complete(struct notifier_ctx *, const char *, ...)
 
 typedef void (*sshsig_t)(int);
 sshsig_t ssh_signal(int, sshsig_t);
+int signal_is_crash(int);
 
 /* On OpenBSD time_t is int64_t which is long long. */
 #define SSH_TIME_T_MAX LLONG_MAX

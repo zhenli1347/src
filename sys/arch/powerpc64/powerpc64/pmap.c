@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.61 2024/04/03 19:30:59 gkoehler Exp $ */
+/*	$OpenBSD: pmap.c,v 1.64 2024/11/28 18:54:36 gkoehler Exp $ */
 
 /*
  * Copyright (c) 2015 Martin Pieuchot
@@ -602,7 +602,11 @@ pmap_vp_enter(pmap_t pm, vaddr_t va, struct pte_desc *pted, int flags)
 	slbd = pmap_slbd_lookup(pm, va);
 	if (slbd == NULL) {
 		slbd = pmap_slbd_alloc(pm, va);
-		KASSERT(slbd);
+		if (slbd == NULL) {
+			if ((flags & PMAP_CANFAIL) == 0)
+				panic("%s: unable to allocate slbd", __func__);
+			return ENOMEM;
+		}
 	}
 
 	vp1 = slbd->slbd_vp;
@@ -812,8 +816,8 @@ pte_insert(struct pte_desc *pted)
 		pted->pted_va &= ~(PTED_VA_HID_M|PTED_VA_PTEGIDX_M);
 		pted->pted_va |= off & (PTED_VA_PTEGIDX_M|PTED_VA_HID_M);
 
-		idx ^= (PTED_HID(pted) ? pmap_ptab_mask : 0);
-		pte = pmap_ptable + (idx * 8);
+		pte = pmap_ptable;
+		pte += (idx ^ (PTED_HID(pted) ? pmap_ptab_mask : 0)) * 8;
 		pte += PTED_PTEGIDX(pted); /* increment by index into pteg */
 
 		if ((pte->pte_hi & PTE_WIRED) == 0)
@@ -834,6 +838,7 @@ pte_insert(struct pte_desc *pted)
 		vsid = avpn >> PTE_VSID_SHIFT;
 		vpn = avpn << (ADDR_VSID_SHIFT - PTE_VSID_SHIFT - PAGE_SHIFT);
 
+		idx ^= (PTED_HID(pted) ? pmap_ptab_mask : 0);
 		idx ^= ((pte->pte_hi & PTE_HID) ? pmap_ptab_mask : 0);
 		vpn |= ((idx ^ vsid) & (ADDR_PIDX >> ADDR_PIDX_SHIFT));
 
@@ -1596,7 +1601,7 @@ pmap_bootstrap_cpu(void)
 	/* Clear TLB. */
 	tlbia();
 
-	if (cpu_features2 & PPC_FEATURE2_ARCH_3_00) {
+	if (hwcap2 & PPC_FEATURE2_ARCH_3_00) {
 		/* Set partition table. */
 		mtptcr((paddr_t)pmap_pat | PATSIZE);
 	} else {

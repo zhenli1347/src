@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.8 2023/11/25 12:00:39 florian Exp $	*/
+/*	$OpenBSD: parse.y,v 1.10 2024/11/11 15:19:31 florian Exp $	*/
 
 /*
  * Copyright (c) 2018 Florian Obser <florian@openbsd.org>
@@ -57,7 +57,7 @@ static struct file {
 	TAILQ_ENTRY(file)	 entry;
 	FILE			*stream;
 	char			*name;
-	size_t	 		 ungetpos;
+	size_t			 ungetpos;
 	size_t			 ungetsize;
 	u_char			*ungetbuf;
 	int			 eof_reached;
@@ -172,7 +172,6 @@ dhcp_iface	: DHCP_IFACE STRING {
 		;
 
 iface_block	: optnl ifaceopts_l
-		| optnl
 		;
 
 ifaceopts_l	: ifaceopts_l ifaceoptsl nl

@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.h,v 1.104 2024/02/25 19:15:50 cheloha Exp $	*/
+/*	$OpenBSD: cpu.h,v 1.107 2024/10/23 18:45:34 miod Exp $	*/
 
 /*
  * Copyright (c) 2000-2004 Michael Shalayeff
@@ -100,7 +100,7 @@ struct cpu_info {
 	volatile int	ci_cpl;
 	volatile u_long	ci_mask;		/* Hardware interrupt mask. */
 	volatile u_long	ci_ipending;
-	volatile int	ci_in_intr;
+	volatile int	ci_idepth;
 	int		ci_want_resched;
 
 	volatile u_long	ci_ipi;			/* IPIs pending. */
@@ -165,7 +165,7 @@ curcpu(void)
 #define CPU_INFO_FOREACH(cii, ci) \
 	for (cii = 0, ci = &cpu_info[0]; cii < ncpus; cii++, ci++)
 
-#define CPU_BUSY_CYCLE()	do {} while (0)
+#define CPU_BUSY_CYCLE()	__asm volatile ("" ::: "memory")
 
 /* types */
 enum hppa_cpu_type {
@@ -229,7 +229,6 @@ extern int cpu_hvers;
 #define	CLKF_PC(framep)		((framep)->tf_iioq_head)
 #define	CLKF_INTR(framep)	((framep)->tf_flags & TFF_INTR)
 #define	CLKF_USERMODE(framep)	((framep)->tf_flags & T_USER)
-#define	CLKF_SYSCALL(framep)	((framep)->tf_flags & TFF_SYS)
 
 #define	need_proftick(p)	setsoftast(p)
 #define	PROC_PC(p)		((p)->p_md.md_regs->tf_iioq_head & ~HPPA_PC_PRIV_MASK)

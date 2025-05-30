@@ -1,4 +1,4 @@
-/* $OpenBSD: evp_cipher.c,v 1.23 2024/04/10 15:00:38 beck Exp $ */
+/* $OpenBSD: evp_cipher.c,v 1.26 2025/05/27 03:58:12 tb Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -115,10 +115,10 @@
 #include <string.h>
 
 #include <openssl/asn1.h>
-#include <openssl/err.h>
 #include <openssl/evp.h>
 
 #include "asn1_local.h"
+#include "err_local.h"
 #include "evp_local.h"
 
 int
@@ -944,10 +944,10 @@ EVP_CIPHER_CTX_flags(const EVP_CIPHER_CTX *ctx)
 LCRYPTO_ALIAS(EVP_CIPHER_CTX_flags);
 
 /*
- * Used by CMS and its predecessors. Only GOST and RC2 have a custom method.
+ * Used by CMS and its predecessors. Only RC2 has a custom method.
  */
 
-int
+static int
 EVP_CIPHER_get_asn1_iv(EVP_CIPHER_CTX *ctx, ASN1_TYPE *type)
 {
 	int iv_len;
@@ -981,7 +981,7 @@ EVP_CIPHER_asn1_to_param(EVP_CIPHER_CTX *ctx, ASN1_TYPE *type)
 	return -1;
 }
 
-int
+static int
 EVP_CIPHER_set_asn1_iv(EVP_CIPHER_CTX *ctx, ASN1_TYPE *type)
 {
 	int iv_len;

@@ -1,4 +1,4 @@
-#	$OpenBSD: test-exec.sh,v 1.111 2024/05/17 01:45:22 djm Exp $
+#	$OpenBSD: test-exec.sh,v 1.129 2025/05/24 04:40:37 djm Exp $
 #	Placed in the Public Domain.
 
 #SUDO=sudo
@@ -53,6 +53,7 @@ SSHKEYSCAN=ssh-keyscan
 SFTP=sftp
 SFTPSERVER=/usr/libexec/sftp-server
 SSHD_SESSION=/usr/libexec/sshd-session
+SSHD_AUTH=/usr/libexec/sshd-auth
 SCP=scp
 
 # Interop testing
@@ -76,6 +77,9 @@ if [ "x$TEST_SSH_SSH" != "x" ]; then
 fi
 if [ "x$TEST_SSH_SSHD_SESSION" != "x" ]; then
 	SSHD_SESSION="${TEST_SSH_SSHD_SESSION}"
+fi
+if [ "x$TEST_SSH_SSHD_AUTH" != "x" ]; then
+	SSHD_AUTH="${TEST_SSH_SSHD_AUTH}"
 fi
 if [ "x$TEST_SSH_SSHD" != "x" ]; then
 	SSHD="${TEST_SSH_SSHD}"
@@ -136,6 +140,11 @@ fi
 case "$SSHD" in
 /*) ;;
 *) SSHD=`which $SSHD` ;;
+esac
+
+case "$SSH" in
+/*) ;;
+*) SSH=`which $SSH` ;;
 esac
 
 case "$SSHAGENT" in
@@ -200,6 +209,7 @@ fi
 # to preserve our debug logging.  In the rare instance where -q is desirable
 # -qq is equivalent and is not removed.
 SSHLOGWRAP=$OBJ/ssh-log-wrapper.sh
+rm -f ${SSHLOGWRAP}
 cat >$SSHLOGWRAP <<EOD
 #!/bin/sh
 timestamp="\`$OBJ/timestamp\`"
@@ -218,6 +228,7 @@ REAL_SSHD="$SSHD"
 SSH="$SSHLOGWRAP"
 
 SSHDLOGWRAP=$OBJ/sshd-log-wrapper.sh
+rm -f ${SSHDLOGWRAP}
 cat >$SSHDLOGWRAP <<EOD
 #!/bin/sh
 timestamp="\`$OBJ/timestamp\`"
@@ -247,14 +258,14 @@ ssh_logfile ()
 # [kbytes] to ensure the file is at least that large.
 DATANAME=data
 DATA=$OBJ/${DATANAME}
-cat ${SSH} >${DATA}
+cat ${REAL_SSH} >${DATA}
 COPY=$OBJ/copy
 rm -f ${COPY}
 
 increase_datafile_size()
 {
 	while [ `du -k ${DATA} | cut -f1` -lt $1 ]; do
-		cat ${SSH} >>${DATA}
+		cat ${REAL_SSH} >>${DATA}
 	done
 }
 
@@ -265,33 +276,32 @@ export SSH_PKCS11_HELPER SSH_SK_HELPER
 
 stop_sshd ()
 {
-	if [ -f $PIDFILE ]; then
-		pid=`$SUDO cat $PIDFILE`
-		if [ "X$pid" = "X" ]; then
-			echo no sshd running
-		else
-			if [ $pid -lt 2 ]; then
-				echo bad pid for sshd: $pid
-			else
-				$SUDO kill $pid
-				trace "wait for sshd to exit"
-				i=0;
-				while [ -f $PIDFILE -a $i -lt 5 ]; do
-					i=`expr $i + 1`
-					sleep $i
-				done
-				if test -f $PIDFILE; then
-					if $SUDO kill -0 $pid; then
-						echo "sshd didn't exit " \
-						    "port $PORT pid $pid"
-					else
-						echo "sshd died without cleanup"
-					fi
-					exit 1
-				fi
-			fi
-		fi
+	[ -z $PIDFILE ] && return
+	[ -f $PIDFILE ] || return
+	pid=`$SUDO cat $PIDFILE`
+	if [ "X$pid" = "X" ]; then
+		echo "no sshd running" 1>&2
+		return
+	elif [ $pid -lt 2 ]; then
+		echo "bad pid for sshd: $pid" 1>&2
+		return
 	fi
+	$SUDO kill $pid
+	trace "wait for sshd to exit"
+	i=0;
+	while [ -f $PIDFILE -a $i -lt 5 ]; do
+		i=`expr $i + 1`
+		sleep $i
+	done
+	if test -f $PIDFILE; then
+		if $SUDO kill -0 $pid; then
+			echo "sshd didn't exit port $PORT pid $pid" 1>&2
+		else
+			echo "sshd died without cleanup" 1>&2
+		fi
+		exit 1
+	fi
+	PIDFILE=""
 }
 
 # helper
@@ -327,10 +337,11 @@ save_debug_log ()
 
 	for logfile in $TEST_SSH_LOGDIR $TEST_REGRESS_LOGFILE \
 	    $TEST_SSH_LOGFILE $TEST_SSHD_LOGFILE; do
-		if [ ! -z "$SUDO" ] && [ -f "$logfile" ]; then
+		if [ ! -z "$SUDO" ] && [ -e "$logfile" ]; then
 			$SUDO chown -R $USER $logfile
 		fi
 	done
+	test -z "$SUDO" || $SUDO chmod ug+rw $TEST_SSHD_LOGFILE
 	echo $@ >>$TEST_REGRESS_LOGFILE
 	echo $@ >>$TEST_SSH_LOGFILE
 	echo $@ >>$TEST_SSHD_LOGFILE
@@ -338,19 +349,6 @@ save_debug_log ()
 	(cat $TEST_REGRESS_LOGFILE; echo) >>$OBJ/failed-regress.log
 	(cat $TEST_SSH_LOGFILE; echo) >>$OBJ/failed-ssh.log
 	(cat $TEST_SSHD_LOGFILE; echo) >>$OBJ/failed-sshd.log
-
-	# Save all logfiles in a tarball.
-	(cd $OBJ &&
-	  logfiles=""
-	  for i in $TEST_REGRESS_LOGFILE $TEST_SSH_LOGFILE $TEST_SSHD_LOGFILE \
-	    $TEST_SSH_LOGDIR; do
-		if [ -e "`basename $i`" ]; then
-			logfiles="$logfiles `basename $i`"
-		else
-			logfiles="$logfiles $i"
-		fi
-	  done
-	  tar cf "$tarname" $logfiles)
 }
 
 trace ()
@@ -427,6 +425,8 @@ cat << EOF > $OBJ/sshd_config
 	AcceptEnv		_XXX_TEST
 	Subsystem	sftp	$SFTPSERVER
 	SshdSessionPath		$SSHD_SESSION
+	SshdAuthPath		$SSHD_AUTH
+	PerSourcePenalties	no
 EOF
 
 # This may be necessary if /usr/src and/or /usr/obj are group-writable,
@@ -646,23 +646,34 @@ esac
 
 if test "$REGRESS_INTEROP_DROPBEAR" = "yes" ; then
 	trace Create dropbear keys and add to authorized_keys
-	mkdir -p $OBJ/.dropbear
-	for i in rsa ecdsa ed25519 dss; do
-		if [ ! -f "$OBJ/.dropbear/id_$i" ]; then
-			($DROPBEARKEY -t $i -f $OBJ/.dropbear/id_$i
-			$DROPBEARCONVERT dropbear openssh \
-			    $OBJ/.dropbear/id_$i $OBJ/.dropbear/ossh.id_$i
-			) > /dev/null 2>&1
+	mkdir -p $OBJ/.dropbear $OBJ/.ssh
+	awk '{print "somehost "$2" "$3}' $OBJ/known_hosts >$OBJ/.ssh/known_hosts
+	kt="ed25519"
+	for i in dss rsa ecdsa; do
+		if $SSH -Q key-plain | grep "$i" >/dev/null; then
+			kt="$kt $i"
+		else
+			rm -f "$OBJ/.dropbear/id_$i"
 		fi
+	done
+	for i in $kt; do
+		if [ ! -f "$OBJ/.dropbear/id_$i" ]; then
+			verbose Create dropbear key type $i
+			$DROPBEARKEY -t $i -f $OBJ/.dropbear/id_$i \
+			    >/dev/null 2>&1
+		fi
+		$DROPBEARCONVERT dropbear openssh $OBJ/.dropbear/id_$i \
+		    $OBJ/.dropbear/ossh.id_$i >/dev/null 2>&1
 		$SSHKEYGEN -y -f $OBJ/.dropbear/ossh.id_$i \
 		   >>$OBJ/authorized_keys_$USER
+		rm -f $OBJ/.dropbear/id_$i.pub $OBJ/.dropbear/ossh.id_$i
 	done
 fi
 
 # create a proxy version of the client config
 (
 	cat $OBJ/ssh_config
-	echo proxycommand ${SUDO} env SSH_SK_HELPER=\"$SSH_SK_HELPER\" ${OBJ}/sshd-log-wrapper.sh -i -f $OBJ/sshd_proxy
+	echo proxycommand ${SUDO} env SSH_SK_HELPER=\"$SSH_SK_HELPER\" ${TEST_SSH_SSHD_ENV} ${OBJ}/sshd-log-wrapper.sh -i -f $OBJ/sshd_proxy
 ) > $OBJ/ssh_proxy
 
 # check proxy config
@@ -676,10 +687,12 @@ chmod a+x $OBJ/ssh_proxy.sh
 
 start_sshd ()
 {
+	PIDFILE=$OBJ/pidfile
 	# start sshd
 	logfile="${TEST_SSH_LOGDIR}/sshd.`$OBJ/timestamp`.$$.log"
-	$SUDO ${SSHD} -f $OBJ/sshd_config "$@" -t || fatal "sshd_config broken"
-	$SUDO env SSH_SK_HELPER="$SSH_SK_HELPER" \
+	$SUDO env SSH_SK_HELPER="$SSH_SK_HELPER" ${TEST_SSH_SSHD_ENV} \
+	    ${SSHD} -f $OBJ/sshd_config "$@" -t || fatal "sshd_config broken"
+	$SUDO env SSH_SK_HELPER="$SSH_SK_HELPER" ${TEST_SSH_SSHD_ENV} \
 	    ${SSHD} -f $OBJ/sshd_config "$@" -E$logfile
 	echo "trace: Started sshd as daemon, logfile $logfile" >>$TEST_REGRESS_LOGFILE
 
@@ -689,6 +702,8 @@ start_sshd ()
 		i=`expr $i + 1`
 		sleep $i
 	done
+	rm -f ${TEST_SSHD_LOGFILE}
+	ln -f -s ${logfile} $TEST_SSHD_LOGFILE
 
 	test -f $PIDFILE || fatal "no sshd running on port $PORT"
 }
@@ -712,7 +727,7 @@ p11_setup() {
 	p11_find_lib \
 		/usr/local/lib/softhsm/libsofthsm2.so
 	test -z "$TEST_SSH_PKCS11" && return 1
-	verbose "using token library $TEST_SSH_PKCS11"
+	trace "using token library $TEST_SSH_PKCS11"
 	TEST_SSH_PIN=1234
 	TEST_SSH_SOPIN=12345678
 	if [ "x$TEST_SSH_SSHPKCS11HELPER" != "x" ]; then
@@ -778,6 +793,28 @@ EOF
 # Peforms ssh-add with the right token PIN.
 p11_ssh_add() {
 	env SSH_ASKPASS="$PIN_SH" SSH_ASKPASS_REQUIRE=force ${SSHADD} "$@"
+}
+
+start_ssh_agent() {
+	EXTRA_AGENT_ARGS="$1"
+	SSH_AUTH_SOCK="$OBJ/agent.sock"
+	export SSH_AUTH_SOCK
+	rm -f $SSH_AUTH_SOCK $OBJ/agent.log
+	trace "start agent"
+	${SSHAGENT} ${EXTRA_AGENT_ARGS} -d -a $SSH_AUTH_SOCK \
+	    > $OBJ/agent.log 2>&1 &
+	AGENT_PID=$!
+	trap "kill $AGENT_PID" EXIT
+	for x in 0 1 2 3 4 ; do
+		# Give it a chance to start
+		${SSHADD} -l > /dev/null 2>&1
+		r=$?
+		test $r -eq 1 && break
+		sleep 1
+	done
+	if [ $r -ne 1 ]; then
+		fatal "ssh-add -l did not fail with exit code 1 (got $r)"
+	fi
 }
 
 # source test body

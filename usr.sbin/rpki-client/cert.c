@@ -1,4 +1,4 @@
-/*	$OpenBSD: cert.c,v 1.132 2024/05/31 02:45:15 tb Exp $ */
+/*	$OpenBSD: cert.c,v 1.158 2025/04/03 14:29:44 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2021 Job Snijders <job@openbsd.org>
@@ -34,7 +34,7 @@ extern ASN1_OBJECT	*carepo_oid;	/* 1.3.6.1.5.5.7.48.5 (caRepository) */
 extern ASN1_OBJECT	*manifest_oid;	/* 1.3.6.1.5.5.7.48.10 (rpkiManifest) */
 extern ASN1_OBJECT	*notify_oid;	/* 1.3.6.1.5.5.7.48.13 (rpkiNotify) */
 
-static int certid = TALSZ_MAX;
+int certid = TALSZ_MAX;
 
 /*
  * Append an IP address structure to our list of results.
@@ -48,12 +48,12 @@ static int certid = TALSZ_MAX;
  * Returns zero on failure (IP overlap) non-zero on success.
  */
 static int
-append_ip(const char *fn, struct cert_ip *ips, size_t *ipsz,
+append_ip(const char *fn, struct cert_ip *ips, size_t *num_ips,
     const struct cert_ip *ip)
 {
-	if (!ip_addr_check_overlap(ip, fn, ips, *ipsz, 0))
+	if (!ip_addr_check_overlap(ip, fn, ips, *num_ips, 0))
 		return 0;
-	ips[(*ipsz)++] = *ip;
+	ips[(*num_ips)++] = *ip;
 	return 1;
 }
 
@@ -63,12 +63,12 @@ append_ip(const char *fn, struct cert_ip *ips, size_t *ipsz,
  * as defined by RFC 3779 section 3.3.
  */
 static int
-append_as(const char *fn, struct cert_as *ases, size_t *asz,
+append_as(const char *fn, struct cert_as *ases, size_t *num_ases,
     const struct cert_as *as)
 {
-	if (!as_check_overlap(as, fn, ases, *asz, 0))
+	if (!as_check_overlap(as, fn, ases, *num_ases, 0))
 		return 0;
-	ases[(*asz)++] = *as;
+	ases[(*num_ases)++] = *as;
 	return 1;
 }
 
@@ -77,7 +77,7 @@ append_as(const char *fn, struct cert_as *ases, size_t *asz,
  * Returns zero on failure, non-zero on success.
  */
 int
-sbgp_as_range(const char *fn, struct cert_as *ases, size_t *asz,
+sbgp_as_range(const char *fn, struct cert_as *ases, size_t *num_ases,
     const ASRange *range)
 {
 	struct cert_as		 as;
@@ -107,14 +107,14 @@ sbgp_as_range(const char *fn, struct cert_as *ases, size_t *asz,
 		return 0;
 	}
 
-	return append_as(fn, ases, asz, &as);
+	return append_as(fn, ases, num_ases, &as);
 }
 
 /*
  * Parse an entire 3.2.3.10 integer type.
  */
 int
-sbgp_as_id(const char *fn, struct cert_as *ases, size_t *asz,
+sbgp_as_id(const char *fn, struct cert_as *ases, size_t *num_ases,
     const ASN1_INTEGER *i)
 {
 	struct cert_as	 as;
@@ -133,30 +133,30 @@ sbgp_as_id(const char *fn, struct cert_as *ases, size_t *asz,
 		return 0;
 	}
 
-	return append_as(fn, ases, asz, &as);
+	return append_as(fn, ases, num_ases, &as);
 }
 
 static int
-sbgp_as_inherit(const char *fn, struct cert_as *ases, size_t *asz)
+sbgp_as_inherit(const char *fn, struct cert_as *ases, size_t *num_ases)
 {
 	struct cert_as as;
 
 	memset(&as, 0, sizeof(struct cert_as));
 	as.type = CERT_AS_INHERIT;
 
-	return append_as(fn, ases, asz, &as);
+	return append_as(fn, ases, num_ases, &as);
 }
 
 int
 sbgp_parse_assysnum(const char *fn, const ASIdentifiers *asidentifiers,
-    struct cert_as **out_as, size_t *out_asz)
+    struct cert_as **out_as, size_t *out_num_ases)
 {
 	const ASIdOrRanges	*aors = NULL;
 	struct cert_as		*as = NULL;
-	size_t			 asz = 0, sz;
+	size_t			 num_ases = 0, num;
 	int			 i;
 
-	assert(*out_as == NULL && *out_asz == 0);
+	assert(*out_as == NULL && *out_num_ases == 0);
 
 	if (asidentifiers->rdi != NULL) {
 		warnx("%s: RFC 6487 section 4.8.11: autonomousSysNum: "
@@ -172,11 +172,11 @@ sbgp_parse_assysnum(const char *fn, const ASIdentifiers *asidentifiers,
 
 	switch (asidentifiers->asnum->type) {
 	case ASIdentifierChoice_inherit:
-		sz = 1;
+		num = 1;
 		break;
 	case ASIdentifierChoice_asIdsOrRanges:
 		aors = asidentifiers->asnum->u.asIdsOrRanges;
-		sz = sk_ASIdOrRange_num(aors);
+		num = sk_ASIdOrRange_num(aors);
 		break;
 	default:
 		warnx("%s: RFC 3779 section 3.2.3.2: ASIdentifierChoice: "
@@ -184,21 +184,21 @@ sbgp_parse_assysnum(const char *fn, const ASIdentifiers *asidentifiers,
 		goto out;
 	}
 
-	if (sz == 0) {
+	if (num == 0) {
 		warnx("%s: RFC 6487 section 4.8.11: empty asIdsOrRanges", fn);
 		goto out;
 	}
-	if (sz >= MAX_AS_SIZE) {
+	if (num >= MAX_AS_SIZE) {
 		warnx("%s: too many AS number entries: limit %d",
 		    fn, MAX_AS_SIZE);
 		goto out;
 	}
-	as = calloc(sz, sizeof(struct cert_as));
+	as = calloc(num, sizeof(struct cert_as));
 	if (as == NULL)
 		err(1, NULL);
 
 	if (aors == NULL) {
-		if (!sbgp_as_inherit(fn, as, &asz))
+		if (!sbgp_as_inherit(fn, as, &num_ases))
 			goto out;
 	}
 
@@ -208,11 +208,11 @@ sbgp_parse_assysnum(const char *fn, const ASIdentifiers *asidentifiers,
 		aor = sk_ASIdOrRange_value(aors, i);
 		switch (aor->type) {
 		case ASIdOrRange_id:
-			if (!sbgp_as_id(fn, as, &asz, aor->u.id))
+			if (!sbgp_as_id(fn, as, &num_ases, aor->u.id))
 				goto out;
 			break;
 		case ASIdOrRange_range:
-			if (!sbgp_as_range(fn, as, &asz, aor->u.range))
+			if (!sbgp_as_range(fn, as, &num_ases, aor->u.range))
 				goto out;
 			break;
 		default:
@@ -223,7 +223,7 @@ sbgp_parse_assysnum(const char *fn, const ASIdentifiers *asidentifiers,
 	}
 
 	*out_as = as;
-	*out_asz = asz;
+	*out_num_ases = num_ases;
 
 	return 1;
 
@@ -256,7 +256,8 @@ sbgp_assysnum(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 		goto out;
 	}
 
-	if (!sbgp_parse_assysnum(fn, asidentifiers, &cert->as, &cert->asz))
+	if (!sbgp_parse_assysnum(fn, asidentifiers, &cert->ases,
+	    &cert->num_ases))
 		goto out;
 
 	rc = 1;
@@ -270,7 +271,7 @@ sbgp_assysnum(const char *fn, struct cert *cert, X509_EXTENSION *ext)
  * Returns zero on failure, non-zero on success.
  */
 int
-sbgp_addr(const char *fn, struct cert_ip *ips, size_t *ipsz, enum afi afi,
+sbgp_addr(const char *fn, struct cert_ip *ips, size_t *num_ips, enum afi afi,
     const ASN1_BIT_STRING *bs)
 {
 	struct cert_ip	ip;
@@ -292,7 +293,7 @@ sbgp_addr(const char *fn, struct cert_ip *ips, size_t *ipsz, enum afi afi,
 		return 0;
 	}
 
-	return append_ip(fn, ips, ipsz, &ip);
+	return append_ip(fn, ips, num_ips, &ip);
 }
 
 /*
@@ -300,7 +301,7 @@ sbgp_addr(const char *fn, struct cert_ip *ips, size_t *ipsz, enum afi afi,
  * Returns zero on failure, non-zero on success.
  */
 int
-sbgp_addr_range(const char *fn, struct cert_ip *ips, size_t *ipsz,
+sbgp_addr_range(const char *fn, struct cert_ip *ips, size_t *num_ips,
     enum afi afi, const IPAddressRange *range)
 {
 	struct cert_ip	ip;
@@ -328,11 +329,11 @@ sbgp_addr_range(const char *fn, struct cert_ip *ips, size_t *ipsz,
 		return 0;
 	}
 
-	return append_ip(fn, ips, ipsz, &ip);
+	return append_ip(fn, ips, num_ips, &ip);
 }
 
 static int
-sbgp_addr_inherit(const char *fn, struct cert_ip *ips, size_t *ipsz,
+sbgp_addr_inherit(const char *fn, struct cert_ip *ips, size_t *num_ips,
     enum afi afi)
 {
 	struct cert_ip	ip;
@@ -342,23 +343,23 @@ sbgp_addr_inherit(const char *fn, struct cert_ip *ips, size_t *ipsz,
 	ip.afi = afi;
 	ip.type = CERT_IP_INHERIT;
 
-	return append_ip(fn, ips, ipsz, &ip);
+	return append_ip(fn, ips, num_ips, &ip);
 }
 
 int
 sbgp_parse_ipaddrblk(const char *fn, const IPAddrBlocks *addrblk,
-    struct cert_ip **out_ips, size_t *out_ipsz)
+    struct cert_ip **out_ips, size_t *out_num_ips)
 {
 	const IPAddressFamily	*af;
 	const IPAddressOrRanges	*aors;
 	const IPAddressOrRange	*aor;
 	enum afi		 afi;
 	struct cert_ip		*ips = NULL;
-	size_t			 ipsz = 0, sz;
+	size_t			 num_ips = 0, num;
 	int			 ipv4_seen = 0, ipv6_seen = 0;
 	int			 i, j, ipaddrblocksz;
 
-	assert(*out_ips == NULL && *out_ipsz == 0);
+	assert(*out_ips == NULL && *out_num_ips == 0);
 
 	ipaddrblocksz = sk_IPAddressFamily_num(addrblk);
 	if (ipaddrblocksz != 1 && ipaddrblocksz != 2) {
@@ -374,26 +375,26 @@ sbgp_parse_ipaddrblk(const char *fn, const IPAddrBlocks *addrblk,
 		switch (af->ipAddressChoice->type) {
 		case IPAddressChoice_inherit:
 			aors = NULL;
-			sz = ipsz + 1;
+			num = num_ips + 1;
 			break;
 		case IPAddressChoice_addressesOrRanges:
 			aors = af->ipAddressChoice->u.addressesOrRanges;
-			sz = ipsz + sk_IPAddressOrRange_num(aors);
+			num = num_ips + sk_IPAddressOrRange_num(aors);
 			break;
 		default:
 			warnx("%s: RFC 3779: IPAddressChoice: unknown type %d",
 			    fn, af->ipAddressChoice->type);
 			goto out;
 		}
-		if (sz == ipsz) {
+		if (num == num_ips) {
 			warnx("%s: RFC 6487 section 4.8.10: "
 			    "empty ipAddressesOrRanges", fn);
 			goto out;
 		}
 
-		if (sz >= MAX_IP_SIZE)
+		if (num >= MAX_IP_SIZE)
 			goto out;
-		ips = recallocarray(ips, ipsz, sz, sizeof(struct cert_ip));
+		ips = recallocarray(ips, num_ips, num, sizeof(struct cert_ip));
 		if (ips == NULL)
 			err(1, NULL);
 
@@ -420,7 +421,7 @@ sbgp_parse_ipaddrblk(const char *fn, const IPAddrBlocks *addrblk,
 		}
 
 		if (aors == NULL) {
-			if (!sbgp_addr_inherit(fn, ips, &ipsz, afi))
+			if (!sbgp_addr_inherit(fn, ips, &num_ips, afi))
 				goto out;
 			continue;
 		}
@@ -429,12 +430,12 @@ sbgp_parse_ipaddrblk(const char *fn, const IPAddrBlocks *addrblk,
 			aor = sk_IPAddressOrRange_value(aors, j);
 			switch (aor->type) {
 			case IPAddressOrRange_addressPrefix:
-				if (!sbgp_addr(fn, ips, &ipsz, afi,
+				if (!sbgp_addr(fn, ips, &num_ips, afi,
 				    aor->u.addressPrefix))
 					goto out;
 				break;
 			case IPAddressOrRange_addressRange:
-				if (!sbgp_addr_range(fn, ips, &ipsz, afi,
+				if (!sbgp_addr_range(fn, ips, &num_ips, afi,
 				    aor->u.addressRange))
 					goto out;
 				break;
@@ -447,7 +448,7 @@ sbgp_parse_ipaddrblk(const char *fn, const IPAddrBlocks *addrblk,
 	}
 
 	*out_ips = ips;
-	*out_ipsz = ipsz;
+	*out_num_ips = num_ips;
 
 	return 1;
 
@@ -480,10 +481,10 @@ sbgp_ipaddrblk(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 		goto out;
 	}
 
-	if (!sbgp_parse_ipaddrblk(fn, addrblk, &cert->ips, &cert->ipsz))
+	if (!sbgp_parse_ipaddrblk(fn, addrblk, &cert->ips, &cert->num_ips))
 		goto out;
 
-	if (cert->ipsz == 0) {
+	if (cert->num_ips == 0) {
 		warnx("%s: RFC 6487 section 4.8.10: empty ipAddrBlock", fn);
 		goto out;
 	}
@@ -495,7 +496,8 @@ sbgp_ipaddrblk(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 }
 
 /*
- * Parse "Subject Information Access" extension, RFC 6487 4.8.8.
+ * Parse "Subject Information Access" extension for a CA cert,
+ * RFC 6487, section 4.8.8.1 and RFC 8182, section 3.2.
  * Returns zero on failure, non-zero on success.
  */
 static int
@@ -505,7 +507,10 @@ sbgp_sia(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 	ACCESS_DESCRIPTION	*ad;
 	ASN1_OBJECT		*oid;
 	const char		*mftfilename;
+	char			*carepo = NULL, *rpkimft = NULL, *notify = NULL;
 	int			 i, rc = 0;
+
+	assert(cert->repo == NULL && cert->mft == NULL && cert->notify == NULL);
 
 	if (X509_EXTENSION_get_critical(ext)) {
 		warnx("%s: RFC 6487 section 4.8.8: SIA: "
@@ -526,16 +531,70 @@ sbgp_sia(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 
 		if (OBJ_cmp(oid, carepo_oid) == 0) {
 			if (!x509_location(fn, "SIA: caRepository",
-			    RSYNC_PROTO, ad->location, &cert->repo))
+			    ad->location, &carepo))
 				goto out;
+			if (cert->repo == NULL && strncasecmp(carepo,
+			    RSYNC_PROTO, RSYNC_PROTO_LEN) == 0) {
+				if (carepo[strlen(carepo) - 1] != '/') {
+					char *carepo_tmp;
+
+					if (asprintf(&carepo_tmp, "%s/",
+					    carepo) == -1)
+						errx(1, NULL);
+					free(carepo);
+					carepo = carepo_tmp;
+				}
+
+				cert->repo = carepo;
+				carepo = NULL;
+				continue;
+			}
+			if (verbose)
+				warnx("%s: RFC 6487 section 4.8.8: SIA: "
+				    "ignoring location %s", fn, carepo);
+			free(carepo);
+			carepo = NULL;
 		} else if (OBJ_cmp(oid, manifest_oid) == 0) {
 			if (!x509_location(fn, "SIA: rpkiManifest",
-			    RSYNC_PROTO, ad->location, &cert->mft))
+			    ad->location, &rpkimft))
 				goto out;
+			if (cert->mft == NULL && strncasecmp(rpkimft,
+			    RSYNC_PROTO, RSYNC_PROTO_LEN) == 0) {
+				cert->mft = rpkimft;
+				rpkimft = NULL;
+				continue;
+			}
+			if (verbose)
+				warnx("%s: RFC 6487 section 4.8.8: SIA: "
+				    "ignoring location %s", fn, rpkimft);
+			free(rpkimft);
+			rpkimft = NULL;
 		} else if (OBJ_cmp(oid, notify_oid) == 0) {
 			if (!x509_location(fn, "SIA: rpkiNotify",
-			    HTTPS_PROTO, ad->location, &cert->notify))
+			    ad->location, &notify))
 				goto out;
+			if (strncasecmp(notify, HTTPS_PROTO,
+			    HTTPS_PROTO_LEN) != 0) {
+				warnx("%s: non-https uri in rpkiNotify: %s",
+				    fn, cert->notify);
+				free(notify);
+				goto out;
+			}
+			if (cert->notify != NULL) {
+				warnx("%s: unexpected rpkiNotify accessMethod",
+				    fn);
+				free(notify);
+				goto out;
+			}
+			cert->notify = notify;
+			notify = NULL;
+		} else {
+			char buf[128];
+
+			OBJ_obj2txt(buf, sizeof(buf), oid, 0);
+			warnx("%s: RFC 6487 section 4.8.8.1: unexpected"
+			    " accessMethod: %s", fn, buf);
+			goto out;
 		}
 	}
 
@@ -557,7 +616,8 @@ sbgp_sia(const char *fn, struct cert *cert, X509_EXTENSION *ext)
 		goto out;
 	}
 
-	if (strstr(cert->mft, cert->repo) != cert->mft) {
+	if (strstr(cert->mft, cert->repo) != cert->mft ||
+	    cert->mft + strlen(cert->repo) != mftfilename) {
 		warnx("%s: RFC 6487 section 4.8.8: SIA: "
 		    "conflicting URIs for caRepository and rpkiManifest", fn);
 		goto out;
@@ -696,15 +756,12 @@ cert_parse_ee_cert(const char *fn, int talid, X509 *x)
 	if (!cert_check_subject_and_issuer(fn, x))
 		goto out;
 
-	if (X509_get_key_usage(x) != KU_DIGITAL_SIGNATURE) {
-		warnx("%s: RFC 6487 section 4.8.4: KU must be digitalSignature",
-		    fn);
+	if (!x509_cache_extensions(x, fn))
 		goto out;
-	}
 
-	/* EKU may be allowed for some purposes in the future. */
-	if (X509_get_extended_key_usage(x) != UINT32_MAX) {
-		warnx("%s: RFC 6487 section 4.8.5: EKU not allowed", fn);
+	if ((cert->purpose = x509_get_purpose(x, fn)) != CERT_PURPOSE_EE) {
+		warnx("%s: expected EE cert, got %s", fn,
+		    purpose2str(cert->purpose));
 		goto out;
 	}
 
@@ -752,9 +809,7 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 	int			 i, extsz;
 	X509			*x = NULL;
 	X509_EXTENSION		*ext = NULL;
-	const X509_ALGOR	*palg;
-	const ASN1_BIT_STRING	*piuid = NULL, *psuid = NULL;
-	const ASN1_OBJECT	*cobj;
+	const ASN1_BIT_STRING	*issuer_uid = NULL, *subject_uid = NULL;
 	ASN1_OBJECT		*obj;
 	EVP_PKEY		*pkey;
 	int			 nid, ip, as, sia, cp, crldp, aia, aki, ski,
@@ -779,24 +834,18 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	}
 
-	/* Cache X509v3 extensions, see X509_check_ca(3). */
-	if (X509_check_purpose(x, -1, -1) <= 0) {
-		warnx("%s: could not cache X509v3 extensions", fn);
+	if (!x509_cache_extensions(x, fn))
 		goto out;
-	}
 
 	if (X509_get_version(x) != 2) {
 		warnx("%s: RFC 6487 4.1: X.509 version must be v3", fn);
 		goto out;
 	}
 
-	X509_get0_signature(NULL, &palg, x);
-	if (palg == NULL) {
-		warnx("%s: X509_get0_signature", fn);
+	if ((nid = X509_get_signature_nid(x)) == NID_undef) {
+		warnx("%s: unknown signature type", fn);
 		goto out;
 	}
-	X509_ALGOR_get0(&cobj, NULL, NULL, palg);
-	nid = OBJ_obj2nid(cobj);
 	if (experimental && nid == NID_ecdsa_with_SHA256) {
 		if (verbose)
 			warnx("%s: P-256 support is experimental", fn);
@@ -806,8 +855,8 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	}
 
-	X509_get0_uids(x, &piuid, &psuid);
-	if (piuid != NULL || psuid != NULL) {
+	X509_get0_uids(x, &issuer_uid, &subject_uid);
+	if (issuer_uid != NULL || subject_uid != NULL) {
 		warnx("%s: issuer or subject unique identifiers not allowed",
 		    fn);
 		goto out;
@@ -844,6 +893,10 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 		case NID_sinfo_access:
 			if (sia++ > 0)
 				goto dup;
+			/*
+			 * This will fail for BGPsec certs, but they must omit
+			 * this extension anyway (RFC 8209, section 3.1.3.3).
+			 */
 			if (!sbgp_sia(fn, cert, ext))
 				goto out;
 			break;
@@ -905,11 +958,12 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	if (!x509_get_notafter(x, fn, &cert->notafter))
 		goto out;
-	cert->purpose = x509_get_purpose(x, fn);
 
 	/* Validation on required fields. */
-
+	cert->purpose = x509_get_purpose(x, fn);
 	switch (cert->purpose) {
+	case CERT_PURPOSE_TA:
+		/* XXX - caller should indicate if it expects TA or CA cert */
 	case CERT_PURPOSE_CA:
 		if ((pkey = X509_get0_pubkey(x)) == NULL) {
 			warnx("%s: X509_get0_pubkey failed", fn);
@@ -918,24 +972,11 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 		if (!valid_ca_pkey(fn, pkey))
 			goto out;
 
-		if (X509_get_key_usage(x) != (KU_KEY_CERT_SIGN | KU_CRL_SIGN)) {
-			warnx("%s: RFC 6487 section 4.8.4: key usage violation",
-			    fn);
-			goto out;
-		}
-
-		/* EKU may be allowed for some purposes in the future. */
-		if (X509_get_extended_key_usage(x) != UINT32_MAX) {
-			warnx("%s: RFC 6487 section 4.8.5: EKU not allowed",
-			    fn);
-			goto out;
-		}
-
 		if (cert->mft == NULL) {
 			warnx("%s: RFC 6487 section 4.8.8: missing SIA", fn);
 			goto out;
 		}
-		if (cert->asz == 0 && cert->ipsz == 0) {
+		if (cert->num_ases == 0 && cert->num_ips == 0) {
 			warnx("%s: missing IP or AS resources", fn);
 			goto out;
 		}
@@ -946,12 +987,12 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 			warnx("%s: x509_get_pubkey failed", fn);
 			goto out;
 		}
-		if (cert->ipsz > 0) {
+		if (cert->num_ips > 0) {
 			warnx("%s: unexpected IP resources in BGPsec cert", fn);
 			goto out;
 		}
-		for (j = 0; j < cert->asz; j++) {
-			if (cert->as[j].type == CERT_AS_INHERIT) {
+		for (j = 0; j < cert->num_ases; j++) {
+			if (cert->ases[j].type == CERT_AS_INHERIT) {
 				warnx("%s: inherit elements not allowed in EE"
 				    " cert", fn);
 				goto out;
@@ -963,6 +1004,9 @@ cert_parse_pre(const char *fn, const unsigned char *der, size_t len)
 			goto out;
 		}
 		break;
+	case CERT_PURPOSE_EE:
+		warn("%s: unexpected EE cert", fn);
+		goto out;
 	default:
 		warnx("%s: x509_get_purpose failed in %s", fn, __func__);
 		goto out;
@@ -1021,7 +1065,6 @@ struct cert *
 ta_parse(const char *fn, struct cert *p, const unsigned char *pkey,
     size_t pkeysz)
 {
-	ASN1_TIME	*notBefore, *notAfter;
 	EVP_PKEY	*pk, *opk;
 	time_t		 now = get_current_time();
 
@@ -1044,39 +1087,40 @@ ta_parse(const char *fn, struct cert *p, const unsigned char *pkey,
 		goto badcert;
 	}
 
-	if ((notBefore = X509_get_notBefore(p->x509)) == NULL) {
-		warnx("%s: certificate has invalid notBefore", fn);
-		goto badcert;
-	}
-	if ((notAfter = X509_get_notAfter(p->x509)) == NULL) {
-		warnx("%s: certificate has invalid notAfter", fn);
-		goto badcert;
-	}
-	if (X509_cmp_time(notBefore, &now) != -1) {
+	if (p->notbefore > now) {
 		warnx("%s: certificate not yet valid", fn);
 		goto badcert;
 	}
-	if (X509_cmp_time(notAfter, &now) != 1) {
+	if (p->notafter < now) {
 		warnx("%s: certificate has expired", fn);
 		goto badcert;
 	}
 	if (p->aki != NULL && strcmp(p->aki, p->ski)) {
-		warnx("%s: RFC 6487 section 8.4.2: "
+		warnx("%s: RFC 6487 section 4.8.3: "
 		    "trust anchor AKI, if specified, must match SKI", fn);
 		goto badcert;
 	}
 	if (p->aia != NULL) {
-		warnx("%s: RFC 6487 section 8.4.7: "
+		warnx("%s: RFC 6487 section 4.8.7: "
 		    "trust anchor must not have AIA", fn);
 		goto badcert;
 	}
 	if (p->crl != NULL) {
-		warnx("%s: RFC 6487 section 8.4.2: "
+		warnx("%s: RFC 6487 section 4.8.6: "
 		    "trust anchor may not specify CRL resource", fn);
 		goto badcert;
 	}
-	if (p->purpose == CERT_PURPOSE_BGPSEC_ROUTER) {
-		warnx("%s: BGPsec cert cannot be a trust anchor", fn);
+	if (p->purpose != CERT_PURPOSE_TA) {
+		warnx("%s: expected trust anchor purpose, got %s", fn,
+		    purpose2str(p->purpose));
+		goto badcert;
+	}
+	/*
+	 * Do not replace with a <= 0 check since OpenSSL 3 broke that:
+	 * https://github.com/openssl/openssl/issues/24575
+	 */
+	if (X509_verify(p->x509, pk) != 1) {
+		warnx("%s: failed to verify signature", fn);
 		goto badcert;
 	}
 	if (x509_any_inherits(p->x509)) {
@@ -1087,7 +1131,7 @@ ta_parse(const char *fn, struct cert *p, const unsigned char *pkey,
 	EVP_PKEY_free(pk);
 	return p;
 
-badcert:
+ badcert:
 	EVP_PKEY_free(pk);
 	cert_free(p);
 	return NULL;
@@ -1105,10 +1149,11 @@ cert_free(struct cert *p)
 
 	free(p->crl);
 	free(p->repo);
+	free(p->path);
 	free(p->mft);
 	free(p->notify);
 	free(p->ips);
-	free(p->as);
+	free(p->ases);
 	free(p->aia);
 	free(p->aki);
 	free(p->ski);
@@ -1129,12 +1174,13 @@ cert_buffer(struct ibuf *b, const struct cert *p)
 	io_simple_buffer(b, &p->talid, sizeof(p->talid));
 	io_simple_buffer(b, &p->certid, sizeof(p->certid));
 	io_simple_buffer(b, &p->repoid, sizeof(p->repoid));
-	io_simple_buffer(b, &p->ipsz, sizeof(p->ipsz));
-	io_simple_buffer(b, &p->asz, sizeof(p->asz));
+	io_simple_buffer(b, &p->num_ips, sizeof(p->num_ips));
+	io_simple_buffer(b, &p->num_ases, sizeof(p->num_ases));
 
-	io_simple_buffer(b, p->ips, p->ipsz * sizeof(p->ips[0]));
-	io_simple_buffer(b, p->as, p->asz * sizeof(p->as[0]));
+	io_simple_buffer(b, p->ips, p->num_ips * sizeof(p->ips[0]));
+	io_simple_buffer(b, p->ases, p->num_ases * sizeof(p->ases[0]));
 
+	io_str_buffer(b, p->path);
 	io_str_buffer(b, p->mft);
 	io_str_buffer(b, p->notify);
 	io_str_buffer(b, p->repo);
@@ -1163,19 +1209,22 @@ cert_read(struct ibuf *b)
 	io_read_buf(b, &p->talid, sizeof(p->talid));
 	io_read_buf(b, &p->certid, sizeof(p->certid));
 	io_read_buf(b, &p->repoid, sizeof(p->repoid));
-	io_read_buf(b, &p->ipsz, sizeof(p->ipsz));
-	io_read_buf(b, &p->asz, sizeof(p->asz));
+	io_read_buf(b, &p->num_ips, sizeof(p->num_ips));
+	io_read_buf(b, &p->num_ases, sizeof(p->num_ases));
 
-	p->ips = calloc(p->ipsz, sizeof(struct cert_ip));
-	if (p->ips == NULL)
-		err(1, NULL);
-	io_read_buf(b, p->ips, p->ipsz * sizeof(p->ips[0]));
+	if (p->num_ips > 0) {
+		if ((p->ips = calloc(p->num_ips, sizeof(p->ips[0]))) == NULL)
+			err(1, NULL);
+		io_read_buf(b, p->ips, p->num_ips * sizeof(p->ips[0]));
+	}
 
-	p->as = calloc(p->asz, sizeof(struct cert_as));
-	if (p->as == NULL)
-		err(1, NULL);
-	io_read_buf(b, p->as, p->asz * sizeof(p->as[0]));
+	if (p->num_ases > 0) {
+		if ((p->ases = calloc(p->num_ases, sizeof(p->ases[0]))) == NULL)
+			err(1, NULL);
+		io_read_buf(b, p->ases, p->num_ases * sizeof(p->ases[0]));
+	}
 
+	io_read_str(b, &p->path);
 	io_read_str(b, &p->mft);
 	io_read_str(b, &p->notify);
 	io_read_str(b, &p->repo);
@@ -1240,8 +1289,12 @@ auth_insert(const char *fn, struct auth_tree *auths, struct cert *cert,
 		cert->certid = cert->talid;
 	} else {
 		cert->certid = ++certid;
-		if (certid > CERTID_MAX)
-			errx(1, "%s: too many certificates in store", fn);
+		if (certid > CERTID_MAX) {
+			if (certid == CERTID_MAX + 1)
+				warnx("%s: too many certificates in store", fn);
+			free(na);
+			return NULL;
+		}
 		na->depth = issuer->depth + 1;
 	}
 
@@ -1300,14 +1353,14 @@ cert_insert_brks(struct brk_tree *tree, struct cert *cert)
 {
 	size_t		 i, asid;
 
-	for (i = 0; i < cert->asz; i++) {
-		switch (cert->as[i].type) {
+	for (i = 0; i < cert->num_ases; i++) {
+		switch (cert->ases[i].type) {
 		case CERT_AS_ID:
-			insert_brk(tree, cert, cert->as[i].id);
+			insert_brk(tree, cert, cert->ases[i].id);
 			break;
 		case CERT_AS_RANGE:
-			for (asid = cert->as[i].range.min;
-			    asid <= cert->as[i].range.max; asid++)
+			for (asid = cert->ases[i].range.min;
+			    asid <= cert->ases[i].range.max; asid++)
 				insert_brk(tree, cert, asid);
 			break;
 		default:
@@ -1337,3 +1390,57 @@ brkcmp(struct brk *a, struct brk *b)
 }
 
 RB_GENERATE(brk_tree, brk, entry, brkcmp);
+
+/*
+ * Add each CA cert into the non-functional CA tree.
+ */
+void
+cert_insert_nca(struct nca_tree *tree, const struct cert *cert, struct repo *rp)
+{
+	struct nonfunc_ca *nca;
+
+	if ((nca = calloc(1, sizeof(*nca))) == NULL)
+		err(1, NULL);
+	if ((nca->location = strdup(cert->path)) == NULL)
+		err(1, NULL);
+	if ((nca->carepo = strdup(cert->repo)) == NULL)
+		err(1, NULL);
+	if ((nca->mfturi = strdup(cert->mft)) == NULL)
+		err(1, NULL);
+	if ((nca->ski = strdup(cert->ski)) == NULL)
+		err(1, NULL);
+	nca->certid = cert->certid;
+	nca->talid = cert->talid;
+
+	if (RB_INSERT(nca_tree, tree, nca) != NULL)
+		errx(1, "non-functional CA tree corrupted");
+	repo_stat_inc(rp, nca->talid, RTYPE_CER, STYPE_NONFUNC);
+}
+
+void
+cert_remove_nca(struct nca_tree *tree, int cid, struct repo *rp)
+{
+	struct nonfunc_ca *found, needle = { .certid = cid };
+
+	if ((found = RB_FIND(nca_tree, tree, &needle)) != NULL) {
+		RB_REMOVE(nca_tree, tree, found);
+		repo_stat_inc(rp, found->talid, RTYPE_CER, STYPE_FUNC);
+		free(found->location);
+		free(found->carepo);
+		free(found->mfturi);
+		free(found->ski);
+		free(found);
+	}
+}
+
+static inline int
+ncacmp(const struct nonfunc_ca *a, const struct nonfunc_ca *b)
+{
+	if (a->certid < b->certid)
+		return -1;
+	if (a->certid > b->certid)
+		return 1;
+	return 0;
+}
+
+RB_GENERATE(nca_tree, nonfunc_ca, entry, ncacmp);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: drm_linux.c,v 1.112 2024/03/30 13:33:20 mpi Exp $	*/
+/*	$OpenBSD: drm_linux.c,v 1.123 2025/05/01 01:16:42 dlg Exp $	*/
 /*
  * Copyright (c) 2013 Jonathan Gray <jsg@openbsd.org>
  * Copyright (c) 2015, 2016 Mark Kettenis <kettenis@openbsd.org>
@@ -51,10 +51,13 @@
 #include <linux/kthread.h>
 #include <linux/processor.h>
 #include <linux/sync_file.h>
+#include <linux/suspend.h>
+#include <linux/slab.h>
 
 #include <drm/drm_device.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_print.h>
+#include <drm/drm_drv.h>
 
 #if defined(__amd64__) || defined(__i386__)
 #include "bios.h"
@@ -114,14 +117,13 @@ void
 __set_current_state(int state)
 {
 	struct proc *p = curproc;
-	int s;
 
 	KASSERT(state == TASK_RUNNING);
-	SCHED_LOCK(s);
+	SCHED_LOCK();
 	unsleep(p);
 	p->p_stat = SONPROC;
-	atomic_clearbits_int(&p->p_flag, P_WSLEEP);
-	SCHED_UNLOCK(s);
+	atomic_clearbits_int(&p->p_flag, P_INSCHED);
+	SCHED_UNLOCK();
 }
 
 void
@@ -159,11 +161,11 @@ schedule_timeout_uninterruptible(long timeout)
 int
 wake_up_process(struct proc *p)
 {
-	int s, rv;
+	int rv;
 
-	SCHED_LOCK(s);
-	rv = wakeup_proc(p, 0);
-	SCHED_UNLOCK(s);
+	SCHED_LOCK();
+	rv = wakeup_proc(p);
+	SCHED_UNLOCK();
 	return rv;
 }
 
@@ -805,6 +807,7 @@ idr_preload(unsigned int gfp_mask)
 		idr_entry_cache = pool_get(&idr_pool, flags);
 }
 
+/* [start, end) */
 int
 idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp_mask)
 {
@@ -951,6 +954,13 @@ ida_simple_remove(struct ida *ida, unsigned int id)
 	idr_remove(&ida->idr, id);
 }
 
+/* [start, end] */
+int
+ida_alloc_range(struct ida *ida, unsigned int start, unsigned int end, gfp_t gfp)
+{
+	return idr_alloc(&ida->idr, NULL, start, end + 1, gfp);
+}
+
 int
 ida_alloc_min(struct ida *ida, unsigned int min, gfp_t gfp)
 {
@@ -982,18 +992,12 @@ SPLAY_GENERATE(xarray_tree, xarray_entry, entry, xarray_cmp);
 void
 xa_init_flags(struct xarray *xa, gfp_t flags)
 {
-	static int initialized;
-
-	if (!initialized) {
-		pool_init(&xa_pool, sizeof(struct xarray_entry), 0, IPL_NONE, 0,
-		    "xapl", NULL);
-		initialized = 1;
-	}
 	SPLAY_INIT(&xa->xa_tree);
 	if (flags & XA_FLAGS_LOCK_IRQ)
 		mtx_init(&xa->xa_lock, IPL_TTY);
 	else
 		mtx_init(&xa->xa_lock, IPL_NONE);
+	xa->xa_flags = flags;
 }
 
 void
@@ -1009,11 +1013,15 @@ xa_destroy(struct xarray *xa)
 
 /* Don't wrap ids. */
 int
-__xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
+__xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xarray_range xr,
+    gfp_t gfp)
 {
 	struct xarray_entry *xid;
-	int start = (xa->xa_flags & XA_FLAGS_ALLOC1) ? 1 : 0;
-	int begin;
+	uint32_t start = xr.start;
+	uint32_t end = xr.end;
+
+	if (start == 0 && (xa->xa_flags & XA_FLAGS_ALLOC1))
+		start = 1;
 
 	if (gfp & GFP_NOWAIT) {
 		xid = pool_get(&xa_pool, PR_NOWAIT);
@@ -1026,17 +1034,14 @@ __xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
 	if (xid == NULL)
 		return -ENOMEM;
 
-	if (limit <= 0)
-		limit = INT_MAX;
-
-	xid->id = begin = start;
+	xid->id = start;
 
 	while (SPLAY_INSERT(xarray_tree, &xa->xa_tree, xid)) {
-		if (xid->id == limit)
+		if (xid->id == end)
 			xid->id = start;
 		else
 			xid->id++;
-		if (xid->id == begin) {
+		if (xid->id == start) {
 			pool_put(&xa_pool, xid);
 			return -EBUSY;
 		}
@@ -1052,10 +1057,10 @@ __xa_alloc(struct xarray *xa, u32 *id, void *entry, int limit, gfp_t gfp)
  * The only caller of this (i915_drm_client.c) doesn't use next id.
  */
 int
-__xa_alloc_cyclic(struct xarray *xa, u32 *id, void *entry, int limit, u32 *next,
-    gfp_t gfp)
+__xa_alloc_cyclic(struct xarray *xa, u32 *id, void *entry,
+    struct xarray_range xr, u32 *next, gfp_t gfp)
 {
-	int r = __xa_alloc(xa, id, entry, limit, gfp);
+	int r = __xa_alloc(xa, id, entry, xr, gfp);
 	*next = *id + 1;
 	return r;
 }
@@ -1346,6 +1351,8 @@ vga_put(struct pci_dev *pdev, int rsrc)
 
 #endif
 
+suspend_state_t pm_suspend_target_state;
+
 /*
  * ACPI types and interfaces.
  */
@@ -1360,6 +1367,8 @@ vga_put(struct pci_dev *pdev, int rsrc)
 #include <dev/acpi/acpivar.h>
 #include <dev/acpi/amltypes.h>
 #include <dev/acpi/dsdt.h>
+
+struct acpi_fadt acpi_gbl_FADT;
 
 acpi_status
 acpi_get_table(const char *sig, int instance,
@@ -1522,6 +1531,12 @@ acpi_format_exception(acpi_status status)
 	}
 }
 
+int
+acpi_target_system_state(void)
+{
+	return acpi_softc->sc_state;
+}
+
 #endif
 
 SLIST_HEAD(,backlight_device) backlight_device_list =
@@ -1571,7 +1586,7 @@ backlight_enable(struct backlight_device *bd)
 	if (bd == NULL)
 		return 0;
 
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 
 	return bd->ops->update_status(bd);
 }
@@ -1582,7 +1597,7 @@ backlight_disable(struct backlight_device *bd)
 	if (bd == NULL)
 		return 0;
 
-	bd->props.power = FB_BLANK_POWERDOWN;
+	bd->props.power = BACKLIGHT_POWER_OFF;
 
 	return bd->ops->update_status(bd);
 }
@@ -2843,14 +2858,24 @@ drm_linux_init(void)
 
 	pool_init(&idr_pool, sizeof(struct idr_entry), 0, IPL_TTY, 0,
 	    "idrpl", NULL);
+	pool_init(&xa_pool, sizeof(struct xarray_entry), 0, IPL_NONE, 0,
+	    "xapl", NULL);
 
 	kmap_atomic_va =
 	    (vaddr_t)km_alloc(PAGE_SIZE, &kv_any, &kp_none, &kd_waitok);
+
+#if NACPI > 0
+	if (acpi_softc) {
+		memcpy(&acpi_gbl_FADT, acpi_softc->sc_fadt,
+		    sizeof(acpi_gbl_FADT));
+	}
+#endif
 }
 
 void
 drm_linux_exit(void)
 {
+	pool_destroy(&xa_pool);
 	pool_destroy(&idr_pool);
 
 	taskq_destroy(taskletq);
@@ -2916,33 +2941,48 @@ pci_resize_resource(struct pci_dev *pdev, int bar, int nsize)
 
 TAILQ_HEAD(, shrinker) shrinkers = TAILQ_HEAD_INITIALIZER(shrinkers);
 
-int
-register_shrinker(struct shrinker *shrinker, const char *format, ...)
+struct shrinker *
+shrinker_alloc(u_int flags, const char *format, ...)
+{
+	struct shrinker *s;
+
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	s->seeks = DEFAULT_SEEKS;
+	return s;
+}
+
+void
+shrinker_register(struct shrinker *shrinker)
 {
 	TAILQ_INSERT_TAIL(&shrinkers, shrinker, next);
-	return 0;
 }
 
 void
-unregister_shrinker(struct shrinker *shrinker)
+shrinker_free(struct shrinker *shrinker)
 {
 	TAILQ_REMOVE(&shrinkers, shrinker, next);
+	kfree(shrinker);
 }
 
-void
+unsigned long
 drmbackoff(long npages)
 {
 	struct shrink_control sc;
 	struct shrinker *shrinker;
-	u_long ret;
+	u_long ret, freed = 0;
 
 	shrinker = TAILQ_FIRST(&shrinkers);
 	while (shrinker && npages > 0) {
 		sc.nr_to_scan = npages;
 		ret = shrinker->scan_objects(shrinker, &sc);
+		if (ret == SHRINK_STOP)
+			break;
 		npages -= ret;
+		freed += ret;
 		shrinker = TAILQ_NEXT(shrinker, next);
 	}
+
+	return freed;
 }
 
 void *
@@ -3123,9 +3163,6 @@ fd_install(int fd, struct file *fp)
 	struct proc *p = curproc;
 	struct filedesc *fdp = p->p_fd;
 
-	if (fp->f_type != DTYPE_SYNC)
-		return;
-
 	fdplock(fdp);
 	/* all callers use get_unused_fd_flags(O_CLOEXEC) */
 	fdinsert(fdp, fd, UF_EXCLOSE, fp);
@@ -3135,9 +3172,6 @@ fd_install(int fd, struct file *fp)
 void
 fput(struct file *fp)
 {
-	if (fp->f_type != DTYPE_SYNC)
-		return;
-	
 	FRELE(fp, curproc);
 }
 
@@ -3216,13 +3250,6 @@ sync_file_create(struct dma_fence *fence)
 	return sf;
 }
 
-bool
-drm_firmware_drivers_only(void)
-{
-	return false;
-}
-
-
 void *
 memremap(phys_addr_t phys_addr, size_t size, int flags)
 {
@@ -3234,6 +3261,12 @@ void
 memunmap(void *addr)
 {
 	STUB();
+}
+
+void
+kfree_const(const void *addr)
+{
+        kfree(addr);
 }
 
 #include <linux/platform_device.h>
